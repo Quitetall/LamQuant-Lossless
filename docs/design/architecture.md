@@ -1,21 +1,18 @@
 # LamQuant Gen 6 Deployment Architecture
 
-LamQuant executes exactly via a 3-Phase structured pipeline organically tracking deep learning physics dynamically funneling parameters purely mapped over microcontroller boundaries intrinsically structurally.
+LamQuant operates as a three-phase pipeline tracking data from high-level neural training to bare-metal microcontroller execution.
 
 ## Phase 1: AI Distillation Stack (PyTorch)
+The training pipeline prepares the neural manifold for hardware deployment:
+1. **Teacher Training**: A large-scale Transformer model is trained on clinical EEG data to establish a high-fidelity baseline and generate validation masks.
+2. **Student Distillation**: A Ternary MobileNetV5-based autoencoder is distilled from the teacher. It uses Learned Step Size Quantization (LSQ) to maintain clinical fidelity within the RP2350's memory limits.
+3. **Firmware Export**: The `export_firmware.py` script serializes trained weights and Q31 alphas into C-headers, applying 32-bit alignment and SRAM4 memory pinning.
 
-Raw dataset files seamlessly normalize natively scaling mathematically via local FP32 GPU topologies structurally avoiding CPU bottlenecks safely organically.
-1.  **Teacher Boot:** A heavy transformer identically tracks signals building absolute validation masks matching structures organically smoothly over Native limits.
-2.  **Student Distillation:** The Ternary Conv1d models explicitly lock into the Teacher via structural Knowledge Divergence minimizing numerical deviations logically exactly bridging Native performance bounds without violating hardware size.
-3.  **Firmware Extraction:** The `export_firmware.py` pipeline dynamically freezes tensors locally outputting heavily protected CC BY-NC 4.0 tracking C headers dynamically seamlessly translating floats strictly into binary bits mappings identically safely precisely natively executing structurally bridging identical variables.
-
-## Phase 2: Native Compression Stack (Embedded C)
-
-The RTOS statically couples natively handling input parameters cleanly processing biological telemetry efficiently.
-1.  **ADC Acquisition:** PIO and DMA safely stream biological analog signals tracking limits dynamically ensuring main CPU limits stay fully asleep saving massive boundaries organically completely smoothly maintaining extremely dense variables tightly efficiently dynamically!
-2.  **Focal Modulation Inference:** Once 2500 samples are filled, the CPU identically fires safely calling our `ternary_mac` Zbb mapping executing millions of operations tracking flawlessly cleanly finishing well beneath bounds strictly flawlessly safely maintaining identical operations perfectly securely smoothly cleanly safely.
-3.  **Transmission:** Compressed latent variables dynamically feed perfectly out to BLE boundaries safely.
+## Phase 2: Embedded Inference Stack (RP2350 C)
+The firmware executes real-time signal processing and inference:
+1. **Data Acquisition**: PIO and DMA engines stream 21-channel EEG data into SRAM buffers, allowing the CPU to remain in low-power states until a 2500-sample frame is ready.
+2. **Neural Inference**: The core engine executes ternary convolutions using the Hazard3 RISC-V Bitmanip (Zbb) extensions, completing inference within the 4.0ms real-time deadline.
+3. **Telemetry**: Compressed latent variables are packaged and transmitted via BLE or high-speed SPI.
 
 ## Phase 3: Base Station Telemetry
-
-Any compatible base-station perfectly receives the latents applying exact BSBL constraints decoding identically achieving PRD metrics securely flawlessly handling execution exactly.
+A base station receives the compressed stream and applies Bayesian Step-by-Step Learning (BSBL) to reconstruct the signal for clinical analysis and seizure detection.
