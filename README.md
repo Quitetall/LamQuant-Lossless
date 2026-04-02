@@ -43,3 +43,11 @@ _GCC limits ensure `lamquant` fails compilation aggressively if any localized me
 3. Train `train_teacher.py` (FP32) applying strictly Patient-Wise 20% validation mapping native morphological validation constraints safely avoiding data leakage.
 4. Execute `train_ternary.py` Distillating the Teacher down to exactly 15,800 `-1, 0, 1` Ternary markers.
 5. `export_firmware.py` binds the checkpoint identically extracting native `C` array maps wrapped perfectly into your embedded core bounds.
+
+## Licensing
+
+LamQuant Gen 6 is structured with a multi-license model to strictly protect open-source clinical integrity while restricting commercialization of the trained neural matrices:
+
+*   **Firmware & Architecture**: The core repository is distributed under the **GPLv3** License.
+*   **Hardware DSP & Cryptographic Transport**: The `ternary_mac.c` and `hybrid_entropy.c` files are explicitly licensed under the **AGPLv3** License.
+*   **Trained Weights**: Any deployed or exported array weights bounds (e.g. `focal_net_weights.h` generated from PyTorch parameters) are licensed strictly under **CC BY-NC 4.0** (Attribution-NonCommercial).
