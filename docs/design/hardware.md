@@ -1,21 +1,17 @@
 # LamQuant Gen 6: Hardware Interoperability
 
-This document details the exact hardware coupling between the LamQuant Gen 6 `C` algorithms and the physical constraints of the **Raspberry Pi RP2350 Microcontroller**.
+This document defines the interface between the LamQuant algorithms and the **Raspberry Pi RP2350** (Cortex-M33 / Hazard3 RISC-V) hardware.
 
-## 1. The Hazard3 RISC-V Core
-LamQuant deviates critically from older ARM M0+ architectures by actively targeting the RP2350's **Hazard3 RISC-V Dual Cores**.
-By capitalizing directly on the RISC-V `Zbb` (Bitmanip) extension, we avoid floating-point math entirely during neural inference. 
-Our Ternary (`-1, 0, 1`) arrays are bit-packed, reducing 32 full-precision MAC (Multiply-Accumulate) operations into a single unrolled `__builtin_popcount` execution natively.
+## 1. Hazard3 RISC-V Optimization
+LamQuant targets the RP2350's dual **Hazard3 RISC-V cores**. By utilizing the RISC-V `Zbb` (Bit-manipulation) instruction set, the firmware executes branchless ternary MAC operations. This approach avoids the clock-cycle overhead of floating-point emulations and enables the high-speed inference engine to meet real-time constraints.
 
-## 2. TCM (Tightly Coupled Memory) Execution
-Latency is universally fatal for biological telemetry streams. If the FocalNet inference retrieves weights traversing through the RP2350's external QSPI flash, cache-misses will violently blow past the `4.0 ms` computation deadline.
+## 2. Memory Architecture & Latency
+To meet the 4.0ms real-time deadline and avoid XIP (eXecute In Place) Flash stalls, all neural weights are pinned to high-speed internal RAM.
+- **SRAM4 Bank Isolation**: The 64KB SRAM4 bank is dedicated exclusively to the TNN (Ternary Neural Network) manifold.
+- **Memory Pinning**: Weights and Q31 alphas are explicitly placed in the `.sram4_tnn` section using `__attribute__((section(".sram4_tnn")))`, ensuring 0-waitstate access.
+- **Alignment**: All data arrays are 32-bit word-aligned (`__attribute__((aligned(4)))`) to prevent alignment faults and optimize cache pipeline efficiency.
 
-*   **TCM Limits:** The RP2350 inherently grants us only `32 KB` natively of guaranteed 0-wait-state Tightly Coupled Memory.
-*   **The Gen 6 Strategy:** The PyTorch pipeline violently distills the focal networks down into exactly a subset of matrices weighing identically `~28 KB`. 
-*   **Memory Pinning:** We explicitly lock this C header into the TCM bounds utilizing `#pragma GCC section` and `__attribute__((section(".tcm_data")))`.
-
-## 3. PMP Sandboxing & Failsafes
-As detailed natively in `COMPLIANCE.md`, the Firmware stack explicitly protects against logic errors crashing the silicon limits.
-
-*   **Stack Bounds Check:** `stack_guard.c` writes canary values natively into the limits of the software stack boundary continuously verified natively.
-*   **Physical Traps:** We manually manipulate the RP2350 `PMP` (Physical Memory Protection) trap hooks. If a buffer overflow physically attempts to push pointers outside of the 32KB limit footprint natively, the processor violently traps the exception dropping into a safe `.brownout` reset physically bypassing arbitrary execution bugs.
+## 3. PMP Sandboxing & Stack Security
+The firmware implements Physical Memory Protection (PMP) to ensure system stability.
+- **NAPOT Stack Guard**: `stack_guard.c` uses **NAPOT (Naturally Aligned Power-Of-Two)** mode to lock a specific 2KB stack canary region. This prevents stack overflows from corrupting adjacent memory.
+- **Hardware Traps**: Any illegal memory access or bit-corruption triggers a hardware-level Exception, forcing the system into an isolated `Safe Mode` to prevent erroneous clinical telemetry.

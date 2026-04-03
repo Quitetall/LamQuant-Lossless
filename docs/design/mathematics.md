@@ -1,21 +1,19 @@
 # LamQuant Gen 6 Mathematics
 
-The LamQuant neural codec bridges strictly differentiable high-level mathematics natively into absolute logic-gate optimizations structurally avoiding arbitrary runtime evaluations natively.
+The LamQuant neural codec uses specialized mathematical primitives to enable high-fidelity signal compression on resource-constrained hardware.
 
-## 1. Event-Weighted Clinical Loss
+### 1. Event-Weighted Clinical Loss ($L_{event}$)
+$$L_{event} = MSE(x, \hat{x}) \cdot [1 + (\lambda - 1) \cdot M]$$
+The loss function scales the error by a multiplier $\lambda$ (default = 5.0) where the binary seizure mask $M=1$, forcing the manifold to preserve critical ictal morphology.
 
-Standard auto-encoders evaluated purely over Mean Squared Error (MSE) systematically wipe away clinical variances directly. We dynamically mask the `2500-sample` signal tensors with 5-fold multipliers exclusively localized over seizure morphologies:
-`weighted_error = base_squared_error * (1.0 + (5.0 - 1.0) * mask_expanded)`
+### 2. Straight-Through Estimator (STE)
+$$W_q = \text{round}\left(\text{clamp}\left(\frac{W_{fp}}{\alpha}, -1, 1\right)\right)$$
+The STE allows backpropagation gradients to bypass non-differentiable quantization functions, enabling the optimization of discrete ternary weights ({-1, 0, 1}).
 
-## 2. Straight-Through Estimators (STE)
+### 3. Knowledge Distillation ($L_{distill}$)
+$$L_{distill} = \alpha \cdot MSE(z_s, z_t) + \beta \cdot D_{KL}(P_s || P_t)$$
+The objective function aligns the student's latent manifold $z_s$ and output probabilities $P_s$ with the teacher, ensuring the quantized model retains the teacher's feature extraction capability.
 
-Hardware Ternary Networks (composed only of `-1, 0, 1`) inherently break PyTorch Autograd paths because `torch.sign(x)` results in a gradient identically zero identically across practically mapping evaluations.
-
-We explicitly bypass the zeroing utilizing STE backwards hooks:
-1.  **Forward Pass:** We threshold the FP32 variables directly clamping structural arrays into identical {-1, 0, 1} symbols dynamically.
-2.  **Backward Pass:** We "lie" to PyTorch structurally skipping the `torch.sign` boundary logic flowing the exact full-precision backwards gradients completely through the zero-points organically.
-
-## 3. Knowledge Distillation (KL Divergence)
-We prevent the Ternary student from losing clinical edge mappings via dual-loss optimization: `Loss = MSE(Latents) + KL_DIV(Student, Teacher)`.
-
-We normalize spatial bounds strictly bridging probabilities evaluated exclusively through a spatial `SoftMax(Latents / Temperature)` mapping ensuring probabilities naturally smooth over biological peaks without clamping to extreme numerical infinities structurally mitigating over-fit risks completely natively.
+### 4. Q31 Fixed-Point Scaling
+$$y = \text{truncate}\left(\frac{A \cdot W_q \cdot \alpha_{q31}}{2^{31}}\right)$$
+The inference engine uses 32-bit integer multiplication and bit-shifting to scale accumulations by the LSQ step size, achieving 100% deterministic math without an FPU.
