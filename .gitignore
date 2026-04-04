@@ -28,9 +28,17 @@ firmware/build/
 *.uf2
 *.map
 
+# Training logs (generated artifacts, not source)
+*.log
+
 # Test Harness Logs
 testing/*.json
-testing/test_harness.log
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
 
 # IDEs
 .vscode/
