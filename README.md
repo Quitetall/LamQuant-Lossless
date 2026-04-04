@@ -1,53 +1,134 @@
-# LamQuant Gen 6: Embedded Clinical Neural Codec
+# LamQuant Gen 6
 
-LamQuant Gen 6 is a full-stack, clinical-grade EEG neural codec engineered for the **RP2350 (Hazard3 RISC-V)** microcontroller. This repository houses the bare-metal C firmware, the PyTorch distillation loops, and the validation harness required to train and deploy Ternary Quantized neural networks directly onto strict hardware limits enforcing < 4ms latencies.
+A clinical-grade EEG neural codec that compresses 21-channel EEG data on-chip using ternary-quantized neural networks, targeting the RP2350 (Hazard3 RISC-V) microcontroller under strict real-time constraints (< 4ms latency, 64KB SRAM).
 
-## Core Architectural Guardrails
+> **Research and educational use only.** This is not a cleared medical device. See [SAFETY.md](SAFETY.md) for details.
 
-- **Zero Dynamic Allocation**: The firmware does not use `malloc()`. Memory bounds are perfectly statically assigned.
-- **TCM Memory Pinning**: Critical PyTorch weight arrays and execution loops are pinned to the Cortex/Hazard3 32KB Tightly Coupled Memory (`.tcm_data`) bypassing SRAM execution cache misses completely.
-- **Hazard3 Zbb Exploitation**: Ternary neural MAC operations skip FP32 multiplication natively, unrolling the network across pure integer bit-masks (`cpop` via `__builtin_popcount`) executed in single ALU cycles natively in `ternary_mac.c`.
-- **Hardware PMP Enforcements**: Stack overflows map identically against native Physical Memory Protection blocks at `0x20007800` safely halting execution over normal software canaries.
+## Quick Start
 
-## Directory Structure
-
-- **/firmware/**
-  - `core/` - Tickless RTOS scheduler, hardware PMP exception trapping, Safe-Mode fallback mapping, and IEEE 802.3 CRC32 firmware integrity checks.
-  - `dsp/` - O(1) Q31 Biquad bounds, Lifting 2D mappings, and Toeplitz Compressed Sensing wrappers.
-  - `neural/` - Bare-metal `ternary_mac.c` executions extracting native tensors and Finite Scalar Quantization (FSQ) targets.
-  - `transport/` - Adaptive EMC Channel Coding over Bluetooth LE bounds safely guaranteeing throughput scaling.
-- **/ai_models/**
-  - `dataset_sim/` - Extractors natively mapping CHB-MIT PhysioNet datasets applying strict clinical `seizure_mask` validation natively to generated Q31 `.npz` records.
-  - `oracle/` - The `MobileNetV5Focal` FP32 configuration mapping heavily penalized `EventWeightedMSELoss` tracking structural neurological morphologies (Spike-waves).
-  - `student/` - PyTorch `TernaryQuantizeSTE` implementations tracking identical native Knowledge Distillation bridging `export_firmware.py` headers tightly wrapping `<16KB` output traces natively into your `.tcm_data` layout natively.
-- **/testing/**
-  - JSON-native Hardware-In-The-Loop simulation scripts explicitly stress testing Stack faults, EMC bounds, and CRC Flash corruption natively verifying Safety Constraints.
-
-## Compilation
-
-Compilation is mapped via CMake directly integrating `pico_sdk` libraries utilizing GCC warning rules bounded mathematically:
-
+**Run the test suite** (no GPU, no data required):
 ```bash
-# Requires $PICO_SDK_PATH
-mkdir build && cd build
-cmake ..
-make lamquant
+pip install -e ".[test]"
+pytest tests/ -v
 ```
 
-_GCC limits ensure `lamquant` fails compilation aggressively if any localized memory structure violates the 2,400-byte stack boundary limit structurally._
+**Train a model** (GPU recommended, requires EEG dataset):
+```bash
+pip install -e .
+# See "Training Pipeline" below
+```
+
+**Build firmware** (requires Pico SDK):
+```bash
+# See docs/BUILDING.md
+```
+
+## Installation
+
+**Prerequisites:** Python 3.10+, pip
+
+```bash
+git clone https://github.com/Quitetall/lamquant_gen6.git
+cd lamquant_gen6
+pip install -e .            # runtime deps (torch, numpy, scipy, mne, tqdm)
+pip install -e ".[test]"    # + pytest, coverage
+pip install -e ".[dev]"     # + wandb, mlflow (optional)
+```
+
+For firmware compilation, see [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Training Pipeline
 
-1. Synchronize `chbmit/1.0.0/` datasets utilizing `s5cmd --no-sign-request cp`.
-2. Map `edf_to_events.py` converting `.edf` limits against `.seizure` summary files into `.npz`.
-3. Train `train_teacher.py` (FP32) applying strictly Patient-Wise 20% validation mapping native morphological validation constraints safely avoiding data leakage.
-4. Execute `train_ternary.py` Distillating the Teacher down to exactly 15,800 `-1, 0, 1` Ternary markers.
-5. `export_firmware.py` binds the checkpoint identically extracting native `C` array maps wrapped perfectly into your embedded core bounds.
+Run these steps in order. Each script has `--help` for options.
+
+### 1. Download and convert EEG data
+
+```bash
+# Download CHB-MIT dataset from PhysioNet
+s5cmd --no-sign-request cp "s3://physionet-open/chb-mit-scalp-eeg-database/1.0.0/*" ./chbmit/
+
+# Convert EDF files to Q31 format
+python ai_models/dataset_sim/edf_to_events.py --input ./chbmit --output ./q31_events
+```
+
+### 2. Train teacher (FP32 reference model)
+
+```bash
+python ai_models/oracle/train_teacher.py            # ~1-2 hours on RTX 4090
+python ai_models/oracle/train_teacher_strided.py     # parallel: strided variant for Route B
+```
+
+### 3. Train student (ternary quantized)
+
+```bash
+python ai_models/student/train_student.py            # ~8 minutes on RTX 4090
+```
+
+### 4. Harden for deployment
+
+```bash
+python ai_models/student/harden_artifacts.py         # aligns latents with strided teacher
+```
+
+See [ai_models/student/README.md](ai_models/student/README.md) for optional fine-tuning and Route B decoder steps.
+
+### 5. Export to firmware
+
+```bash
+python firmware/export_firmware.py                   # generates focal_net_weights.h
+```
+
+### 6. Build firmware
+
+```bash
+export PICO_SDK_PATH=/path/to/pico-sdk
+mkdir build && cd build && cmake .. && make lamquant
+```
+
+## Directory Structure
+
+```
+ai_models/
+  dataset_sim/    EDF→Q31 dataset conversion and audit
+  oracle/         FP32 teacher model training
+  student/        Ternary student distillation and hardening
+  training_cockpit.py   ANSI training dashboard
+firmware/
+  core/           Boot, scheduler, CRC integrity, stack guard
+  dsp/            Q30 biquad filters, lifting wavelets, Toeplitz CS
+  neural/         Ternary MAC, focal modulation, FSQ
+  transport/      BLE/SPI host, hybrid entropy coding
+  export_firmware.py    PyTorch→C header exporter
+tests/
+  test_*.py       Unit tests (pytest)
+  c_host/         Host-compiled C firmware tests
+  benchmarks/     Integration benchmarks (fidelity, parity, compression)
+docs/
+  design/         Architecture, hardware, mathematics, validation specs
+```
+
+## Testing
+
+```bash
+# Unit tests (51 Python + 44 C assertions)
+pytest tests/ -v
+
+# Integration benchmarks (requires trained model + dataset)
+python tests/benchmarks/run_all_benchmarks.py
+```
+
+## Architecture
+
+The system uses knowledge distillation to compress a full-precision teacher into a ternary-quantized student (W2A6) that fits in 43KB SRAM. The encoder runs on-chip at < 4ms; the decoder runs on the base station.
+
+For technical deep-dives, see [docs/design/](docs/design/).
 
 ## Licensing
 
-LamQuant Gen 6 is structured with a multi-license model to strictly protect open-source clinical integrity while restricting commercialization of the trained neural matrices:
+- **Firmware & code**: [GPLv3](LICENSE.md)
+- **Transport layer** (`ternary_mac.c`, `hybrid_entropy.c`): [AGPLv3](LICENSE.md)
+- **Trained weights** (`focal_net_weights.h`): [CC BY-NC 4.0](LICENSE.md)
 
-*   **Firmware & Architecture**: The core repository is distributed under the **GPLv3** License.
-*   **Hardware DSP & Cryptographic Transport**: The `ternary_mac.c` and `hybrid_entropy.c` files are explicitly licensed under the **AGPLv3** License.
-*   **Trained Weights**: Any deployed or exported array weights bounds (e.g. `focal_net_weights.h` generated from PyTorch parameters) are licensed strictly under **CC BY-NC 4.0** (Attribution-NonCommercial).
+## Compliance
+
+See [COMPLIANCE.md](COMPLIANCE.md) for IEC 60601-1, ISO 13485, and IEC 62304 traceability.
