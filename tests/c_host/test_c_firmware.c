@@ -24,6 +24,10 @@ static inline int32_t mul_q31(int32_t a, int32_t b) {
     return (int32_t)(((int64_t)a * (int64_t)b) >> 31);
 }
 
+static inline int32_t mul_q30(int32_t a, int32_t b) {
+    return (int32_t)(((int64_t)a * (int64_t)b) >> 30);
+}
+
 static inline int32_t add_sat_q31(int32_t a, int32_t b) {
     int64_t r = (int64_t)a + (int64_t)b;
     if (r > INT32_MAX) return INT32_MAX;
@@ -131,21 +135,21 @@ static uint32_t isqrt32(uint32_t x) {
     return result;
 }
 
-/* ---- Biquad Q31 (from biquad_q31.c) ---- */
+/* ---- Biquad Q30 (from biquad_q31.c — now uses Q30 coefficients) ---- */
 typedef struct {
     int32_t b0, b1, b2;
     int32_t a1, a2;
     int32_t x1, x2;
     int32_t y1, y2;
-} biquad_state_q31_t;
+} biquad_state_t;
 
-static inline int32_t biquad_process(biquad_state_q31_t* S, int32_t x0) {
+static inline int32_t biquad_process(biquad_state_t* S, int32_t x0) {
     int32_t acc;
-    acc = mul_q31(S->b0, x0);
-    acc = add_sat_q31(acc, mul_q31(S->b1, S->x1));
-    acc = add_sat_q31(acc, mul_q31(S->b2, S->x2));
-    acc = sub_sat_q31(acc, mul_q31(S->a1, S->y1));
-    acc = sub_sat_q31(acc, mul_q31(S->a2, S->y2));
+    acc = mul_q30(S->b0, x0);
+    acc = add_sat_q31(acc, mul_q30(S->b1, S->x1));
+    acc = add_sat_q31(acc, mul_q30(S->b2, S->x2));
+    acc = sub_sat_q31(acc, mul_q30(S->a1, S->y1));
+    acc = sub_sat_q31(acc, mul_q30(S->a2, S->y2));
     S->x2 = S->x1; S->x1 = x0;
     S->y2 = S->y1; S->y1 = acc;
     return acc;
@@ -324,22 +328,68 @@ void test_isqrt32(void) {
     ASSERT_EQ(isqrt32(10), 3, "floor(sqrt(10)) = 3");
 }
 
-/* ---- Test: Biquad Q31 stability under DC ---- */
-void test_biquad_dc_stability(void) {
-    printf("[TEST] biquad DC stability\n");
+/* ---- Q30 biquad coefficients from biquad_q31.c ---- */
 
-    /* Lowpass 50Hz coefficients from biquad_q31.c */
-    biquad_state_q31_t lp;
-    lp.b0 =  292809836;
-    lp.b1 =  585619672;
-    lp.b2 =  292809836;
-    lp.a1 = -451621498;
-    lp.a2 =  622860843;
-    lp.x1 = lp.x2 = lp.y1 = lp.y2 = 0;
+/* HP 0.5 Hz Q30 */
+#define HP_B0  1064243069
+#define HP_B1 (-2128486138)
+#define HP_B2  1064243069
+#define HP_A1 (-2128402106)
+#define HP_A2  1054828345
+
+/* LP 50 Hz Q30 */
+#define LP_B0  221805086
+#define LP_B1  443610172
+#define LP_B2  221805086
+#define LP_A1 (-396777000)
+#define LP_A2  210255520
+
+/* Notch 60 Hz Q30 */
+#define NOTCH_B0  1047411946
+#define NOTCH_B1 (-131535080)
+#define NOTCH_B2  1047411946
+#define NOTCH_A1 (-131535080)
+#define NOTCH_A2  1021082069
+
+static void init_biquad(biquad_state_t* s,
+                        int32_t b0, int32_t b1, int32_t b2,
+                        int32_t a1, int32_t a2) {
+    s->b0 = b0; s->b1 = b1; s->b2 = b2;
+    s->a1 = a1; s->a2 = a2;
+    s->x1 = s->x2 = s->y1 = s->y2 = 0;
+}
+
+/* ---- Test: HP DC rejection (Q30 fix) ---- */
+void test_biquad_hp_dc_rejection(void) {
+    printf("[TEST] biquad HP DC rejection (Q30)\n");
+
+    biquad_state_t hp;
+    init_biquad(&hp, HP_B0, HP_B1, HP_B2, HP_A1, HP_A2);
+
+    /* Feed constant DC for 2000 samples (8 seconds at 250Hz).
+       The HP filter must reject DC — output converges to zero. */
+    int32_t dc_value = 100000000;
+    int32_t last = 0;
+    for (int i = 0; i < 2000; i++) {
+        last = biquad_process(&hp, dc_value);
+    }
+
+    /* After 8 seconds, HP should reject DC to < 1% of input */
+    int32_t tolerance = dc_value / 100;
+    ASSERT_TRUE(abs(last) < tolerance,
+                "HP filter rejects DC (Q30 coefficients)");
+}
+
+/* ---- Test: LP DC stability ---- */
+void test_biquad_lp_dc_stability(void) {
+    printf("[TEST] biquad LP DC stability (Q30)\n");
+
+    biquad_state_t lp;
+    init_biquad(&lp, LP_B0, LP_B1, LP_B2, LP_A1, LP_A2);
 
     /* Feed constant DC for 1000 samples. Filter must:
        1. Produce non-zero output (not a no-op)
-       2. Converge to a steady state (not diverge)  */
+       2. Converge to a steady state (not diverge) */
     int32_t dc_value = 100000000;
     int32_t prev = 0, last = 0;
     for (int i = 0; i < 1000; i++) {
@@ -348,23 +398,16 @@ void test_biquad_dc_stability(void) {
     }
 
     ASSERT_TRUE(last != 0, "LP filter output is non-zero for DC input");
-    /* Steady state: last two outputs should be very close */
     ASSERT_TRUE(abs(last - prev) < 100,
                 "LP filter converges to steady state under DC");
 }
 
 /* ---- Test: Biquad impulse response is finite ---- */
 void test_biquad_impulse_finite(void) {
-    printf("[TEST] biquad impulse response is finite\n");
+    printf("[TEST] biquad impulse response is finite (Q30)\n");
 
-    /* Lowpass 50Hz coefficients */
-    biquad_state_q31_t lp;
-    lp.b0 =  292809836;
-    lp.b1 =  585619672;
-    lp.b2 =  292809836;
-    lp.a1 = -451621498;
-    lp.a2 =  622860843;
-    lp.x1 = lp.x2 = lp.y1 = lp.y2 = 0;
+    biquad_state_t lp;
+    init_biquad(&lp, LP_B0, LP_B1, LP_B2, LP_A1, LP_A2);
 
     /* Unit impulse */
     int32_t out = biquad_process(&lp, 1000000000);
@@ -375,6 +418,53 @@ void test_biquad_impulse_finite(void) {
         out = biquad_process(&lp, 0);
     }
     ASSERT_TRUE(abs(out) < 1000, "LP impulse response decays to near zero");
+}
+
+/* ---- Test: 3-stage cascade stability ---- */
+void test_biquad_cascade_stable(void) {
+    printf("[TEST] biquad 3-stage cascade stability (Q30)\n");
+
+    biquad_state_t hp, lp, notch;
+    init_biquad(&hp,    HP_B0, HP_B1, HP_B2, HP_A1, HP_A2);
+    init_biquad(&lp,    LP_B0, LP_B1, LP_B2, LP_A1, LP_A2);
+    init_biquad(&notch, NOTCH_B0, NOTCH_B1, NOTCH_B2, NOTCH_A1, NOTCH_A2);
+
+    /* Feed 5000 samples of varied input — must not diverge */
+    int32_t max_out = 0;
+    for (int i = 0; i < 5000; i++) {
+        /* Synthetic EEG-like signal: sum of 10Hz + 30Hz components */
+        double t = (double)i / 250.0;
+        int32_t sample = (int32_t)(50000000.0 * sin(2.0 * 3.14159 * 10.0 * t)
+                                 + 30000000.0 * sin(2.0 * 3.14159 * 30.0 * t));
+        sample = biquad_process(&hp, sample);
+        sample = biquad_process(&lp, sample);
+        sample = biquad_process(&notch, sample);
+        if (abs(sample) > max_out) max_out = abs(sample);
+    }
+
+    /* Output must be bounded — no divergence */
+    ASSERT_TRUE(max_out < 500000000, "3-stage cascade output is bounded");
+    ASSERT_TRUE(max_out > 0, "3-stage cascade produces non-zero output");
+}
+
+/* ---- Test: mul_q30 basic correctness ---- */
+void test_mul_q30(void) {
+    printf("[TEST] mul_q30\n");
+
+    int32_t Q30 = 1 << 30; /* 1.0 in Q30 */
+
+    /* 1.0 * 1.0 = 1.0 */
+    ASSERT_EQ(mul_q30(Q30, Q30), Q30, "1.0 * 1.0 = 1.0 in Q30");
+
+    /* 1.5 * 1.0: 1.5 in Q30 = 1.5 * 2^30 = 1610612736 */
+    int32_t one_point_five = (int32_t)(1.5 * (1 << 30));
+    ASSERT_EQ(mul_q30(one_point_five, Q30), one_point_five, "1.5 * 1.0 = 1.5 in Q30");
+
+    /* -1.5 * 1.0 = -1.5 */
+    ASSERT_EQ(mul_q30(-one_point_five, Q30), -one_point_five, "-1.5 * 1.0 = -1.5 in Q30");
+
+    /* 0 * anything = 0 */
+    ASSERT_EQ(mul_q30(0, one_point_five), 0, "0 * 1.5 = 0 in Q30");
 }
 
 /* ==================================================================
@@ -392,8 +482,11 @@ int main(void) {
     test_lfsr_period();
     test_lfsr_batch32_equivalence();
     test_isqrt32();
-    test_biquad_dc_stability();
+    test_mul_q30();
+    test_biquad_hp_dc_rejection();
+    test_biquad_lp_dc_stability();
     test_biquad_impulse_finite();
+    test_biquad_cascade_stable();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
