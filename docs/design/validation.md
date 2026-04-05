@@ -1,19 +1,25 @@
-# LamQuant Continuous Integration Validation Harness
+# LamQuant Gen 7 Validation Harness
 
-Before deployment, LamQuant validates embedded behaviors against hardware and clinical metrics using automated stress profiles.
+Automated stress profiles validate firmware before deployment.
 
-## The Stress Profile Architecture
-Our automated CI suite mimics extreme environments to evaluate firmware robustness:
+## Stress Profiles
 
-1. **`baseline_nominal`**: Normal baseline EEG rhythms. Target: **PRD < 2.0%**.
-2. **`seizure_burst`**: High-frequency seizure oscillations and voltage excursions. Target: **PRD < 2.5%**.
-3. **`emc_burst`**: Synthetic IEC 61000-4-4 transient bursts simulated against the BLE transmission stack. Target: Signal recovery with **< 15.0%** total packet loss.
-4. **`thermal_derating`**: CPU clock throttling simulation across an 85°C thermal range. Target: Inference latency must remain beneath the **4.0ms** real-time deadline.
-5. **`flash_corruption`**: Induced byte-flips to test CRC32 integrity anchors. Target: Graceful failure trapping and mandatory entry into `Safe Mode`.
+| Profile | Condition | Pass Criteria |
+|---------|-----------|---------------|
+| `baseline_nominal` | Normal EEG rhythms | PRD < 2.0% |
+| `seizure_burst` | High-frequency ictal discharge | PRD < 2.5% |
+| `emc_burst` | IEC 61000-4-4 transient injection | < 15% packet loss |
+| `thermal_derating` | 85°C junction temp, clock throttle | Latency < 4.0ms |
+| `flash_corruption` | Induced byte-flips in weight storage | Safe mode entry, no TX |
+| `electrode_pop` | DC offset jump + drift | PRD < 40%, R ≥ 0.85 |
 
-## Graduation Thresholds (Clinical Signoff)
-A `lamquant_gen6` build must satisfy the following technical constraints for deployment:
-- **Clinical Readiness**: Pearson Correlation **$R > 0.85$** across all held-out clinical datasets.
-- **End-to-End Latency**: **< 300ms** total pipeline lag (ADC capture to encrypted BLE payload).
-- **Stack Depth**: **< 2.4KB** total usage, verified by stack canary analysis.
-- **Parity Proof**: **0.000** numerical drift between Python simulation and C-header integer exports.
+## Graduation Thresholds
+
+A build ships when all of these hold:
+
+- **Fidelity**: Pearson R > 0.85 on held-out patients (chb15–chb20)
+- **Latency**: < 4.0ms per window (ADC complete → BLE TX start)
+- **Stack**: < 2.4KB usage (`-Werror=stack-usage=2400`)
+- **Parity**: 0.000 numerical drift between Python and C encoder output
+- **Compression**: ≥ 5.0x ratio at R ≥ 0.85
+- **Memory**: Encoder ≤ 43KB (SRAM4 budget)

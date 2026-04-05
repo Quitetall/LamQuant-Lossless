@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "lamquant-gen6"
-version = "6.0.0"
+version = "7.0.0"
 description = "Clinical-grade EEG neural codec for RP2350"
 requires-python = ">=3.9"
 dependencies = [
@@ -15,6 +15,11 @@ dependencies = [
     "tqdm>=4.65",
 ]
 
+[project.scripts]
+lamquant-decode = "lamquant_codec.decode:main"
+lamquant-export = "lamquant_codec.export:main"
+lamquant-visualize = "tools.visualize_pipeline:main"
+
 [project.optional-dependencies]
 test = [
     "pytest>=7.4",
@@ -24,6 +29,10 @@ test = [
 dev = [
     "wandb",
     "mlflow",
+    "matplotlib>=3.7",
+]
+gui = [
+    "matplotlib>=3.7",
 ]
 
 [tool.pytest.ini_options]
