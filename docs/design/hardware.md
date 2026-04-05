@@ -1,17 +1,31 @@
-# LamQuant Gen 6: Hardware Interoperability
+# LamQuant Gen 7: Hardware Interface
 
-This document defines the interface between the LamQuant algorithms and the **Raspberry Pi RP2350** (Cortex-M33 / Hazard3 RISC-V) hardware.
+Target: RP2350 with dual Hazard3 RISC-V cores at 150MHz.
 
-## 1. Hazard3 RISC-V Optimization
-LamQuant targets the RP2350's dual **Hazard3 RISC-V cores**. By utilizing the RISC-V `Zbb` (Bit-manipulation) instruction set, the firmware executes branchless ternary MAC operations. This approach avoids the clock-cycle overhead of floating-point emulations and enables the high-speed inference engine to meet real-time constraints.
+## 1. Hazard3 RISC-V
 
-## 2. Memory Architecture & Latency
-To meet the 4.0ms real-time deadline and avoid XIP (eXecute In Place) Flash stalls, all neural weights are pinned to high-speed internal RAM.
-- **SRAM4 Bank Isolation**: The 64KB SRAM4 bank is dedicated exclusively to the TNN (Ternary Neural Network) manifold.
-- **Memory Pinning**: Weights and Q31 alphas are explicitly placed in the `.sram4_tnn` section using `__attribute__((section(".sram4_tnn")))`, ensuring 0-waitstate access.
-- **Alignment**: All data arrays are 32-bit word-aligned (`__attribute__((aligned(4)))`) to prevent alignment faults and optimize cache pipeline efficiency.
+Firmware uses `Zbb` (bit-manipulation) extensions for branchless ternary MAC. No FPU — all arithmetic is Q31/Q30 fixed-point. Compile flags: `-march=rv32imac_zbb -mabi=ilp32 -Os`.
 
-## 3. PMP Sandboxing & Stack Security
-The firmware implements Physical Memory Protection (PMP) to ensure system stability.
-- **NAPOT Stack Guard**: `stack_guard.c` uses **NAPOT (Naturally Aligned Power-Of-Two)** mode to lock a specific 2KB stack canary region. This prevents stack overflows from corrupting adjacent memory.
-- **Hardware Traps**: Any illegal memory access or bit-corruption triggers a hardware-level Exception, forcing the system into an isolated `Safe Mode` to prevent erroneous clinical telemetry.
+## 2. Memory Layout
+
+All TNN weights pinned to SRAM4 for 0-waitstate access (no XIP flash stalls).
+
+| Region | Size | Contents |
+|--------|------|----------|
+| SRAM0 | 64KB | ADC buffer (`raw_adc_buffer[21][2500]`) |
+| SRAM4 | 64KB | TNN weights (~33KB packed) + workspace |
+| SRAM5 | 64KB | Activation double-buffers, latent output |
+| Stack | 2.4KB | Enforced via `-Wstack-usage=2400 -Werror` |
+
+Placement: `__attribute__((section(".sram4_tnn"), aligned(4)))`.
+
+## 3. PMP Stack Guard
+
+`stack_guard.c` configures PMP entry 0 in NAPOT mode to poison a 2KB region at `0x20007800`. Lock bit set — immutable after boot. Any stack overflow triggers a hardware exception → `enter_safe_mode()` → BLE flush → WFI halt.
+
+## 4. SPI Bus Allocation
+
+| Bus | Slave | Clock | Use |
+|-----|-------|-------|-----|
+| SPI0 | ADS1299 | 4MHz | AFE data acquisition |
+| SPI1 | nRF52840 | 8MHz | BLE packet transmission |
