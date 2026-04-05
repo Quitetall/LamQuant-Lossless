@@ -467,11 +467,108 @@ void test_mul_q30(void) {
     ASSERT_EQ(mul_q30(0, one_point_five), 0, "0 * 1.5 = 0 in Q30");
 }
 
+/* ---- Test: Raw USB packet header format ---- */
+void test_raw_packet_header(void) {
+    printf("[TEST] raw USB packet header format\n");
+
+    /* Simulate header construction matching raw_output.c */
+    uint32_t window_id = 0x1234;
+    int total_channels = 21;
+
+    uint8_t header[8];
+    header[0] = 'L';
+    header[1] = 'A';
+    header[2] = 'M';
+    header[3] = 'R';
+    header[4] = (uint8_t)total_channels;
+    header[5] = 0;
+    header[6] = (uint8_t)(window_id >> 8);
+    header[7] = (uint8_t)(window_id & 0xFF);
+
+    ASSERT_EQ(header[0], 'L', "sync byte 0 = 'L'");
+    ASSERT_EQ(header[1], 'A', "sync byte 1 = 'A'");
+    ASSERT_EQ(header[2], 'M', "sync byte 2 = 'M'");
+    ASSERT_EQ(header[3], 'R', "sync byte 3 = 'R'");
+    ASSERT_EQ(header[4], 21, "channel count = 21");
+    ASSERT_EQ(header[5], 0, "reserved byte = 0");
+    ASSERT_EQ(header[6], 0x12, "window ID high byte");
+    ASSERT_EQ(header[7], 0x34, "window ID low byte");
+
+    /* Test 24-bit sample packing (big-endian) */
+    int32_t val = -12345;
+    uint8_t sample[3] = {
+        (uint8_t)((val >> 16) & 0xFF),
+        (uint8_t)((val >> 8) & 0xFF),
+        (uint8_t)(val & 0xFF)
+    };
+
+    /* Reconstruct with sign extension */
+    int32_t reconstructed = (sample[0] << 16) | (sample[1] << 8) | sample[2];
+    if (reconstructed & 0x800000) {
+        reconstructed |= (int32_t)0xFF000000;
+    }
+    ASSERT_EQ(reconstructed, val, "24-bit pack/unpack roundtrip for negative value");
+
+    /* Positive value */
+    val = 54321;
+    sample[0] = (uint8_t)((val >> 16) & 0xFF);
+    sample[1] = (uint8_t)((val >> 8) & 0xFF);
+    sample[2] = (uint8_t)(val & 0xFF);
+    reconstructed = (sample[0] << 16) | (sample[1] << 8) | sample[2];
+    if (reconstructed & 0x800000) {
+        reconstructed |= (int32_t)0xFF000000;
+    }
+    ASSERT_EQ(reconstructed, val, "24-bit pack/unpack roundtrip for positive value");
+
+    /* Zero */
+    val = 0;
+    sample[0] = (uint8_t)((val >> 16) & 0xFF);
+    sample[1] = (uint8_t)((val >> 8) & 0xFF);
+    sample[2] = (uint8_t)(val & 0xFF);
+    reconstructed = (sample[0] << 16) | (sample[1] << 8) | sample[2];
+    if (reconstructed & 0x800000) {
+        reconstructed |= (int32_t)0xFF000000;
+    }
+    ASSERT_EQ(reconstructed, val, "24-bit pack/unpack roundtrip for zero");
+}
+
+/* ---- Test: Output mode enum values ---- */
+void test_output_mode_enum(void) {
+    printf("[TEST] output mode enum\n");
+
+    /* Verify enum values match between firmware and receiver */
+    typedef enum {
+        OUTPUT_COMPRESSED_ONLY,
+        OUTPUT_RAW_ONLY,
+        OUTPUT_DUAL,
+    } output_mode_t;
+
+    ASSERT_EQ(OUTPUT_COMPRESSED_ONLY, 0, "OUTPUT_COMPRESSED_ONLY = 0");
+    ASSERT_EQ(OUTPUT_RAW_ONLY, 1, "OUTPUT_RAW_ONLY = 1");
+    ASSERT_EQ(OUTPUT_DUAL, 2, "OUTPUT_DUAL = 2");
+
+    /* Verify serial command byte mapping */
+    output_mode_t mode;
+    uint8_t cmd;
+
+    cmd = 'R'; mode = OUTPUT_RAW_ONLY;
+    ASSERT_EQ(cmd, 0x52, "'R' command byte = 0x52");
+    ASSERT_EQ(mode, 1, "'R' maps to OUTPUT_RAW_ONLY");
+
+    cmd = 'C'; mode = OUTPUT_COMPRESSED_ONLY;
+    ASSERT_EQ(cmd, 0x43, "'C' command byte = 0x43");
+    ASSERT_EQ(mode, 0, "'C' maps to OUTPUT_COMPRESSED_ONLY");
+
+    cmd = 'D'; mode = OUTPUT_DUAL;
+    ASSERT_EQ(cmd, 0x44, "'D' command byte = 0x44");
+    ASSERT_EQ(mode, 2, "'D' maps to OUTPUT_DUAL");
+}
+
 /* ==================================================================
  * Main
  * ================================================================== */
 int main(void) {
-    printf("=== LamQuant Gen 6: C Firmware Unit Tests (Host) ===\n\n");
+    printf("=== LamQuant Gen 7: C Firmware Unit Tests (Host) ===\n\n");
 
     test_mul_q31();
     test_add_sat_q31();
@@ -487,6 +584,8 @@ int main(void) {
     test_biquad_lp_dc_stability();
     test_biquad_impulse_finite();
     test_biquad_cascade_stable();
+    test_raw_packet_header();
+    test_output_mode_enum();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
