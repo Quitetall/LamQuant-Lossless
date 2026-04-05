@@ -13,6 +13,7 @@ dependencies = [
     "scipy>=1.10",
     "mne>=1.5",
     "tqdm>=4.65",
+    "snntorch>=0.9",
 ]
 
 [project.scripts]
