@@ -40,6 +40,13 @@ testing/*.json
 htmlcov/
 coverage.xml
 
+# GUI build artifacts
+gui/node_modules/
+gui/.svelte-kit/
+gui/build/
+gui/src-tauri/target/
+gui/src-tauri/gen/
+
 # IDEs
 .vscode/
 .idea/
