@@ -52,3 +52,5 @@ gui/src-tauri/gen/
 .idea/
 *.swp
 .DS_Store
+*.edf
+ai_models/dataset_sim/datasets/
