@@ -1,4 +1,4 @@
-# LamQuant Gen 6
+# LamQuant Gen 7
 
 An on-chip EEG neural codec that compresses 21-channel electroencephalography data in real time using ternary-quantized neural networks. Runs on the RP2350 microcontroller (dual Hazard3 RISC-V cores, 150 MHz) under a hard 4 ms latency ceiling with 64 KB SRAM.
 
@@ -24,8 +24,28 @@ An on-chip EEG neural codec that compresses 21-channel electroencephalography da
 
 ## Quick Start
 
+### One-Click Setup (no terminal required)
+
+| Platform | What to do |
+|----------|-----------|
+| **Windows** | Double-click `run.bat`. On first run it installs everything automatically. |
+| **macOS** | Double-click `LamQuant.command`. Right-click → Open if macOS blocks it. |
+| **Linux** | Run `./install.sh` once, then find **LamQuant OpenHuman** in your app menu. |
+
+The app opens in **mock mode** by default — no hardware needed to explore every feature.
+
+### For developers
+
 ```bash
-# Run the Python test suite (no GPU, no data required)
+# Full install (Python + Node + Rust + GUI build)
+./install.sh              # Linux/macOS
+.\install.ps1             # Windows (PowerShell)
+
+# Launch
+./run.sh                  # Linux/macOS
+.\run.bat                 # Windows (double-click)
+
+# Or run tests directly
 pip install -e ".[test]"
 pytest tests/ -v
 
@@ -158,30 +178,44 @@ For a file-by-file description, see [docs/directory_structure.md](docs/directory
 
 ## Installation
 
-### Python (training + codec)
+### Automated (recommended)
 
-Requires Python 3.10+.
+The install scripts detect your OS, install all system dependencies, create a Python virtual environment, build the GUI, and set up a desktop launcher.
 
 ```bash
-git clone https://github.com/Quitetall/lamquant_gen6.git
-cd lamquant_gen6
+# Linux / macOS
+./install.sh
 
+# Windows (PowerShell)
+.\install.ps1
+```
+
+After install, launch from your app menu (Linux), Desktop shortcut (Windows), or by double-clicking `LamQuant.command` (macOS).
+
+**What gets installed automatically**: Python 3.10+, Node.js 18+, Rust 1.77+, CMake, system libraries (GTK/WebKitGTK on Linux, Xcode CLI on macOS). The scripts are idempotent — safe to re-run.
+
+### Manual (per component)
+
+#### Python (training + codec)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .            # Core: torch, numpy, scipy, mne, tqdm
 pip install -e ".[test]"    # + pytest, coverage
 pip install -e ".[dev]"     # + wandb, mlflow, matplotlib
 ```
 
-### Firmware
+#### Firmware
 
 Requires the [Pico SDK v2.x](https://github.com/raspberrypi/pico-sdk) and a RISC-V cross-compiler. See [docs/BUILDING.md](docs/BUILDING.md).
 
-### Desktop GUI
-
-Requires Node.js 18+ and Rust 1.77+. See [docs/gui_guide.md](docs/gui_guide.md).
+#### Desktop GUI
 
 ```bash
-bash install.sh   # Linux/macOS: installs Python package, builds GUI
+cd gui && npm install && npx tauri build
 ```
+
+See [docs/gui_guide.md](docs/gui_guide.md) for development mode and architecture details.
 
 ---
 
@@ -257,20 +291,29 @@ See [docs/BUILDING.md](docs/BUILDING.md) for full instructions.
 
 ## Desktop GUI
 
-The Tauri v2 desktop application provides impedance checking, live signal visualization, recording, and EDF/CSV export.
+The Tauri v2 desktop application provides impedance checking, live 21-channel signal visualization, recording, data export, firmware flashing, and hardware preflight testing — all without a terminal.
 
-```bash
-cd gui
-npm install
-npx tauri dev    # Development mode (mock data, no hardware needed)
-```
+Two operating modes, toggled from the connection bar:
 
-Three main screens:
-1. **Impedance Check** — SVG head diagram with 10-20 electrode positions, color-coded by impedance (green < 5 kOhm, amber 5-20, red > 20)
-2. **Live Signals** — 8-channel scrolling Canvas2D waveforms at 250 Hz, configurable gain/filter/time window
-3. **Export** — Record sessions and export as EDF or CSV
+### Vision Mode (clinical use)
 
-See [docs/gui_guide.md](docs/gui_guide.md) for architecture details.
+| Page | What it does |
+|------|-------------|
+| **Impedance** | SVG head diagram with 21 electrode positions (10-20 system), color-coded by impedance |
+| **Signals** | 21-channel scrolling Canvas2D waveforms at 250 Hz. Configurable gain, filter, time window, montage (Referential / Bipolar Banana / Bipolar Transverse). Output mode selector (Raw USB / Compressed BLE / Dual) |
+| **Export** | Save As dialog for EDF, CSV, or NPZ export. Event marker support |
+| **Firmware** | Detect RP2350 in bootloader mode, browse for `.uf2` file, one-click flash |
+
+### Eagle Mode (developer preflight)
+
+| Page | What it does |
+|------|-------------|
+| **Dashboard** | Summary of hardware, software, and benchmark status. Run All button |
+| **Hardware** | 8 preflight checks (KAT, CRC, PMP, ADC, BLE, SNN, Dual-Core, Mailbox). Memory usage bars |
+| **Software** | Run pytest + C host tests from the GUI. Expandable pass/fail results |
+| **Benchmarks** | Run benchmark suite from the GUI. Pass/fail grid |
+
+See [docs/gui_guide.md](docs/gui_guide.md) for architecture details and [docs/user_manual.md](docs/user_manual.md) for the full user manual.
 
 ---
 
@@ -310,6 +353,8 @@ See [docs/design/validation.md](docs/design/validation.md) for the full test str
 
 | Document | Contents |
 |----------|----------|
+| [docs/user_manual.md](docs/user_manual.md) | **User Manual** — setup, every screen, firmware flashing, troubleshooting |
+| [docs/gui_guide.md](docs/gui_guide.md) | GUI developer guide — architecture, Tauri commands, stores, wire protocol |
 | [docs/design/architecture.md](docs/design/architecture.md) | Full system architecture, data flow, dual-path scheduler |
 | [docs/design/hardware.md](docs/design/hardware.md) | RP2350 memory map, PMP stack guard, SPI bus allocation, pin map |
 | [docs/design/mathematics.md](docs/design/mathematics.md) | LSQ quantization, Q31/Q30 arithmetic, FSQ+rANS, distillation loss |
@@ -318,7 +363,6 @@ See [docs/design/validation.md](docs/design/validation.md) for the full test str
 | [docs/directory_structure.md](docs/directory_structure.md) | File-by-file codebase reference |
 | [docs/firmware_reference.md](docs/firmware_reference.md) | Every C function: signature, behavior, callers |
 | [docs/training_pipeline.md](docs/training_pipeline.md) | Python training walkthrough, model architecture |
-| [docs/gui_guide.md](docs/gui_guide.md) | Tauri GUI architecture, screens, wire protocol |
 | [docs/wire_protocol.md](docs/wire_protocol.md) | Device-host packet format and command reference |
 | [docs/hardware_bom.md](docs/hardware_bom.md) | Component list, PCB specs, power budget |
 | [SAFETY.md](SAFETY.md) | Regulatory disclaimer, F1 fragility defense |
