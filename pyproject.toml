@@ -54,6 +54,21 @@ markers = [
 source = ["ai_models", "firmware"]
 omit = [
     "tests/benchmarks/*",
+    # CLI-only entry points (argparse + main()): not unit-tested directly,
+    # exercised via integration tests and actual training runs.
+    "ai_models/dataset_sim/audit_dataset.py",
+    "ai_models/dataset_sim/generate_validation_split.py",
+    "ai_models/dataset_sim/validate_cross_dataset.py",
+    "ai_models/dataset_sim/edf_to_events.py",
+    "ai_models/snn/generate_activity_labels.py",
+    "ai_models/snn/train_dlif.py",
+    "ai_models/snn/train_dlif_run.py",
+    "ai_models/training_cockpit.py",
+    "ai_models/oracle/*",
+    "ai_models/student/train_student.py",
+    "ai_models/student/train_route_b_decoder.py",
+    "ai_models/student/finetune_student.py",
+    "ai_models/student/harden_artifacts.py",
 ]
 
 [tool.coverage.report]
