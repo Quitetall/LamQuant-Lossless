@@ -1,4 +1,4 @@
-# LamQuant Gen 7
+# LamQuant
 
 An on-chip EEG neural codec that compresses 21-channel electroencephalography data in real time using ternary-quantized neural networks. Runs on the RP2350 microcontroller (dual Hazard3 RISC-V cores, 150 MHz) under a hard 4 ms latency ceiling with 64 KB SRAM.
 
@@ -30,7 +30,7 @@ An on-chip EEG neural codec that compresses 21-channel electroencephalography da
 |----------|-----------|
 | **Windows** | Double-click `run.bat`. On first run it installs everything automatically. |
 | **macOS** | Double-click `LamQuant.command`. Right-click → Open if macOS blocks it. |
-| **Linux** | Run `./install.sh` once, then find **LamQuant OpenHuman** in your app menu. |
+| **Linux** | Run `./install.sh` once, then find **OpenHuman Vision** in your app menu. |
 
 The app opens in **mock mode** by default — no hardware needed to explore every feature.
 
@@ -106,7 +106,7 @@ For a complete architecture description, see [docs/design/architecture.md](docs/
 ## Directory Layout
 
 ```
-lamquant_gen6/
+lamquant/
 ├── ai_models/                  Python training pipeline
 │   ├── dataset_sim/            EDF -> Q31 dataset conversion
 │   │   ├── edf_to_events.py   CHB-MIT parser, channel aliasing, Q31 scaling
@@ -178,16 +178,30 @@ For a file-by-file description, see [docs/directory_structure.md](docs/directory
 
 ## Installation
 
-### Automated (recommended)
+### Automated (recommended) — OpenHuman Portal
 
-The install scripts detect your OS, install all system dependencies, create a Python virtual environment, build the GUI, and set up a desktop launcher.
+The **OpenHuman Portal** install scripts detect your OS, install all system dependencies, create a Python virtual environment, build the GUI, and set up a desktop launcher. Run without arguments for an interactive component menu, or pass `--quiet` to install everything non-interactively.
 
 ```bash
 # Linux / macOS
-./install.sh
+./install.sh                       # interactive menu
+./install.sh --quiet               # install everything, no prompts
+./install.sh --components=gui      # only the OpenHuman Vision GUI
+./install.sh --components=python   # only the Python pipeline
 
 # Windows (PowerShell)
-.\install.ps1
+.\install.ps1                      # interactive menu
+.\install.ps1 -Quiet               # install everything
+.\install.ps1 -Components gui      # only the OpenHuman Vision GUI
+```
+
+You can also install via pip and use the unified `lamquant` CLI:
+
+```bash
+pip install -e .
+lamquant setup --yes               # wraps install.sh / install.ps1 --quiet
+lamquant gui                       # launch OpenHuman Vision
+lamquant validate                  # run installation validator
 ```
 
 After install, launch from your app menu (Linux), Desktop shortcut (Windows), or by double-clicking `LamQuant.command` (macOS).
@@ -289,13 +303,13 @@ See [docs/BUILDING.md](docs/BUILDING.md) for full instructions.
 
 ---
 
-## Desktop GUI
+## Desktop GUI — OpenHuman Vision
 
-The Tauri v2 desktop application provides impedance checking, live 21-channel signal visualization, recording, data export, firmware flashing, and hardware preflight testing — all without a terminal.
+The Tauri v2 desktop application **OpenHuman Vision** provides impedance checking, live 21-channel signal visualization, recording, data export, firmware flashing, and hardware preflight testing — all without a terminal.
 
 Two operating modes, toggled from the connection bar:
 
-### Vision Mode (clinical use)
+### OpenHuman Vision Mode (clinical use)
 
 | Page | What it does |
 |------|-------------|
@@ -304,7 +318,7 @@ Two operating modes, toggled from the connection bar:
 | **Export** | Save As dialog for EDF, CSV, or NPZ export. Event marker support |
 | **Firmware** | Detect RP2350 in bootloader mode, browse for `.uf2` file, one-click flash |
 
-### Eagle Mode (developer preflight)
+### OpenHuman Eagle Mode (developer preflight)
 
 | Page | What it does |
 |------|-------------|
