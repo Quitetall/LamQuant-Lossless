@@ -45,6 +45,11 @@ testing/*.json
 htmlcov/
 coverage.xml
 
+# Python packaging artifacts (created by pip install -e .)
+*.egg-info/
+*.egg
+dist/
+
 # GUI build artifacts
 gui/node_modules/
 gui/.svelte-kit/
