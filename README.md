@@ -82,6 +82,7 @@ LamQuant compresses continuous EEG signals on a microcontroller in real time, tr
 | Latency | < 4 ms per window (ADC complete -> BLE TX start) |
 | Stack usage | < 2.4 KB (enforced at compile time) |
 | BLE packet | max 240 bytes per window |
+| Recording duration | Streaming mode: limited only by disk (~38 MB/hour, 300 MB/8h). See [docs/RECORDING.md](docs/RECORDING.md). |
 
 ---
 
@@ -404,6 +405,10 @@ See [docs/design/validation.md](docs/design/validation.md) for the full test str
 | [docs/training_pipeline.md](docs/training_pipeline.md) | Python training walkthrough, model architecture |
 | [docs/wire_protocol.md](docs/wire_protocol.md) | Device-host packet format and command reference |
 | [docs/hardware_bom.md](docs/hardware_bom.md) | Component list, PCB specs, power budget |
+| [docs/RECORDING.md](docs/RECORDING.md) | Recording duration, RAM/disk costs, streaming mode |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common bring-up problems and fixes |
+| [SUPPORT.md](SUPPORT.md) | How to file bugs, ask questions, report security issues |
+| [CITATION.cff](CITATION.cff) | Cite this work |
 | [SAFETY.md](SAFETY.md) | Regulatory disclaimer, F1 fragility defense |
 | [COMPLIANCE.md](COMPLIANCE.md) | IEC 60601-1, ISO 13485, IEC 62304 traceability |
 
