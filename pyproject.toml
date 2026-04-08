@@ -1,12 +1,12 @@
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "lamquant"
 version = "7.0.0"
 description = "Clinical-grade EEG neural codec for RP2350"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
     "numpy>=1.24",
@@ -36,6 +36,22 @@ dev = [
 gui = [
     "matplotlib>=3.7",
 ]
+# Meta extra for install.sh and user convenience: pulls in everything
+# a developer wants locally (test + dev + gui tooling).
+all = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "coverage[toml]>=7.3",
+    "matplotlib>=3.7",
+]
+
+# Only lamquant_codec is a real importable library package. The training
+# scripts in ai_models/ and firmware/ are run directly (python path/to/
+# script.py) and are not installed. tools/ is included because its
+# visualize script is registered as a [project.scripts] entry point.
+[tool.setuptools.packages.find]
+include = ["lamquant_codec*", "tools*"]
+exclude = ["tests*", "gui*", "docs*", "build*", "ai_models*", "firmware*", "installer*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,6 +76,7 @@ omit = [
     "ai_models/dataset_sim/audit_dataset.py",
     "ai_models/dataset_sim/generate_validation_split.py",
     "ai_models/dataset_sim/validate_cross_dataset.py",
+    "ai_models/dataset_sim/validate_subband.py",
     "ai_models/dataset_sim/edf_to_events.py",
     "ai_models/snn/generate_activity_labels.py",
     "ai_models/snn/train_dlif.py",
@@ -67,6 +84,7 @@ omit = [
     "ai_models/training_cockpit.py",
     "ai_models/oracle/*",
     "ai_models/student/train_student.py",
+    "ai_models/student/train_student_subband.py",
     "ai_models/student/train_route_b_decoder.py",
     "ai_models/student/finetune_student.py",
     "ai_models/student/harden_artifacts.py",
