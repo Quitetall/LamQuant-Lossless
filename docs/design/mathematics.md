@@ -1,6 +1,6 @@
 # Mathematical Foundations
 
-Every equation used in LamQuant, from training through firmware inference.
+Every equation used in LamQuant Gen 7.1 ("Subband"), from training through firmware inference.
 
 ---
 
@@ -61,7 +61,7 @@ These primitives are defined in `firmware/core/math_utils.h` and used throughout
 
 ## 2. Biquad IIR Filter (Q30)
 
-Three cascaded second-order IIR sections per channel, Direct Form 1:
+Single second-order IIR section per channel (Gen 7.1: HP-only), Direct Form 1:
 
 ```
 y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
@@ -69,13 +69,15 @@ y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
 
 All coefficients are Q30 constants precomputed in `export_firmware.py` using `scipy.signal`.
 
-### Stages
+### Stages (Gen 7.1)
 
 | Stage | Type | Cutoff | Order | Purpose |
 |-------|------|--------|-------|---------|
 | 1 | Highpass (Butterworth) | 0.5 Hz | 2 | Remove DC offset and slow drift |
-| 2 | Lowpass (Butterworth) | 50 Hz | 2 | Anti-alias, remove high-frequency noise |
-| 3 | Notch | 60 Hz (Q=30) | 2 | Suppress power line interference |
+
+In Gen 7.1, the lowpass and notch stages are removed. Their anti-aliasing and interference rejection functions are replaced by the 3-level lifting DWT's inherent subband decomposition combined with detail coefficient thresholding. This reduces filter state from 63 delay lines (21 channels x 3 stages) to 21 delay lines (21 channels x 1 stage).
+
+> **Legacy (Gen 7.0)**: 3-stage cascade: HP 0.5 Hz + LP 50 Hz + Notch 60 Hz.
 
 ### Coefficient values (Q30, fs=250 Hz)
 
@@ -88,27 +90,9 @@ a1 = -1.98222893 → Q30: -2128402106
 a2 =  0.98238545 → Q30:  1054828345
 ```
 
-**Lowpass 50 Hz:**
-```
-b0 =  0.20657208 → Q30:   221805086
-b1 =  0.41314417 → Q30:   443610172
-b2 =  0.20657208 → Q30:   221805086
-a1 = -0.36952738 → Q30:  -396777000
-a2 =  0.19581571 → Q30:   210255520
-```
-
-**Notch 60 Hz (Q=30):**
-```
-b0 =  0.97547839 → Q30:  1047411946
-b1 = -0.12250159 → Q30:  -131535080
-b2 =  0.97547839 → Q30:  1047411946
-a1 = -0.12250159 → Q30:  -131535080
-a2 =  0.95095678 → Q30:  1021082069
-```
-
-To regenerate these from Python:
+To regenerate from Python:
 ```python
-from scipy.signal import butter, iirnotch
+from scipy.signal import butter
 Q30 = 1 << 30
 b, a = butter(2, 0.5, btype='high', fs=250)
 print([int(c * Q30) for c in b])
@@ -261,7 +245,7 @@ bin = clamp(floor((val - vmin) * L / (vmax - vmin)), 0, L-1)
 ```
 
 Where:
-- `L` = number of levels (default 16)
+- `L` = number of levels (quality-dependent; see below)
 - `vmin`, `vmax` = latent value range (calibrated from training data)
 
 **Firmware optimization**: To avoid runtime division, the inverse range is precomputed at export time as a Q31 multiplier:
@@ -271,9 +255,23 @@ fsq_inv_range_q31 = (FSQ_NUM_LEVELS << 31) / (vmax - vmin)
 bin = clamp((shifted * fsq_inv_range_q31) >> 31, 0, L-1)
 ```
 
-### 4D FSQ lattice
+### Quality-Dependent FSQ Levels (Gen 7.1)
 
-For the `fsq.c` adaptive quantizer, 4 latent dimensions are quantized with independent level counts:
+Gen 7.1 introduces quality-dependent FSQ levels. The FSQ level set `L` varies by quality mode, with MAX_SYMBOLS=32:
+
+| Quality Mode | FSQ Levels (L) | MAX_SYMBOLS | Approx. Compression Ratio |
+|-------------|----------------|-------------|---------------------------|
+| ALERTING | 2, 3, 5 | 5 | ~150:1 |
+| MONITORING | 2, 3, 5, 16 | 16 | ~80:1 |
+| CLINICAL | 2, 3, 5, 32 | 32 | ~40:1 |
+
+The L=32 level is used exclusively in CLINICAL mode for maximum fidelity. The latent tensor is [32][79] (32 channels, 79 time steps after 4x stride TNN).
+
+> **Legacy (Gen 7.0)**: Fixed L=2/3/5 (MAX_SYMBOLS=5), latent [32][312].
+
+### 4D FSQ lattice (legacy)
+
+For backward compatibility, the `run_fsq_translation()` function retains the 4D FSQ lattice:
 
 ```
 FSQ_LEVELS[4] = {8, 6, 5, 5}
@@ -356,7 +354,7 @@ Each channel uses a different LFSR seed for uncorrelated sensing rows. The batch
 
 ## 12. Le Gall 5/3 Lifting Wavelet
 
-Integer-to-integer wavelet transform, in-place:
+Integer-to-integer wavelet transform, in-place.
 
 **Predict (high-pass details):**
 ```
@@ -368,23 +366,43 @@ d[n] = x[2n+1] - floor((x[2n] + x[2n+2]) / 2)
 s[n] = x[2n] + floor((d[n-1] + d[n] + 2) / 4)
 ```
 
-The 2D transform applies the temporal pass (32 samples per channel) then the spatial pass (6 channels cross-linked). Boundary handling uses symmetric mirroring.
+Boundary handling uses symmetric mirroring for all levels.
+
+### 3-Level Decomposition (Gen 7.1 Golden Path)
+
+In Gen 7.1, a 3-level lifting DWT replaces the former lowpass and notch biquad stages. The transform is applied per-channel on the 2500-sample HP-filtered signal:
+
+```
+Level 1: [2500] → approx[1250] + detail[1250]
+Level 2: approx[1250] → approx[625] + detail[625]
+Level 3: approx[625]  → approx[313] + detail[313]
+```
+
+The L3 approximation subband [21,313] becomes the TNN input. Detail subbands are thresholded and selectively transmitted depending on quality mode.
+
+The predict step acts as a highpass filter, extracting detail information. The update step acts as a lowpass filter, producing a smooth approximation. At each level, the signal length is halved (with rounding for odd lengths).
+
+### 2D Lightning Path Transform (Legacy)
+
+The 2D transform for the lightning path applies the temporal pass (32 samples per channel) then the spatial pass (6 channels cross-linked). This remains unchanged from Gen 7.0.
 
 ---
 
 ## 13. Linear Predictive Coding (LPC)
 
-Order-4 LPC removes temporal redundancy after the lifting wavelet.
+### Order-8 LPC Analysis (Gen 7.1 Golden Path)
 
-**Autocorrelation** (Q31 samples, int64 accumulator):
+Gen 7.1 uses order-8 LPC analysis per channel with 256-sample autocorrelation windows, applied before the lifting DWT. This captures the spectral envelope of each channel for prediction and delta encoding.
+
+**Autocorrelation** (Q31 samples, int64 accumulator, 256-sample window):
 ```
-R[k] = sum_{n=k}^{N-1} x[n] * x[n-k],   k = 0..4
+R[k] = sum_{n=k}^{255} x[n] * x[n-k],   k = 0..8
 ```
 
-**Levinson-Durbin recursion** solves for 4 LPC coefficients from R[0..4]:
+**Levinson-Durbin recursion** solves for 8 LPC coefficients from R[0..8]:
 
 ```
-For m = 0 to 3:
+For m = 0 to 7:
   k_m = -(R[m+1] + sum_{j<m} a[j]*R[m-j]) / E
   a_curr[m] = k_m
   For j < m: a_curr[j] = a_prev[j] + k_m * a_prev[m-1-j]
@@ -392,6 +410,34 @@ For m = 0 to 3:
 ```
 
 Reflection coefficients `k_m` are in Q31. Coefficients are clamped to `INT32_MIN`/`INT32_MAX`.
+
+**Prediction filter**: The LPC coefficients define a prediction filter applied to each channel. The prediction residual has a flatter spectrum (closer to white noise), which improves the lifting DWT's ability to concentrate energy in the approximation subband.
+
+```
+pred[n] = sum_{i=1}^{8} a[i] * x[n-i]
+residual[n] = x[n] - pred[n]
+```
+
+### LPC Delta Encoding (Gen 7.1)
+
+LPC coefficients are delta-encoded for bandwidth-efficient transmission:
+
+| Frame Type | Encoding | Size per frame (21 channels x 8 coefficients) |
+|-----------|----------|------------------------------------------------|
+| Keyframe | Full Q31 coefficients | 672 bytes (21 x 8 x 4) |
+| Q15 delta | Difference from previous keyframe, Q15 | 336 bytes (21 x 8 x 2) |
+| Q8 delta | Difference from previous Q15 frame, Q8 | 168 bytes (21 x 8 x 1) |
+
+Keyframes are sent periodically (e.g., every 10 frames). Between keyframes, Q15 deltas capture coefficient drift. Between Q15 frames, Q8 deltas capture fine changes. The decoder reconstructs full Q31 coefficients by accumulating deltas from the last keyframe.
+
+### Order-4 LPC (Lightning Path, Legacy)
+
+The lightning path retains order-4 LPC on the 6x32 lifting tile:
+
+**Autocorrelation**:
+```
+R[k] = sum_{n=k}^{N-1} x[n] * x[n-k],   k = 0..4
+```
 
 **Forward prediction residuals** (in-place, backwards to preserve needed samples):
 ```
@@ -416,6 +462,16 @@ quotient = mapped >> k        (unary coded: q ones + 0 terminator)
 remainder = mapped & (2^k - 1) (binary coded: k bits)
 ```
 
+### Golomb-Rice with Run-Length Coding (Gen 7.1 Detail Encoding)
+
+For sparse detail subband coefficients (after thresholding), Gen 7.1 combines Golomb-Rice with run-length coding. After SNN-driven thresholding, most detail coefficients are zero. The encoding proceeds:
+
+1. **Run-length encode zeros**: Count consecutive zero coefficients. Emit a run-length count using Golomb-Rice (k=3) before each non-zero coefficient.
+2. **Encode non-zero value**: The non-zero coefficient is zigzag-encoded and Golomb-Rice coded (k=4) as above.
+3. **Terminal run**: A final run-length encodes any trailing zeros.
+
+This achieves high compression on the sparse detail subbands, since ALERTING and MONITORING modes threshold most detail coefficients to zero.
+
 ---
 
 ## 15. CRC32
@@ -430,3 +486,85 @@ return crc ^ 0xFFFFFFFF;
 ```
 
 Compatible with Python's `zlib.crc32()` for cross-platform verification. The expected CRC covers Toeplitz seeds, neural network weights, and FSQ lattice configuration.
+
+---
+
+## 16. Walsh-Hadamard Transform (Gen 7.1)
+
+The 32-point Walsh-Hadamard Transform (WHT) is applied as a pre-rotation on the 32-channel latent dimension before FSQ quantization. It decorrelates latent channels, improving FSQ codebook utilization and entropy coding efficiency.
+
+### Butterfly Decomposition
+
+The WHT is computed in-place using 5 stages of length-2 butterflies (log2(32) = 5 stages):
+
+```
+For stage s = 0 to 4:
+  block_size = 2^(s+1)
+  half = block_size / 2
+  For each block starting at index j:
+    For i = 0 to half-1:
+      a = data[j + i]
+      b = data[j + i + half]
+      data[j + i]        = a + b
+      data[j + i + half] = a - b
+```
+
+After all 5 stages, the output is normalized by dividing by sqrt(32) (or equivalently, right-shifting by 5 for the integer version with a final rounding correction).
+
+### Application to Latent Tensor
+
+At each of the T=79 time steps, the WHT is applied along the 32-channel dimension:
+
+```
+For t = 0 to 78:
+  wht32_forward(latent[:, t])
+```
+
+The inverse WHT (used at the decoder) is identical to the forward WHT up to the normalization factor, since the Hadamard matrix is symmetric and orthogonal.
+
+---
+
+## 17. Detail Coefficient Thresholding (Gen 7.1)
+
+After the 3-level lifting DWT, detail coefficients are thresholded to produce a sparse representation. The threshold is estimated from the data using the Median Absolute Deviation (MAD), a robust noise estimator.
+
+### MAD Noise Estimation
+
+```
+sigma_hat = MAD(detail_coeffs) / 0.6745
+```
+
+Where:
+- `MAD(x) = median(|x - median(x)|)`
+- `0.6745` is the MAD-to-sigma conversion factor for Gaussian noise
+
+### Quality-Dependent Multipliers
+
+The threshold is `T = lambda * sigma_hat`, where `lambda` depends on the quality mode:
+
+| Quality Mode | Lambda | Effect |
+|-------------|--------|--------|
+| ALERTING | 4.0 | Aggressive: only large transients survive, most detail zeroed |
+| MONITORING | 2.0 | Moderate: preserves clinically relevant detail |
+| CLINICAL | 0.5 | Conservative: preserves nearly all detail for diagnostic fidelity |
+
+### Hard Thresholding
+
+```
+detail_out[n] = (|detail[n]| >= T) ? detail[n] : 0
+```
+
+The resulting sparse array is then encoded using Golomb-Rice with run-length coding (Section 14).
+
+---
+
+## 18. SNN Classification on L3 Subband (Gen 7.1)
+
+The Spiking Neural Network (SNN) classifies the L3 approximation subband for quality mode selection and path decision. Topology: 21 -> 64 -> 8.
+
+- **Input**: L3 approximation [21,313], stride 1
+- **Hidden layer**: 64 leaky integrate-and-fire (LIF) neurons
+- **Output layer**: 8 class neurons (softmax over spike rates)
+- **Weights**: ~8 KB (up from ~5 KB in Gen 7.0 due to wider input: 21 channels vs. 8)
+
+> **Legacy (Gen 7.0)**: Input [21,2500] stride 8, topology 8->64->8, weights ~5 KB.
