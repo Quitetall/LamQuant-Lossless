@@ -64,3 +64,6 @@ gui/src-tauri/gen/
 .DS_Store
 *.edf
 ai_models/dataset_sim/datasets/
+.training_queue.json
+.training_state.json
+training_logs/
