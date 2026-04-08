@@ -16,6 +16,11 @@ ai_models/dataset_sim/q31_events/*.npz
 *.pt
 *.pth
 
+# Exception: weights/ directory is tracked (ships to end users)
+!weights/*.ckpt
+!weights/*.pt
+!weights/*.pth
+
 # Generated Firmware Exports
 firmware/firmware_export/*.h
 firmware/firmware_export/*.bin
