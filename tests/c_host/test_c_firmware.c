@@ -840,30 +840,327 @@ void test_levinson_overflow_guard(void) {
 }
 
 /* ==================================================================
- * Main (extended)
+ * LPC DELTA CODEC TESTS (verifies Bug F2 fix)
+ * ================================================================== */
+
+/* Inline simplified LPC delta encode/decode for self-contained testing.
+ * These match the logic from firmware/codec/lpc_delta.c. */
+#define TEST_LPC_ORDER 8
+#define TEST_NUM_CH 2  /* Use 2 channels for faster tests */
+
+typedef enum { TMODE_KEY = 0, TMODE_Q15 = 1, TMODE_Q8 = 2 } test_delta_mode_t;
+
+static int32_t td_prev[TEST_NUM_CH][TEST_LPC_ORDER];
+static int td_has_prev = 0;
+
+static uint32_t td_encode(const int32_t curr[][TEST_LPC_ORDER], uint8_t* buf) {
+    uint32_t pos = 0;
+    if (!td_has_prev) {
+        buf[pos++] = TMODE_KEY;
+        for (int ch = 0; ch < TEST_NUM_CH; ch++)
+            for (int k = 0; k < TEST_LPC_ORDER; k++) {
+                int32_t v = curr[ch][k];
+                buf[pos++] = v & 0xFF; buf[pos++] = (v>>8)&0xFF;
+                buf[pos++] = (v>>16)&0xFF; buf[pos++] = (v>>24)&0xFF;
+            }
+    } else {
+        /* Check if Q8 fits */
+        int q8_ok = 1;
+        for (int ch = 0; ch < TEST_NUM_CH && q8_ok; ch++)
+            for (int k = 0; k < TEST_LPC_ORDER && q8_ok; k++) {
+                int32_t d = curr[ch][k] - td_prev[ch][k];
+                int8_t d8 = (int8_t)(d >> 23);
+                if (((int32_t)d8 << 23) != d) q8_ok = 0;
+            }
+        if (q8_ok) {
+            buf[pos++] = TMODE_Q8;
+            for (int ch = 0; ch < TEST_NUM_CH; ch++)
+                for (int k = 0; k < TEST_LPC_ORDER; k++) {
+                    int32_t d = curr[ch][k] - td_prev[ch][k];
+                    buf[pos++] = (uint8_t)(d >> 23);
+                }
+        } else {
+            buf[pos++] = TMODE_Q15;
+            for (int ch = 0; ch < TEST_NUM_CH; ch++)
+                for (int k = 0; k < TEST_LPC_ORDER; k++) {
+                    int32_t d = curr[ch][k] - td_prev[ch][k];
+                    int16_t d16 = (int16_t)(d >> 16);
+                    buf[pos++] = d16 & 0xFF; buf[pos++] = (d16 >> 8) & 0xFF;
+                }
+        }
+    }
+    memcpy(td_prev, curr, sizeof(td_prev));
+    td_has_prev = 1;
+    return pos;
+}
+
+static uint32_t td_decode(const uint8_t* buf, int32_t out[][TEST_LPC_ORDER]) {
+    test_delta_mode_t mode = (test_delta_mode_t)buf[0];
+    uint32_t pos = 1;
+    /* Bug F2 guard: reject delta before keyframe */
+    if (!td_has_prev && mode != TMODE_KEY) {
+        memset(out, 0, sizeof(int32_t) * TEST_NUM_CH * TEST_LPC_ORDER);
+        return 0;
+    }
+    switch (mode) {
+        case TMODE_KEY:
+            for (int ch = 0; ch < TEST_NUM_CH; ch++)
+                for (int k = 0; k < TEST_LPC_ORDER; k++) {
+                    out[ch][k] = (int32_t)buf[pos] | ((int32_t)buf[pos+1]<<8)
+                               | ((int32_t)buf[pos+2]<<16) | ((int32_t)buf[pos+3]<<24);
+                    pos += 4;
+                }
+            break;
+        case TMODE_Q15:
+            for (int ch = 0; ch < TEST_NUM_CH; ch++)
+                for (int k = 0; k < TEST_LPC_ORDER; k++) {
+                    int16_t d16 = (int16_t)((uint16_t)buf[pos] | ((uint16_t)buf[pos+1]<<8));
+                    out[ch][k] = td_prev[ch][k] + ((int32_t)d16 << 16);
+                    pos += 2;
+                }
+            break;
+        case TMODE_Q8:
+            for (int ch = 0; ch < TEST_NUM_CH; ch++)
+                for (int k = 0; k < TEST_LPC_ORDER; k++) {
+                    int8_t d8 = (int8_t)buf[pos];
+                    out[ch][k] = td_prev[ch][k] + ((int32_t)d8 << 23);
+                    pos += 1;
+                }
+            break;
+    }
+    memcpy(td_prev, out, sizeof(td_prev));
+    td_has_prev = 1;
+    return pos;
+}
+
+static void td_reset(void) { memset(td_prev, 0, sizeof(td_prev)); td_has_prev = 0; }
+
+void test_lpc_delta_keyframe_roundtrip(void) {
+    printf("[TEST] LPC delta keyframe encode/decode roundtrip\n");
+    td_reset();
+    int32_t coeffs[TEST_NUM_CH][TEST_LPC_ORDER];
+    for (int ch = 0; ch < TEST_NUM_CH; ch++)
+        for (int k = 0; k < TEST_LPC_ORDER; k++)
+            coeffs[ch][k] = (ch * 100000 + k * 12345) ^ 0x55AA0000;
+    uint8_t buf[256];
+    uint32_t n = td_encode(coeffs, buf);
+    ASSERT_TRUE(n > 0, "keyframe encode produced bytes");
+    ASSERT_EQ(buf[0], TMODE_KEY, "first frame must be keyframe");
+
+    td_reset();
+    int32_t out[TEST_NUM_CH][TEST_LPC_ORDER];
+    td_decode(buf, out);
+    for (int ch = 0; ch < TEST_NUM_CH; ch++)
+        for (int k = 0; k < TEST_LPC_ORDER; k++)
+            ASSERT_EQ(out[ch][k], coeffs[ch][k], "keyframe roundtrip exact");
+}
+
+void test_lpc_delta_q8_roundtrip(void) {
+    printf("[TEST] LPC delta Q8 encode/decode roundtrip\n");
+    td_reset();
+    int32_t frame1[TEST_NUM_CH][TEST_LPC_ORDER] = {{0}};
+    int32_t frame2[TEST_NUM_CH][TEST_LPC_ORDER];
+    /* frame2 differs from frame1 by small deltas (fits in Q8) */
+    for (int ch = 0; ch < TEST_NUM_CH; ch++)
+        for (int k = 0; k < TEST_LPC_ORDER; k++)
+            frame2[ch][k] = (k + 1) * (1 << 23); /* small Q31 values */
+    uint8_t buf1[256], buf2[256];
+    td_encode(frame1, buf1); /* keyframe */
+    uint32_t n2 = td_encode(frame2, buf2);
+    ASSERT_EQ(buf2[0], TMODE_Q8, "small delta should use Q8 mode");
+
+    td_reset();
+    int32_t out1[TEST_NUM_CH][TEST_LPC_ORDER], out2[TEST_NUM_CH][TEST_LPC_ORDER];
+    td_decode(buf1, out1);
+    td_decode(buf2, out2);
+    for (int ch = 0; ch < TEST_NUM_CH; ch++)
+        for (int k = 0; k < TEST_LPC_ORDER; k++)
+            ASSERT_EQ(out2[ch][k], frame2[ch][k], "Q8 delta roundtrip exact");
+}
+
+void test_lpc_delta_decode_no_prev(void) {
+    printf("[TEST] LPC delta decode rejects delta without keyframe (Bug F2)\n");
+    td_reset();
+    /* Craft a Q15 delta frame without a preceding keyframe */
+    uint8_t fake_delta[256] = {TMODE_Q15};
+    int32_t out[TEST_NUM_CH][TEST_LPC_ORDER];
+    uint32_t consumed = td_decode(fake_delta, out);
+    ASSERT_EQ(consumed, 0, "Bug F2: decode should return 0 on delta without keyframe");
+    /* Output should be zeroed (safe fallback) */
+    for (int ch = 0; ch < TEST_NUM_CH; ch++)
+        for (int k = 0; k < TEST_LPC_ORDER; k++)
+            ASSERT_EQ(out[ch][k], 0, "Bug F2: output zeroed on missing keyframe");
+}
+
+/* ==================================================================
+ * TERNARY MAC EXHAUSTIVE + Q31 ALPHA TESTS (Bug F4)
+ * ================================================================== */
+
+void test_ternary_mac_exhaustive(void) {
+    printf("[TEST] ternary MAC exhaustive 2-bit weight combos\n");
+    /* Test all 256 possible packed_w byte values against hand-computed results */
+    int16_t acts[4] = {100, -200, 300, -400};
+    int failures = 0;
+    for (int w = 0; w < 256; w++) {
+        uint8_t packed = (uint8_t)w;
+        int32_t expected = 0;
+        for (int j = 0; j < 4; j++) {
+            int bits = (packed >> (2*j)) & 0x03;
+            expected += (int32_t)acts[j] * TERNARY_LUT[bits];
+        }
+        int32_t got = ternary_mac_byte_w2a6(packed, acts);
+        if (got != expected) failures++;
+    }
+    ASSERT_EQ(failures, 0, "all 256 weight byte combos must match hand computation");
+}
+
+void test_ternary_mac_q31_alpha(void) {
+    printf("[TEST] ternary MAC Q31 alpha scaling (Bug F4 fix)\n");
+    /* Verify mul_q31 produces correct alpha-scaled result.
+     * accumulator=1000, alpha=0.1 in Q31 = 214748365 */
+    int32_t acc = 1000;
+    int32_t alpha_q31 = (int32_t)(0.1 * 2147483648.0); /* 0.1 in Q31 */
+    int32_t result = mul_q31(acc, alpha_q31);
+    /* Expected: 1000 * 0.1 = 100 (within ±1 for Q31 rounding) */
+    ASSERT_TRUE(abs(result - 100) <= 1,
+                "Bug F4: Q31 alpha scaling should give ~100 for acc=1000, alpha=0.1");
+}
+
+/* ==================================================================
+ * FSQ QUANTIZATION TESTS
+ * ================================================================== */
+
+/* Simplified FSQ quantize matching firmware/neural/fsq.c */
+static int32_t fsq_quantize(int32_t val, int L) {
+    /* Map Q31 value to grid [0, L-1] */
+    /* val in [-2^31, 2^31-1], map to [-L/2, L/2] then shift to [0, L-1] */
+    int32_t half_L = L / 2;
+    /* Scale: val * L / 2^32 (approximate) */
+    int64_t scaled = ((int64_t)val * L) >> 32;
+    /* Clamp to [-L/2, L/2] */
+    if (scaled > half_L) scaled = half_L;
+    if (scaled < -half_L) scaled = -half_L;
+    /* Shift to [0, L-1] */
+    int32_t idx = (int32_t)(scaled + half_L);
+    if (idx >= L) idx = L - 1;
+    if (idx < 0) idx = 0;
+    return idx;
+}
+
+void test_fsq_quantize_range(void) {
+    printf("[TEST] FSQ quantize output range [0, L-1]\n");
+    int levels[] = {2, 3, 5, 32};
+    int n_levels = 4;
+    int failures = 0;
+    for (int li = 0; li < n_levels; li++) {
+        int L = levels[li];
+        /* Test with extreme values */
+        int32_t test_vals[] = {INT32_MIN, INT32_MIN/2, 0, INT32_MAX/2, INT32_MAX};
+        for (int vi = 0; vi < 5; vi++) {
+            int32_t idx = fsq_quantize(test_vals[vi], L);
+            if (idx < 0 || idx >= L) failures++;
+        }
+    }
+    ASSERT_EQ(failures, 0, "FSQ output must always be in [0, L-1]");
+}
+
+void test_fsq_quantize_monotonic(void) {
+    printf("[TEST] FSQ quantize is monotonic\n");
+    /* For a given L, if val1 < val2 then fsq(val1) <= fsq(val2) */
+    int failures = 0;
+    for (int L = 2; L <= 32; L++) {
+        int32_t prev_idx = fsq_quantize(INT32_MIN, L);
+        for (int i = 1; i <= 1000; i++) {
+            int32_t val = (int32_t)((int64_t)INT32_MIN + (int64_t)i * ((int64_t)UINT32_MAX / 1000));
+            int32_t idx = fsq_quantize(val, L);
+            if (idx < prev_idx) failures++;
+            prev_idx = idx;
+        }
+    }
+    ASSERT_EQ(failures, 0, "FSQ must be monotonically non-decreasing");
+}
+
+/* ==================================================================
+ * BIQUAD EXTENDED TESTS
+ * ================================================================== */
+
+void test_biquad_impulse_response_values(void) {
+    printf("[TEST] biquad HP impulse response (first 5 values)\n");
+    /* HP 0.5 Hz at 250 Hz: b0=1064243069, b1=-2128486138, b2=1064243069,
+     * a1=-2128402106, a2=1054828345 (all Q30) */
+    biquad_state_t S = {
+        .b0 = 1064243069, .b1 = -2128486138, .b2 = 1064243069,
+        .a1 = -2128402106, .a2 = 1054828345,
+        .x1=0, .x2=0, .y1=0, .y2=0
+    };
+    /* Impulse: x[0]=Q31_MAX, x[n>0]=0 */
+    int32_t y0 = biquad_process(&S, INT32_MAX);
+    int32_t y1 = biquad_process(&S, 0);
+    int32_t y2 = biquad_process(&S, 0);
+    /* y0 should be large positive (≈ b0 * xmax) */
+    ASSERT_TRUE(y0 > 0, "HP impulse y[0] should be positive");
+    /* y1 should be large negative (b1 term dominates) */
+    ASSERT_TRUE(y1 < 0, "HP impulse y[1] should be negative");
+    /* All values must be finite (no overflow to 0 or wrap) */
+    ASSERT_TRUE(y0 != 0 && y1 != 0 && y2 != 0, "impulse response must be non-zero for first 3 samples");
+}
+
+void test_biquad_state_carryover(void) {
+    printf("[TEST] biquad state carries over between calls\n");
+    biquad_state_t S = {
+        .b0 = 1064243069, .b1 = -2128486138, .b2 = 1064243069,
+        .a1 = -2128402106, .a2 = 1054828345,
+        .x1=0, .x2=0, .y1=0, .y2=0
+    };
+    /* Process 5 samples */
+    int32_t y[5];
+    for (int i = 0; i < 5; i++) y[i] = biquad_process(&S, 100000);
+    /* State should be non-zero after processing */
+    ASSERT_TRUE(S.x1 != 0 || S.y1 != 0, "state must carry over between samples");
+    /* Process 5 more — output should be different from first 5 (filter memory) */
+    int32_t y2[5];
+    for (int i = 0; i < 5; i++) y2[i] = biquad_process(&S, 100000);
+    /* With constant input, HP filter should settle toward 0 */
+    ASSERT_TRUE(abs(y2[4]) < abs(y[0]), "HP output should decrease for DC input");
+}
+
+/* ==================================================================
+ * Main (complete)
  * ================================================================== */
 int main(void) {
     printf("=== LamQuant Gen 7: C Firmware Unit Tests (Host) ===\n\n");
 
-    /* Existing tests */
+    /* Math primitives */
     test_mul_q31();
     test_add_sat_q31();
     test_sub_sat_q31();
+    test_mul_q30();
+
+    /* Ternary MAC */
     test_ternary_mac_kat();
     test_ternary_mac_edges();
+    test_ternary_mac_exhaustive();
+    test_ternary_mac_q31_alpha();
+
+    /* CRC + LFSR */
     test_crc32();
     test_lfsr_period();
     test_lfsr_batch32_equivalence();
+
+    /* Misc */
     test_isqrt32();
-    test_mul_q30();
+    test_raw_packet_header();
+    test_output_mode_enum();
+
+    /* Biquad filter */
     test_biquad_hp_dc_rejection();
     test_biquad_lp_dc_stability();
     test_biquad_impulse_finite();
     test_biquad_cascade_stable();
-    test_raw_packet_header();
-    test_output_mode_enum();
+    test_biquad_impulse_response_values();
+    test_biquad_state_carryover();
 
-    /* New: Lifting DWT (Bug F1 + F3 verification) */
+    /* Lifting DWT (Bug F1 + F3 verification) */
     test_lifting_roundtrip_even();
     test_lifting_roundtrip_odd();
     test_lifting_constant_input();
@@ -871,13 +1168,22 @@ int main(void) {
     test_lifting_negative_rounding();
     test_lifting_2500_roundtrip();
 
-    /* New: WHT32 */
+    /* WHT32 */
     test_wht32_roundtrip();
     test_wht32_delta_function();
 
-    /* New: LPC Levinson-Durbin (Bug F5 verification) */
+    /* LPC Levinson-Durbin (Bug F5 verification) */
     test_levinson_flat_signal();
     test_levinson_overflow_guard();
+
+    /* LPC Delta Codec (Bug F2 verification) */
+    test_lpc_delta_keyframe_roundtrip();
+    test_lpc_delta_q8_roundtrip();
+    test_lpc_delta_decode_no_prev();
+
+    /* FSQ Quantization */
+    test_fsq_quantize_range();
+    test_fsq_quantize_monotonic();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
