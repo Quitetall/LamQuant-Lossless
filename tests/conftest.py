@@ -2,12 +2,23 @@
 Pytest configuration and shared fixtures for all test levels.
 """
 
+import os
+import sys
 import pytest
 import numpy as np
-import torch
 import tempfile
 import json
 from pathlib import Path
+
+# Expose repo modules that tests import by bare name (train_ternary,
+# export_firmware, subband_preprocess, ...). These live under feature-specific
+# subdirectories rather than in an installed package, so the test runner needs
+# their parent dirs on sys.path.
+_REPO_ROOT = Path(__file__).parent.parent
+for _rel in ("ai_models/student", "firmware", "ai_models/dataset_sim"):
+    _p = str((_REPO_ROOT / _rel).resolve())
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 
 
 @pytest.fixture(scope="session")
@@ -62,6 +73,31 @@ def sample_seizure_mask():
     np.random.seed(42)
     mask = np.random.binomial(1, 0.05, size=2500).astype(np.float32)
     return mask
+
+
+@pytest.fixture
+def ternary_model():
+    """Fresh TernaryMobileNetV5 autoencoder instance on CPU in eval mode."""
+    import torch
+    from train_ternary import TernaryMobileNetV5
+    torch.manual_seed(0)
+    m = TernaryMobileNetV5(in_ch=21, latent_dim=32)
+    m.eval()
+    return m
+
+
+@pytest.fixture
+def random_eeg_batch():
+    """Small random EEG batch [B=2, C=21, T=2500], float32, CPU."""
+    import torch
+    torch.manual_seed(0)
+    return torch.randn(2, 21, 2500)
+
+
+@pytest.fixture
+def tmp_header(tmp_path):
+    """Temp path for an exported C header file."""
+    return tmp_path / "focal_net_weights.h"
 
 
 @pytest.fixture
