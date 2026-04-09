@@ -1,0 +1,69 @@
+# LamQuant Gen 6 Git Bounds
+
+# Python Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+env/
+venv/
+
+# AI Dataset / Model Weights
+ai_models/dataset_sim/dataset/
+ai_models/dataset_sim/q31_events/*.npz
+*.ckpt
+*.pt
+*.pth
+
+# Exception: weights/ directory is tracked (ships to end users)
+!weights/*.ckpt
+!weights/*.pt
+!weights/*.pth
+
+# Generated Firmware Exports
+firmware/firmware_export/*.h
+firmware/firmware_export/*.bin
+
+# Build Dependencies
+build/
+firmware/build/
+*.o
+*.elf
+*.uf2
+*.map
+
+# Training logs (generated artifacts, not source)
+*.log
+
+# Test Harness Logs
+testing/*.json
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Python packaging artifacts (created by pip install -e .)
+*.egg-info/
+*.egg
+dist/
+
+# GUI build artifacts
+gui/node_modules/
+gui/.svelte-kit/
+gui/build/
+gui/src-tauri/target/
+gui/src-tauri/gen/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+.DS_Store
+*.edf
+ai_models/dataset_sim/datasets/
+.training_queue.json
+.training_state.json
+training_logs/

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy scipy mne pytest pytest-cov coverage
+
+      - name: Run Python tests with coverage
+        run: |
+          python -m pytest tests/ \
+            --cov=ai_models --cov=firmware \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            -v
+
+      - name: Check coverage threshold
+        run: |
+          python -m coverage report --fail-under=60
+
+  c-host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile C test harness
+        run: |
+          gcc -O2 -Wall -Wextra \
+            -I tests/c_host \
+            -o tests/c_host/test_c_firmware \
+            tests/c_host/test_c_firmware.c -lm
+
+      - name: Run C unit tests
+        run: ./tests/c_host/test_c_firmware
