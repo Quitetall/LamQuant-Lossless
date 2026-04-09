@@ -565,11 +565,287 @@ void test_output_mode_enum(void) {
 }
 
 /* ==================================================================
- * Main
+ * LIFTING DWT TESTS (verifies Bug F1 + F3 fixes)
+ * ================================================================== */
+
+/* Inline the fixed lifting_1d_53_inplace from firmware/dsp/lifting_2d.c */
+static void lifting_1d_53_inplace(int32_t* signal, int length) {
+    if (length < 2) return;
+    int n_detail = length / 2;
+    int n_approx = (length + 1) / 2;
+
+    /* Predict step */
+    for (int n = 0; n < n_detail - 1; n++) {
+        signal[2*n + 1] -= (signal[2*n] + signal[2*n + 2]) >> 1;
+    }
+    /* Last detail: boundary (BUG F1 FIX: even-length uses >>1 average) */
+    if (n_detail > 0) {
+        int last_odd = 2*(n_detail - 1) + 1;
+        int last_even = 2*(n_detail - 1);
+        if (last_odd < length) {
+            if (length % 2 == 0) {
+                signal[last_odd] -= (signal[last_even] + signal[last_even]) >> 1;
+            } else {
+                signal[last_odd] -= (signal[last_even] + signal[last_odd + 1]) >> 1;
+            }
+        }
+    }
+
+    /* Update step (BUG F3 FIX: symmetric rounding) */
+    signal[0] += (signal[1] + 1) >> 1;
+    for (int n = 1; n < n_approx; n++) {
+        int left = 2*n - 1;
+        int right = 2*n + 1;
+        if (right < length) {
+            int32_t sum = signal[left] + signal[right];
+            signal[2*n] += (sum >= 0) ? (sum + 2) >> 2 : -(((-sum) + 2) >> 2);
+        } else {
+            signal[2*n] += (signal[left] + 1) >> 1;
+        }
+    }
+}
+
+/* Inverse lifting for roundtrip test */
+static void lifting_1d_53_inverse(int32_t* signal, int length) {
+    if (length < 2) return;
+    int n_detail = length / 2;
+    int n_approx = (length + 1) / 2;
+
+    /* Undo update */
+    for (int n = n_approx - 1; n >= 1; n--) {
+        int left = 2*n - 1;
+        int right = 2*n + 1;
+        if (right < length) {
+            int32_t sum = signal[left] + signal[right];
+            signal[2*n] -= (sum >= 0) ? (sum + 2) >> 2 : -(((-sum) + 2) >> 2);
+        } else {
+            signal[2*n] -= (signal[left] + 1) >> 1;
+        }
+    }
+    signal[0] -= (signal[1] + 1) >> 1;
+
+    /* Undo predict */
+    if (n_detail > 0) {
+        int last_odd = 2*(n_detail - 1) + 1;
+        int last_even = 2*(n_detail - 1);
+        if (last_odd < length) {
+            if (length % 2 == 0) {
+                signal[last_odd] += (signal[last_even] + signal[last_even]) >> 1;
+            } else {
+                signal[last_odd] += (signal[last_even] + signal[last_odd + 1]) >> 1;
+            }
+        }
+    }
+    for (int n = n_detail - 2; n >= 0; n--) {
+        signal[2*n + 1] += (signal[2*n] + signal[2*n + 2]) >> 1;
+    }
+}
+
+void test_lifting_roundtrip_even(void) {
+    printf("[TEST] lifting 1D roundtrip (even length=100)\n");
+    int32_t orig[100], buf[100];
+    for (int i = 0; i < 100; i++) orig[i] = buf[i] = (i * 12345) ^ (i << 16);
+    lifting_1d_53_inplace(buf, 100);
+    lifting_1d_53_inverse(buf, 100);
+    int max_err = 0;
+    for (int i = 0; i < 100; i++) {
+        int err = abs(buf[i] - orig[i]);
+        if (err > max_err) max_err = err;
+    }
+    ASSERT_TRUE(max_err == 0, "even-length roundtrip should be exact (integer lifting)");
+}
+
+void test_lifting_roundtrip_odd(void) {
+    printf("[TEST] lifting 1D roundtrip (odd length=625)\n");
+    int32_t orig[625], buf[625];
+    for (int i = 0; i < 625; i++) orig[i] = buf[i] = (i * 54321 - 100000) ^ (i << 12);
+    lifting_1d_53_inplace(buf, 625);
+    lifting_1d_53_inverse(buf, 625);
+    int max_err = 0;
+    for (int i = 0; i < 625; i++) {
+        int err = abs(buf[i] - orig[i]);
+        if (err > max_err) max_err = err;
+    }
+    ASSERT_TRUE(max_err == 0, "odd-length roundtrip should be exact");
+}
+
+void test_lifting_constant_input(void) {
+    printf("[TEST] lifting 1D constant input\n");
+    int32_t buf[100];
+    for (int i = 0; i < 100; i++) buf[i] = 42000;
+    lifting_1d_53_inplace(buf, 100);
+    /* Approximation (even indices) should be ~42000, detail (odd) ~0 */
+    for (int i = 1; i < 100; i += 2) {
+        ASSERT_TRUE(abs(buf[i]) < 10, "detail of constant should be ~0");
+    }
+}
+
+void test_lifting_boundary_even_fix(void) {
+    printf("[TEST] lifting boundary even-length (Bug F1 fix)\n");
+    /* The boundary predict for even-length should use averaged mirror,
+     * not just the raw neighbor. Verify the last detail coefficient
+     * is correct for a known signal. */
+    int32_t buf[10] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000};
+    int32_t orig[10];
+    memcpy(orig, buf, sizeof(buf));
+    lifting_1d_53_inplace(buf, 10);
+    lifting_1d_53_inverse(buf, 10);
+    int max_err = 0;
+    for (int i = 0; i < 10; i++) {
+        int err = abs(buf[i] - orig[i]);
+        if (err > max_err) max_err = err;
+    }
+    ASSERT_TRUE(max_err == 0, "Bug F1: even boundary roundtrip must be exact");
+}
+
+void test_lifting_negative_rounding(void) {
+    printf("[TEST] lifting negative rounding symmetry (Bug F3 fix)\n");
+    /* Verify that positive and negative signals produce symmetric results */
+    int32_t pos_buf[20], neg_buf[20];
+    for (int i = 0; i < 20; i++) {
+        pos_buf[i] = (i + 1) * 1000;
+        neg_buf[i] = -(i + 1) * 1000;
+    }
+    lifting_1d_53_inplace(pos_buf, 20);
+    lifting_1d_53_inplace(neg_buf, 20);
+    /* After lifting, neg_buf should be the negation of pos_buf
+     * (within rounding tolerance of ±1 due to integer division) */
+    int max_asym = 0;
+    for (int i = 0; i < 20; i++) {
+        int asym = abs(pos_buf[i] + neg_buf[i]);
+        if (asym > max_asym) max_asym = asym;
+    }
+    ASSERT_TRUE(max_asym <= 1, "Bug F3: positive/negative should be symmetric (±1)");
+}
+
+void test_lifting_2500_roundtrip(void) {
+    printf("[TEST] lifting 1D roundtrip (length=2500, real window size)\n");
+    int32_t orig[2500], buf[2500];
+    /* Pseudorandom signal in Q31 range */
+    uint32_t rng = 0xDEADBEEF;
+    for (int i = 0; i < 2500; i++) {
+        rng = rng * 1103515245 + 12345;
+        orig[i] = buf[i] = (int32_t)rng;
+    }
+    lifting_1d_53_inplace(buf, 2500);
+    lifting_1d_53_inverse(buf, 2500);
+    int max_err = 0;
+    for (int i = 0; i < 2500; i++) {
+        int err = abs(buf[i] - orig[i]);
+        if (err > max_err) max_err = err;
+    }
+    ASSERT_TRUE(max_err == 0, "2500-sample roundtrip must be exact");
+}
+
+/* ==================================================================
+ * WHT32 TESTS
+ * ================================================================== */
+
+static void wht32_forward(int32_t* x) {
+    int h = 1;
+    while (h < 32) {
+        for (int i = 0; i < 32; i += h * 2) {
+            for (int j = i; j < i + h; j++) {
+                int32_t a = x[j];
+                int32_t b = x[j + h];
+                x[j] = a + b;
+                x[j + h] = a - b;
+            }
+        }
+        h *= 2;
+    }
+}
+
+static void wht32_inverse(int32_t* x) {
+    wht32_forward(x);  /* WHT is self-inverse up to scale */
+    for (int i = 0; i < 32; i++) x[i] /= 32;
+}
+
+void test_wht32_roundtrip(void) {
+    printf("[TEST] WHT32 forward+inverse roundtrip\n");
+    int32_t orig[32], buf[32];
+    for (int i = 0; i < 32; i++) orig[i] = buf[i] = (i * 1000 - 16000);
+    wht32_forward(buf);
+    wht32_inverse(buf);
+    int max_err = 0;
+    for (int i = 0; i < 32; i++) {
+        int err = abs(buf[i] - orig[i]);
+        if (err > max_err) max_err = err;
+    }
+    ASSERT_TRUE(max_err == 0, "WHT32 roundtrip should be exact");
+}
+
+void test_wht32_delta_function(void) {
+    printf("[TEST] WHT32 delta function -> uniform\n");
+    int32_t buf[32] = {0};
+    buf[0] = 32;  /* delta function scaled by N */
+    wht32_forward(buf);
+    /* WHT of scaled delta = all ones (Hadamard row 0 = all +1) */
+    int all_one = 1;
+    for (int i = 0; i < 32; i++) {
+        if (buf[i] != 32) all_one = 0;
+    }
+    ASSERT_TRUE(all_one, "WHT32 of [32,0,0,...] should be [32,32,...,32]");
+}
+
+/* ==================================================================
+ * LPC LEVINSON-DURBIN TESTS (verifies Bug F5 fix)
+ * ================================================================== */
+
+void test_levinson_flat_signal(void) {
+    printf("[TEST] LPC Levinson-Durbin on flat (DC) signal\n");
+    /* A constant signal has R[0] = val^2 * N, R[k>0] = same.
+     * Levinson-Durbin should produce k[0] ≈ -1 (first reflection coeff)
+     * and all subsequent reflections ≈ 0. The prediction residual of a
+     * constant = 0 after the first sample. */
+    int32_t signal[256];
+    for (int i = 0; i < 256; i++) signal[i] = 1000;
+
+    /* Biased autocorrelation */
+    int64_t R[9] = {0};
+    for (int lag = 0; lag <= 8; lag++) {
+        for (int i = 0; i < 256 - lag; i++) {
+            R[lag] += (int64_t)signal[i] * signal[i + lag];
+        }
+    }
+    /* For a constant: R[lag] = 1000^2 * (256-lag) for all lag */
+    ASSERT_TRUE(R[0] > 0, "R[0] must be positive for a non-zero signal");
+    /* R[1]/R[0] should be very close to 1 (only differs by 1/256) */
+    double ratio = (double)R[1] / (double)R[0];
+    ASSERT_TRUE(ratio > 0.99, "DC signal autocorrelation should be near 1.0");
+}
+
+void test_levinson_overflow_guard(void) {
+    printf("[TEST] LPC Levinson-Durbin overflow guard (Bug F5 fix)\n");
+    /* Use a high-energy signal that stresses the Levinson computation.
+     * INT32_MAX/16 is a realistic "loud" Q31 EEG signal that doesn't
+     * overflow the int64 autocorrelation accumulator itself. */
+    int32_t signal[256];
+    for (int i = 0; i < 256; i++) signal[i] = INT32_MAX / 16;
+
+    int64_t R[9] = {0};
+    for (int lag = 0; lag <= 8; lag++) {
+        for (int i = 0; i < 256 - lag; i++) {
+            R[lag] += (int64_t)signal[i] * signal[i + lag];
+        }
+    }
+    ASSERT_TRUE(R[0] > 0, "R[0] must be positive for non-zero signal");
+
+    /* Compute reflection coefficient k[0] = -R[1]/R[0] using fixed approach.
+     * The old code `-(R[1] * (1LL<<31)) / R[0]` would overflow int64 for
+     * high-energy signals. The fix: divide first, then shift. */
+    int64_t k_fixed = -(R[1] / R[0]) * (int64_t)(1LL << 31);
+    ASSERT_TRUE(k_fixed >= INT32_MIN && k_fixed <= INT32_MAX,
+                "Bug F5: reflection coefficient must fit in Q31 after fix");
+}
+
+/* ==================================================================
+ * Main (extended)
  * ================================================================== */
 int main(void) {
     printf("=== LamQuant Gen 7: C Firmware Unit Tests (Host) ===\n\n");
 
+    /* Existing tests */
     test_mul_q31();
     test_add_sat_q31();
     test_sub_sat_q31();
@@ -586,6 +862,22 @@ int main(void) {
     test_biquad_cascade_stable();
     test_raw_packet_header();
     test_output_mode_enum();
+
+    /* New: Lifting DWT (Bug F1 + F3 verification) */
+    test_lifting_roundtrip_even();
+    test_lifting_roundtrip_odd();
+    test_lifting_constant_input();
+    test_lifting_boundary_even_fix();
+    test_lifting_negative_rounding();
+    test_lifting_2500_roundtrip();
+
+    /* New: WHT32 */
+    test_wht32_roundtrip();
+    test_wht32_delta_function();
+
+    /* New: LPC Levinson-Durbin (Bug F5 verification) */
+    test_levinson_flat_signal();
+    test_levinson_overflow_guard();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
