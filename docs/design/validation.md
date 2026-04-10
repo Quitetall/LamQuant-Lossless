@@ -9,9 +9,9 @@ How LamQuant is tested, from unit tests through firmware stress profiles.
 ### Layer 1: Python Unit Tests (pytest)
 
 **Location**: `tests/test_*.py`
-**Count**: 51 tests
+**Count**: 155 tests (L2=79, L5=54, L7=41 by paranoia level)
 **Run**: `pytest tests/ -v`
-**Requires**: Python 3.10+, no GPU, no dataset
+**Requires**: Python 3.10+, torch, no dataset (18 tests skip without trained checkpoint)
 
 | Test File | What It Covers |
 |-----------|---------------|
@@ -25,8 +25,8 @@ How LamQuant is tested, from unit tests through firmware stress profiles.
 ### Layer 2: C Host Tests
 
 **Location**: `tests/c_host/test_c_firmware.c`
-**Count**: 48 assertions
-**Run**: `gcc -I firmware tests/c_host/test_c_firmware.c -o test_fw -lm && ./test_fw`
+**Count**: 186 assertions
+**Run**: `gcc -O2 -lm tests/c_host/test_c_firmware.c -o test_fw && ./test_fw`
 **Requires**: Any C compiler (x86/ARM/RISC-V), no RP2350 hardware
 
 These tests compile the firmware's pure-math functions for the host platform using stub headers that replace RP2350 intrinsics.

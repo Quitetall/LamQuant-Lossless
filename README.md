@@ -359,22 +359,35 @@ See [docs/gui_guide.md](docs/gui_guide.md) for architecture details and [docs/us
 
 ## Testing
 
-### Python tests
+**341 tests total** (155 Python + 186 C firmware), organized by 7 paranoia levels.
+
+### Python tests (155 tests)
 
 ```bash
-pytest tests/ -v                    # 51 unit tests
-pytest tests/ -v --cov=ai_models    # With coverage report
+pytest tests/ -v                      # Full suite
+pytest tests/ -m l2 -v                # L2 property-based only (79 tests)
+pytest tests/ -m l5 -v                # L5 cross-implementation (54 tests)
+pytest tests/ -m l7 -v                # L7 adversarial (41 tests)
+pytest tests/ -v --cov=ai_models      # With coverage report
 ```
 
-Covers: weight packing round-trip, LSQ quantization shape/gradient, channel mapping aliases, export firmware integrity, Q31 arithmetic, utility functions.
+Covers: Q31 math, lifting DWT invertibility, LPC stability, preprocessing idempotence, ternary quantization, model shapes, channel mapping, firmware weight export, NEDC clinical metrics, EDF reader cross-validation (pyedflib parity), ERDR subprocess wrapper, canonical split enforcement, adversarial saturation/dead-electrode handling, C↔Python firmware parity (mul_q31, WHT32, lifting).
 
-### C host tests
+### C firmware tests (186 tests)
 
 ```bash
-gcc -I firmware tests/c_host/test_c_firmware.c -o test_fw -lm && ./test_fw
+gcc -O2 -lm tests/c_host/test_c_firmware.c -o test_fw && ./test_fw
 ```
 
-48 assertions covering: ternary MAC KAT, biquad Q30 filter, LFSR period/batch, CRC32 cross-platform parity, LPC predictor residuals (order-8), lifting wavelet (3-level DWT), Golomb-Rice round-trip, WHT round-trip, detail thresholding.
+Covers: Q31/Q30 math, ternary MAC (KAT + exhaustive 256-combo + Q31 alpha), CRC32, LFSR, biquad IIR (DC rejection, impulse response, state carryover, cascade stability), lifting DWT (roundtrip even/odd/2500, constant, boundary, negative rounding), WHT32 (roundtrip, delta function), LPC Levinson-Durbin (flat signal, overflow guard), LPC delta codec (keyframe/Q8 roundtrip, no-prev guard), FSQ quantization (range, monotonicity).
+
+### Training cockpit
+
+```bash
+python training_cockpit.py            # Interactive menu with 9 options
+```
+
+Live 6-line dashboard with epoch progress, loss, PRD, gradient norm, weight sparsity, GPU utilization, VRAM, temperature, ETA. Supports resume from checkpoint, factory reset, and edit queue.
 
 ### Integration benchmarks
 
@@ -383,9 +396,9 @@ python tests/benchmarks/test_golden_path_e2e.py    # Requires trained model + da
 python tests/benchmarks/benchmark_decoder_e2e.py
 ```
 
-Pass criteria: R >= 0.96 (clinical mode), PRD <= 40%, CR >= 40x (clinical), CR >= 150x (alerting). Gen 7.0 legacy: R >= 0.85, CR >= 5.0x.
+Pass criteria: R >= 0.96 (clinical mode), PRD <= 2%, CR >= 40x (clinical), CR >= 150x (alerting).
 
-See [docs/design/validation.md](docs/design/validation.md) for the full test strategy.
+See [PARANOID_TEST_GUIDE.md](PARANOID_TEST_GUIDE.md) and [docs/design/validation.md](docs/design/validation.md) for the full test strategy.
 
 ---
 
