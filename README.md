@@ -134,8 +134,9 @@ For a complete architecture description, see [docs/design/architecture.md](docs/
 lamquant/
 ├── assets/                     Branding and icons
 │   ├── banner.svg             GitHub README banner
-│   ├── icon.svg               App icon (scalable source)
-│   └── icons/                 Generated app icons (PNG/ICO/ICNS)
+│   ├── icon.svg               App icon (shield mark)
+│   ├── lockup.svg             Full logo (mark + wordmark)
+│   └── wordmark.svg           Text-only wordmark
 ├── ai_models/                  Python training pipeline
 │   ├── dataset_sim/            EDF -> Q31 dataset conversion
 │   ├── oracle/                 FP32 teacher models
