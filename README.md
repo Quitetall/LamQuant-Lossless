@@ -4,7 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/quitetall/lamquant/actions/workflows/ci.yml"><img src="https://github.com/quitetall/lamquant/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-7.0.0-blue" alt="Version 7.0.0">
+  <img src="https://img.shields.io/badge/version-7.1.0-blue" alt="Version 7.1.0">
+  <img src="https://img.shields.io/badge/tests-341_passing-brightgreen" alt="341 tests passing">
   <img src="https://img.shields.io/badge/python-3.10%2B-3776ab" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
   <img src="https://img.shields.io/badge/platform-RP2350-red" alt="RP2350">
@@ -71,7 +72,7 @@ gcc -I firmware tests/c_host/test_c_firmware.c -o test_fw -lm && ./test_fw
 
 LamQuant compresses continuous EEG signals on a microcontroller in real time, transmits the compressed stream over BLE, and reconstructs the signals on a base station. The compression pipeline has three stages:
 
-1. **Training (Python/PyTorch)** — A full-precision teacher autoencoder is trained on clinical EEG data (CHB-MIT). A ternary-quantized student (weights in {-1, 0, +1}) is distilled from the teacher using Learned Step Size (LSQ) quantization. The student encoder fits in 40.3 KB.
+1. **Training (Python/PyTorch)** — A full-precision teacher autoencoder is trained on 767K+ EEG windows from CHB-MIT and TUH datasets. A ternary-quantized student (weights in {-1, 0, +1}) is distilled from the teacher using state-of-the-art QAT: LSQ with gradient scaling, Tequila deadzone fix, and INT16 activation quantization. The student encoder fits in 40.3 KB. Clinical metrics (sensitivity, specificity, MCC, FAR/24h) adapted from Temple University's NEDC evaluation toolkit.
 
 2. **On-chip encoding (C, bare metal)** — The RP2350 firmware acquires 21-channel EEG at 250 Hz and encodes it through the Gen 7.1 subband pipeline:
    - **Golden path**: HP biquad -> LPC order-8 -> 3-level lifting DWT -> TNN on L3 approx -> WHT -> FSQ -> rANS + detail Golomb-Rice + LPC delta encoding. Three quality modes: Alerting (~150:1), Monitoring (~80:1), Clinical (~40:1).
@@ -102,15 +103,15 @@ LamQuant compresses continuous EEG signals on a microcontroller in real time, tr
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                         RP2350 (On-Chip) — Gen 7.1 Subband              │
+│                         RP2350 (On-Chip) — Gen 7.1 Subband               │
 │                                                                          │
-│  ADC ──> HP Biquad ──> LPC-8 ──> 3-level Lifting DWT ──┐               │
-│  (21ch                                                   │               │
-│  250Hz)                    ┌──────────────────────────────┘               │
+│  ADC ──> HP Biquad ──> LPC-8 ──> 3-level Lifting DWT ─────┐              │
+│  (21ch                                                    │              │
+│  250Hz)                    ┌──────────────────────────────┘              │
 │                            │                                             │
 │              L3 approx ────┼──> SNN (Core 0, activity detect)            │
 │              [21,313]      │                                             │
-│                            ├──> TNN ──> WHT ──> FSQ ──> rANS ──>│       │
+│                            ├───> TNN ──> WHT ──> FSQ ──> rANS ──>│       │
 │                            │    (Core 1, Golden Path)            │       │
 │                            │                                     ├─> BLE │
 │              L1/L2 detail ─┼──> Golomb-Rice detail encoding ────>│       │
@@ -227,59 +228,63 @@ See [docs/gui_guide.md](docs/gui_guide.md) for development mode and architecture
 
 ## Training Pipeline
 
-Run these steps in order. Each script accepts `--help`.
+### Training Cockpit (recommended)
 
-### 1. Prepare dataset
+The interactive training cockpit manages the full 15-job pipeline with a live dashboard:
 
 ```bash
-# Download CHB-MIT from PhysioNet
-s5cmd --no-sign-request cp "s3://physionet-open/chb-mit-scalp-eeg-database/1.0.0/*" ./chbmit/
-
-# Convert EDF files to Q31 tensors
-python ai_models/dataset_sim/edf_to_events.py --input ./chbmit --output ./q31_events
+python training_cockpit.py
 ```
 
-### 2. Train teacher (FP32 reference)
+Options: Quick Start (full pipeline), Resume (skip already-converted data), Factory Reset, Edit Queue. Each job shows real-time metrics: epoch, loss, PRD, gradient norm, GPU utilization, ETA.
+
+### Manual (step-by-step)
+
+Each script accepts `--help`.
 
 ```bash
-python ai_models/oracle/train_teacher.py            # ~1-2 hours on RTX 4090
-python ai_models/oracle/train_teacher_strided.py     # Strided variant for Route B decoder
-```
+# 1. Convert EDF → Q31
+python ai_models/dataset_sim/edf_to_events.py --input ./datasets/chbmit --output ./q31_events
 
-### 3. Train student (ternary quantized)
+# 2. Precompute L3 approximations (eliminates 94ms/sample bottleneck)
+python ai_models/student/precompute_l3_fast.py --input ./q31_events --workers 8
 
-```bash
-# Gen 7.0 (TernaryMobileNetV5, stride 8, [21,2500] -> [32,312])
-python ai_models/student/train_student.py            # ~8 min on RTX 4090
+# 3. Train teacher (FP32 autoencoder, 800 epochs)
+python ai_models/oracle/train_teacher.py --headless --resume
 
-# Gen 7.1 Subband (TernaryMobileNetV5_Subband, stride 4, [21,313] -> [32,79])
-python ai_models/student/train_student_subband.py    # Requires subband_preprocess.py
-```
+# 4. Train student (ternary, 500 epochs: 50 warmup + 200 QAT + 250 fine-tune)
+python ai_models/student/train_student_subband.py
 
-Three-phase schedule (both variants):
-- Phase 1 (50 epochs): FP32 warm-up, no quantization
-- Phase 2 (200 epochs): LSQ quantization enabled (STE gradients)
-- Phase 3 (250 epochs): Fine-tune with spectral loss
+# 5. Harden via teacher distillation (1000 epochs: 200+400+400)
+python ai_models/student/harden_artifacts.py
 
-Gen 7.1 uses `subband_preprocess.py` to apply LPC order-8 + 3-level lifting DWT before training. The TNN operates on L3 approximation coefficients (width 112, 3 focal blocks + GLU bottleneck).
+# 6. Train SNN activity detector (500 epochs)
+python ai_models/snn/train_dlif_run.py --data ai_models/snn/labels --epochs 500
 
-### 4. Harden for deployment
-
-```bash
-python ai_models/student/harden_artifacts.py         # Aligns student latents with teacher
-```
-
-### 5. Export to firmware headers
-
-```bash
+# 7. Export to firmware C headers
 python firmware/export_firmware.py
 ```
 
-Generates header files in `firmware/firmware_export/`:
-- `focal_net_weights.h` — Packed ternary weights (4 per byte), Q31 alphas, GroupNorm params, rANS frequency tables (Gen 7.1: V5_Subband weights, WHT coefficients)
-- `fsq_lattice.h` — FSQ level configuration (Gen 7.1: L=2/3/5/32, L=32 for clinical mode)
-- `toep_seeds.h` — LFSR seeds for compressed sensing
-- `firmware_crc.h` — CRC32 checksum covering all exported data
+### QAT features (Gen 7.1)
+
+The student training uses state-of-the-art quantization-aware training:
+- **LSQ** (Learned Step Quantization) with per-channel alpha, gradient scaling by 1/sqrt(n)
+- **Tequila deadzone fix** — trapped boundary weights get soft bias corrections, annealed to pure ternary
+- **INT16 activation quantization** — matches firmware's int16_t activations (W2A16)
+- **Block-WHT activation smoothing** — Walsh-Hadamard rotation reduces quantization error
+
+### Experimental scripts
+
+```bash
+# Mamba-based SNN (bidirectional SSM, drop-in replacement for dLIF)
+python ai_models/snn/train_mamba_snn.py --data ai_models/snn/labels --epochs 500
+
+# Progressive distillation (Teacher → INT8 Medium → Ternary Student)
+python ai_models/student/train_progressive_distill.py --teacher-ckpt teacher_best.ckpt
+
+# Frequency-weighted teacher loss (prioritizes neural oscillation bands)
+python ai_models/oracle/train_teacher.py --headless --freq-weighted-loss
+```
 
 For a detailed walkthrough, see [docs/training_pipeline.md](docs/training_pipeline.md).
 
@@ -399,11 +404,6 @@ See [PARANOID_TEST_GUIDE.md](PARANOID_TEST_GUIDE.md) and [docs/design/validation
 
 ---
 
-## Licensing
+## License
 
-- **Code** (firmware + Python): [AGPL-3.0](LICENSE.md)
-- **Trained weights** (`focal_net_weights.h`): [CC BY-NC 4.0](LICENSE.md)
-
-## Compliance
-
-See [COMPLIANCE.md](COMPLIANCE.md) for IEC 60601-1, ISO 13485, and IEC 62304 traceability.
+**Code** (firmware + Python): [AGPL-3.0](LICENSE.md) | **Trained weights**: [CC BY-NC 4.0](LICENSE.md) | **Compliance**: [IEC 60601-1, ISO 13485, IEC 62304](COMPLIANCE.md)
