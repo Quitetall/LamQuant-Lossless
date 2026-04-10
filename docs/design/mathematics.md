@@ -568,3 +568,70 @@ The Spiking Neural Network (SNN) classifies the L3 approximation subband for qua
 - **Weights**: ~8 KB (up from ~5 KB in Gen 7.0 due to wider input: 21 channels vs. 8)
 
 > **Legacy (Gen 7.0)**: Input [21,2500] stride 8, topology 8->64->8, weights ~5 KB.
+
+---
+
+## 19. Advanced QAT: Tequila Deadzone + LSQ Gradient Scaling (Gen 7.1)
+
+### LSQ Gradient Scaling
+
+Alpha gradient scaled by `1/√n` where n = weight elements per output channel:
+
+```
+∂L/∂α_scaled = (1/√n) × Σ (∂L/∂y × w_q)
+```
+
+### Data-Driven Alpha Initialization
+
+```
+α₀ = (2/3) × mean(|W|)    per output channel
+```
+
+### Tequila Deadzone Fix (ICLR 2026)
+
+```
+w_q = (round(w/α) + τ × frac(w/α)) × α
+frac(w/α) = w/α - round(w/α)
+τ annealed 0.1 → 0 over Phase 3
+```
+
+### INT16 Activation Quantization (W2A16)
+
+```
+s = max(|x|) / 32767
+x_q = round(x / s) × s       (STE backward)
+```
+
+---
+
+## 20. Block-WHT Activation Smoothing (SSDi8, ICLR 2026)
+
+```
+x_blocks = reshape(x, [B, C, n_blocks, 32])
+x_wht = x_blocks × H₃₂ᵀ           (forward WHT)
+x_wht_q = INT16_quantize(x_wht)    (quantize in WHT domain)
+x_q = x_wht_q × H₃₂               (inverse WHT)
+```
+
+Block size 32 matches firmware `wht32.c`. Zero additional inference cost.
+
+---
+
+## 21. DWB Loss for Seizure Detection (2026)
+
+```
+w_i = class_weight(y_i) × (1 + |σ(logit_i) - y_i|)^γ
+γ = 2, normalized so mean(w) ≈ 1
+```
+
+---
+
+## 22. Experimental: Mamba SSM for Activity Detection
+
+```
+h[t] = exp(Δ·A) × h[t-1] + Δ·B × x[t]    (selective scan)
+y[t] = C × h[t]
+Δ, B, C are data-dependent (input-gated)
+```
+
+Bidirectional (forward + backward averaged), 33K params, 8.3 KB at W2A8.
