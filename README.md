@@ -1,3 +1,15 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="LamQuant — Clinical-Grade EEG Neural Codec" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/quitetall/lamquant/actions/workflows/ci.yml"><img src="https://github.com/quitetall/lamquant/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/version-7.0.0-blue" alt="Version 7.0.0">
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776ab" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
+  <img src="https://img.shields.io/badge/platform-RP2350-red" alt="RP2350">
+</p>
+
 # LamQuant
 
 An on-chip EEG neural codec that compresses 21-channel electroencephalography data in real time using ternary-quantized neural networks with subband decomposition. Runs on the RP2350 microcontroller (dual Hazard3 RISC-V cores, 150 MHz) under a hard 4 ms latency ceiling with 64 KB SRAM.
@@ -120,72 +132,31 @@ For a complete architecture description, see [docs/design/architecture.md](docs/
 
 ```
 lamquant/
+├── assets/                     Branding and icons
+│   ├── banner.svg             GitHub README banner
+│   ├── icon.svg               App icon (scalable source)
+│   └── icons/                 Generated app icons (PNG/ICO/ICNS)
 ├── ai_models/                  Python training pipeline
 │   ├── dataset_sim/            EDF -> Q31 dataset conversion
-│   │   ├── edf_to_events.py   CHB-MIT parser, channel aliasing, Q31 scaling
-│   │   └── audit_dataset.py   Dataset integrity checker
 │   ├── oracle/                 FP32 teacher models
-│   │   ├── train_teacher.py   Standard teacher autoencoder
-│   │   └── train_teacher_strided.py  Strided teacher for Route B
-│   └── student/                Ternary student distillation
-│       ├── train_ternary.py   TernaryMobileNetV5 / V5_Subband architecture + LSQ
-│       ├── train_student.py   Standalone student training (3-phase)
-│       ├── train_student_subband.py  Gen 7.1 subband student training
-│       ├── subband_preprocess.py     LPC + lifting DWT preprocessing
-│       ├── validate_subband.py       Subband pipeline validation
-│       ├── harden_artifacts.py Latent alignment with teacher
-│       ├── finetune_student.py Optional fine-tuning
-│       └── train_route_b_decoder.py  Route B (teacher decoder) training
+│   └── student/                Ternary student distillation (LSQ, subband)
 ├── firmware/                   Bare-metal C for RP2350
 │   ├── core/                   Boot, scheduler, safety
-│   │   ├── main.c             Entry point, boot sequence, ADC init
-│   │   ├── scheduler.c        Pipeline FSM (legacy Gen 7.0)
-│   │   ├── scheduler_v7_1.c   Gen 7.1 subband pipeline scheduler
-│   │   ├── power_states.c     Safe mode, dormant state
-│   │   ├── stack_guard.c      PMP hardware stack protection
-│   │   ├── integrity.c        CRC32 firmware verification
-│   │   └── math_utils.h       Q31/Q30 fixed-point primitives
-│   ├── dsp/                    Signal processing
-│   │   ├── biquad_q31.c       HP-only biquad filter (Q30)
-│   │   ├── toeplitz_cs.c      LFSR-based compressed sensing
-│   │   ├── lifting_2d.c       Le Gall 5/3 wavelet transform (3-level lifting DWT)
-│   │   ├── lpc_predictor.c    Order-8 LPC (Levinson-Durbin)
-│   │   ├── lpc_delta.c        LPC delta encoding for residuals
-│   │   ├── detail_threshold.c Detail coefficient thresholding
-│   │   └── wht32.c            Walsh-Hadamard Transform (32-point)
-│   ├── neural/                 Neural network inference
-│   │   ├── focal_modulation.c 3 focal blocks + GLU bottleneck (stride 4x on L3)
-│   │   ├── ternary_mac.c      Branchless ternary MAC + KAT
-│   │   ├── ternary_manifold.c Grouped conv helper (Q31 scaling)
-│   │   └── fsq.c              Finite scalar quantization (L=2/3/5/32)
-│   ├── transport/              Output encoding + BLE
-│   │   ├── hybrid_entropy.c   rANS + Golomb-Rice + LPC delta encoder (LAMQ v1/v2)
-│   │   └── ble_spi_host.c     SPI1 DMA to nRF52840, EMC adaptation
-│   ├── afe/                    Analog front-end drivers
-│   │   ├── ads1299_driver.c   ADS1299 SPI0 driver (production)
-│   │   └── ads1299_driver.h   Public API
+│   ├── dsp/                    Signal processing (biquad, DWT, LPC, WHT)
+│   ├── neural/                 TNN inference (focal modulation, FSQ)
+│   ├── transport/              rANS + Golomb-Rice entropy coding, BLE
+│   ├── afe/                    ADS1299 analog front-end driver
 │   ├── pio/                    PIO programs
-│   │   └── lc_adc_trigger.pio LC comparator trigger (development)
-│   ├── firmware_export/        Generated headers (from export_firmware.py)
-│   │   ├── focal_net_weights.h Packed ternary weights + Q31 alphas
-│   │   ├── fsq_lattice.h      FSQ level configuration
-│   │   ├── toep_seeds.h       LFSR seeds for compressed sensing
-│   │   └── firmware_crc.h     Expected CRC32 checksum
-│   └── export_firmware.py      PyTorch -> C header converter
-├── gui/                        Tauri v2 desktop application
-│   ├── src-tauri/              Rust backend (serial, BLE, export)
+│   └── firmware_export/        Generated C headers (weights, CRC)
+├── gui/                        Tauri v2 desktop app — OpenHuman Vision
+│   ├── src-tauri/              Rust backend (serial, recording, export)
 │   └── src/                    SvelteKit frontend
+├── installer/                  Tauri v2 setup wizard — OpenHuman Portal
 ├── lamquant_codec/             Pip-installable Python codec package
-│   ├── codec.py               TernaryCodec + SubbandCodec wrapper classes
-│   ├── decode.py              CLI decoder entry point
-│   └── export.py              CLI export entry point
-├── tests/
-│   ├── test_*.py              Python unit tests (pytest)
-│   ├── c_host/                Host-compiled C firmware tests
-│   └── benchmarks/            Integration benchmarks
-├── tools/
-│   └── visualize_pipeline.py  4-panel pipeline visualization
-├── docs/                       Technical documentation
+├── tests/                      Python unit tests + C host tests + benchmarks
+├── tools/                      Visualization utilities
+├── docs/                       Technical documentation and session reports
+├── weights/                    Pre-trained model checkpoints
 ├── CMakeLists.txt             Firmware build (Pico SDK)
 ├── pyproject.toml             Python package configuration
 ├── install.sh                 Linux/macOS build script
