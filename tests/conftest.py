@@ -18,6 +18,7 @@ _REPO_ROOT = Path(__file__).parent.parent
 for _rel in (
     "ai_models/student",
     "ai_models/oracle",
+    "ai_models/snn",
     "ai_models/dataset_sim",
     "ai_models/validation",
     "ai_models",           # for `from snn import ...` etc.

@@ -67,3 +67,15 @@ ai_models/dataset_sim/datasets/
 .training_queue.json
 .training_state.json
 training_logs/
+
+# Pretrained external models (ZUNA, LaBraM, hvEEGNet)
+ai_models/pretrained/
+
+# SNN training labels (generated data)
+ai_models/snn/labels/*.npz
+
+# Teacher memmap cache (generated data)
+ai_models/dataset_sim/teacher_memmap/
+
+# Training logs
+training_logs/

@@ -261,33 +261,33 @@ LPC order-8 analysis (256-sample autocorrelation, per-channel)
     ├── SNN on L3 (Core 0, topology 21→64→8, ~8KB)
     │   classifies signal → quality mode select
     │
-    ├── Golden (Core 1) ──────────────────────────┐
-    │   TNN Encoder (focal1→focal2→focal3          │
-    │   →GLU bottleneck→project)                   │
-    │   act_buf_a/b[112][313] (SRAM5)              │
-    │   latent_output[32][79] (SRAM5)              │
+    ├── Golden (Core 1) ────────────────────────────┐
+    │   TNN Encoder (focal1→focal2→focal3           │
+    │   →GLU bottleneck→project)                    │
+    │   act_buf_a/b[112][313] (SRAM5)               │
+    │   latent_output[32][79] (SRAM5)               │
     │       │                                       │
     │       ▼                                       │
     │   WHT-32 pre-rotation on latent               │
     │       │                                       │
     │       ▼                                       │
-    │   FSQ quantize (L=2/3/5/32, quality-dep.)    │
+    │   FSQ quantize (L=2/3/5/32, quality-dep.)     │
     │       │                                       │
     │       ▼                                       │
     │   rANS entropy code                           │
     │       │                                       │
     ├── Lightning ──────────────────────────┐       │
-    │   Toeplitz CS: [21][2500] → [6][32]  │       │
+    │   Toeplitz CS: [21][2500] → [6][32]   │       │
     │   2D Lifting wavelet                  │       │
     │   LPC order-4 residuals               │       │
     │   Golomb-Rice code                    │       │
     │                                       │       │
     ├── Detail encoding (Core 0) ──────────┐│       │
-    │   SNN-driven thresholding             ││       │
-    │   Golomb-Rice + run-length coding     ││       │
-    │   (quality mode determines subbands)  ││       │
-    │                                       ││       │
-    ▼                                       ▼▼       ▼
+    │   SNN-driven thresholding             ││      │
+    │   Golomb-Rice + run-length coding     ││      │
+    │   (quality mode determines subbands)  ││      │
+    │                                       ││      │
+    ▼                                       ▼▼      ▼
 LAMQ v2 packet (sync 'LMQ2', 30-byte header)
     │
     ▼
