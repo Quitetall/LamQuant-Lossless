@@ -69,9 +69,9 @@ ai_models/dataset_sim/datasets/
 training_logs/
 
 # Pretrained external models — large binary weights
-Reference Software/zuna/*.safetensors
-Reference Software/zuna/.cache/
-Reference Software/labram/repo/checkpoints/*.pth
+dependencies/zuna/*.safetensors
+dependencies/zuna/.cache/
+dependencies/labram/repo/checkpoints/*.pth
 Reference Software/hveegnet/repo/
 
 # SNN training labels (generated data)
