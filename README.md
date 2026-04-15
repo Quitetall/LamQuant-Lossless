@@ -53,7 +53,7 @@ MCU (RP2350)                                              GPU (Base Station)
 │   L3 [21,313] → SNN (activity)      │           │ WHT inverse              │
 │          ↓           ↓              │           │ Student decode [21,313]  │
 │   TNN encode → WHT → FSQ → rANS     │           │ Inverse lifting          │
-│   (433K ternary, W2A16)             │           │ LPC synthesis            │
+│   (213K ternary DW-sep, W2A16)      │           │ LPC synthesis            │
 │                                     │           │          ↓               │
 │   Detail subbands → Golomb-Rice     │           │ Vocos decoder [21,2500]  │
 │                                     │           │ (100M/400M/837M iSTFT)   │
@@ -62,9 +62,9 @@ MCU (RP2350)                                              GPU (Base Station)
                                                   └──────────────────────────┘
 ```
 
-### Encoder (MCU-side, 433K params)
+### Encoder (MCU-side, 213K params — V2)
 
-TernaryMobileNetV5_Subband: CSP blocks, ECA channel attention, ReGLU bottleneck, Bit-Shift Normalization. Weights in {-1, 0, +1} with ParetoQ SEQ quantizer and SubLN. Trained with unified QAT (350 epochs, no phase transitions).
+TernaryMobileNetV5_Subband_V2: width 216, 4 depthwise-separable focal blocks, ReGLU bottleneck, Bit-Shift Normalization. Weights in {-1, 0, +1} with ParetoQ SEQ quantizer and SubLN. DW-sep blocks are 6.8x more parameter-efficient than full convolutions. Trained with unified QAT (350 epochs).
 
 ### Decoders (GPU-side)
 
