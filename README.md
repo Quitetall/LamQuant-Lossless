@@ -48,16 +48,16 @@ lamquant decode -i eeg.npy --lossless --encode -o lossless.bin
 ```
 MCU (RP2350)                                              GPU (Base Station)
 ┌─────────────────────────────────────┐    BLE    ┌──────────────────────────┐
-│ ADC → HP → LPC → 3-level Lifting   │───────────│ rANS decode              │
+│ ADC → HP → LPC → 3-level Lifting    │───────────│ rANS decode              │
 │          ↓                          │           │ FSQ dequantize           │
-│   L3 [21,313] → SNN (activity)     │           │ WHT inverse              │
+│   L3 [21,313] → SNN (activity)      │           │ WHT inverse              │
 │          ↓           ↓              │           │ Student decode [21,313]  │
-│   TNN encode → WHT → FSQ → rANS    │           │ Inverse lifting          │
+│   TNN encode → WHT → FSQ → rANS     │           │ Inverse lifting          │
 │   (433K ternary, W2A16)             │           │ LPC synthesis            │
 │                                     │           │          ↓               │
 │   Detail subbands → Golomb-Rice     │           │ Vocos decoder [21,2500]  │
 │                                     │           │ (100M/400M/837M iSTFT)   │
-│   OR: Lossless (lifting+LPC+GR)    │           │          ↓               │
+│   OR: Lossless (lifting+LPC+GR)     │           │          ↓               │
 └─────────────────────────────────────┘           │ CFM postfilter (opt.)    │
                                                   └──────────────────────────┘
 ```
