@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lamquant"
-version = "7.2.0"
+version = "7.6.1"
 description = "Clinical-grade EEG neural codec for RP2350"
 requires-python = ">=3.10"
 dependencies = [
