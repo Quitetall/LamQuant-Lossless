@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lamquant"
-version = "7.0.0"
+version = "7.2.0"
 description = "Clinical-grade EEG neural codec for RP2350"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,6 +14,8 @@ dependencies = [
     "mne>=1.5",
     "tqdm>=4.65",
     "snntorch>=0.9",
+    "auraloss>=0.4",
+    "safetensors>=0.4",
 ]
 
 [project.scripts]
@@ -32,6 +34,13 @@ dev = [
     "wandb",
     "mlflow",
     "matplotlib>=3.7",
+]
+# Research extras: optional analysis and augmentation tools
+research = [
+    "selfEEG>=0.2",
+    "antropy>=0.1",
+    "fooof>=1.0",
+    "snac",
 ]
 gui = [
     "matplotlib>=3.7",
@@ -71,22 +80,15 @@ markers = [
 source = ["ai_models", "firmware"]
 omit = [
     "tests/benchmarks/*",
-    # CLI-only entry points (argparse + main()): not unit-tested directly,
-    # exercised via integration tests and actual training runs.
     "ai_models/dataset_sim/audit_dataset.py",
     "ai_models/dataset_sim/generate_validation_split.py",
     "ai_models/dataset_sim/validate_cross_dataset.py",
     "ai_models/dataset_sim/validate_subband.py",
     "ai_models/dataset_sim/edf_to_events.py",
     "ai_models/snn/generate_activity_labels.py",
-    "ai_models/snn/train_dlif.py",
     "ai_models/snn/train_dlif_run.py",
-    "ai_models/training_cockpit.py",
     "ai_models/oracle/*",
-    "ai_models/student/train_student.py",
     "ai_models/student/train_student_subband.py",
-    "ai_models/student/train_route_b_decoder.py",
-    "ai_models/student/finetune_student.py",
     "ai_models/student/harden_artifacts.py",
 ]
 
