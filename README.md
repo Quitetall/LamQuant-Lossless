@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/version-7.2.0-blue" alt="Version 7.2.0">
   <img src="https://img.shields.io/badge/python-3.10%2B-3776ab" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
-  <img src="https://img.shields.io/badge/platform-RP2350-red" alt="RP2350">
+  <img src="https://img.shields.io/badge/platform-RP2350-red" alt="RP2350/ESP32-P4/ESP32-S3">
 </p>
 
 # LamQuant
