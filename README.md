@@ -10,6 +10,7 @@
   <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
   <img src="https://img.shields.io/badge/MCU-RP2350%20%7C%20ESP32--S3%20%7C%20ESP32--P4-red" alt="Multi-MCU">
 </p>
+
 # LamQuant
 
 An EEG neural codec for real-time compression on microcontrollers. Ternary encoder on the RP2350 (150 MHz RISC-V), GPU decoders (100M-800M params) on the base station.
