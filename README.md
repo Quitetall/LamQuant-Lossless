@@ -1,3 +1,15 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="LamQuant — Open-Source Neural EEG Codec" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/quitetall/lamquant/actions/workflows/ci.yml"><img src="https://github.com/quitetall/lamquant/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/version-7.6.1-blue" alt="Version 7.6.1">
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776ab" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/tests-462%20passing-success" alt="462 tests passing">
+  <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
+  <img src="https://img.shields.io/badge/MCU-RP2350%20%7C%20ESP32--S3%20%7C%20ESP32--P4-red" alt="Multi-MCU">
+</p>
 # LamQuant
 
 An EEG neural codec for real-time compression on microcontrollers. Ternary encoder on the RP2350 (150 MHz RISC-V), GPU decoders (100M-800M params) on the base station.
