@@ -1,6 +1,6 @@
 # System Architecture
 
-This document describes the complete LamQuant Gen 7.1 ("Subband") system: how EEG data flows from electrodes through on-chip compression to base station reconstruction.
+This document describes the complete LamQuant Gen 7.6.1 system: how EEG data flows from electrodes through on-chip compression to base station reconstruction.
 
 ---
 
@@ -24,9 +24,9 @@ A full-precision (FP32) Transformer autoencoder is trained on the CHB-MIT Scalp 
 - Seizure masks (from CHB-MIT annotations) for event-weighted loss
 - A strided teacher variant (for Route B decoding)
 
-### Student: TernaryMobileNetV5 (Gen 7.1 Subband)
+### Student: TernaryMobileNetV5_Subband (Gen 7.6.1)
 
-The student is a 112-wide ternary autoencoder with 3 encoder focal blocks plus a GLU bottleneck. In Gen 7.1, the TNN operates on the L3 approximation subband output by the lifting DWT, not the raw 2500-sample input:
+The student is a 128-wide ternary autoencoder with 3 focal blocks plus a ReGLU bottleneck. The TNN operates on the L3 approximation subband output by the lifting DWT, not the raw 2500-sample input:
 
 ```
 Encoder:
@@ -48,7 +48,7 @@ Decoder (symmetric):
 - **Latent**: `[B, 32, 79]` (32 channels, 79 time steps)
 - **Weight precision**: 2-bit ternary {-1, 0, +1} via LSQ quantization
 - **Activation precision**: 16-bit integer (W2A16)
-- **Encoder packed size**: ~40.3 KB / 43 KB SRAM4 budget (93.7% utilization)
+- **Encoder packed size**: ~75 KB (V1 w=128, spans SRAM4+SRAM5)
 - **GLU bottleneck**: Gated Linear Unit replaces the old linear bottleneck for better information gating
 
 > **Legacy (Gen 7.0)**: 96-wide, 4 focal blocks, stride 8, input [21,2500], latent [32,312], encoder ~42.3 KB.
@@ -89,7 +89,7 @@ Phase 4: Main loop
 
 ### Scheduler FSM (`scheduler_v7_1.c`)
 
-The Gen 7.1 scheduler is event-driven with a multi-core pipeline. It sleeps (WFI) until a DMA interrupt signals that a 2500-sample ADC window is ready, then processes one window across both RP2350 cores:
+The scheduler is event-driven with a multi-core pipeline. It sleeps (WFI) until a DMA interrupt signals that a 2500-sample ADC window is ready, then processes one window across both RP2350 cores:
 
 ```
 State Machine:
@@ -120,7 +120,7 @@ State Machine:
 
 > **Legacy (Gen 7.0)**: Single-core scheduler in `scheduler.c`. HP+LP+notch biquad directly followed by path select. No LPC, lifting, or WHT stages.
 
-### Golden Path (Gen 7.1)
+### Golden Path
 
 ```
 HP biquad(2500)
@@ -229,7 +229,7 @@ Both backends fill the same buffer and fire `on_adc_dma_complete()` when a 2500-
 | Region | Size | Contents | Access |
 |--------|------|----------|--------|
 | SRAM0 | 64 KB | `raw_adc_buffer[21][2500]` (ADC + HP biquad workspace) | DMA write, CPU read/write |
-| SRAM4 | 64 KB | TNN weights (~40.3 KB packed), SNN weights (~8 KB), FSQ tables, rANS freq, WHT twiddles | CPU read-only at runtime |
+| SRAM4 | 64 KB | TNN weights (~75 KB packed, SRAM4+SRAM5), SNN weights (~28 KB INT4), FSQ tables, rANS freq, WHT twiddles | CPU read-only at runtime |
 | SRAM5 | 64 KB | Activation double-buffers (~140 KB peak via double-buffering), latent output [32][79], lifting subbands, LPC state, detail encoding workspace | CPU read/write |
 | Stack | 2.4 KB | Function call frames | Enforced by `-Wstack-usage=2400 -Werror` |
 

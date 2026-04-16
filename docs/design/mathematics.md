@@ -1,6 +1,6 @@
 # Mathematical Foundations
 
-Every equation used in LamQuant Gen 7.1 ("Subband"), from training through firmware inference.
+Every equation used in LamQuant Gen 7.6.1 ("Subband"), from training through firmware inference.
 
 ---
 
@@ -61,7 +61,7 @@ These primitives are defined in `firmware/core/math_utils.h` and used throughout
 
 ## 2. Biquad IIR Filter (Q30)
 
-Single second-order IIR section per channel (Gen 7.1: HP-only), Direct Form 1:
+Single second-order IIR section per channel (Gen 7.6.1: HP-only), Direct Form 1:
 
 ```
 y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
@@ -69,13 +69,13 @@ y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
 
 All coefficients are Q30 constants precomputed in `export_firmware.py` using `scipy.signal`.
 
-### Stages (Gen 7.1)
+### Stages (Gen 7.6.1)
 
 | Stage | Type | Cutoff | Order | Purpose |
 |-------|------|--------|-------|---------|
 | 1 | Highpass (Butterworth) | 0.5 Hz | 2 | Remove DC offset and slow drift |
 
-In Gen 7.1, the lowpass and notch stages are removed. Their anti-aliasing and interference rejection functions are replaced by the 3-level lifting DWT's inherent subband decomposition combined with detail coefficient thresholding. This reduces filter state from 63 delay lines (21 channels x 3 stages) to 21 delay lines (21 channels x 1 stage).
+In Gen 7.6.1, the lowpass and notch stages are removed. Their anti-aliasing and interference rejection functions are replaced by the 3-level lifting DWT's inherent subband decomposition combined with detail coefficient thresholding. This reduces filter state from 63 delay lines (21 channels x 3 stages) to 21 delay lines (21 channels x 1 stage).
 
 > **Legacy (Gen 7.0)**: 3-stage cascade: HP 0.5 Hz + LP 50 Hz + Notch 60 Hz.
 
@@ -255,9 +255,9 @@ fsq_inv_range_q31 = (FSQ_NUM_LEVELS << 31) / (vmax - vmin)
 bin = clamp((shifted * fsq_inv_range_q31) >> 31, 0, L-1)
 ```
 
-### Quality-Dependent FSQ Levels (Gen 7.1)
+### Quality-Dependent FSQ Levels (Gen 7.6.1)
 
-Gen 7.1 introduces quality-dependent FSQ levels. The FSQ level set `L` varies by quality mode, with MAX_SYMBOLS=32:
+Gen 7.6.1 introduces quality-dependent FSQ levels. The FSQ level set `L` varies by quality mode, with MAX_SYMBOLS=32:
 
 | Quality Mode | FSQ Levels (L) | MAX_SYMBOLS | Approx. Compression Ratio |
 |-------------|----------------|-------------|---------------------------|
@@ -368,9 +368,9 @@ s[n] = x[2n] + floor((d[n-1] + d[n] + 2) / 4)
 
 Boundary handling uses symmetric mirroring for all levels.
 
-### 3-Level Decomposition (Gen 7.1 Golden Path)
+### 3-Level Decomposition (Gen 7.6.1 Golden Path)
 
-In Gen 7.1, a 3-level lifting DWT replaces the former lowpass and notch biquad stages. The transform is applied per-channel on the 2500-sample HP-filtered signal:
+In Gen 7.6.1, a 3-level lifting DWT replaces the former lowpass and notch biquad stages. The transform is applied per-channel on the 2500-sample HP-filtered signal:
 
 ```
 Level 1: [2500] → approx[1250] + detail[1250]
@@ -390,9 +390,9 @@ The 2D transform for the lightning path applies the temporal pass (32 samples pe
 
 ## 13. Linear Predictive Coding (LPC)
 
-### Order-8 LPC Analysis (Gen 7.1 Golden Path)
+### Order-8 LPC Analysis (Gen 7.6.1 Golden Path)
 
-Gen 7.1 uses order-8 LPC analysis per channel with 256-sample autocorrelation windows, applied before the lifting DWT. This captures the spectral envelope of each channel for prediction and delta encoding.
+Gen 7.6.1 uses order-8 LPC analysis per channel with 256-sample autocorrelation windows, applied before the lifting DWT. This captures the spectral envelope of each channel for prediction and delta encoding.
 
 **Autocorrelation** (Q31 samples, int64 accumulator, 256-sample window):
 ```
@@ -418,7 +418,7 @@ pred[n] = sum_{i=1}^{8} a[i] * x[n-i]
 residual[n] = x[n] - pred[n]
 ```
 
-### LPC Delta Encoding (Gen 7.1)
+### LPC Delta Encoding (Gen 7.6.1)
 
 LPC coefficients are delta-encoded for bandwidth-efficient transmission:
 
@@ -462,9 +462,9 @@ quotient = mapped >> k        (unary coded: q ones + 0 terminator)
 remainder = mapped & (2^k - 1) (binary coded: k bits)
 ```
 
-### Golomb-Rice with Run-Length Coding (Gen 7.1 Detail Encoding)
+### Golomb-Rice with Run-Length Coding (Gen 7.6.1 Detail Encoding)
 
-For sparse detail subband coefficients (after thresholding), Gen 7.1 combines Golomb-Rice with run-length coding. After SNN-driven thresholding, most detail coefficients are zero. The encoding proceeds:
+For sparse detail subband coefficients (after thresholding), Gen 7.6.1 combines Golomb-Rice with run-length coding. After SNN-driven thresholding, most detail coefficients are zero. The encoding proceeds:
 
 1. **Run-length encode zeros**: Count consecutive zero coefficients. Emit a run-length count using Golomb-Rice (k=3) before each non-zero coefficient.
 2. **Encode non-zero value**: The non-zero coefficient is zigzag-encoded and Golomb-Rice coded (k=4) as above.
@@ -489,7 +489,7 @@ Compatible with Python's `zlib.crc32()` for cross-platform verification. The exp
 
 ---
 
-## 16. Walsh-Hadamard Transform (Gen 7.1)
+## 16. Walsh-Hadamard Transform (Gen 7.6.1)
 
 The 32-point Walsh-Hadamard Transform (WHT) is applied as a pre-rotation on the 32-channel latent dimension before FSQ quantization. It decorrelates latent channels, improving FSQ codebook utilization and entropy coding efficiency.
 
@@ -524,7 +524,7 @@ The inverse WHT (used at the decoder) is identical to the forward WHT up to the 
 
 ---
 
-## 17. Detail Coefficient Thresholding (Gen 7.1)
+## 17. Detail Coefficient Thresholding (Gen 7.6.1)
 
 After the 3-level lifting DWT, detail coefficients are thresholded to produce a sparse representation. The threshold is estimated from the data using the Median Absolute Deviation (MAD), a robust noise estimator.
 
@@ -558,7 +558,7 @@ The resulting sparse array is then encoded using Golomb-Rice with run-length cod
 
 ---
 
-## 18. SNN Classification on L3 Subband (Gen 7.1)
+## 18. SNN Classification on L3 Subband (Gen 7.6.1)
 
 The Spiking Neural Network (SNN) classifies the L3 approximation subband for quality mode selection and path decision. Topology: 21 -> 64 -> 8.
 
@@ -571,7 +571,7 @@ The Spiking Neural Network (SNN) classifies the L3 approximation subband for qua
 
 ---
 
-## 19. Advanced QAT: Tequila Deadzone + LSQ Gradient Scaling (Gen 7.1)
+## 19. Advanced QAT: Tequila Deadzone + LSQ Gradient Scaling (Gen 7.6.1)
 
 ### LSQ Gradient Scaling
 
