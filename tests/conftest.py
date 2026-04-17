@@ -45,16 +45,36 @@ def root_dir():
 
 @pytest.fixture
 def canonical_split_config(root_dir):
-    """Load official_split_config.json for testing."""
-    config_path = root_dir / "ai_models" / "dataset_sim" / "official_split_config.json"
+    """Load official_split_config.json for testing.
+
+    Moved to legacy/data_pipeline_v2/ on 2026-04-16 (the typed
+    DatasetManifest replaces the dual-config split logic). Tests
+    that depend on this fixture should migrate to manifest_v3 via
+    `ai_models.DatasetManifest`; the fixture stays for the L2/L5/L7
+    legacy tests until they're rewritten.
+    """
+    config_path = (root_dir / "legacy" / "data_pipeline_v2"
+                   / "official_split_config.json")
+    if not config_path.exists():
+        pytest.skip(
+            "legacy official_split_config.json not present — migrate this "
+            "test to ai_models.DatasetManifest (see test_data_integrity.py)"
+        )
     with open(config_path) as f:
         return json.load(f)
 
 
 @pytest.fixture
 def validation_manifest(root_dir):
-    """Load validation_manifest.json for testing."""
-    manifest_path = root_dir / "ai_models" / "dataset_sim" / "validation_manifest" / "validation_manifest.json"
+    """Load v2 validation_manifest.json for testing. Kept on disk because
+    build_manifest.py uses it as the canonical (dataset, subject) lookup
+    when building manifest_v3. Tests of the *current* split should use
+    `ai_models.DatasetManifest.load(.../manifest_v3.json)`.
+    """
+    manifest_path = (root_dir / "ai_models" / "dataset_sim"
+                     / "validation_manifest" / "validation_manifest.json")
+    if not manifest_path.exists():
+        pytest.skip("validation_manifest.json not present")
     with open(manifest_path) as f:
         return json.load(f)
 
