@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lamquant"
-version = "7.6.1"
+version = "7.7.0"
 description = "Clinical-grade EEG neural codec for RP2350"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,7 +20,8 @@ dependencies = [
 ]
 
 [project.scripts]
-lamquant = "lamquant_codec.cli:main"
+oh = "lamquant_codec.cli_entry:main"
+lamquant = "lamquant_codec.cli_entry:main"
 lamquant-decode = "lamquant_codec.decode:main"
 lamquant-export = "lamquant_codec.export:main"
 lamquant-visualize = "tools.visualize_pipeline:main"
