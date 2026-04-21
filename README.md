@@ -212,7 +212,7 @@ decisions/               Architecture decision records
 
 | Document | Content |
 |----------|---------|
-| [Format Spec](decisions/0010-lml-format-spec.md) | LMQ5 wire format, byte layout, conformance requirements |
+| [Format Spec](decisions/0010-lml-format-spec.md) | LML1 wire format, byte layout, conformance requirements |
 | [Entropy Analysis](decisions/0011-lml-entropy-coder-final.md) | GR vs rANS vs arithmetic, Shannon gap, competitive analysis |
 | [Production Config](decisions/0012-lml-production-config.md) | All modes, safety systems, performance numbers |
 | [CLI Output Spec](decisions/0013-cli-output-spec.md) | Dashboard, audit log, manifest format |
