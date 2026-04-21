@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/quitetall/lamquant/actions/workflows/ci.yml"><img src="https://github.com/quitetall/lamquant/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-7.6.1-blue" alt="Version 7.6.1">
+  <img src="https://img.shields.io/badge/version-7.7.0-blue" alt="Version 7.7.0">
   <img src="https://img.shields.io/badge/python-3.10%2B-3776ab" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
   <img src="https://img.shields.io/badge/MCU-RP2350%20%7C%20ESP32--S3-red" alt="Multi-MCU">
@@ -52,13 +52,13 @@ EDF files (16-bit, any SR, any channel count)
 
 Every `.lml` file starts with a readable ASCII line:
 ```
-LML v5 | 21ch | lossless | CRC-32
+LML v1 | 21ch | lossless | CRC-32
 ```
 Then binary. `head -1 file.lml` tells you what it is without any tools.
 
 ---
 
-## Lossless Codec (LML v5)
+## Lossless Codec (LML v1)
 
 State of the art for 16-bit clinical EEG. No published method beats it on comparable data.
 
@@ -81,7 +81,7 @@ State of the art for 16-bit clinical EEG. No published method beats it on compar
 | zstd -3 | 1.64 : 1 | General |
 | FLAC | ~2.0 : 1 | Audio |
 | 2D-DWT VLSI (2024) | 1.95 : 1 | Academic |
-| **LML v5** | **2.26 : 1** | **EEG-specific** |
+| **LML v1** | **2.26 : 1** | **EEG-specific** |
 | Chen/Wu (2018) | 2.35 : 1 | Academic (CHB-MIT only) |
 | Shannon limit | 2.41 : 1 | Theoretical |
 
@@ -179,7 +179,7 @@ RP2350 (Encoder, 435K ternary)          Base Station (Decoder, 3.8M-844M FP32)
 
 ```
 lamquant_codec/          Codec implementation
-  lossless.py              LML v5 lossless codec (compress/decompress/peek_header)
+  lossless.py              LML v1 lossless codec (compress/decompress/peek_header)
   ops/golomb.py            Golomb-Rice entropy coder (JIT'd)
   ops/rans.py              rANS coder (experimental)
   edf_to_lml.py            EDF → LML converter (pyedflib)
