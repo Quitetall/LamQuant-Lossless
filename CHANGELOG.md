@@ -1,5 +1,58 @@
 # OpenHuman LamQuant Changelog
 
+## LamQuant v7.7.1 (2026-04-21)
+
+### Firmware Optimization Session
+
+**Safety Subsystems (+59 KB, 8 subsystems)**
+- Added `firmware/core/safety_features.c/.h`: 8 persistent safety monitoring subsystems
+- BLE retry buffer (0.5 KB): retransmit lost neural packets over BLE
+- Impedance monitor (0.8 KB): per-channel contact quality with threshold alerts
+- Pre-ictal ring buffer (32.0 KB): ~8 s circular buffer of L3 windows for seizure onset detection
+- Channel quality scores (0.2 KB): per-channel SNR and artifact flags
+- Seizure diary log (8.0 KB): persistent on-device seizure event log
+- Event timestamp log (2.0 KB): general clinical event timestamps
+- Battery/power monitor (0.1 KB): supply voltage and charge state tracking
+- Firmware fault log (1.0 KB): watchdog resets, PMP faults, BLE errors
+- Total SRAM: 509.8 KB / 520 KB (98.0%), up from 449.9 KB (86.5%)
+
+**Pedantic Compiler Warnings**
+- Enabled max pedantic warning flags across 18 firmware headers
+- Zero warnings: all pre-existing issues resolved
+- Catches implicit truncations, shadowed variables, and missing prototypes at compile time
+
+**MAC Throughput Optimization (3-path)**
+- Achieved ~1.2 cyc/MAC (down from ~3 cyc/MAC)
+- Path 1: Software pipelining of weight decode + accumulate loops
+- Path 2: XNOR + CPOP (popcount) via Zbb `cpop` instruction for packed ternary
+- Path 3: Zbb saturating arithmetic for activation clamp (no branch on overflow)
+- Combined throughput measured across all focal block configurations
+
+**Inference Optimizations**
+- W2A8 support: INT8 activation path alongside existing INT16 (W2A16)
+- DMA prefetch infrastructure: weight prefetch during activation compute
+- Fused conv+shortcut: reduces memory bandwidth for residual connections
+- XIP cache tiling: aligned weight layout for cache-line-optimal flash reads
+
+**Scratchpad Optimization (+4.4 KB headroom)**
+- Moved Core 0 DSP hot buffers to SCRATCH_X (4 KB dedicated scratchpad):
+  `hp_filters` (HP biquad state, 21ch), LPC coefficient working set, entropy coding buffers
+- Moved Core 1 stack to SCRATCH_Y (4 KB dedicated scratchpad)
+- Freed equivalent main RAM; net +4.4 KB headroom over naive placement
+- SCRATCH_X: 2.6 KB used, 1.5 KB free; SCRATCH_Y: 2.0 KB used, 2.0 KB free
+
+**Soft-Float Elimination (-8.5 KB flash)**
+- Removed all soft-float operations from firmware
+- `.text` section: 95.3 KB (down from ~103.8 KB)
+- Firmware is now 100% pure integer (Q31/Q30 fixed-point)
+
+**Floor Division Fix (cross-language correctness)**
+- `BIAS_CTX_LEN=32` context bias cancellation now uses floor division consistently
+- C firmware and Python/Rust reference implementations now produce bit-identical output
+- Affects `ops/bias.py` and `lamquant-core/src/lpc.rs` (already correct); firmware was the divergent path
+
+---
+
 ## OH! v1.0.0 / LamQuant v7.7.0 (2026-04-19)
 
 ### Architecture Refactor

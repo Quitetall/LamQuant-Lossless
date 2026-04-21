@@ -160,11 +160,13 @@ RP2350 Hazard3 (150 MHz RISC-V)         Base Station
 | | Value |
 |---|---|
 | Target | RP2350B Hazard3, RV32IMAC + Zba/Zbb/Zbs, 150 MHz |
-| SRAM | 449.9 KB / 520 KB (86.5%) |
-| Flash | 91.8 KB code + 104.8 KB weights (XIP) |
-| Headroom | 70.1 KB |
-| Ternary MAC | ~3 cycles/MAC (branchless conditional negate) |
+| SRAM | 509.8 KB / 520 KB (98.0%) |
+| Flash | 95.3 KB code + 104.8 KB weights (XIP) |
+| Headroom | 11.1 KB (7.6 KB main + 1.5 KB SCRATCH_X + 2.0 KB SCRATCH_Y) |
+| Ternary MAC | ~1.2 cyc/MAC (3-path: SW pipeline + XNOR+CPOP + Zbb sat) |
 | Soft float | Zero. Pure integer firmware. |
+| Compiler | Max pedantic warnings, zero warnings |
+| Safety | 8 FDA safety subsystems (BLE retry, impedance monitoring, pre-ictal buffer, seizure diary, event log, battery monitor, fault log, channel quality) |
 
 ---
 
