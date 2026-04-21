@@ -3,20 +3,26 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lamquant"
+name = "lamquant-codec"
 version = "7.7.0"
-description = "Clinical-grade EEG neural codec for RP2350"
+description = "LML lossless EEG compression codec + LMQ neural codec"
+readme = "README.md"
+license = {text = "AGPL-3.0"}
 requires-python = ">=3.10"
+keywords = ["eeg", "lossless", "compression", "codec", "medical", "neuroscience"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+]
+# Core: lossless codec works with numpy + scipy only.
+# Neural codec, JIT acceleration, and MNE integration are optional.
 dependencies = [
-    "torch>=2.0",
     "numpy>=1.24",
     "scipy>=1.10",
-    "numba>=0.59",
-    "mne>=1.5",
     "tqdm>=4.65",
-    "snntorch>=0.9",
-    "auraloss>=0.4",
-    "safetensors>=0.4",
 ]
 
 [project.scripts]
@@ -27,6 +33,20 @@ lamquant-export = "lamquant_codec.export:main"
 lamquant-visualize = "tools.visualize_pipeline:main"
 
 [project.optional-dependencies]
+# JIT acceleration for lossless codec (3-4x faster)
+fast = ["numba>=0.59"]
+# Neural codec (requires torch)
+neural = [
+    "torch>=2.0",
+    "snntorch>=0.9",
+    "auraloss>=0.4",
+    "safetensors>=0.4",
+]
+# MNE-Python integration
+mne = ["mne>=1.5"]
+# Rust acceleration (lamquant-core, built separately via maturin)
+rust = ["lamquant-core>=0.2.0"]
+# Development
 test = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
@@ -37,23 +57,15 @@ dev = [
     "mlflow",
     "matplotlib>=3.7",
 ]
-# Research extras: optional analysis and augmentation tools
 research = [
     "selfEEG>=0.2",
     "antropy>=0.1",
     "fooof>=1.0",
     "snac",
 ]
-gui = [
-    "matplotlib>=3.7",
-]
-# Meta extra for install.sh and user convenience: pulls in everything
-# a developer wants locally (test + dev + gui tooling).
+# Everything for local development
 all = [
-    "pytest>=7.4",
-    "pytest-cov>=4.1",
-    "coverage[toml]>=7.3",
-    "matplotlib>=3.7",
+    "lamquant-codec[fast,neural,mne,test,dev]",
 ]
 
 # Only lamquant_codec is a real importable library package. The training

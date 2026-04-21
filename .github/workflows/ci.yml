@@ -81,3 +81,30 @@ jobs:
 
       - name: Run C unit tests
         run: ./tests/c_host/test_c_firmware
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Fuzz decompress (60s)
+        run: |
+          cd lamquant-core
+          cargo +nightly fuzz run decompress -- -max_total_time=60
+
+      - name: Fuzz roundtrip (60s)
+        run: |
+          cd lamquant-core
+          cargo +nightly fuzz run roundtrip -- -max_total_time=60
+
+      - name: Generate C FFI header
+        run: |
+          cargo install cbindgen
+          cd lamquant-core
+          cbindgen --config cbindgen.toml --crate lamquant-core --output include/lml.h
+          # Verify header hasn't drifted from checked-in version
+          git diff --exit-code include/lml.h
