@@ -24,7 +24,7 @@ There is no FPU. All arithmetic is Q31 or Q30 fixed-point using 64-bit intermedi
 | Region | Address | Size | Contents |
 |--------|---------|------|----------|
 | SRAM0 | 0x20000000 | 64 KB | `raw_adc_buffer[21][2500]` — ADC DMA target, biquad workspace |
-| SRAM4 | 0x20040000 | 64 KB | TNN weights (~42.3 KB packed), FSQ tables, rANS freq tables |
+| SRAM4 | 0x20040000 | 64 KB | TNN weights (~105 KB packed in flash via XIP, first 64 KB), FSQ tables, rANS freq tables |
 | SRAM5 | 0x20050000 | 64 KB | Activation double-buffers `act_buf_a/b[96][2500]`, `latent_output[32][312]`, `lifting_tile_2d[6][32]` |
 | Stack | 0x20007800-0x20008000 | 2.4 KB | Call frames. PMP-guarded below 0x20007800 |
 | Flash (XIP) | 0x10000000 | 16 Mbit | Firmware binary, read via XIP cache |
