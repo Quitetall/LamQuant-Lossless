@@ -106,3 +106,8 @@ sdk/
 
 # Case-corrected
 reference_software/
+
+# Local data sync scripts (contain server credentials/paths)
+scripts/sync_tuh_all.sh
+scripts/sync_tuh_annotations.sh
+scripts/update_tueg_super.sh
