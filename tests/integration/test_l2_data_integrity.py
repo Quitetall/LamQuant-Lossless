@@ -112,9 +112,9 @@ def test_parser_tuev_patient_no_collision_with_tuh_seizure():
 
 def test_parser_tuh_seizure():
     p = parse_npz_filename('tuh_aaaaaaac_s002_t000_q31.npz')
-    # Defaults to TUH_SEIZURE — build_manifest.py overrides via v2 lookup
+    # Defaults to TUEG — build_manifest.py overrides via v2 lookup
     # if the file is actually tuh_artifact / tuh_epilepsy.
-    assert p.dataset == Dataset.TUH_SEIZURE
+    assert p.dataset == Dataset.TUEG
     assert p.patient_id == 'aaaaaaac'
     assert p.session_id == 's002_t000'
     assert p.event_type == ''
