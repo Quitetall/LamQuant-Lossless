@@ -95,13 +95,18 @@ def test_lifting_forward_inverse_random(N, seed):
 
     ref_a, ref_d = _lifting_1d_forward_int_pyref(sig)
     new_a, new_d = lifting_1d_forward_int(sig)
-    assert np.array_equal(ref_a, new_a) and np.array_equal(ref_d, new_d)
+    assert np.array_equal(ref_a, new_a), \
+        f"N={N} seed={seed}: approx mismatch, max_diff={np.abs(ref_a - new_a).max()}"
+    assert np.array_equal(ref_d, new_d), \
+        f"N={N} seed={seed}: detail mismatch, max_diff={np.abs(ref_d - new_d).max()}"
 
     ref_recon = _lifting_1d_inverse_int_pyref(new_a, new_d)
     new_recon = lifting_1d_inverse_int(new_a, new_d)
-    assert np.array_equal(ref_recon, new_recon)
+    assert np.array_equal(ref_recon, new_recon), \
+        f"N={N} seed={seed}: inverse impl mismatch, max_diff={np.abs(ref_recon - new_recon).max()}"
     # Round-trip must reproduce input exactly.
-    assert np.array_equal(new_recon, sig)
+    assert np.array_equal(new_recon, sig), \
+        f"N={N} seed={seed}: roundtrip broken, max_diff={np.abs(new_recon - sig).max()}"
 
 
 @pytest.mark.parametrize('N', [10, 100, 1000, 2500])
@@ -214,11 +219,13 @@ def test_float_lifting_random(N, seed):
     ra, rd = _lifting_1d_forward_pyref(sig)
     na, nd = lifting_1d_forward(sig)
     assert np.array_equal(ra, na), 'float forward not bit-identical'
-    assert np.array_equal(rd, nd)
+    assert np.array_equal(rd, nd), \
+        f"N={N} seed={seed}: float detail mismatch"
 
     ref_recon = _lifting_1d_inverse_pyref(na, nd)
     new_recon = lifting_1d_inverse(na, nd)
-    assert np.array_equal(ref_recon, new_recon), 'float inverse not bit-identical'
+    assert np.array_equal(ref_recon, new_recon), \
+        f"N={N} seed={seed}: float inverse not bit-identical"
 
 
 @pytest.mark.parametrize('N', [50, 313, 625, 1250, 2500])
@@ -315,8 +322,10 @@ def test_golomb_dense_jit_byte_exact(n, vmax, seed):
     assert ref_bytes == new_bytes, 'JIT encode_dense not byte-identical'
     ref_dec, _ = _decode_dense_pyref(ref_bytes)
     new_dec, _ = decode_dense(new_bytes)
-    assert np.array_equal(ref_dec, new_dec)
-    assert np.array_equal(new_dec, data), 'GR roundtrip broken'
+    assert np.array_equal(ref_dec, new_dec), \
+        f"n={n} vmax={vmax} seed={seed}: GR decode mismatch between ref and JIT"
+    assert np.array_equal(new_dec, data), \
+        f"n={n} vmax={vmax} seed={seed}: GR roundtrip broken"
 
 
 def test_golomb_dense_jit_fuzz():
@@ -355,8 +364,10 @@ def test_rans_jit_byte_exact(n, L, seed):
     assert ref_bytes == new_bytes, 'JIT rANS encode not byte-identical'
     ref_dec = _decode_pyref(ref_bytes, freq, n)
     new_dec = decode(new_bytes, freq, n)
-    assert np.array_equal(ref_dec, new_dec)
-    assert np.array_equal(new_dec, syms), 'rANS roundtrip broken'
+    assert np.array_equal(ref_dec, new_dec), \
+        f"n={n} L={L} seed={seed}: rANS decode mismatch between ref and JIT"
+    assert np.array_equal(new_dec, syms), \
+        f"n={n} L={L} seed={seed}: rANS roundtrip broken"
 
 
 def test_rans_jit_fuzz():

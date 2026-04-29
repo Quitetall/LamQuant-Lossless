@@ -140,7 +140,11 @@ class TestBitFlipCorruption:
 
     def test_single_bit_flip_in_payload(self):
         """Single bit flip in payload: must either error or produce wrong output
-        that is detectable (not silently accepted as valid)."""
+        that is detectable (not silently accepted as valid).
+
+        AUDIT (2026-04-27): Narrowed from bare `except Exception` to specific
+        expected exceptions. Unexpected errors (MemoryError, etc.) propagate.
+        """
         compressed, orig_sig = self._compress_signal()
         orig_int = np.round(orig_sig).astype(np.int64)
 
@@ -158,12 +162,13 @@ class TestBitFlipCorruption:
                         detected += 1  # corruption detected (wrong output)
                     else:
                         silent += 1  # bit flip had no effect (benign)
-                except Exception:
-                    detected += 1  # corruption caused error (good)
+                except (ValueError, struct.error):
+                    detected += 1  # corruption caused expected error (good)
+                # Other exceptions intentionally propagate — they're real bugs
 
         # We want: most flips detected, zero silent corruption that looks valid
         # Some benign flips are OK (e.g., in padding bits)
-        assert detected > 0, "No bit flips detected at all"
+        assert detected > 0, "No bit flips detected at all — CRC/validation may be broken"
 
     def test_magic_corruption_detected(self):
         """Corrupted magic bytes must raise ValueError."""
@@ -187,7 +192,7 @@ class TestBitFlipCorruption:
         # Every truncation point must raise
         for cut_point in [10, 50, len(compressed) // 4, len(compressed) // 2,
                           len(compressed) - 10, len(compressed) - 1]:
-            with pytest.raises((ValueError, Exception)):
+            with pytest.raises((ValueError, struct.error)):
                 _decompress_bytes(compressed[:cut_point])
 
     def test_appended_garbage(self):

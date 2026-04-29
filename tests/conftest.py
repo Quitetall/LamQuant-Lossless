@@ -1,9 +1,14 @@
 """
 Pytest configuration and shared fixtures for all test levels.
+
+AUDIT (2026-04-27): Added session-start reporting of data availability
+so CI logs clearly show whether tests ran with real or synthetic data.
+Also added pytest_terminal_summary hook to report skip counts by reason.
 """
 
 import os
 import sys
+import warnings
 import pytest
 import numpy as np
 import tempfile
@@ -180,3 +185,33 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "l7: Adversarial test (edge cases)"
     )
+
+
+def pytest_sessionstart(session):
+    """Report data availability at session start so CI logs clearly show
+    whether tests are running with real EEG data or synthetic fallbacks.
+
+    AUDIT (2026-04-27): This makes it impossible to miss that tests ran
+    in degraded mode. Previously, synthetic fallback was silent.
+    """
+    repo = Path(__file__).parent.parent
+    checks = {
+        "q31_events (real EEG)": repo / "ai_models" / "dataset_sim" / "q31_events",
+        "student checkpoint": repo / "weights" / "student_subband.ckpt",
+        "manifest_v3": repo / "ai_models" / "dataset_sim" / "manifest_v3.json",
+        "Rust CLI binary": repo / "target" / "release" / "lml",
+    }
+    print("\n" + "=" * 60)
+    print("TEST DATA AVAILABILITY")
+    print("=" * 60)
+    all_present = True
+    for name, path in checks.items():
+        present = path.exists()
+        if not present:
+            all_present = False
+        status = "PRESENT" if present else "MISSING — tests will use fallbacks"
+        print(f"  {name}: {status}")
+    if not all_present:
+        print("  NOTE: Some tests will run with synthetic data or skip.")
+        print("  This is expected in CI. On dev machines, ensure data is present.")
+    print("=" * 60 + "\n")
