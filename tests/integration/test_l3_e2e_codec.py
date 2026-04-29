@@ -102,7 +102,7 @@ def student_model():
 @pytest.fixture(scope="module")
 def codec(student_model):
     """SubbandCodec with loaded student."""
-    from codec import SubbandCodec
+    from lamquant_codec.codec import SubbandCodec
     return SubbandCodec(student_model)
 
 
@@ -258,7 +258,7 @@ class TestL0_RANS:
     """L0: rANS entropy coding — foundation of neural compression."""
 
     def test_roundtrip_small(self):
-        from codec import _rans_encode_symbols, _rans_decode_symbols
+        from lamquant_codec.codec import _rans_encode_symbols, _rans_decode_symbols
         symbols = np.array([0, 1, 2, 1, 0, 3, 2, 1, 0, 0], dtype=np.int64)
         rb, rf, _M = _rans_encode_symbols(symbols)
         decoded = _rans_decode_symbols(rb, rf, len(symbols))
@@ -266,7 +266,7 @@ class TestL0_RANS:
         _foundations['rans'] = True
 
     def test_roundtrip_large(self):
-        from codec import _rans_encode_symbols, _rans_decode_symbols
+        from lamquant_codec.codec import _rans_encode_symbols, _rans_decode_symbols
         np.random.seed(42)
         symbols = np.abs(np.random.laplace(0, 10, size=5000)).astype(np.int64)
         rb, rf, _M = _rans_encode_symbols(symbols)
@@ -274,7 +274,7 @@ class TestL0_RANS:
         assert np.array_equal(symbols, decoded)
 
     def test_single_symbol(self):
-        from codec import _rans_encode_symbols, _rans_decode_symbols
+        from lamquant_codec.codec import _rans_encode_symbols, _rans_decode_symbols
         symbols = np.zeros(100, dtype=np.int64)
         rb, rf, _M = _rans_encode_symbols(symbols)
         decoded = _rans_decode_symbols(rb, rf, len(symbols))
@@ -286,7 +286,7 @@ class TestL0_RANS:
         For well-conditioned distributions, rANS overhead should be
         < 5% above the theoretical entropy lower bound.
         """
-        from codec import _rans_encode_symbols
+        from lamquant_codec.codec import _rans_encode_symbols
         np.random.seed(42)
         # Geometric distribution (common in EEG residuals)
         symbols = np.random.geometric(p=0.3, size=10000).astype(np.int64) - 1
@@ -305,7 +305,7 @@ class TestL0_RANS:
 
     def test_adversarial_single_dominant_symbol(self):
         """Adversarial: 99% one symbol, 1% another (extreme skew)."""
-        from codec import _rans_encode_symbols, _rans_decode_symbols
+        from lamquant_codec.codec import _rans_encode_symbols, _rans_decode_symbols
         symbols = np.zeros(10000, dtype=np.int64)
         symbols[::100] = 1  # 1% are symbol 1
         rb, rf, _M = _rans_encode_symbols(symbols)
@@ -314,7 +314,7 @@ class TestL0_RANS:
 
     def test_adversarial_high_cardinality(self):
         """Adversarial: many unique symbols (wide alphabet)."""
-        from codec import _rans_encode_symbols, _rans_decode_symbols
+        from lamquant_codec.codec import _rans_encode_symbols, _rans_decode_symbols
         symbols = np.arange(500, dtype=np.int64)  # 500 unique symbols, 1 each
         rb, rf, _M = _rans_encode_symbols(symbols)
         decoded = _rans_decode_symbols(rb, rf, len(symbols))
@@ -326,7 +326,7 @@ class TestL0_RANS:
         A well-functioning ANS coder produces output bytes that are close
         to uniformly distributed over [0, 255].
         """
-        from codec import _rans_encode_symbols
+        from lamquant_codec.codec import _rans_encode_symbols
         np.random.seed(42)
         symbols = np.random.geometric(p=0.2, size=50000).astype(np.int64) - 1
         rb, _, _M = _rans_encode_symbols(symbols)
@@ -422,7 +422,7 @@ class TestL3_LosslessCodec:
     """L3: Lossless codec — validated against the lossless contract."""
 
     def _make_packet(self, seg):
-        from codec import LosslessCodec
+        from lamquant_codec.codec import LosslessCodec
         codec = LosslessCodec(klt_matrix=None, n_levels=3)
         compressed = codec.compress(seg.astype(np.float64))
         recon = codec.decompress(compressed)
@@ -541,7 +541,7 @@ class TestL4_L3ErrorCorrection:
 
     def test_correction_size_reasonable(self, student_model, val_window):
         from subband_preprocess import compute_l3_correction
-        from codec import _encode_dense_subband
+        from lamquant_codec.codec import _encode_dense_subband
         _, l3, _, _ = val_window
         l3_t = torch.from_numpy(l3).float().unsqueeze(0)
         with torch.no_grad():

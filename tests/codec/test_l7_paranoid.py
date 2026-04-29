@@ -300,12 +300,21 @@ class TestBoundary:
     """Edge values and sizes."""
 
     def _roundtrip(self, signal):
+        """AUDIT (2026-04-28): Added diagnostic failure message (was bare assert)."""
         signal = np.asarray(signal, dtype=np.float64)
         compressed = _compress_bytes(signal, n_levels=3)
         decompressed = _decompress_bytes(compressed)
+        assert decompressed.shape == signal.shape, \
+            f"Shape mismatch: input {signal.shape} → output {decompressed.shape}"
         sig_int = np.round(signal).astype(np.int64)
         dec_int = np.round(decompressed).astype(np.int64)
-        assert np.array_equal(sig_int, dec_int)
+        if not np.array_equal(sig_int, dec_int):
+            diff = np.abs(sig_int - dec_int)
+            pytest.fail(
+                f"BOUNDARY MISMATCH: shape={signal.shape}, "
+                f"max_diff={diff.max()}, n_diff={np.count_nonzero(diff)}, "
+                f"at {np.unravel_index(np.argmax(diff), diff.shape)}"
+            )
 
     def test_minimum_size_2ch_8samples(self):
         """Smallest possible input."""

@@ -16,9 +16,11 @@ from lamquant_codec.edf_to_lml import (
 
 
 # ── Paths to real EDF files (skip if not present) ──
+_DATA_ROOT = os.environ.get("LAMQUANT_DATA_ROOT", "/mnt/4tb/data")
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-_TUEG_EDF = "/mnt/4tb/data/tueg_v2.0.1/edf/000/aaaaaaaa/s001_2015/01_tcp_ar/aaaaaaaa_s001_t000.edf"
-_CHBMIT_EDF = "/mnt/4tb/LamQuant/ai_models/dataset_sim/datasets/chbmit/chb01/chb01_03.edf"
+_TUEG_EDF = os.path.join(_DATA_ROOT, "tueg_v2.0.1/edf/000/aaaaaaaa/s001_2015/01_tcp_ar/aaaaaaaa_s001_t000.edf")
+_CHBMIT_EDF = os.path.join(_REPO_ROOT, "ai_models/dataset_sim/datasets/chbmit/chb01/chb01_03.edf")
 
 
 class TestTALParser:

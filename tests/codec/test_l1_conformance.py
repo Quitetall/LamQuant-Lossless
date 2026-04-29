@@ -170,34 +170,41 @@ class TestDecoderFuzzing:
         return _compress_bytes(sig, n_levels=3), sig
 
     def test_random_bytes_rejected(self):
-        """Pure random data must raise ValueError, not return garbage."""
+        """Pure random data must raise ValueError, not return garbage.
+
+        AUDIT (2026-04-28): Narrowed from (ValueError, Exception) to
+        (ValueError, struct.error) — specific expected failure modes.
+        """
         rng = np.random.RandomState(0)
         for _ in range(100):
             length = rng.randint(1, 10000)
             garbage = bytes(rng.randint(0, 256, length).astype(np.uint8))
-            with pytest.raises((ValueError, Exception)):
+            with pytest.raises((ValueError, struct.error)):
                 _decompress_bytes(garbage)
 
     def test_valid_header_garbage_payload(self):
-        """Valid LML header but random payload → must be caught."""
+        """Valid LML header but random payload → must be caught by CRC."""
         c, _ = self._valid_compressed()
         nl = c.index(b'\n') + 1
-        # Keep prefix + 22-byte LML header, randomize everything after
         hdr = c[:nl + 22]
         rng = np.random.RandomState(1)
         fake_payload = bytes(rng.randint(0, 256, len(c) - nl - 22).astype(np.uint8))
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="CRC|corrupt|Invalid"):
             _decompress_bytes(hdr + fake_payload)
 
     def test_every_single_byte_flip(self):
-        """Flip each byte in CRC-protected payload — must either fail or roundtrip."""
+        """Flip each byte in CRC-protected payload — must either fail or roundtrip.
+
+        AUDIT (2026-04-28): Narrowed exception catch, added diagnostic counters.
+        """
         c, sig = self._valid_compressed()
         sig_int = np.round(sig).astype(np.int64)
         silent_corruption = 0
+        correctly_rejected = 0
+        benign = 0
 
-        # CRC covers payload after header. Find payload start.
-        nl = c.index(b'\n') + 1  # end of ASCII prefix
-        payload_start = nl + 22  # LML header is 22 bytes after prefix
+        nl = c.index(b'\n') + 1
+        payload_start = nl + 22
         for pos in range(payload_start, min(len(c), payload_start + 200)):
             corrupted = bytearray(c)
             corrupted[pos] ^= 0x80
@@ -206,11 +213,15 @@ class TestDecoderFuzzing:
                 d_int = np.round(d).astype(np.int64)
                 if not np.array_equal(sig_int, d_int):
                     silent_corruption += 1
-            except (ValueError, Exception):
-                pass  # correctly rejected
+                else:
+                    benign += 1
+            except (ValueError, struct.error):
+                correctly_rejected += 1
+            # Other exceptions intentionally propagate
 
         assert silent_corruption == 0, \
-            f"{silent_corruption} byte positions produced silent corruption"
+            f"{silent_corruption} byte positions produced silent corruption " \
+            f"(rejected={correctly_rejected}, benign={benign})"
 
     def test_empty_input(self):
         with pytest.raises(ValueError):

@@ -29,7 +29,7 @@ dependencies = [
 [project.scripts]
 oh = "lamquant_codec.cli_entry:main"
 lamquant = "lamquant_codec.cli_entry:main"
-lamquant-decode = "lamquant_codec.decode:main"
+lamquant-decode = "lamquant_codec.cli_codec:main"
 lamquant-export = "lamquant_codec.export:main"
 lamquant-visualize = "tools.visualize_pipeline:main"
 
@@ -101,7 +101,6 @@ omit = [
     "ai_models/dataset_sim/validate_subband.py",
     "ai_models/dataset_sim/edf_to_events.py",
     "ai_models/snn/generate_activity_labels.py",
-    "ai_models/snn/train_dlif_run.py",
     "ai_models/oracle/*",
     "ai_models/student/train_student_subband.py",
     "ai_models/student/harden_artifacts.py",
