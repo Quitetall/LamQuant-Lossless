@@ -100,7 +100,7 @@ class TestL7ModelWithDeadData:
     def test_model_with_all_zero_l3(self):
         """Adversarial: Model processes all-zero L3 (preprocessed dead channel)."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)
@@ -125,7 +125,7 @@ class TestL7ModelWithDeadData:
     def test_model_batch_with_dead_channels_mixed(self):
         """Adversarial: Some samples in batch have dead channels."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)

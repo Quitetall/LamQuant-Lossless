@@ -82,7 +82,7 @@ def val_window():
 @pytest.fixture(scope="module")
 def student_model():
     """Load the production student model."""
-    from train_ternary import TernaryMobileNetV5_Subband
+    from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
     model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32)
     ckpt_paths = [
         os.path.join(_REPO, "weights/student_subband.ckpt"),

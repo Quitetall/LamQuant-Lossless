@@ -113,7 +113,7 @@ def sample_seizure_mask():
 def ternary_model():
     """Fresh TernaryMobileNetV5 autoencoder instance on CPU in eval mode."""
     import torch
-    from train_ternary import TernaryMobileNetV5
+    from lamquant_codec.models.encoder import TernaryMobileNetV5
     torch.manual_seed(0)
     m = TernaryMobileNetV5(in_ch=21, latent_dim=32)
     m.eval()

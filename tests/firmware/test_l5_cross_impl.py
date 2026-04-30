@@ -37,7 +37,7 @@ class TestL5QuantizationConsistency:
     def test_student_quantization_deterministic(self):
         """INVARIANT: Student quantization must be deterministic - same input -> same output."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)
@@ -127,7 +127,7 @@ class TestL5NumberPrecision:
     def test_model_output_numerical_stability(self):
         """INVARIANT: Model outputs should never be NaN even with edge cases."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)
@@ -159,7 +159,7 @@ class TestL5FirmwarePredictor:
     def test_quantized_vs_float_difference_bounded(self):
         """INVARIANT: Quantized output shouldn't differ from float by more than quantization error."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)

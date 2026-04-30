@@ -137,7 +137,7 @@ class TestL7AdversarialModelInput:
     def test_model_saturated_l3_input(self):
         """Adversarial: Feed saturated L3 values to model."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)
@@ -158,7 +158,7 @@ class TestL7AdversarialModelInput:
     def test_model_all_zeros_l3(self):
         """Adversarial: Feed all-zero L3 (silent/dead electrode)."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)
@@ -181,7 +181,7 @@ class TestL7AdversarialModelInput:
     def test_model_mixed_valid_saturated(self):
         """Adversarial: Batch with mix of normal and saturated channels."""
         try:
-            from train_ternary import TernaryMobileNetV5_Subband
+            from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
             
             device = torch.device('cpu')
             model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32).to(device)
