@@ -56,30 +56,45 @@ cargo install --path lamquant-core
 
 ## CLI Usage
 
+### Python CLI (`lamquant` / `oh`)
+
+```bash
+# Compress a directory of EEG files (lossless, no model needed)
+lamquant compress data/ -o compressed/ --mode lossless -r
+
+# Neural compression (requires trained checkpoint)
+lamquant compress data/ -o compressed/ --mode neural -c weights/student_subband_gold.ckpt -r
+
+# Decompress back to .npy
+lamquant decompress compressed/ -o decoded/ -r
+
+# Validate quality against originals (HTML report)
+lamquant validate compressed/ -r --reference data/ --level C --report-html quality.html
+
+# Inspect a file's metadata
+lamquant info recording.lml --json
+
+# First-run wizard
+lamquant init
+```
+
+### Rust CLI (`lml`)
+
 ```bash
 # Encode a directory of EDF files to LML
 lml encode <dir>
 
-# Bundle an entire directory into a single .lma archive
+# Bundle into a single .lma archive
 lml archive <dir> -o archive.lma
 
 # Extract archive bit-exactly
 lml extract archive.lma -o <dir>
 
-# Verify archive integrity without extracting
+# Verify archive integrity
 lml verify-archive archive.lma
 
 # List archive contents
 lml list-archive archive.lma
-
-# Inspect an LML file
-lml info <file.lml>
-
-# CRC-32 verify per window
-lml verify <file.lml>
-
-# Export to CSV or NPY
-lml export <file.lml>
 
 # Benchmark encode/decode speed
 lml bench <file.edf>
@@ -95,7 +110,7 @@ signal[Nch][2500]
   -> per-subband LPC prediction (order 2)
   -> bias cancellation (running mean, ctx=32, floor division)
   -> Golomb-Rice entropy coding (adaptive k)
-  -> 32-byte container header, CRC-32 per window, zstd-9 metadata
+  -> LML1 per-window packets, CRC-32 per window, zstd-9 metadata
 ```
 
 Preserves every byte of the original EDF file: headers, annotations, timestamps, trailing data. EDF, EDF+C, EDF+D, and BDF (24-bit) are all supported.
