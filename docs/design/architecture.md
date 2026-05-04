@@ -56,7 +56,7 @@ Decoder (symmetric):
 ### Training schedule
 
 1. **Subband preprocessing** (`subband_preprocess.py`): Applies HP biquad, LPC order-8 analysis, and 3-level Le Gall 5/3 lifting DWT to training data offline. Produces L3 approximation subband [21,313] inputs and detail coefficient arrays for the student.
-2. **Standalone training** (`train_student_subband.py`): 500 epochs in 3 phases — FP32 warm-up (50 ep), quantization-aware (200 ep), fine-tune with spectral loss (250 ep). Trains on subband-preprocessed data.
+2. **Joint training** (`train_joint.py`): Warm phase (FP32) + QAT phase (ternary) + EMA checkpoint selection. Trains encoder + decoder jointly with multi-scale loss (MSE + Pearson-R + PRD + spectral).
 3. **Validation** (`validate_subband.py`): Validates subband pipeline fidelity (round-trip reconstruction, per-quality-mode metrics).
 4. **Hardening** (`harden_artifacts.py`): Aligns student latent space with teacher using distillation loss.
 5. **Export** (`export_firmware.py`): Serializes ternary weights (4 per byte), Q31 alphas, GroupNorm params, rANS frequency tables, and detail encoding config into C headers.
