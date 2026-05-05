@@ -9,5 +9,6 @@
 //!   - focal:       TODO — needs weight export pipeline (Python → Rust const arrays)
 //!   - snn:         TODO — same as focal
 
+pub mod focal;
 pub mod fsq;
 pub mod ternary_mac;
