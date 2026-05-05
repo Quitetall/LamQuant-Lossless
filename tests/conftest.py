@@ -112,57 +112,15 @@ def rust_wheel():
     return lamquant_core
 
 
-@pytest.fixture
-def canonical_split_config(root_dir):
-    """Load official_split_config.json for testing.
-
-    Moved to legacy/data_pipeline_v2/ on 2026-04-16 (the typed
-    DatasetManifest replaces the dual-config split logic). Tests
-    that depend on this fixture should migrate to manifest_v3 via
-    `ai_models.DatasetManifest`; the fixture stays for the L2/L5/L7
-    legacy tests until they're rewritten.
-    """
-    config_path = (root_dir / "legacy" / "data_pipeline_v2"
-                   / "official_split_config.json")
-    if not config_path.exists():
-        pytest.skip(
-            "legacy official_split_config.json not present — migrate this "
-            "test to ai_models.DatasetManifest (see test_data_integrity.py)"
-        )
-    with open(config_path) as f:
-        return json.load(f)
-
-
-@pytest.fixture
-def validation_manifest(root_dir):
-    """Load v2 validation_manifest.json for testing. Kept on disk because
-    build_manifest.py uses it as the canonical (dataset, subject) lookup
-    when building manifest_v3. Tests of the *current* split should use
-    `ai_models.DatasetManifest.load(.../manifest_v3.json)`.
-    """
-    manifest_path = (root_dir / "ai_models" / "dataset_sim"
-                     / "validation_manifest" / "validation_manifest.json")
-    if not manifest_path.exists():
-        pytest.skip("validation_manifest.json not present")
-    with open(manifest_path) as f:
-        return json.load(f)
-
-
-@pytest.fixture
-def sample_eeg_q31():
-    """Generate sample Q31-format EEG data [21 channels, 2500 samples]."""
-    np.random.seed(42)
-    # Q31: signed 32-bit integers in range [-2^31, 2^31-1]
-    eeg_q31 = np.random.randint(-2147483647, 2147483647, size=(21, 2500), dtype=np.int32)
-    return eeg_q31
-
-
-@pytest.fixture
-def sample_eeg_float():
-    """Generate sample normalized EEG [21, 2500] in microvolts."""
-    np.random.seed(42)
-    eeg_float = np.random.randn(21, 2500).astype(np.float32) * 100  # ~100 uV std dev
-    return eeg_float
+# NOTE: The following fixtures were migrated out of this root conftest on
+# 2026-05-05 to the subdir conftests that actually consume them:
+#   canonical_split_config  → tests/training/conftest.py
+#   validation_manifest     → tests/training/conftest.py
+#   random_eeg_batch        → tests/training/conftest.py
+#   sample_eeg_q31          → tests/codec/conftest.py
+#   sample_eeg_float        → tests/codec/conftest.py
+# Cross-cutting fixtures (ternary_model, tmp_header, sample_seizure_mask,
+# sample_npz_file, the session-scoped resource fixtures) stay here.
 
 
 @pytest.fixture
@@ -182,14 +140,6 @@ def ternary_model():
     m = TernaryMobileNetV5(in_ch=21, latent_dim=32)
     m.eval()
     return m
-
-
-@pytest.fixture
-def random_eeg_batch():
-    """Small random EEG batch [B=2, C=21, T=2500], float32, CPU."""
-    import torch
-    torch.manual_seed(0)
-    return torch.randn(2, 21, 2500)
 
 
 @pytest.fixture
