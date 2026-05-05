@@ -11,4 +11,5 @@
 
 pub mod focal;
 pub mod fsq;
+pub mod snn;
 pub mod ternary_mac;
