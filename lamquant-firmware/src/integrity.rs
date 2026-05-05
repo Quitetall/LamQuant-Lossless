@@ -38,6 +38,7 @@ fn compute_weight_crc() -> u32 {
 
     // Ternary layers, in schema declaration order.
     crc = crc32_update(crc, &generated::focal::premix::PACKED_WEIGHTS);
+    crc = crc32_update(crc, &generated::focal::focal1_conv::PACKED_WEIGHTS);
     crc = crc32_update(crc, &generated::focal::focal2::PACKED_WEIGHTS);
     crc = crc32_update(crc, &generated::focal::focal3::PACKED_WEIGHTS);
     crc = crc32_update(crc, &generated::focal::dw_gate::PACKED_WEIGHTS);
