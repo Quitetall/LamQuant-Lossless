@@ -2443,6 +2443,7 @@ dependencies = [
  "embedded-hal-nb",
  "fugit",
  "lamquant-core",
+ "lamquant-weights",
  "nb 1.1.0",
  "panic-halt",
  "riscv 0.12.1",
@@ -2465,6 +2466,10 @@ dependencies = [
  "tokio",
  "zip",
 ]
+
+[[package]]
+name = "lamquant-weights"
+version = "7.7.0"
 
 [[package]]
 name = "leb128fmt"

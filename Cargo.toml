@@ -4,12 +4,15 @@ members = [
     "gui/src-tauri",
     "lamquant-core",
     "lamquant-firmware",
+    "lamquant-weights",
 ]
-# Firmware uses a different target (riscv32imac) and its own profile.
-# Default `cargo build` from root only touches host crates.
+# Firmware + weights use a different target (riscv32imac) and the firmware
+# profile. Default `cargo build` from root only touches host crates;
+# weights crate is no_std + alloc-free so it builds cleanly anywhere.
 default-members = [
     "gui/src-tauri",
     "lamquant-core",
+    "lamquant-weights",
 ]
 
 # Custom profile for firmware builds. Use with:

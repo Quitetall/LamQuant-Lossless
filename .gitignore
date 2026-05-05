@@ -115,3 +115,6 @@ reference_software/
 scripts/sync_tuh_all.sh
 scripts/sync_tuh_annotations.sh
 scripts/update_tueg_super.sh
+
+# Graphify rebuild cache (363 MB of intermediate artifacts).
+graphify-out/cache/
