@@ -101,6 +101,10 @@ target/
 *.elf
 *.map
 
+# User-local config — copy lamquant.toml.example to lamquant.toml to start.
+# The .example file is tracked; the active config is per-user and gitignored.
+lamquant.toml
+
 # Vendored SDKs
 sdk/
 
