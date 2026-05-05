@@ -35,20 +35,20 @@ from ai_models.data_types import (
     TrainingBatch, parse_npz_filename, ParsedFilename,
 )
 
-MANIFEST_PATH = _REPO / 'ai_models' / 'dataset_sim' / 'manifest_v3.json'
-Q31_DIR = _REPO / 'ai_models' / 'dataset_sim' / 'q31_events'
+# Module-level @data marker — every test in this file requires the
+# manifest or q31_events. CI fast lane filters with `-m "not data"`
+# to skip cleanly.
+pytestmark = pytest.mark.data
 
-# The manifest is the canonical fixture for every test in this file.
-# Tests that don't depend on the on-disk manifest skip cleanly.
-_HAVE_MANIFEST = MANIFEST_PATH.exists()
+Q31_DIR = _REPO / 'ai_models' / 'dataset_sim' / 'q31_events'
 
 
 @pytest.fixture(scope='module')
-def manifest():
-    if not _HAVE_MANIFEST:
-        pytest.skip(f'manifest not present at {MANIFEST_PATH} — '
-                    f'run build_manifest.py to generate')
-    return DatasetManifest.load(MANIFEST_PATH)
+def manifest(manifest_v3_path):
+    """Load DatasetManifest from manifest_v3.json. Skips via the
+    `manifest_v3_path` session fixture if the file is missing.
+    """
+    return DatasetManifest.load(manifest_v3_path)
 
 
 # ============================================================

@@ -48,6 +48,70 @@ def root_dir():
     return Path(__file__).parent.parent
 
 
+# ============================================================
+# Centralised skip-on-missing-resource fixtures.
+#
+# Each fixture returns a Path or module on success, or calls pytest.skip
+# with a clear reason. Tests that need an external resource should depend
+# on the matching fixture AND mark themselves with the matching marker
+# (data / checkpoint / rust / c_host) so the CI fast lane can filter them
+# out without parsing skip messages.
+# ============================================================
+
+
+@pytest.fixture(scope="session")
+def q31_events_dir():
+    """Real EEG q31 dataset directory. Skips if not present."""
+    from tests.helpers.data_paths import q31_events_dir as _resolve
+    p = _resolve()
+    if p is None:
+        pytest.skip("q31_events not present (use synthetic fallback or set up data)")
+    return p
+
+
+@pytest.fixture(scope="session")
+def manifest_v3_path():
+    """Dataset manifest_v3.json. Skips if not present."""
+    from tests.helpers.data_paths import manifest_v3 as _resolve
+    p = _resolve()
+    if p is None:
+        pytest.skip("manifest_v3.json not present — run build_manifest.py")
+    return p
+
+
+@pytest.fixture(scope="session")
+def student_checkpoint_path():
+    """Trained student-subband checkpoint. Skips if not present."""
+    from tests.helpers.data_paths import student_checkpoint as _resolve
+    p = _resolve()
+    if p is None:
+        pytest.skip("student_subband.ckpt not present in weights/")
+    return p
+
+
+@pytest.fixture(scope="session")
+def lml_cli_binary():
+    """Path to the `lml` Rust CLI binary. Skips if not built."""
+    from tests.helpers.data_paths import lml_cli_binary as _resolve
+    p = _resolve()
+    if p is None:
+        pytest.skip("lml binary not built — run `cargo build --release --bin lml`")
+    return p
+
+
+@pytest.fixture(scope="session")
+def rust_wheel():
+    """Imported lamquant_core PyO3 wheel. Skips if not installed."""
+    from tests.helpers.rust_bindings import HAS_RUST
+    if not HAS_RUST:
+        pytest.skip(
+            "lamquant_core PyO3 wheel not installed — "
+            "run `maturin develop --features python --manifest-path lamquant-core/Cargo.toml`"
+        )
+    import lamquant_core
+    return lamquant_core
+
+
 @pytest.fixture
 def canonical_split_config(root_dir):
     """Load official_split_config.json for testing.
