@@ -5,7 +5,7 @@
 // Architecture: subband_v1 (TernaryMobileNetV5_Subband)
 // Schema:    1.0
 // Exporter:  1.0.0
-// Generated: 2026-05-05T15:50:59.776447+00:00
+// Generated: 2026-05-05T16:47:12.074522+00:00
 //
 // Regenerate via:
 //   python firmware/export_firmware.py --target rust --arch subband_v1
@@ -24,12 +24,12 @@ pub const CHECKPOINT_NAME: &str = "student_subband_gold.ckpt";
 pub const CHECKPOINT_SHA256: [u8; 32] = [    0x0e,    0x85,    0x62,    0xc3,    0x77,    0xf6,    0x08,    0x1f,    0xe5,    0xde,    0x90,    0xf7,    0x1b,    0x47,    0x63,    0x02,    0xa5,    0x3a,    0xc9,    0xd3,    0xe5,    0x11,    0xdc,    0x51,    0x11,    0x6a,    0xb9,    0xc7,    0xd6,    0xee,    0x29,    0x57,];
 
 pub const EXPORTER_VERSION: &str = "1.0.0";
-pub const GIT_COMMIT: &str = "17d80c7";
-pub const EXPORT_TIMESTAMP_UNIX: u64 = 1777996259;
+pub const GIT_COMMIT: &str = "de303f67";
+pub const EXPORT_TIMESTAMP_UNIX: u64 = 1777999632;
 
 /// CRC-32 over all weight byte arrays in deterministic enumeration order.
 /// Verified at boot; mismatch → safe mode.
-pub const FIRMWARE_CRC32: u32 = 0xCA6AC746;
+pub const FIRMWARE_CRC32: u32 = 0x25008C9E;
 
 /// True once the codegen tool has populated this crate.
 pub const IS_INITIALIZED: bool = true;

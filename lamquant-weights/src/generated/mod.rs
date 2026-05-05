@@ -5,14 +5,14 @@
 // Architecture: subband_v1 (TernaryMobileNetV5_Subband)
 // Schema:    1.0
 // Exporter:  1.0.0
-// Generated: 2026-05-05T15:50:59.776447+00:00
+// Generated: 2026-05-05T16:47:12.074522+00:00
 //
 // Regenerate via:
 //   python firmware/export_firmware.py --target rust --arch subband_v1
 //! Top-level re-exports for the active architecture variant.
 
 pub mod focal {
-    pub mod premix;    pub mod focal2;    pub mod focal3;    pub mod dw_gate;    pub mod bneck_g;    pub mod bneck_v;}
+    pub mod premix;    pub mod focal1_conv;    pub mod focal2;    pub mod focal3;    pub mod dw_gate;    pub mod bneck_g;    pub mod bneck_v;}
 
 pub mod rotation;
 pub mod fsq;
