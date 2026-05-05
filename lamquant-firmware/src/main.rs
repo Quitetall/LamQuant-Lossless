@@ -20,6 +20,7 @@ extern crate alloc;
 
 mod dsp;
 mod integrity;
+mod neural;
 mod power;
 mod stack_guard;
 
@@ -90,9 +91,15 @@ fn main() -> ! {
     stack_guard::install();
 
     // Step 5: Firmware integrity check (CRC32 over weight tables).
-    // Phase 3 wires actual weight buffers; for Phase 1 this is a stub
-    // that exercises the CRC engine.
+    // Phase 3+ wires actual weight buffers; this stub exercises the engine.
     if !integrity::check_firmware_crc() {
+        power::enter_safe_mode();
+    }
+
+    // Step 5b: Ternary MAC parity KAT — mandatory before processing any
+    // patient data (Phase 14 Total Verification). Catches compiler
+    // bitfield rotation, struct-packing surprises, codegen regressions.
+    if neural::ternary_mac::boot_parity_kat().is_err() {
         power::enter_safe_mode();
     }
 
