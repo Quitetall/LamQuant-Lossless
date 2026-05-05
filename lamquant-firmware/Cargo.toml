@@ -7,7 +7,17 @@ description = "LamQuant v7.7 firmware — bare-metal Rust for RP2350 (Hazard3 RI
 license = "AGPL-3.0"
 publish = false
 
-# Bare-metal binary — no std, no test harness, no doctest.
+# Library exposes pure DSP/neural/codec modules so we can test them on the
+# host (no HAL, no allocator, no panic_handler needed).
+[lib]
+name = "lamquant_firmware"
+path = "src/lib.rs"
+test = true
+doctest = false
+bench = false
+
+# Bare-metal binary — only built for the embedded target.
+# On host (cargo test), bin compilation is suppressed via cfg in main.rs.
 [[bin]]
 name = "lamquant-firmware"
 path = "src/main.rs"
@@ -18,26 +28,24 @@ bench = false
 [features]
 default = []
 
-# Verification mode: build firmware modules as a library on host so we can
-# run unit tests and validate against C reference output.
+# Host-side verification mode: enables `cargo test -p lamquant-firmware
+# --features host-verify` to run bit-exact parity tests against C
+# reference output without flashing the device.
 host-verify = []
 
 [dependencies]
-# Core codec — no_std, alloc-only.
+# Core codec — no_std, alloc-only. Used by both lib (host tests) and bin.
 lamquant-core = { path = "../lamquant-core", default-features = false }
 
-# RP2350 hardware abstraction. Pulls riscv-rt transitively via "rt" feature.
-# `riscv32` feature gates Hazard3 entry/runtime path (vs Cortex-M33 ARM).
-rp235x-hal = { version = "0.3", features = [
-    "rt",
-    "critical-section-impl",
-] }
+# Allocator support — needed by core types in the lib too. Bin provides
+# the actual global allocator instance (see main.rs).
+embedded-alloc = "0.6"
 
-# RISC-V CSR access (Hazard3 PMP for stack guard). Pinned to match
-# rp235x-hal's transitive riscv-rt version.
+# Bare-metal-only deps. Cargo target-specific dependency tables apply
+# automatically when --target matches.
+[target.riscv32imac-unknown-none-elf.dependencies]
+rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
 riscv = "0.12"
-
-# Embedded utilities.
 critical-section = "1.2"
 embedded-hal = "1.0"
 embedded-hal-nb = "1.0"
@@ -45,11 +53,9 @@ fugit = "0.3"
 nb = "1.1"
 panic-halt = "1.0"
 
-# Bump allocator for codec scratch (Vec, etc.) — no GC, no fragmentation.
-embedded-alloc = "0.6"
+# Host-side test dev deps.
+[dev-dependencies]
 
-# Cortex-M alternatives (some HAL bits still pull these even on RISC-V).
-# Kept pinned to known-good versions.
-
-# Profiles defined at workspace root (Cargo requires this).
-# Build with:  cargo build --profile firmware -p lamquant-firmware
+# Profiles defined at workspace root.
+# Embedded build:  cargo build --target riscv32imac-unknown-none-elf --profile firmware -p lamquant-firmware
+# Host tests:      cargo test -p lamquant-firmware

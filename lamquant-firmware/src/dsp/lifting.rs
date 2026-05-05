@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn dc_concentrates_in_l3_approx() {
         // Constant DC input should put all energy in L3 approx, zero in details.
-        let mut signal = [[1000i32; WINDOW_SAMPLES]; NUM_CHANNELS];
+        let signal = [[1000i32; WINDOW_SAMPLES]; NUM_CHANNELS];
         let mut subbands = Subbands::zeroed();
         forward_all_channels(&signal, &mut subbands);
 
