@@ -87,9 +87,24 @@ addopts = [
     "--strict-markers",
 ]
 markers = [
-    "slow: marks tests that require model loading or heavy computation",
-    "c_host: marks tests that compile and run C code on the host",
+    # Test taxonomy (codec/ wire-format suite)
+    "l1: KAT — fixed input, fixed output (codec/ only)",
+    "l2: property/invariant",
+    "l3: metamorphic / regression",
+    "l4: fuzz",
+    "l5: cross-implementation parity (Py↔Rust↔C)",
+    "l7: adversarial / boundary",
+    # Resource markers (used by CI lanes)
+    "slow: model loading or heavy computation (>5s)",
+    "perf: performance regression sentinel (nightly only)",
+    "data: requires real EEG (q31_events / manifest_v3)",
+    "checkpoint: requires trained weights on disk",
+    "rust: requires lamquant_core PyO3 wheel",
+    "c_host: compiles and runs C code on the host",
+    "doctest: doctest collection target",
+    "cross_lang: Python↔Rust drift sentinel",
 ]
+doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
 
 [tool.coverage.run]
 source = ["ai_models", "firmware"]

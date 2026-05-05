@@ -162,29 +162,10 @@ class ParanoiaLevel:
         return func
 
 
-# Fixture markers for running by level
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers", "l1: KAT test (known good inputs)"
-    )
-    config.addinivalue_line(
-        "markers", "l2: Property-based test (invariants)"
-    )
-    config.addinivalue_line(
-        "markers", "l3: Metamorphic test (relationships)"
-    )
-    config.addinivalue_line(
-        "markers", "l4: Fuzz test (random inputs)"
-    )
-    config.addinivalue_line(
-        "markers", "l5: Cross-implementation test"
-    )
-    config.addinivalue_line(
-        "markers", "l6: Statistical test (distributions)"
-    )
-    config.addinivalue_line(
-        "markers", "l7: Adversarial test (edge cases)"
-    )
+# Markers (l1-l7, slow, data, checkpoint, rust, c_host, doctest, cross_lang, perf)
+# now declared in pyproject.toml [tool.pytest.ini_options].markers as the single
+# source of truth — `--strict-markers` enforces from there. Do not add inline
+# `addinivalue_line` calls here; use pyproject.toml.
 
 
 def pytest_sessionstart(session):
