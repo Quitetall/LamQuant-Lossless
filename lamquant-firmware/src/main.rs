@@ -18,6 +18,7 @@
 
 extern crate alloc;
 
+mod dsp;
 mod integrity;
 mod power;
 mod stack_guard;
