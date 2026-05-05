@@ -1,4 +1,4 @@
-"""Cross-language LML1 wire-format tests — Python ↔ Rust parity.
+"""Cross-language LML1 wire-format tests — Python ↔ Rust parity (L5).
 
 Pins every wire-format invariant that must hold across both implementations:
   - Magic byte, header size, field offsets, endianness, CRC polynomial
@@ -12,6 +12,8 @@ Drift caught here would mean a Python-encoded packet is mis-read by Rust
 
 Implementation: uses the in-process PyO3 wheel `lamquant_core` for the Rust
 side. The wheel must be installed via `maturin develop --features python`.
+Imports the canonical helpers from `tests/helpers/` rather than duplicating
+their logic inline.
 """
 from __future__ import annotations
 
@@ -30,35 +32,16 @@ from lamquant_codec.lossless import (
 )
 from lamquant_codec.ops.constants import MAGIC_LML
 
-# Rust bindings (PyO3 wheel).
-try:
-    import lamquant_core
-    rust_encode = lamquant_core.lml_compress      # (List[List[int]], noise_bits) -> bytes
-    rust_decode = lamquant_core.lml_decompress    # (bytes) -> List[List[int]]
-    HAS_RUST = True
-except ImportError:
-    HAS_RUST = False
-
-pytestmark = pytest.mark.skipif(
-    not HAS_RUST,
-    reason="lamquant_core PyO3 wheel not installed (run `maturin develop`)",
+# Canonical helpers — single source of truth.
+from tests.helpers.signals import synth_signal
+from tests.helpers.rust_bindings import (
+    rust_compress as rust_encode,
+    rust_decompress as rust_decode,
+    to_rust_signal,
+    requires_rust,
 )
 
-
-# ============================================================
-# Helpers
-# ============================================================
-
-def synth_signal(n_ch: int, T: int, *, seed: int = 0,
-                 amp: int = 8000) -> np.ndarray:
-    """Reproducible int16-range integer signal [n_ch, T]."""
-    rng = np.random.default_rng(seed)
-    return rng.integers(-amp, amp, size=(n_ch, T), dtype=np.int64)
-
-
-def to_rust_signal(sig: np.ndarray) -> list[list[int]]:
-    """Rust binding takes Vec<Vec<i64>>."""
-    return [row.tolist() for row in sig]
+pytestmark = [pytest.mark.l5, pytest.mark.cross_lang, requires_rust]
 
 
 def strip_ascii_prefix(data: bytes) -> bytes:
