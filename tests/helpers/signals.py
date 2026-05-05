@@ -7,6 +7,29 @@ the deprecated np.random.seed global state).
 import numpy as np
 
 
+def synth_signal(n_ch: int, T: int, *, seed: int = 0,
+                 amp: int = 8000, dtype=np.int64) -> np.ndarray:
+    """Reproducible integer-domain signal of shape (n_ch, T).
+
+    Used by all cross-language and roundtrip tests where the input must be
+    integer-valued (LML wire format encodes int samples). Replaces inline
+    `synth_signal` definitions and ad-hoc `np.random.seed(42); randn(...)`
+    patterns scattered across the test suite.
+
+    Args:
+        n_ch: number of channels.
+        T: samples per channel.
+        seed: RNG seed (independent per call — uses default_rng).
+        amp: maximum absolute value (default 8000, well within int16).
+        dtype: output dtype (default int64; pass np.int16/int32 if needed).
+
+    Returns:
+        ndarray of shape (n_ch, T) with values in [-amp, amp).
+    """
+    rng = np.random.default_rng(seed)
+    return rng.integers(-amp, amp, size=(n_ch, T), dtype=dtype)
+
+
 def make_synthetic_eeg(n_channels=21, n_samples=2500, seed=42):
     """Generate synthetic EEG-like signal with realistic spectral content.
 
