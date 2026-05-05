@@ -5,11 +5,14 @@
 //!   - quality:          quality mode + activity level enums ✅
 //!   - detail_threshold: SNN-driven hard thresholding of DWT details ✅
 //!   - fsq_adaptive:     variable-L FSQ driven by SNN activity_map ✅
-//!   - rans_context:     TODO (316 LoC — context-adaptive rANS state machine)
-//!   - lpc_delta:        TODO (lossless path)
-//!   - hybrid_entropy:   TODO (orchestrator, wires rANS + Golomb together)
+//!   - lpc_delta:        Q31 / Q15 / Q8 delta encoding (lossless) ✅
+//!   - rans_context:     context-adaptive rANS encoder ✅
+//!   - hybrid_entropy:   orchestrator (Mode 1 rANS / Mode 2 LPC+Rice) ✅
 
 pub mod detail_threshold;
 pub mod fsq_adaptive;
+pub mod hybrid_entropy;
+pub mod lpc_delta;
 pub mod mailbox;
 pub mod quality;
+pub mod rans_context;
