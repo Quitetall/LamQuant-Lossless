@@ -24,13 +24,18 @@ extern crate alloc;
 
 pub mod dsp;
 pub mod neural;
+// `safety` is pure data structures (no HAL) so it builds on host too —
+// useful for unit tests of the audit-trail logic.
+pub mod safety;
 
-// Hardware-bound modules: peripheral drivers, scheduler, transport, safety.
+// Hardware-bound modules: peripheral drivers, scheduler, transport.
 // Compiled only when targeting the bare-metal RP2350. Host tests skip them.
 #[cfg(target_arch = "riscv32")]
 pub mod afe;
 #[cfg(target_arch = "riscv32")]
 pub mod codec;
+#[cfg(target_arch = "riscv32")]
+pub mod scheduler;
 #[cfg(target_arch = "riscv32")]
 pub mod transport;
 
