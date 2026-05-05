@@ -3,4 +3,30 @@ resolver = "2"
 members = [
     "gui/src-tauri",
     "lamquant-core",
+    "lamquant-firmware",
 ]
+# Firmware uses a different target (riscv32imac) and its own profile.
+# Default `cargo build` from root only touches host crates.
+default-members = [
+    "gui/src-tauri",
+    "lamquant-core",
+]
+
+# Custom profile for firmware builds. Use with:
+#   cargo build --profile firmware -p lamquant-firmware
+[profile.firmware]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+debug = false
+strip = "symbols"
+
+[profile.firmware-dev]
+inherits = "dev"
+opt-level = 1
+panic = "abort"
+overflow-checks = true
+debug = 2

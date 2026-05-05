@@ -1,0 +1,55 @@
+[package]
+name = "lamquant-firmware"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "LamQuant v7.7 firmware — bare-metal Rust for RP2350 (Hazard3 RISC-V)"
+license = "AGPL-3.0"
+publish = false
+
+# Bare-metal binary — no std, no test harness, no doctest.
+[[bin]]
+name = "lamquant-firmware"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[features]
+default = []
+
+# Verification mode: build firmware modules as a library on host so we can
+# run unit tests and validate against C reference output.
+host-verify = []
+
+[dependencies]
+# Core codec — no_std, alloc-only.
+lamquant-core = { path = "../lamquant-core", default-features = false }
+
+# RP2350 hardware abstraction. Pulls riscv-rt transitively via "rt" feature.
+# `riscv32` feature gates Hazard3 entry/runtime path (vs Cortex-M33 ARM).
+rp235x-hal = { version = "0.3", features = [
+    "rt",
+    "critical-section-impl",
+] }
+
+# RISC-V CSR access (Hazard3 PMP for stack guard). Pinned to match
+# rp235x-hal's transitive riscv-rt version.
+riscv = "0.12"
+
+# Embedded utilities.
+critical-section = "1.2"
+embedded-hal = "1.0"
+embedded-hal-nb = "1.0"
+fugit = "0.3"
+nb = "1.1"
+panic-halt = "1.0"
+
+# Bump allocator for codec scratch (Vec, etc.) — no GC, no fragmentation.
+embedded-alloc = "0.6"
+
+# Cortex-M alternatives (some HAL bits still pull these even on RISC-V).
+# Kept pinned to known-good versions.
+
+# Profiles defined at workspace root (Cargo requires this).
+# Build with:  cargo build --profile firmware -p lamquant-firmware

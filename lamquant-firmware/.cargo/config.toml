@@ -1,0 +1,14 @@
+# LamQuant firmware build config — Hazard3 RISC-V on RP2350.
+
+[build]
+target = "riscv32imac-unknown-none-elf"
+
+[target.riscv32imac-unknown-none-elf]
+runner = "probe-rs run --chip RP235x"
+rustflags = [
+    # memory.x defines MEMORY + REGION_ALIAS (must come BEFORE link.x).
+    # link.x (from riscv-rt) defines section layout.
+    "-C", "link-arg=-Tmemory.x",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "no-vectorize-loops",
+]
