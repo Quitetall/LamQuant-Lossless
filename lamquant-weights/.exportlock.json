@@ -5,7 +5,7 @@
   "model_arch": "subband_v1",
   "checkpoint": "/mnt/4tb/LamQuant/weights/student_subband_gold.ckpt",
   "checkpoint_sha256": "0e8562c377f6081fe5de90f71b476302a53ac9d3e511dc51116ab9c7d6ee2957",
-  "git_commit": "de303f67",
-  "timestamp": "2026-05-05T16:47:12.074522+00:00",
-  "firmware_crc32": "0x25008C9E"
+  "git_commit": "528303d9",
+  "timestamp": "2026-05-05T18:06:01.935213+00:00",
+  "firmware_crc32": "0x63EE6A12"
 }

@@ -5,7 +5,7 @@
 // Architecture: subband_v1 (TernaryMobileNetV5_Subband)
 // Schema:    1.0
 // Exporter:  1.0.0
-// Generated: 2026-05-05T16:47:12.074522+00:00
+// Generated: 2026-05-05T18:06:01.935213+00:00
 //
 // Regenerate via:
 //   python firmware/export_firmware.py --target rust --arch subband_v1
@@ -18,3 +18,4 @@ pub mod rotation;
 pub mod fsq;
 pub mod toeplitz;
 pub mod crc;
+pub mod snn;

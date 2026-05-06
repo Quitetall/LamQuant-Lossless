@@ -5,13 +5,13 @@
 // Architecture: subband_v1 (TernaryMobileNetV5_Subband)
 // Schema:    1.0
 // Exporter:  1.0.0
-// Generated: 2026-05-05T16:47:12.074522+00:00
+// Generated: 2026-05-05T18:06:01.935213+00:00
 //
 // Regenerate via:
 //   python firmware/export_firmware.py --target rust --arch subband_v1
 //! FSQ lattice + rANS frequency table. Calibrated from 50
 //! random-clamped EEG forward passes. Latent range [-1.000, 1.000],
-//! entropy 3.924 bps.
+//! entropy 3.925 bps.
 
 use crate::types::FsqLattice;
 
@@ -23,9 +23,9 @@ pub static LEVELS: [i32; 4] = [
 
 pub const QUANT_SCALE_Q31: i32 = 1073741824;
 
-pub static RANS_FREQ: [u32; NUM_LEVELS] = [225, 124, 168, 219, 270, 316, 350, 374,368, 349, 316, 270, 220, 170, 125, 232,];
+pub static RANS_FREQ: [u32; NUM_LEVELS] = [225, 124, 169, 219, 269, 315, 348, 375,367, 349, 316, 271, 220, 171, 126, 232,];
 
-pub static RANS_START: [u32; NUM_LEVELS] = [0, 225, 349, 517, 736, 1006, 1322, 1672,2046, 2414, 2763, 3079, 3349, 3569, 3739, 3864,];
+pub static RANS_START: [u32; NUM_LEVELS] = [0, 225, 349, 518, 737, 1006, 1321, 1669,2044, 2411, 2760, 3076, 3347, 3567, 3738, 3864,];
 
 pub const VMIN_Q31: i32 = -1000;
 pub const VMAX_Q31: i32 = 1000;

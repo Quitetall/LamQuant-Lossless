@@ -25,6 +25,7 @@ use crate::codec::rans_context::{RansContextEncoder, RansTables, RANS_BUF_SIZE};
 use crate::dsp::biquad::{HpFilter, HpFilterBank, NUM_CHANNELS, WINDOW_SAMPLES};
 use crate::dsp::lifting::{forward_all_channels, Subbands};
 use crate::dsp::lpc::{analyze_all_channels, LpcOutput};
+use crate::neural::{focal, snn};
 use crate::safety::SafetyState;
 
 /// Active codec mode for the current session. Set by host before recording
@@ -145,23 +146,43 @@ impl PipelineScheduler {
         // Stage 4: encode per active codec mode.
         let result = match self.codec_mode {
             CodecMode::Neural => {
-                // SNN-driven adaptive FSQ over the L3 approximation.
-                // L3 is laid out [21][313]; the encoder model reduces it to
-                // [32][79] which we don't compute here — TNN inference is
-                // delegated to Core 1 in production. For Phase 5 we feed
-                // the L3 approximation directly to the FSQ encoder using
-                // the first 79 timesteps and 32 lanes worth of channels
-                // pretending to be the latent. Real wiring lands when
-                // Core 1 TNN inference is hooked up (Phase 6).
-                let mut latent_stub = [[0i32; 79]; 32];
-                for d in 0..32 {
-                    for t in 0..79 {
-                        if d < NUM_CHANNELS && t < 313 {
-                            latent_stub[d][t] = self.subbands.l3_approx[d][t];
-                        }
+                // 4a: convert L3 approximation [21][313] from i32 → i16 with
+                //     saturation. The TNN encoder operates in i16 act
+                //     (W2A16) — anything beyond i16 range is clamped, not
+                //     wrapped, so artifacts saturate to peak rather than
+                //     wrap into the wrong sign.
+                let mut l3_i16 = [[0i16; 313]; NUM_CHANNELS];
+                for ch in 0..NUM_CHANNELS {
+                    for t in 0..313 {
+                        let v = self.subbands.l3_approx[ch][t];
+                        l3_i16[ch][t] = v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                     }
                 }
-                self.fsq.encode(&latent_stub, activity_map, self.quality);
+
+                // 4b: SNN classify the L3 — populates the activity map the
+                //     FSQ adaptive encoder consumes for per-block level
+                //     selection. The caller-supplied `activity_map` arg
+                //     stays as the reference path (lets scheduler tests
+                //     inject deterministic activity) but we call the real
+                //     SNN unconditionally so its membrane state stays in
+                //     sync window-to-window.
+                snn::inference(&l3_i16);
+
+                // 4c: TNN focal forward — produces the [32][79] latent that
+                //     FSQ + rANS compress. This replaces the prior stub
+                //     that copied L3 directly into the latent slots.
+                let mut latent_i16 = [[0i16; 79]; 32];
+                focal::forward(&l3_i16, &mut latent_i16);
+
+                // FSQ adaptive expects an i32 latent; widen.
+                let mut latent_i32 = [[0i32; 79]; 32];
+                for d in 0..32 {
+                    for t in 0..79 {
+                        latent_i32[d][t] = latent_i16[d][t] as i32;
+                    }
+                }
+
+                self.fsq.encode(&latent_i32, activity_map, self.quality);
                 let out = encode_neural(&mut self.rans, &self.fsq, snn_activity_sum);
                 EncodeResult {
                     bytes: out.bytes,
