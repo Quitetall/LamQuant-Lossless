@@ -91,6 +91,21 @@ class TestOpSerialization:
         assert 'LPC_PREDICT' in s
         assert 'order=8' in s
 
+    def test_op_to_bytes_rejects_non_ascii_key(self):
+        """Found by hypothesis on 2026-05-05: previously raised
+        UnicodeEncodeError mid-write. Now raises LmlInputError at the
+        boundary."""
+        from lamquant_codec.errors import LmlInputError
+        op = tg.Op(tg.LPC_PREDICT, **{"orderª": 8})
+        with pytest.raises(LmlInputError):
+            op.to_bytes()
+
+    def test_op_to_bytes_rejects_oversize_key(self):
+        from lamquant_codec.errors import LmlInputError
+        op = tg.Op(tg.LPC_PREDICT, **{"a" * 300: 8})
+        with pytest.raises(LmlInputError):
+            op.to_bytes()
+
 
 # ============================================================
 # 3. TransformGraph serialization + magic byte
