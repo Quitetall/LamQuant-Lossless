@@ -4,7 +4,7 @@
 //!   1. RP2350 boot ROM loads firmware from QSPI flash (XIP)
 //!   2. riscv-rt _start sets up stack, .data, .bss, calls main()
 //!   3. main() initializes:
-//!        a. Bump allocator (64 KB scratch heap for codec Vec usage)
+//!        a. Bump allocator (16 KB scratch heap for codec Vec usage)
 //!        b. Peripherals + clocks (12 MHz XTAL → 150 MHz sys clock)
 //!        c. PMP stack guard (NAPOT region at stack top, hardware-locked)
 //!        d. CRC32 firmware integrity check (Phase 3 wired)
@@ -13,9 +13,10 @@
 //!        g. Watchdog start (500 ms timeout)
 //!   4. Main loop: pet watchdog, when ADC window ready → encode + tx
 //!
-//! Phase 6 wiring: PipelineScheduler is now linked. SPI0 (ADS1299), SPI1
-//! (BLE), USB CDC peripherals are stubbed via mock buffers — full
-//! peripheral wiring is the final follow-up before flashing real silicon.
+//! Phase 6 wiring: PipelineScheduler is now linked. ADC fills directly
+//! into `pipeline.lpc.residual` via aliased raw pointer (matches the C
+//! `#define lpc_residual raw_adc_buffer` aliasing trick) so we save 210 KB
+//! of duplicate buffer space.
 //!
 //! On host (`cargo test`), the binary collapses to a no-op so `cargo
 //! build` doesn't fail. All testable logic lives in the library
@@ -48,39 +49,34 @@ mod embedded {
     pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
     // ─── Global allocator ─────────────────────────────────────────────
+    //
+    // Codec path uses Vec<i64> internally for LPC analysis (transient
+    // ~20 KB per channel during compute). 16 KB heap is too small for
+    // the full per-channel buffer; we re-use the heap by clearing
+    // between channels. Phase 7 polishes this with a fixed scratch arena.
     #[global_allocator]
     static HEAP: Heap = Heap::empty();
-    const HEAP_SIZE: usize = 64 * 1024;
+    const HEAP_SIZE: usize = 16 * 1024;
 
     #[link_section = ".bss"]
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
 
     // ─── Pipeline state — singleton, BSS-allocated ────────────────────
-    //
-    // The C firmware put these in dedicated SRAM banks via section
-    // attributes (`.sram2_sram3` for the ADC buffer, `.sram4_tnn` for the
-    // weights, etc.). Phase 6 leaves them in default `.bss`; per-bank
-    // placement attributes are added in the linker-script polish pass
-    // before flashing real silicon.
 
-    /// Raw ADC sample buffer. DMA target. 21 × 2500 × 4 = 210 KB.
+    /// PipelineScheduler — owns biquad bank, LPC scratch (== ADC buffer),
+    /// subbands, FSQ adaptive, rANS encoder, LPC delta encoder.
+    /// `lpc.residual` doubles as the raw ADC fill target.
     #[link_section = ".bss"]
-    static mut RAW_ADC_BUFFER: [[i32; WINDOW_SAMPLES]; NUM_CHANNELS] =
-        [[0; WINDOW_SAMPLES]; NUM_CHANNELS];
+    static mut PIPELINE: MaybeUninit<PipelineScheduler> = MaybeUninit::uninit();
+
+    /// Patient-safety subsystems.
+    #[link_section = ".bss"]
+    static mut SAFETY: MaybeUninit<SafetyState> = MaybeUninit::uninit();
 
     /// SNN per-group activity classification, set by SNN inference each
     /// window. Latent shape (8 groups × 79 timesteps).
     #[link_section = ".bss"]
     static mut SNN_ACTIVITY_MAP: [[u8; 79]; 8] = [[0; 79]; 8];
-
-    /// PipelineScheduler — owns biquad bank, LPC scratch, subbands, FSQ
-    /// adaptive, rANS encoder, LPC delta encoder, output buf (~110 KB).
-    #[link_section = ".bss"]
-    static mut PIPELINE: MaybeUninit<PipelineScheduler> = MaybeUninit::uninit();
-
-    /// Patient-safety subsystems (~59 KB).
-    #[link_section = ".bss"]
-    static mut SAFETY: MaybeUninit<SafetyState> = MaybeUninit::uninit();
 
     /// Set by the ADC DMA-complete ISR. Cleared by the scheduler.
     static ADC_BUFFER_READY: AtomicBool = AtomicBool::new(false);
@@ -90,12 +86,19 @@ mod embedded {
     static CLOCK_MS: AtomicU32 = AtomicU32::new(0);
 
     fn now_ms() -> u32 {
-        // Monotonically advance by 10 s per call (matches window cadence
-        // so safety event timestamps look sane in the audit log).
+        // Monotonically advance by 10 s per call (matches window cadence).
         CLOCK_MS.fetch_add(10_000, Ordering::Relaxed)
     }
 
     const XTAL_HZ: u32 = 12_000_000;
+
+    /// Aliased pointer to the ADC fill region (== pipeline.lpc.residual).
+    /// Used by the DRDY ISR to deposit one sample per channel without
+    /// taking out a `&mut PipelineScheduler` borrow. SAFETY contract:
+    /// caller MUST stop continuous ADC mode before encoding starts.
+    fn adc_buffer_ptr() -> *mut [[i32; WINDOW_SAMPLES]; NUM_CHANNELS] {
+        unsafe { addr_of_mut!((*PIPELINE.as_mut_ptr()).lpc.residual) }
+    }
 
     #[hal::entry]
     fn entry() -> ! {
@@ -118,7 +121,7 @@ mod embedded {
         .ok()
         .expect("clock init failed");
 
-        // PMP stack guard (RISC-V CSR, NAPOT region at stack top).
+        // PMP stack guard.
         stack_guard::install();
 
         // Firmware integrity check (CRC32 over weight tables).
@@ -126,16 +129,14 @@ mod embedded {
             power::enter_safe_mode();
         }
 
-        // Ternary MAC parity KAT — mandatory before processing patient data.
-        // Catches compiler bitfield rotation, struct-packing surprises,
-        // codegen regressions.
+        // Ternary MAC parity KAT — mandatory before any patient data.
         if neural::ternary_mac::boot_parity_kat().is_err() {
             power::enter_safe_mode();
         }
 
-        // Initialize singletons. SAFETY: BSS storage is zero-initialized
-        // by riscv-rt; we replace with a fully-constructed instance and
-        // never alias the MaybeUninit slot afterward.
+        // Initialize singletons. SAFETY: BSS slots zero-initialized by
+        // riscv-rt; we replace with a constructed instance and never
+        // alias the MaybeUninit slot afterward.
         unsafe {
             PIPELINE.write(PipelineScheduler::new());
             SAFETY.write(SafetyState::default());
@@ -147,7 +148,10 @@ mod embedded {
         pipeline.set_codec_mode(CodecMode::Neural);
         pipeline.output_mode = OutputMode::BleOnly;
 
-        // Start watchdog.
+        // Suppress unused-pointer warning until Phase 7 wires the ADS1299
+        // ISR which calls adc_buffer_ptr() to deposit samples.
+        let _ = adc_buffer_ptr;
+
         watchdog.start(fugit::ExtU32::millis(500));
 
         // ── Main loop ──────────────────────────────────────────────
@@ -157,19 +161,29 @@ mod embedded {
             if ADC_BUFFER_READY.swap(false, Ordering::AcqRel) {
                 run_one_window();
             } else {
-                // Sleep until the next interrupt (DMA complete, host serial,
-                // etc.). Saves ~3 mA vs polling on Hazard3.
                 power::wait_for_interrupt();
             }
         }
     }
 
     /// Process one ADC window: HP biquad → LPC → lifting → SNN → encode → TX.
+    ///
+    /// SAFETY: ADC must have stopped continuous mode before this runs (see
+    /// `adc_buffer_ptr` contract). Uses raw pointer aliasing to read the
+    /// signal from `pipeline.lpc.residual` while `pipeline` is also borrowed
+    /// mutably; the per-channel LPC analyze copies to a Vec<i64> snapshot
+    /// before writing back, so no interleaved RW.
     fn run_one_window() {
         let pipeline: &mut PipelineScheduler = unsafe { &mut *PIPELINE.as_mut_ptr() };
         let safety: &mut SafetyState = unsafe { &mut *SAFETY.as_mut_ptr() };
+
+        // SAFETY: signal aliases pipeline.lpc.residual. encode_window first
+        // runs HP biquad in-place (writes to signal == lpc.residual), then
+        // analyze_all_channels takes a Vec<i64> snapshot per channel before
+        // writing back to lpc.residual — no interleaved RW.
         let signal: &mut [[i32; WINDOW_SAMPLES]; NUM_CHANNELS] =
-            unsafe { &mut *addr_of_mut!(RAW_ADC_BUFFER) };
+            unsafe { &mut *adc_buffer_ptr() };
+
         let activity_map: &[[u8; 79]; 8] =
             unsafe { &*core::ptr::addr_of!(SNN_ACTIVITY_MAP) };
 
@@ -187,7 +201,7 @@ mod embedded {
             now_ms(),
         );
 
-        // Phase 6 stub: real path hands `result.bytes` to BLE DMA TX
+        // Phase 7 stub: real path hands `result.bytes` to BLE DMA TX
         // (transport::ble) or USB CDC writer (transport::usb). For now
         // the bytes live in the scheduler buffer and the safety subsystem
         // has already pushed them onto the BLE retry queue.
