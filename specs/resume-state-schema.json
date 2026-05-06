@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openhuman.tech/schemas/lamquant/resume-state.schema.json",
+  "title": "LamQuant .lamquant_state.json",
+  "description": "Per-output-directory resume marker. Tracks which input files have been processed and their final state so a crashed/cancelled run can pick up exactly where it left off. Written atomically by the lml binary; never edited by hand.",
+  "type": "object",
+  "required": ["schema_version", "run_id", "input_root", "files"],
+  "properties": {
+    "schema_version": { "type": "string", "default": "1.0" },
+    "run_id":         { "type": "string", "description": "Hex-encoded random ID tagging the run. New on each fresh start; preserved on resume." },
+    "started_at":     { "type": "string", "format": "date-time" },
+    "last_checkpoint":{ "type": "string", "format": "date-time" },
+    "cli_invocation": { "type": "array", "items": { "type": "string" } },
+    "config_hash":    { "type": "string", "description": "SHA-256 of the effective config at run start." },
+    "input_root":     { "type": "string" },
+    "output_root":    { "type": "string" },
+    "total_files_discovered": { "type": "integer", "minimum": 0 },
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "completed", "failed", "quarantined"]
+          },
+          "output_path":     { "type": "string" },
+          "bytes_in":        { "type": "integer", "minimum": 0 },
+          "bytes_out":       { "type": "integer", "minimum": 0 },
+          "sha256":          { "type": "string" },
+          "completed_at":    { "type": "string", "format": "date-time" },
+          "worker_pid":      { "type": "integer", "minimum": 0 },
+          "attempts":        { "type": "integer", "minimum": 0 },
+          "last_error":      { "type": "string" },
+          "quarantined_to":  { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "statistics_so_far": {
+      "type": "object",
+      "properties": {
+        "files_completed": { "type": "integer", "minimum": 0 },
+        "files_failed":    { "type": "integer", "minimum": 0 },
+        "files_remaining": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

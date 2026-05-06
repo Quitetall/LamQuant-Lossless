@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lamquant-history",
+    "crates/lamquant-ops",
     "gui/src-tauri",
     "lamquant-core",
     "lamquant-firmware",
@@ -10,6 +12,8 @@ members = [
 # profile. Default `cargo build` from root only touches host crates;
 # weights crate is no_std + alloc-free so it builds cleanly anywhere.
 default-members = [
+    "crates/lamquant-history",
+    "crates/lamquant-ops",
     "gui/src-tauri",
     "lamquant-core",
     "lamquant-weights",

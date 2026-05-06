@@ -1,0 +1,104 @@
+# LamQuant configuration — language-neutral schema.
+#
+# Mirrors lamquant-core/src/tui/config.rs::LamQuantConfig and
+# lamquant_codec/cli/config.py::LamQuantConfig. THIS document is canonical;
+# both Rust and Python regenerate their structs from it. Drift is detected
+# by crates/lamquant-ops/tests/schema_parity.rs.
+#
+# Sections, field names, and defaults are frozen — reorder/rename only with
+# a parity-version bump.
+
+parity_version: 1
+schema_version: "1.0"
+instance_name: "lamquant"
+
+sections:
+
+  - name: backend
+    fields:
+      - { key: mode,          type: enum,    values: [auto, rust, python, custom], default: auto, doc: "Which encode/decode engine to use." }
+      - { key: rust_binary,   type: string,  default: "lml",  doc: "Name or path of the Rust lml binary." }
+      - { key: custom_binary, type: string,  default: "",     doc: "Absolute path for mode=custom." }
+
+  - name: codec
+    fields:
+      - { key: default_mode,    type: enum,   values: [lossless, neural], default: lossless }
+      - { key: input_bits,      type: int,    default: 16,    range: [8, 32] }
+      - { key: window_samples,  type: int,    default: 2500,  range: [256, 65536] }
+      - { key: noise_bits,      type: int,    default: 0,     range: [0, 15] }
+      - { key: verification,    type: enum,   values: [paranoid, standard, fast], default: standard }
+
+  - name: codec.lossless
+    fields:
+      - { key: entropy_coder, type: enum,   values: [golomb_rice, rans], default: golomb_rice }
+      - { key: lpc_order,     type: int,    default: 4, range: [0, 16] }
+      - { key: use_lifting,   type: bool,   default: true }
+
+  - name: compute
+    fields:
+      - { key: workers,           type: int,    default: 0,    range: [0, 192], doc: "0 = auto (cores - 2 capped by RAM)." }
+      - { key: memory_limit_gib,  type: float,  default: 0.0,  range: [0.0, 1024.0], doc: "0 = unlimited." }
+      - { key: numba_cache_dir,   type: string, default: "" }
+
+  - name: integrity
+    fields:
+      - { key: window_checksum,        type: enum, values: [crc32, none], default: crc32 }
+      - { key: file_checksum,          type: enum, values: [sha256, none], default: sha256 }
+      - { key: verify_after_write,     type: bool, default: true }
+      - { key: verify_outliers,        type: bool, default: true }
+      - { key: reject_corrupted_input, type: bool, default: true }
+      - { key: refuse_double_strip,    type: bool, default: true }
+      - { key: fail_fast,              type: bool, default: false }
+
+  - name: resume
+    fields:
+      - { key: enabled,              type: bool,   default: true }
+      - { key: state_file,           type: string, default: ".lamquant_state.json" }
+      - { key: checkpoint_strategy,  type: enum,   values: [every_file, every_n, time_based], default: every_file }
+      - { key: on_existing_state,    type: enum,   values: [resume, prompt, restart], default: prompt }
+      - { key: skip_existing_output, type: bool,   default: true }
+      - { key: verify_skipped,       type: bool,   default: false }
+      - { key: quarantine_dir,       type: string, default: "" }
+      - { key: max_retries,          type: int,    default: 3, range: [0, 10] }
+      - { key: retry_backoff_s,      type: float,  default: 1.0, range: [0.0, 60.0] }
+
+  - name: output
+    fields:
+      - { key: refresh_hz,         type: float,  default: 10.0, range: [1.0, 60.0] }
+      - { key: color,              type: enum,   values: [auto, always, never], default: auto }
+      - { key: charset,            type: enum,   values: [auto, utf8, ascii],   default: auto }
+      - { key: dashboard_width,    type: int,    default: 80, range: [40, 240] }
+      - { key: show_spinner,       type: bool,   default: true }
+      - { key: spinner_style,      type: enum,   values: [braille, dots, line], default: braille }
+      - { key: verbose_per_file,   type: bool,   default: false }
+      - { key: truncate_filenames, type: bool,   default: true }
+      - { key: show_banner,        type: bool,   default: true }
+      - { key: show_summary,       type: bool,   default: true }
+      - { key: json_summary,       type: bool,   default: false }
+      - { key: splash_duration,    type: float,  default: 0.5, range: [0.0, 5.0] }
+      - { key: autocomplete,       type: bool,   default: true }
+      - { key: potato_mode,        type: bool,   default: false }
+      - { key: allow_root,         type: bool,   default: false }
+      - { key: warn_root,          type: bool,   default: true }
+      - { key: instant_nav,        type: bool,   default: false }
+      - { key: bell_on_done,       type: bool,   default: false }
+      - { key: default_ui_mode,    type: enum,   values: [vision, eagle, codec, train], default: vision, doc: "First-launch landing for the GUI; ignored by TUIs." }
+
+  - name: logging
+    fields:
+      - { key: audit_log,    type: string, default: "" }
+      - { key: manifest,     type: string, default: "manifest.lml.json" }
+      - { key: stderr_level, type: enum,   values: [debug, info, warn, error], default: info }
+
+  - name: input
+    fields:
+      - { key: extensions,       type: list_string, default: ["edf", "bdf"] }
+      - { key: recursive,        type: bool,        default: true }
+      - { key: follow_symlinks,  type: bool,        default: false }
+
+  - name: output_files
+    fields:
+      - { key: extension,         type: string, default: "lml" }
+      - { key: preserve_structure, type: bool,  default: true }
+      - { key: atomic_writes,     type: bool,   default: true }
+      - { key: fsync_on_write,    type: bool,   default: true }

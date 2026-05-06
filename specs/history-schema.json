@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openhuman.tech/schemas/lamquant/history.schema.json",
+  "title": "LamQuant history.json",
+  "description": "Persistent recent-activity record. Lives at ~/.config/lamquant/history.json (Linux), ~/Library/Application Support/lamquant/history.json (macOS), or %APPDATA%\\lamquant\\history.json (Windows). Atomic writes via temp+rename, fcntl-locked on Unix and LockFileEx on Windows.",
+  "type": "object",
+  "required": ["recent_operations", "recent_paths"],
+  "properties": {
+    "schema_version": { "type": "string", "default": "1.0" },
+    "recent_operations": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": ["action", "target", "when", "result"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Op id from specs/ui-parity.md::Op IDs."
+          },
+          "target": {
+            "type": "string",
+            "description": "Human-readable target — usually the input filename or path basename."
+          },
+          "when": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 UTC timestamp."
+          },
+          "result": {
+            "type": "string",
+            "enum": ["ok", "error", "cancelled", "partial"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "recent_paths": {
+      "type": "object",
+      "required": ["inputs", "outputs"],
+      "properties": {
+        "inputs":  { "type": "array", "maxItems": 10, "items": { "type": "string" } },
+        "outputs": { "type": "array", "maxItems": 10, "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
