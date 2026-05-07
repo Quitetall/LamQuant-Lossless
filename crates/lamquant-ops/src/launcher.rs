@@ -38,8 +38,14 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         "setup_musl"   => ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-core/Cargo.toml", "--bin", "lml", "--target", "x86_64-unknown-linux-musl"], "static linux build"),
         "setup_windows"=> ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-core/Cargo.toml", "--bin", "lml", "--target", "x86_64-pc-windows-gnu"], "windows build"),
 
-        // GUI launcher
-        "gui" => ("lamquant-gui", vec![], "Vision GUI"),
+        // GUI / visualization launchers
+        "gui"                => ("lamquant-gui",  vec![], "Vision GUI"),
+        "viz_lamquant-gui"   => ("lamquant-gui",  vec![], "Vision GUI"),
+        "viz_eeglab"         => ("eeglab",        vec![], "EEGLab"),
+        "viz_mne"            => ("python3",       vec!["-c", "import mne; mne.gui.browse_raw()"], "MNE-Python viewer"),
+        "viz_OpenBCIGUI"     => ("OpenBCIGUI",    vec![], "OpenBCI GUI"),
+        "viz_BVAnalyzer"     => ("BVAnalyzer",    vec![], "BrainVision Analyzer"),
+        "viz_besa"           => ("besa",          vec![], "BESA"),
 
         // Firmware exports
         "fw_export" => ("python", vec!["scripts/export_weights.py"], "export weights"),

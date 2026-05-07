@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "lamquant-core"
-version = "0.2.0"
+version = "7.7.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
