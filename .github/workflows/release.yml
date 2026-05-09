@@ -9,24 +9,55 @@ permissions:
 
 jobs:
   build-binaries:
+    # Phase D.1: ship both `lml` (codec CLI) and `lamquant` (launcher)
+    # per target. The launcher's --gui execs sibling lamquant-gui via
+    # current_exe()-relative resolve, so the two CLI binaries are
+    # always paired in release artifacts.
     strategy:
       matrix:
         include:
+          # lml — codec CLI
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            binary: lml
             name: lml-linux-x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            binary: lml
             name: lml-linux-aarch64
           - target: x86_64-apple-darwin
             os: macos-latest
+            binary: lml
             name: lml-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
+            binary: lml
             name: lml-macos-aarch64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            binary: lml
             name: lml-windows-x86_64.exe
+          # lamquant — top-level launcher (TUI + GUI dispatch)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: lamquant
+            name: lamquant-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: lamquant
+            name: lamquant-linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            binary: lamquant
+            name: lamquant-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            binary: lamquant
+            name: lamquant-macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            binary: lamquant
+            name: lamquant-windows-x86_64.exe
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -42,15 +73,15 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release binary
-        run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin lml --target ${{ matrix.target }}
+        run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin ${{ matrix.binary }} --target ${{ matrix.target }}
 
       - name: Rename binary
         shell: bash
         run: |
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/lml.exe ${{ matrix.name }}
+            cp target/${{ matrix.target }}/release/${{ matrix.binary }}.exe ${{ matrix.name }}
           else
-            cp target/${{ matrix.target }}/release/lml ${{ matrix.name }}
+            cp target/${{ matrix.target }}/release/${{ matrix.binary }} ${{ matrix.name }}
           fi
 
       - name: Upload artifact
@@ -59,8 +90,67 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
 
+  build-gui:
+    # Phase D.2: bundle the Tauri GUI per platform via tauri-action.
+    # Outputs: linux .deb + .AppImage, macOS .dmg, Windows .msi.
+    # Signing certs not configured — bundles ship unsigned for v1; users
+    # see the "unverified developer" prompt on first run. Document in
+    # INSTALL.md. Linux .deb / .AppImage have no signing requirement.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            args: ''
+            artifact_glob: 'gui/src-tauri/target/release/bundle/{deb,appimage}/*.{deb,AppImage}'
+          - os: macos-latest
+            args: '--target universal-apple-darwin'
+            artifact_glob: 'gui/src-tauri/target/release/bundle/{dmg,macos}/*.{dmg,app.tar.gz}'
+          - os: windows-latest
+            args: ''
+            artifact_glob: 'gui/src-tauri/target/release/bundle/msi/*.msi'
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'gui/package-lock.json'
+
+      - name: Install Linux GUI deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf
+
+      - name: Install JS deps
+        working-directory: gui
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: gui
+          args: ${{ matrix.args }}
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: lamquant-gui-${{ matrix.os }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: warn
+
   create-release:
-    needs: build-binaries
+    needs: [build-binaries, build-gui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

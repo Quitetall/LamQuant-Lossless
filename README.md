@@ -46,11 +46,32 @@ git clone https://github.com/Quitetall/LamQuant.git && cd LamQuant
 pip install -e ".[all]"
 ```
 
-Rust CLI (single binary, no dependencies):
+Rust CLI (no dependencies):
 
 ```bash
+# Installs both `lml` (codec CLI) and `lamquant` (top-level launcher)
 cargo install --path lamquant-core
 ```
+
+`lamquant` is the recommended entrypoint — it auto-routes to the TUI
+(`lamquant --tui`), the desktop GUI (`lamquant --gui` if installed),
+or passes subcommands through to `lml` (`lamquant encode <file>`).
+
+Desktop GUI (Tauri):
+
+```bash
+# From source
+cd gui && npm install && npm run tauri build
+
+# Or download the pre-built bundle for your platform from the
+# v1.0+ release page:
+#   linux:   lamquant-gui_*.AppImage  /  lamquant-gui_*.deb
+#   macos:   lamquant-gui_*.dmg
+#   windows: lamquant-gui_*.msi
+```
+
+The GUI shares its op-event contract, config, and history with the
+TUI/CLI — same lamquant.toml, same operations.
 
 ---
 
