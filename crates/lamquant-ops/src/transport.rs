@@ -57,18 +57,28 @@ pub enum TransportKind {
 }
 
 /// SSH transport config. Security stance is "explicit only — no agent
-/// trust": the caller must specify a key path AND pin the peer's host
-/// fingerprint. This rejects the common mistakes (using `~/.ssh/id_rsa`
-/// for everything; no host-key check).
+/// trust": the caller must specify a key path AND a peer-specific
+/// known_hosts file. This rejects the common mistakes (using
+/// `~/.ssh/id_rsa` for everything; no host-key check).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshConfig {
     /// Username on the remote.
     pub user: String,
     /// Private key path. Used with `-i` and `-o IdentitiesOnly=yes`.
-    /// Agent fallback is explicitly disabled at SSH level (`-o IdentityAgent=none`).
+    /// Agent fallback is explicitly disabled at SSH level
+    /// (`-o IdentitiesOnly=yes`).
     pub key_path: PathBuf,
-    /// Pinned host-key fingerprint, e.g. "SHA256:abc123…".
-    /// Mismatch = refuse. Empty/missing = refuse.
+    /// Per-peer known_hosts file containing ONLY this peer's host public
+    /// key. Generate once with:
+    ///   ssh-keyscan -H <host> > /path/to/peer-known-hosts
+    /// Used with `-o UserKnownHostsFile=<path> -o StrictHostKeyChecking=yes`
+    /// so SSH refuses connection if the host key doesn't match.
+    pub known_hosts: PathBuf,
+    /// Display-only fingerprint tag (e.g. "SHA256:abc123…"). Shown in the
+    /// Peers panel so users can visually verify the configured host. SSH
+    /// itself enforces the host key via `known_hosts` — this field is
+    /// not used in security checks.
+    #[serde(default)]
     pub host_fingerprint: String,
     /// SSH port. Defaults to 22 if omitted.
     #[serde(default = "default_ssh_port")]
