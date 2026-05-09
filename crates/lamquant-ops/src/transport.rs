@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::sink::OpReceiver;
 
 /// One configured remote machine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
     /// Stable identifier — used in TrackedProcess.peer + state.selected_peer.
     pub id: String,
@@ -45,7 +45,7 @@ pub struct Peer {
 
 /// Tagged transport variant. Switching variant swaps which `Transport` impl
 /// the dispatcher uses for this peer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum TransportKind {
     /// SSH transport — the only variant shipped today.
@@ -60,7 +60,7 @@ pub enum TransportKind {
 /// trust": the caller must specify a key path AND a peer-specific
 /// known_hosts file. This rejects the common mistakes (using
 /// `~/.ssh/id_rsa` for everything; no host-key check).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshConfig {
     /// Username on the remote.
     pub user: String,
