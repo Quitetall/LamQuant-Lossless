@@ -34,6 +34,11 @@ from lamquant_codec.contract import CONTRACTS, check_contract, check_contract_st
 
 RAW_BYTES_PER_WINDOW = 21 * 2500 * 2  # 105,000 bytes (int16)
 
+# Canonical codec window length in samples. Used as the val_window fixture's
+# fallback when q31 npz files lack a precomputed 'l3' field. Must be ≤ 65535
+# so that codec's uint16 T-field doesn't overflow on write_window.
+CODEC_CANONICAL_SPW = 2500
+
 # Track foundation-level results so dependent tests can skip early
 _foundations = {'lifting': False, 'rans': False, 'model': False, 'codec': False}
 
@@ -61,14 +66,13 @@ def val_window():
         raw = d['data']
         # Precomputed 'l3' has shape [num_windows, 21, 313]; samples-per-
         # window = total / num_windows. When 'l3' is missing (preprocess.py
-        # output without the L3-precompute step), default to 2500 — the
-        # canonical codec window. Capping is required: the codec header
-        # packs T as uint16 (max 65535), so feeding a full 118250-sample
-        # recording overflows on write_window.
-        if 'l3' in d.files:
+        # output without the L3-precompute step), default to the canonical
+        # codec window. The codec header packs T as uint16 (max 65535),
+        # so feeding a full multi-minute recording overflows write_window.
+        if 'l3' in d.files and d['l3'].shape[0] > 0:
             spw = raw.shape[1] // d['l3'].shape[0]
         else:
-            spw = 2500
+            spw = CODEC_CANONICAL_SPW
         spw = min(spw, raw.shape[1])
         seg = (raw[:, :spw].astype(np.float32) / 2147483647.0) * 1000.0
     else:
