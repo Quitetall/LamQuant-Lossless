@@ -60,11 +60,15 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
                 // are reported. Final exit code reflects whether either
                 // step encountered a real error.
                 "rc=0; \
-                 if rm -rf ~/.cache/lamquant; then \
-                     echo '✓ ~/.cache/lamquant cleared'; \
+                 if [ -e ~/.cache/lamquant ]; then \
+                     if rm -rf ~/.cache/lamquant; then \
+                         echo '✓ ~/.cache/lamquant cleared'; \
+                     else \
+                         echo '✗ rm -rf ~/.cache/lamquant failed (permissions?)'; \
+                         rc=1; \
+                     fi; \
                  else \
-                     echo '✗ rm -rf ~/.cache/lamquant failed (permissions?)'; \
-                     rc=1; \
+                     echo '— ~/.cache/lamquant did not exist; nothing to clear'; \
                  fi; \
                  if command -v tmux >/dev/null 2>&1; then \
                      out=$(tmux kill-session -t lamquant-train 2>&1); \
@@ -95,7 +99,7 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
                 // only files under a `checkpoints/` directory inside a
                 // run, not arbitrary files with "checkpoint" in the name.
                 "if [ -d runs ]; then \
-                     hits=$(find runs -maxdepth 4 -path 'runs/*/checkpoints/*' -type f 2>/dev/null | sort -r | head -100); \
+                     hits=$(find runs -maxdepth 6 -path 'runs/*/checkpoints/*' -type f 2>/dev/null | sort -r | head -100); \
                      if [ -z \"$hits\" ]; then \
                          echo 'no checkpoints found under runs/*/checkpoints/'; \
                      else \
