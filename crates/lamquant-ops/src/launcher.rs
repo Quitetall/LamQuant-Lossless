@@ -47,6 +47,52 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         "viz_BVAnalyzer"     => ("BVAnalyzer",    vec![], "BrainVision Analyzer"),
         "viz_besa"           => ("besa",          vec![], "BESA"),
 
+        // Cockpit utilities (Phase B.2 wiring of [r/c/m] keys).
+        // Linux/macOS only — sh -c shell pipelines. Windows users see
+        // the same status sidebar entry; the launcher itself fails fast.
+        "cockpit_reset" => (
+            "sh",
+            vec![
+                "-c",
+                "rm -rf ~/.cache/lamquant 2>/dev/null; \
+                 tmux kill-session -t lamquant-train 2>/dev/null; \
+                 echo 'reset complete: ~/.cache/lamquant cleared, tmux session killed (if any)'",
+            ],
+            "reset: cache + tmux",
+        ),
+        "cockpit_checkpoints" => (
+            "sh",
+            vec![
+                "-c",
+                "if [ -d runs ]; then \
+                     find runs -maxdepth 4 -path '*checkpoints*' -type f 2>/dev/null \
+                       | sort -r | head -100; \
+                 else \
+                     echo 'no runs/ directory in cwd ('\"$PWD\"')'; \
+                 fi",
+            ],
+            "list checkpoints",
+        ),
+        "cockpit_metrics" => (
+            "sh",
+            vec![
+                "-c",
+                "latest=$(ls -td runs/*/ 2>/dev/null | head -1); \
+                 if [ -z \"$latest\" ]; then \
+                     echo 'no runs/ directory'; \
+                     exit 1; \
+                 fi; \
+                 log=\"${latest}log.txt\"; \
+                 if [ -f \"$log\" ]; then \
+                     echo \"# tailing $log\"; \
+                     tail -200 \"$log\"; \
+                 else \
+                     echo \"no log.txt in $latest (looked for $log)\"; \
+                 fi",
+            ],
+            "tail latest log",
+        ),
+
         // Firmware exports
         "fw_export" => ("python", vec!["scripts/export_weights.py"], "export weights"),
 
