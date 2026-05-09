@@ -141,8 +141,13 @@ impl OpEventSink for MpscSink {
     }
 }
 
+/// Receiving half of the op-event channel. Type alias so callers don't
+/// have to spell out `mpsc::Receiver<OpEvent>` every time. Used by the
+/// [`crate::transport::Transport`] trait return type.
+pub type OpReceiver = mpsc::Receiver<OpEvent>;
+
 /// Convenience: create a paired (sender-sink, receiver) for in-process use.
-pub fn channel() -> (MpscSink, mpsc::Receiver<OpEvent>) {
+pub fn channel() -> (MpscSink, OpReceiver) {
     let (tx, rx) = mpsc::channel();
     (MpscSink::new(tx), rx)
 }

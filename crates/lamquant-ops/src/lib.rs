@@ -22,11 +22,16 @@ pub mod launcher;
 pub mod op_spec;
 pub mod runner;
 pub mod sink;
+pub mod transport;
 
 pub use launcher::launcher;
 pub use op_spec::{op_spec, OpSpec};
 pub use runner::{spawn_command, spawn_lml, OpHandle};
 pub use sink::{MpscSink, OpEventSink, OpProgressSnapshot, OpState};
+pub use transport::{
+    Peer, PeerHealth, PeerInfo, RemoteHandle, RemotePath, SshConfig,
+    Transport, TransportError, TransportKind,
+};
 
 use serde::{Deserialize, Serialize};
 
