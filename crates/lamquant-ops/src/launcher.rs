@@ -54,9 +54,36 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
             "sh",
             vec![
                 "-c",
-                "rm -rf ~/.cache/lamquant 2>/dev/null; \
-                 tmux kill-session -t lamquant-train 2>/dev/null; \
-                 echo 'reset complete: ~/.cache/lamquant cleared, tmux session killed (if any)'",
+                // Two destructive operations, each with honest exit
+                // reporting. tmux missing-session is normal (no error);
+                // tmux command-not-installed is reported. rm failures
+                // are reported. Final exit code reflects whether either
+                // step encountered a real error.
+                "rc=0; \
+                 if rm -rf ~/.cache/lamquant; then \
+                     echo '✓ ~/.cache/lamquant cleared'; \
+                 else \
+                     echo '✗ rm -rf ~/.cache/lamquant failed (permissions?)'; \
+                     rc=1; \
+                 fi; \
+                 if command -v tmux >/dev/null 2>&1; then \
+                     out=$(tmux kill-session -t lamquant-train 2>&1); \
+                     case \"$out\" in \
+                         *\"can't find session\"*|'') \
+                             echo '✓ tmux: no lamquant-train session running' ;; \
+                         *) \
+                             echo \"✗ tmux kill-session failed: $out\"; \
+                             rc=1 ;; \
+                     esac; \
+                 else \
+                     echo '— tmux not installed; skipped session kill'; \
+                 fi; \
+                 if [ \"$rc\" = 0 ]; then \
+                     echo 'reset complete'; \
+                 else \
+                     echo 'reset finished with errors'; \
+                 fi; \
+                 exit $rc",
             ],
             "reset: cache + tmux",
         ),
@@ -64,9 +91,16 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
             "sh",
             vec![
                 "-c",
+                // Tighter glob: -path 'runs/*/checkpoints/*' so we match
+                // only files under a `checkpoints/` directory inside a
+                // run, not arbitrary files with "checkpoint" in the name.
                 "if [ -d runs ]; then \
-                     find runs -maxdepth 4 -path '*checkpoints*' -type f 2>/dev/null \
-                       | sort -r | head -100; \
+                     hits=$(find runs -maxdepth 4 -path 'runs/*/checkpoints/*' -type f 2>/dev/null | sort -r | head -100); \
+                     if [ -z \"$hits\" ]; then \
+                         echo 'no checkpoints found under runs/*/checkpoints/'; \
+                     else \
+                         echo \"$hits\"; \
+                     fi; \
                  else \
                      echo 'no runs/ directory in cwd ('\"$PWD\"')'; \
                  fi",
@@ -77,10 +111,17 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
             "sh",
             vec![
                 "-c",
-                "latest=$(ls -td runs/*/ 2>/dev/null | head -1); \
+                // Distinguishes "no runs/ at all" from "runs/ exists but
+                // empty"; both are non-error exits since training just
+                // hasn't started yet.
+                "if [ ! -d runs ]; then \
+                     echo 'no runs/ directory in cwd ('\"$PWD\"')'; \
+                     exit 0; \
+                 fi; \
+                 latest=$(ls -td runs/*/ 2>/dev/null | head -1); \
                  if [ -z \"$latest\" ]; then \
-                     echo 'no runs/ directory'; \
-                     exit 1; \
+                     echo 'no training runs found under runs/'; \
+                     exit 0; \
                  fi; \
                  log=\"${latest}log.txt\"; \
                  if [ -f \"$log\" ]; then \
