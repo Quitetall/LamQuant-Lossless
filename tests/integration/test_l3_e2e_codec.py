@@ -59,9 +59,17 @@ def val_window():
     if files:
         d = np.load(files[0])
         raw = d['data']
-        # Precomputed 'l3' has shape [num_windows, 21, 313]; fall back to
-        # the full file length if 'l3' is missing.
-        spw = raw.shape[1] // d['l3'].shape[0] if 'l3' in d.files else raw.shape[1]
+        # Precomputed 'l3' has shape [num_windows, 21, 313]; samples-per-
+        # window = total / num_windows. When 'l3' is missing (preprocess.py
+        # output without the L3-precompute step), default to 2500 — the
+        # canonical codec window. Capping is required: the codec header
+        # packs T as uint16 (max 65535), so feeding a full 118250-sample
+        # recording overflows on write_window.
+        if 'l3' in d.files:
+            spw = raw.shape[1] // d['l3'].shape[0]
+        else:
+            spw = 2500
+        spw = min(spw, raw.shape[1])
         seg = (raw[:, :spw].astype(np.float32) / 2147483647.0) * 1000.0
     else:
         # Synthetic EEG-like signal: mixed low-frequency rhythms + mild noise.
