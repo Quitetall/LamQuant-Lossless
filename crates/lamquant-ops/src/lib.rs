@@ -32,6 +32,7 @@ pub use transport::{
     Peer, PeerHealth, PeerInfo, RemoteHandle, RemotePath, SshConfig,
     Transport, TransportError, TransportKind,
 };
+pub use transport::ssh::SshTransport;
 
 use serde::{Deserialize, Serialize};
 
