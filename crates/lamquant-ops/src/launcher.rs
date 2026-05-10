@@ -52,6 +52,17 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         // package-manager install for that tool. Network access
         // required; failures show in the output panel and the
         // visualization panel's [r] re-probe surfaces success.
+        // Vision GUI build — runs `cargo install` against the
+        // gui/src-tauri crate. Requires repo-root cwd (so the
+        // --path arg resolves) and the Tauri Linux webview deps:
+        //   apt: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+        // Output panel surfaces compile errors verbatim so users
+        // can diagnose missing system libs.
+        "viz_install_lamquant_gui" => (
+            "cargo",
+            vec!["install", "--path", "gui/src-tauri", "--bin", "lamquant-gui"],
+            "install: cargo install lamquant-gui",
+        ),
         "viz_install_mne"        => ("pip",   vec!["install", "mne"],         "install: pip install mne"),
         "viz_install_scope_tui"  => ("cargo", vec!["install", "scope-tui"],   "install: cargo install scope-tui"),
         "viz_install_bottom"     => ("cargo", vec!["install", "bottom"],      "install: cargo install bottom"),
