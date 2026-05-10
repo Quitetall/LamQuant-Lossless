@@ -80,6 +80,15 @@ pub enum OpEvent {
         ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cr: Option<f64>,
+        /// Original (uncompressed) byte size. Drives the dashboard's
+        /// throughput + saved-bytes display. Optional for backward
+        /// compatibility with pre-dashboard emitters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes_in: Option<u64>,
+        /// Compressed output byte size. Same dashboard role as
+        /// bytes_in. Either both fields are present or neither.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes_out: Option<u64>,
     },
 
     /// Op completed successfully. Final event for a happy path.
@@ -172,6 +181,8 @@ mod tests {
             success: false,
             ms: 0,
             cr: None,
+            bytes_in: None,
+            bytes_out: None,
         };
         let line = ev.to_json_line();
         assert!(!line.contains("\"cr\""));

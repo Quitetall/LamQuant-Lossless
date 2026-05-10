@@ -59,16 +59,50 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         // Output panel surfaces compile errors verbatim so users
         // can diagnose missing system libs.
         "viz_install_lamquant_gui" => (
-            "cargo",
-            vec!["install", "--path", "gui/src-tauri", "--bin", "lamquant-gui"],
-            "install: cargo install lamquant-gui",
+            "sh",
+            vec![
+                "-c",
+                "set -e; \
+                 if ! command -v npm >/dev/null 2>&1; then \
+                     echo 'ERROR: npm not found — install Node.js first'; \
+                     exit 1; \
+                 fi; \
+                 if [ ! -d gui ]; then \
+                     echo 'ERROR: gui/ directory missing — run from repo root'; \
+                     exit 1; \
+                 fi; \
+                 echo '[1/3] npm install (frontend deps)'; \
+                 (cd gui && npm install); \
+                 echo '[2/3] npm run build (Vite frontend bundle)'; \
+                 (cd gui && npm run build); \
+                 echo '[3/3] cargo install lamquant-gui (release embeds frontend)'; \
+                 cargo install --path gui/src-tauri --bin lamquant-gui --force; \
+                 echo 'install complete — re-launch with `lamquant --gui` or [r] to re-probe'",
+            ],
+            "install: build + cargo install Vision GUI",
         ),
-        "viz_install_mne"        => ("pip",   vec!["install", "mne"],         "install: pip install mne"),
-        "viz_install_scope_tui"  => ("cargo", vec!["install", "scope-tui"],   "install: cargo install scope-tui"),
-        "viz_install_bottom"     => ("cargo", vec!["install", "bottom"],      "install: cargo install bottom"),
-        "viz_install_television" => ("cargo", vec!["install", "television"],  "install: cargo install television"),
-        "viz_install_csvlens"    => ("cargo", vec!["install", "csvlens"],     "install: cargo install csvlens"),
-        "viz_install_gitui"      => ("cargo", vec!["install", "gitui"],       "install: cargo install gitui"),
+        // --force / --force-reinstall lets the same launcher serve
+        // both first-install AND repair (re-fire on a working
+        // install just rebuilds it). Companion viz_uninstall_<tool>
+        // launchers below remove the tool.
+        "viz_install_mne"        => ("pip",   vec!["install", "--force-reinstall", "mne"],     "install: pip install mne"),
+        "viz_install_scope_tui"  => ("cargo", vec!["install", "--force", "scope-tui"],         "install: cargo install scope-tui"),
+        "viz_install_bottom"     => ("cargo", vec!["install", "--force", "bottom"],            "install: cargo install bottom"),
+        "viz_install_television" => ("cargo", vec!["install", "--force", "television"],        "install: cargo install television"),
+        "viz_install_csvlens"    => ("cargo", vec!["install", "--force", "csvlens"],           "install: cargo install csvlens"),
+        "viz_install_gitui"      => ("cargo", vec!["install", "--force", "gitui"],             "install: cargo install gitui"),
+
+        // Uninstall companions — pair with viz_install_<tool> entries.
+        // Vision GUI: cargo uninstall removes ~/.cargo/bin/lamquant-gui
+        // but does NOT clean gui/build/ (frontend dist) — it's source
+        // tree the user owns.
+        "viz_uninstall_lamquant_gui" => ("cargo", vec!["uninstall", "lamquant-gui"], "uninstall: cargo uninstall lamquant-gui"),
+        "viz_uninstall_mne"          => ("pip",   vec!["uninstall", "-y", "mne"],   "uninstall: pip uninstall mne"),
+        "viz_uninstall_scope_tui"    => ("cargo", vec!["uninstall", "scope-tui"],   "uninstall: cargo uninstall scope-tui"),
+        "viz_uninstall_bottom"       => ("cargo", vec!["uninstall", "bottom"],      "uninstall: cargo uninstall bottom"),
+        "viz_uninstall_television"   => ("cargo", vec!["uninstall", "television"],  "uninstall: cargo uninstall television"),
+        "viz_uninstall_csvlens"      => ("cargo", vec!["uninstall", "csvlens"],     "uninstall: cargo uninstall csvlens"),
+        "viz_uninstall_gitui"        => ("cargo", vec!["uninstall", "gitui"],       "uninstall: cargo uninstall gitui"),
 
         // Cockpit utilities (Phase B.2 wiring of [r/c/m] keys).
         // Linux/macOS only — sh -c shell pipelines. Windows users see

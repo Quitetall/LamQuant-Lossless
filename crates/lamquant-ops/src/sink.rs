@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(snap.current, 3);
         assert_eq!(snap.message, "f3");
 
-        snap.apply(&OpEvent::FileDone { ts_ms: 0, path: "f3.lml".into(), success: true, ms: 1, cr: Some(2.0) });
+        snap.apply(&OpEvent::FileDone { ts_ms: 0, path: "f3.lml".into(), success: true, ms: 1, cr: Some(2.0), bytes_in: None, bytes_out: None });
         assert_eq!(snap.last_file.as_deref(), Some("f3.lml"));
 
         snap.apply(&OpEvent::Done { ts_ms: 0, message: "ok".into() });

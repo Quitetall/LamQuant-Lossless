@@ -50,6 +50,16 @@
       "type": "integer",
       "minimum": 0,
       "description": "FileDone: wall-clock milliseconds the file took."
+    },
+    "bytes_in": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: original (uncompressed) byte size. Drives the dashboard throughput + saved-bytes display. Optional for backward compatibility."
+    },
+    "bytes_out": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: compressed output byte size. Drives the dashboard throughput + saved-bytes display. Optional."
     }
   },
   "allOf": [

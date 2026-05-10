@@ -71,6 +71,8 @@ fn rust_emit_matches_schema() {
             success: true,
             ms: 120,
             cr: Some(2.5),
+            bytes_in: Some(1_048_576),
+            bytes_out: Some(419_430),
         },
         OpEvent::FileDone {
             ts_ms: 1_730_000_001_000,
@@ -78,6 +80,8 @@ fn rust_emit_matches_schema() {
             success: false,
             ms: 7,
             cr: None,
+            bytes_in: None,
+            bytes_out: None,
         },
         OpEvent::Done {
             ts_ms: 1_730_000_002_000,
@@ -111,8 +115,8 @@ fn rust_round_trip_preserves_variants() {
         OpEvent::Started { ts_ms: 1, op_id: "x".into(), total: None },
         OpEvent::Started { ts_ms: 2, op_id: "y".into(), total: Some(10) },
         OpEvent::Progress { ts_ms: 3, current: 1, total: 10, message: "m".into() },
-        OpEvent::FileDone { ts_ms: 4, path: "p".into(), success: true, ms: 5, cr: Some(1.5) },
-        OpEvent::FileDone { ts_ms: 5, path: "p".into(), success: false, ms: 0, cr: None },
+        OpEvent::FileDone { ts_ms: 4, path: "p".into(), success: true, ms: 5, cr: Some(1.5), bytes_in: None, bytes_out: None },
+        OpEvent::FileDone { ts_ms: 5, path: "p".into(), success: false, ms: 0, cr: None, bytes_in: None, bytes_out: None },
         OpEvent::Done { ts_ms: 6, message: "done".into() },
         OpEvent::Error { ts_ms: 7, message: "fail".into() },
         OpEvent::Log { ts_ms: 8, message: "log".into() },
