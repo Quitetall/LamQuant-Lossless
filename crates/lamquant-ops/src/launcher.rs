@@ -62,22 +62,30 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
             "sh",
             vec![
                 "-c",
-                "set -e; \
-                 if ! command -v npm >/dev/null 2>&1; then \
-                     echo 'ERROR: npm not found — install Node.js first'; \
-                     exit 1; \
-                 fi; \
-                 if [ ! -d gui ]; then \
-                     echo 'ERROR: gui/ directory missing — run from repo root'; \
-                     exit 1; \
-                 fi; \
-                 echo '[1/3] npm install (frontend deps)'; \
-                 (cd gui && npm install); \
-                 echo '[2/3] npm run build (Vite frontend bundle)'; \
-                 (cd gui && npm run build); \
-                 echo '[3/3] cargo install lamquant-gui (release embeds frontend)'; \
-                 cargo install --path gui/src-tauri --bin lamquant-gui --force; \
-                 echo 'install complete — re-launch with `lamquant --gui` or [r] to re-probe'",
+                // 3-step build with strict per-step failure surfacing.
+                // Each step writes a clear PASS/FAIL/STARTED marker so
+                // even a wall of svelte/vite warnings can't bury the
+                // final outcome. Logs persist at /tmp/lamquant-gui-install.log
+                // for post-mortem inspection; tail -F that file in
+                // another terminal to follow live.
+                "LOG=/tmp/lamquant-gui-install.log; \
+                 : > \"$LOG\"; \
+                 mark()  { echo \"\"; echo \"========== $1 ==========\"; echo \"$1\" >> \"$LOG\"; }; \
+                 fail()  { echo \"\"; echo \"########## INSTALL FAILED — $1 ##########\"; echo \"see $LOG\"; exit 1; }; \
+                 if ! command -v npm >/dev/null 2>&1; then fail 'npm not found (install Node.js first)'; fi; \
+                 if ! command -v cargo >/dev/null 2>&1; then fail 'cargo not found (install Rust toolchain)'; fi; \
+                 if [ ! -d gui ]; then fail 'gui/ directory missing — run from repo root'; fi; \
+                 mark '[1/3] npm install (frontend deps)'; \
+                 (cd gui && npm install) 2>&1 | tee -a \"$LOG\" || fail 'step 1: npm install'; \
+                 mark '[2/3] npm run build (Vite/SvelteKit frontend bundle)'; \
+                 (cd gui && npm run build) 2>&1 | tee -a \"$LOG\" || fail 'step 2: npm run build'; \
+                 mark '[3/3] cargo install lamquant-gui --force (release, embeds frontend)'; \
+                 cargo install --path gui/src-tauri --bin lamquant-gui --force 2>&1 | tee -a \"$LOG\" || fail 'step 3: cargo install'; \
+                 echo \"\"; \
+                 echo '########## INSTALL COMPLETE ##########'; \
+                 echo \"binary: $(command -v lamquant-gui || echo '<not on PATH — restart shell>')\"; \
+                 echo \"log:    $LOG\"; \
+                 echo 're-launch via `lamquant --gui` or [r] in the viz panel'",
             ],
             "install: build + cargo install Vision GUI",
         ),
