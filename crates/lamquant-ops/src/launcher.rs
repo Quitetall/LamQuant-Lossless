@@ -75,20 +75,29 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
                  if ! command -v npm >/dev/null 2>&1; then fail 'npm not found (install Node.js first)'; fi; \
                  if ! command -v cargo >/dev/null 2>&1; then fail 'cargo not found (install Rust toolchain)'; fi; \
                  if [ ! -d gui ]; then fail 'gui/ directory missing — run from repo root'; fi; \
-                 mark '[1/5] cleanup stale install (rm + cargo clean)'; \
+                 mark '[1/4] cleanup stale install + caches'; \
                  BINPATH=\"$(command -v lamquant-gui 2>/dev/null || echo '')\"; \
                  if [ -n \"$BINPATH\" ]; then echo \"removing $BINPATH\"; rm -f \"$BINPATH\"; fi; \
                  cargo clean -p lamquant-gui 2>&1 | tee -a \"$LOG\" || true; \
-                 mark '[2/5] npm install (frontend deps)'; \
+                 rm -rf gui/src-tauri/target/release/build/lamquant-gui-* 2>/dev/null || true; \
+                 rm -rf gui/build 2>/dev/null || true; \
+                 mark '[2/4] npm install (frontend deps)'; \
                  (cd gui && npm install) 2>&1 | tee -a \"$LOG\" || fail 'step 2: npm install'; \
-                 mark '[3/5] npm run build (Vite/SvelteKit frontend bundle)'; \
-                 (cd gui && npm run build) 2>&1 | tee -a \"$LOG\" || fail 'step 3: npm run build'; \
-                 mark '[4/5] cargo install lamquant-gui --force (release, embeds frontend)'; \
-                 cargo install --path gui/src-tauri --bin lamquant-gui --force 2>&1 | tee -a \"$LOG\" || fail 'step 4: cargo install'; \
-                 mark '[5/5] verify install'; \
-                 NEWPATH=\"$(command -v lamquant-gui 2>/dev/null || echo '')\"; \
-                 if [ -z \"$NEWPATH\" ]; then fail 'step 5: binary not on PATH after install'; fi; \
-                 echo \"installed at $NEWPATH ($(stat -c %y \"$NEWPATH\" 2>/dev/null || echo unknown))\"; \
+                 mark '[3/4] tauri build --no-bundle (Tauri CLI: embeds frontend via tauri-build)'; \
+                 (cd gui && ./node_modules/.bin/tauri build --no-bundle) 2>&1 | tee -a \"$LOG\" || fail 'step 3: tauri build'; \
+                 mark '[4/4] copy binary into ~/.cargo/bin/ and verify'; \
+                 SRC=target/release/lamquant-gui; \
+                 if [ ! -f \"$SRC\" ]; then SRC=gui/src-tauri/target/release/lamquant-gui; fi; \
+                 if [ ! -f \"$SRC\" ]; then fail 'step 4: tauri build did not produce a binary in target/release/'; fi; \
+                 mkdir -p \"$HOME/.cargo/bin\"; \
+                 cp -f \"$SRC\" \"$HOME/.cargo/bin/lamquant-gui\"; \
+                 chmod +x \"$HOME/.cargo/bin/lamquant-gui\"; \
+                 NEWPATH=\"$HOME/.cargo/bin/lamquant-gui\"; \
+                 echo \"copied $SRC → $NEWPATH\"; \
+                 echo \"binary stat: $(stat -c %y \"$NEWPATH\")\"; \
+                 EMBED_COUNT=$(strings \"$NEWPATH\" 2>/dev/null | grep -c _app/immutable || echo 0); \
+                 echo \"embedded SvelteKit asset refs found: $EMBED_COUNT\"; \
+                 if [ \"$EMBED_COUNT\" = 0 ]; then fail 'step 4: binary has 0 embedded frontend assets — build pipeline broken'; fi; \
                  echo \"\"; \
                  echo '########## INSTALL COMPLETE ##########'; \
                  echo \"binary: $NEWPATH\"; \
