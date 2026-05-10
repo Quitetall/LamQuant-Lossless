@@ -51,12 +51,24 @@ impl OpSpec {
 pub fn op_spec(op_id: &str) -> Option<OpSpec> {
     Some(match op_id {
         "encode" | "encode_neural" => OpSpec {
+            // Paranoid clinical-grade defaults: --verify confirms the
+            // container CRC; --cross-validate decodes the just-written
+            // LML and SHA-256 compares samples against the source EDF
+            // before reporting success. The encode command runs in
+            // lossless mode by default (noise_bits=0).
             cmd: "encode", input: true, output: true,
-            output_flag: "-o", recursive: true, extra: &["--verify"],
+            output_flag: "-o", recursive: true,
+            extra: &["--verify", "--cross-validate"],
         },
         "decode" | "decode_neural" => OpSpec {
+            // --to-edf reconstructs a byte-identical EDF/BDF (header +
+            // data records + trailing) from the LML container, instead
+            // of the legacy raw int32 LE sample dump. Required for the
+            // "decompressed file = source file" guarantee — without
+            // this flag, the decoder output is sample data only and
+            // cannot SHA-match the original.
             cmd: "decode", input: true, output: true,
-            output_flag: "-o", recursive: true, extra: &[],
+            output_flag: "-o", recursive: true, extra: &["--to-edf"],
         },
         "verify" => OpSpec {
             cmd: "verify", input: true, output: false,
