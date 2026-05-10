@@ -47,6 +47,18 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         "viz_BVAnalyzer"     => ("BVAnalyzer",    vec![], "BrainVision Analyzer"),
         "viz_besa"           => ("besa",          vec![], "BESA"),
 
+        // Auto-install launchers fired by the visualization panel's
+        // [Enter]/[i] key on missing tools. Each runs the standard
+        // package-manager install for that tool. Network access
+        // required; failures show in the output panel and the
+        // visualization panel's [r] re-probe surfaces success.
+        "viz_install_mne"        => ("pip",   vec!["install", "mne"],         "install: pip install mne"),
+        "viz_install_scope_tui"  => ("cargo", vec!["install", "scope-tui"],   "install: cargo install scope-tui"),
+        "viz_install_bottom"     => ("cargo", vec!["install", "bottom"],      "install: cargo install bottom"),
+        "viz_install_television" => ("cargo", vec!["install", "television"],  "install: cargo install television"),
+        "viz_install_csvlens"    => ("cargo", vec!["install", "csvlens"],     "install: cargo install csvlens"),
+        "viz_install_gitui"      => ("cargo", vec!["install", "gitui"],       "install: cargo install gitui"),
+
         // Cockpit utilities (Phase B.2 wiring of [r/c/m] keys).
         // Linux/macOS only — sh -c shell pipelines. Windows users see
         // the same status sidebar entry; the launcher itself fails fast.
