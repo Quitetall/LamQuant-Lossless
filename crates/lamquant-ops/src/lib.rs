@@ -73,6 +73,11 @@ pub enum OpEvent {
     },
 
     /// One file in a multi-file op completed (success or failure).
+    ///
+    /// All optional fields are present-and-meaningful or absent — never
+    /// half-populated. Older emitters that don't carry the extended
+    /// telemetry simply leave these as None, and the dashboard falls
+    /// back to "—" for the corresponding rows.
     FileDone {
         ts_ms: i64,
         path: String,
@@ -89,6 +94,29 @@ pub enum OpEvent {
         /// bytes_in. Either both fields are present or neither.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bytes_out: Option<u64>,
+        /// Total sample count for the file (n_channels * n_samples).
+        /// Drives "Samples" + Shannon-efficiency math on the dashboard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        samples: Option<u64>,
+        /// Wall-clock duration of the recording in seconds. Drives
+        /// "EEG hours" on the dashboard / completion summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_s: Option<f64>,
+        /// Channel count parsed from the EDF header. Drives the
+        /// effective-bitrate display (kbps @ Nch @ sample_rate).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        n_channels: Option<u32>,
+        /// Sample rate (Hz). Combined with n_channels for the kbps
+        /// readout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample_rate: Option<f32>,
+        /// SHA-256 of the compressed file (hex-encoded). Carries
+        /// integrity proof through to the audit log + manifest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+        /// Number of LMQ/LML windows in the compressed file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        n_windows: Option<u32>,
     },
 
     /// Op completed successfully. Final event for a happy path.
@@ -183,6 +211,12 @@ mod tests {
             cr: None,
             bytes_in: None,
             bytes_out: None,
+            samples: None,
+            duration_s: None,
+            n_channels: None,
+            sample_rate: None,
+            sha256: None,
+            n_windows: None,
         };
         let line = ev.to_json_line();
         assert!(!line.contains("\"cr\""));
@@ -191,6 +225,48 @@ mod tests {
             OpEvent::FileDone { success, cr, .. } => {
                 assert!(!success);
                 assert_eq!(cr, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn round_trip_filedone_full_telemetry() {
+        let ev = OpEvent::FileDone {
+            ts_ms: 1,
+            path: "a.lml".into(),
+            success: true,
+            ms: 120,
+            cr: Some(2.5),
+            bytes_in: Some(1_000_000),
+            bytes_out: Some(400_000),
+            samples: Some(5_250_000),
+            duration_s: Some(1000.0),
+            n_channels: Some(21),
+            sample_rate: Some(250.0),
+            sha256: Some("deadbeef".into()),
+            n_windows: Some(100),
+        };
+        let line = ev.to_json_line();
+        assert!(line.contains("\"samples\":5250000"));
+        assert!(line.contains("\"sha256\":\"deadbeef\""));
+        let back = OpEvent::from_json_line(&line).unwrap();
+        match back {
+            OpEvent::FileDone {
+                samples,
+                duration_s,
+                n_channels,
+                sample_rate,
+                sha256,
+                n_windows,
+                ..
+            } => {
+                assert_eq!(samples, Some(5_250_000));
+                assert_eq!(duration_s, Some(1000.0));
+                assert_eq!(n_channels, Some(21));
+                assert_eq!(sample_rate, Some(250.0));
+                assert_eq!(sha256.as_deref(), Some("deadbeef"));
+                assert_eq!(n_windows, Some(100));
             }
             _ => panic!("wrong variant"),
         }

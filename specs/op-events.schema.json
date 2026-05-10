@@ -60,6 +60,35 @@
       "type": ["integer", "null"],
       "minimum": 0,
       "description": "FileDone: compressed output byte size. Drives the dashboard throughput + saved-bytes display. Optional."
+    },
+    "samples": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: total sample count for the file (n_channels * n_samples). Drives Samples + Shannon-efficiency math on the dashboard. Optional."
+    },
+    "duration_s": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "FileDone: wall-clock duration of the recording in seconds. Drives EEG hours on the dashboard / completion summary. Optional."
+    },
+    "n_channels": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: channel count parsed from the EDF header. Drives the effective-bitrate display. Optional."
+    },
+    "sample_rate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "FileDone: sample rate (Hz). Combined with n_channels for the kbps readout. Optional."
+    },
+    "sha256": {
+      "type": ["string", "null"],
+      "description": "FileDone: SHA-256 of the compressed file (hex-encoded). Carries integrity proof through to the audit log + manifest. Optional."
+    },
+    "n_windows": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: number of LMQ/LML windows in the compressed file. Optional."
     }
   },
   "allOf": [
