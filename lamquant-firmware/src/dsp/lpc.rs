@@ -64,19 +64,24 @@ fn mul_q31(a: i32, b: i32) -> i32 {
 /// 4× unrolled inner loop, matches C reference at firmware/dsp/lpc_predictor.c.
 #[inline]
 fn autocorrelation(x: &[i32], len: usize, order: usize, r_out: &mut [i64]) {
+    // Audit-2026-05-11 Fix-C26: wrapping arithmetic throughout so the
+    // firmware path produces bit-identical output to lamquant-core's
+    // `lpc::analyze` on every input, including overflow-inducing
+    // adversarial signals (Q27 coeff × i64 sample can overflow i64 at
+    // saturation; consistent wrapping keeps encode + decode aligned).
     for k in 0..=order {
         let mut acc: i64 = 0;
         let mut n = k;
         let limit = k + ((len - k) & !3);
         while n < limit {
-            acc += (x[n] as i64) * (x[n - k] as i64);
-            acc += (x[n + 1] as i64) * (x[n + 1 - k] as i64);
-            acc += (x[n + 2] as i64) * (x[n + 2 - k] as i64);
-            acc += (x[n + 3] as i64) * (x[n + 3 - k] as i64);
+            acc = acc.wrapping_add((x[n] as i64).wrapping_mul(x[n - k] as i64));
+            acc = acc.wrapping_add((x[n + 1] as i64).wrapping_mul(x[n + 1 - k] as i64));
+            acc = acc.wrapping_add((x[n + 2] as i64).wrapping_mul(x[n + 2 - k] as i64));
+            acc = acc.wrapping_add((x[n + 3] as i64).wrapping_mul(x[n + 3 - k] as i64));
             n += 4;
         }
         while n < len {
-            acc += (x[n] as i64) * (x[n - k] as i64);
+            acc = acc.wrapping_add((x[n] as i64).wrapping_mul(x[n - k] as i64));
             n += 1;
         }
         r_out[k] = acc / (len as i64);
@@ -97,7 +102,9 @@ fn levinson_q31(r: &[i64], order: usize) -> Option<[i32; LPC_ORDER]> {
     for m in 0..order {
         let mut sum: i64 = r[m + 1];
         for j in 0..m {
-            sum += ((a_prev[j] as i64) * r[m - j]) >> 31;
+            sum = sum.wrapping_add(
+                ((a_prev[j] as i64).wrapping_mul(r[m - j])) >> 31,
+            );
         }
         if e == 0 {
             return None;
@@ -105,7 +112,11 @@ fn levinson_q31(r: &[i64], order: usize) -> Option<[i32; LPC_ORDER]> {
 
         // k = -sum / e in Q31 form. Divide-then-shift dodges i64 overflow
         // on the intermediate product (matches the C bug-fix path).
-        let k_q31_64 = -(sum / e) * (1i64 << 31);
+        //
+        // Audit-2026-05-11 Fix-C27: wrapping_neg avoids UB on
+        // `sum/e == i64::MIN`. Final clamp to i32 below makes the wrap
+        // observable only as a saturated boundary value.
+        let k_q31_64 = (sum / e).wrapping_neg().wrapping_mul(1i64 << 31);
         let k_q31 = if k_q31_64 > i32::MAX as i64 {
             i32::MAX
         } else if k_q31_64 < i32::MIN as i64 {
@@ -119,7 +130,7 @@ fn levinson_q31(r: &[i64], order: usize) -> Option<[i32; LPC_ORDER]> {
             a_curr[j] = sat_add_i32(a_prev[j], mul_q31(k_q31, a_prev[m - 1 - j]));
         }
 
-        e -= ((k_q31 as i64) * k_q31_64) >> 31;
+        e -= ((k_q31 as i64).wrapping_mul(k_q31_64)) >> 31;
         if e <= 0 {
             e = 1;
         }
@@ -148,15 +159,17 @@ fn residuals_q27(x: &[i32], r: &mut [i32], coeffs_q27: &[i32; LPC_ORDER]) {
     let a5 = coeffs_q27[5] as i64;
     let a6 = coeffs_q27[6] as i64;
     let a7 = coeffs_q27[7] as i64;
+    // Audit-2026-05-11 Fix-C26: wrapping mul/add throughout so the
+    // residual path matches lamquant-core bit-for-bit on overflow inputs.
     for n in LPC_ORDER..len {
-        let p: i64 = a0 * (x[n - 1] as i64)
-            + a1 * (x[n - 2] as i64)
-            + a2 * (x[n - 3] as i64)
-            + a3 * (x[n - 4] as i64)
-            + a4 * (x[n - 5] as i64)
-            + a5 * (x[n - 6] as i64)
-            + a6 * (x[n - 7] as i64)
-            + a7 * (x[n - 8] as i64);
+        let p: i64 = a0.wrapping_mul(x[n - 1] as i64)
+            .wrapping_add(a1.wrapping_mul(x[n - 2] as i64))
+            .wrapping_add(a2.wrapping_mul(x[n - 3] as i64))
+            .wrapping_add(a3.wrapping_mul(x[n - 4] as i64))
+            .wrapping_add(a4.wrapping_mul(x[n - 5] as i64))
+            .wrapping_add(a5.wrapping_mul(x[n - 6] as i64))
+            .wrapping_add(a6.wrapping_mul(x[n - 7] as i64))
+            .wrapping_add(a7.wrapping_mul(x[n - 8] as i64));
         let pred = (p >> Q27) as i32;
         r[n] = sat_sub_i32(x[n], pred);
     }
@@ -178,15 +191,17 @@ fn synth_q27(r: &[i32], x: &mut [i32], coeffs_q27: &[i32; LPC_ORDER]) {
     let a5 = coeffs_q27[5] as i64;
     let a6 = coeffs_q27[6] as i64;
     let a7 = coeffs_q27[7] as i64;
+    // Audit-2026-05-11 Fix-C26: wrapping mul/add throughout so synth
+    // pairs bit-exactly with residuals_q27 on overflow inputs.
     for n in LPC_ORDER..len {
-        let p: i64 = a0 * (x[n - 1] as i64)
-            + a1 * (x[n - 2] as i64)
-            + a2 * (x[n - 3] as i64)
-            + a3 * (x[n - 4] as i64)
-            + a4 * (x[n - 5] as i64)
-            + a5 * (x[n - 6] as i64)
-            + a6 * (x[n - 7] as i64)
-            + a7 * (x[n - 8] as i64);
+        let p: i64 = a0.wrapping_mul(x[n - 1] as i64)
+            .wrapping_add(a1.wrapping_mul(x[n - 2] as i64))
+            .wrapping_add(a2.wrapping_mul(x[n - 3] as i64))
+            .wrapping_add(a3.wrapping_mul(x[n - 4] as i64))
+            .wrapping_add(a4.wrapping_mul(x[n - 5] as i64))
+            .wrapping_add(a5.wrapping_mul(x[n - 6] as i64))
+            .wrapping_add(a6.wrapping_mul(x[n - 7] as i64))
+            .wrapping_add(a7.wrapping_mul(x[n - 8] as i64));
         let pred = (p >> Q27) as i32;
         x[n] = sat_add_i32(r[n], pred);
     }
