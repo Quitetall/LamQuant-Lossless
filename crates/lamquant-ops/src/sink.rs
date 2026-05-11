@@ -113,30 +113,68 @@ pub trait OpEventSink: Send + Sync + 'static {
     fn emit(&self, event: OpEvent);
 }
 
-/// In-process sink that forwards events to an `mpsc::Sender`. Used by the
-/// Rust TUI's output panel: the panel's `tick()` drains the receiver each
-/// frame and updates its line buffer.
+/// In-process sink that forwards events to an mpsc channel — bounded or
+/// unbounded. Used by the Rust TUI's output panel: the panel's `tick()`
+/// drains the receiver each frame and updates its line buffer.
 ///
-/// `mpsc::Sender` is not `Sync` on stable Rust, so we wrap it in a `Mutex`
-/// to satisfy the `OpEventSink` trait bound. Lock contention is negligible
-/// — events arrive far slower than a mutex can release.
+/// `mpsc::Sender` / `SyncSender` are not `Sync` on stable Rust, so we
+/// wrap them in a `Mutex` to satisfy the `OpEventSink` trait bound. Lock
+/// contention is negligible — events arrive far slower than a mutex can
+/// release.
+///
+/// Backpressure policy for the bounded variant:
+///   - emit() uses `try_send`; on a full buffer the event is DROPPED
+///     (not blocked). Dropping newest favours runner throughput over
+///     observability — the runner never stalls on a slow consumer.
+///   - The TUI re-derives terminal state from the next Done / Error /
+///     Progress event, so transient drops don't corrupt the dashboard.
+///   - The OutputPanel's `lines` buffer is also capped (LINES_CAP=5000),
+///     so total memory is bounded at both ends.
 pub struct MpscSink {
-    tx: std::sync::Mutex<mpsc::Sender<OpEvent>>,
+    tx: std::sync::Mutex<MpscTx>,
+}
+
+enum MpscTx {
+    Unbounded(mpsc::Sender<OpEvent>),
+    Bounded(mpsc::SyncSender<OpEvent>),
 }
 
 impl MpscSink {
+    /// Wrap an existing unbounded `Sender`. Use `channel()` /
+    /// `bounded_channel()` in normal code; this constructor is for
+    /// callers that already own a sender (e.g. tests injecting a
+    /// shared bus).
     pub fn new(tx: mpsc::Sender<OpEvent>) -> Self {
-        Self { tx: std::sync::Mutex::new(tx) }
+        Self {
+            tx: std::sync::Mutex::new(MpscTx::Unbounded(tx)),
+        }
+    }
+
+    /// Wrap an existing bounded `SyncSender`. emit() will `try_send`
+    /// and drop on overflow.
+    pub fn new_bounded(tx: mpsc::SyncSender<OpEvent>) -> Self {
+        Self {
+            tx: std::sync::Mutex::new(MpscTx::Bounded(tx)),
+        }
     }
 }
 
 impl OpEventSink for MpscSink {
     fn emit(&self, event: OpEvent) {
-        // Best-effort send. Receiver may be dropped (UI navigated away);
-        // we can't recover so just discard — runner's terminal Done/Error
-        // event will be the last thing it tries to deliver anyway.
+        // Best-effort send. Receiver may be dropped (UI navigated away
+        // OR bounded channel full); we can't recover so we discard.
+        // The runner's terminal Done/Error event is the last thing it
+        // tries to deliver, and the TUI auto-derives state from the
+        // next event that does land, so transient drops are safe.
         if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send(event);
+            match &*tx {
+                MpscTx::Unbounded(s) => {
+                    let _ = s.send(event);
+                }
+                MpscTx::Bounded(s) => {
+                    let _ = s.try_send(event);
+                }
+            }
         }
     }
 }
@@ -146,10 +184,29 @@ impl OpEventSink for MpscSink {
 /// [`crate::transport::Transport`] trait return type.
 pub type OpReceiver = mpsc::Receiver<OpEvent>;
 
-/// Convenience: create a paired (sender-sink, receiver) for in-process use.
+/// Default bound for in-process op-event channels. Sized to absorb a
+/// burst of FileDone events from a fast batch encode (typically 100-
+/// 1000/sec) without backpressure stalls, while still capping memory
+/// at `BUFFER × sizeof(OpEvent)` ≈ a few MB worst-case.
+pub const DEFAULT_CHANNEL_BOUND: usize = 4096;
+
+/// Convenience: create a paired (sender-sink, receiver) for in-process
+/// use. UNBOUNDED — preserved for external callers that depended on
+/// `send()` never blocking and never dropping. New TUI / GUI code
+/// should use `bounded_channel` instead.
 pub fn channel() -> (MpscSink, OpReceiver) {
     let (tx, rx) = mpsc::channel();
     (MpscSink::new(tx), rx)
+}
+
+/// Bounded channel. emit() will drop events when the buffer is full —
+/// see `MpscSink` doc for the rationale. `bound` must be > 0; smaller
+/// values give faster drop-detection at the cost of more frequent
+/// drops under burst. Default via [`DEFAULT_CHANNEL_BOUND`].
+pub fn bounded_channel(bound: usize) -> (MpscSink, OpReceiver) {
+    assert!(bound > 0, "channel bound must be positive");
+    let (tx, rx) = mpsc::sync_channel(bound);
+    (MpscSink::new_bounded(tx), rx)
 }
 
 #[cfg(test)]
