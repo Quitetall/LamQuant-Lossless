@@ -71,6 +71,15 @@ pub fn op_spec(op_id: &str) -> Option<OpSpec> {
             output_flag: "-o", recursive: true,
             extra: &["--verify", "--cross-validate"],
         },
+        "encode_lma" => OpSpec {
+            // Same as `encode` but packs the entire output into a
+            // single .lma archive instead of a directory of .lml
+            // files. The TUI output picker takes a .lma path; lml
+            // encodes into a temp staging dir, then archives.
+            cmd: "encode", input: true, output: true,
+            output_flag: "-o", recursive: true,
+            extra: &["--verify", "--cross-validate", "--lma"],
+        },
         "decode" | "decode_neural" => OpSpec {
             // --to-edf reconstructs a byte-identical EDF/BDF (header +
             // data records + trailing) from the LML container, instead
