@@ -123,11 +123,19 @@ pub trait OpEventSink: Send + Sync + 'static {
 /// release.
 ///
 /// Backpressure policy for the bounded variant:
-///   - emit() uses `try_send`; on a full buffer the event is DROPPED
-///     (not blocked). Dropping newest favours runner throughput over
-///     observability — the runner never stalls on a slow consumer.
-///   - The TUI re-derives terminal state from the next Done / Error /
-///     Progress event, so transient drops don't corrupt the dashboard.
+///   - emit() uses blocking `send`; on a full buffer the runner thread
+///     PAUSES until the consumer drains room. NO events are dropped
+///     under any condition — the CR distribution histogram, recent-
+///     files list, and every Progress tick reach the dashboard.
+///   - Buffer is sized to absorb a multi-second burst before any
+///     blocking is observable (DEFAULT_CHANNEL_BOUND = 16384 ≈ a few
+///     MB at typical OpEvent size). Realistic encode runs emit at
+///     100-1000 events/sec while the TUI drains 64 events/tick at
+///     20fps = 1280 events/sec, so steady-state drain > emit and
+///     blocking is rare.
+///   - When the runner DOES block, it's a real signal that the TUI
+///     thread is stalled (panic-in-transit, debugger pause). Treat
+///     that as a system-wide problem, not a sink-level concern.
 ///   - The OutputPanel's `lines` buffer is also capped (LINES_CAP=5000),
 ///     so total memory is bounded at both ends.
 pub struct MpscSink {
@@ -172,7 +180,12 @@ impl OpEventSink for MpscSink {
                     let _ = s.send(event);
                 }
                 MpscTx::Bounded(s) => {
-                    let _ = s.try_send(event);
+                    // Blocking send — backpressure on the runner, not
+                    // drops on the consumer. Receiver-dropped (UI
+                    // navigated away) returns Err; ignore so we don't
+                    // panic — terminal Done was the runner's last
+                    // useful event anyway.
+                    let _ = s.send(event);
                 }
             }
         }
@@ -185,10 +198,13 @@ impl OpEventSink for MpscSink {
 pub type OpReceiver = mpsc::Receiver<OpEvent>;
 
 /// Default bound for in-process op-event channels. Sized to absorb a
-/// burst of FileDone events from a fast batch encode (typically 100-
-/// 1000/sec) without backpressure stalls, while still capping memory
-/// at `BUFFER × sizeof(OpEvent)` ≈ a few MB worst-case.
-pub const DEFAULT_CHANNEL_BOUND: usize = 4096;
+/// multi-second burst of FileDone events from a fast batch encode
+/// (typically 100-1000/sec) before the bounded sender starts blocking
+/// for backpressure, while still capping memory at `BUFFER ×
+/// sizeof(OpEvent)` ≈ a few MB worst-case. At 16k slots the buffer
+/// holds ~16s of burst at 1000 events/sec, far longer than any TUI
+/// drain pause should plausibly take.
+pub const DEFAULT_CHANNEL_BOUND: usize = 16384;
 
 /// Convenience: create a paired (sender-sink, receiver) for in-process
 /// use. UNBOUNDED — preserved for external callers that depended on
