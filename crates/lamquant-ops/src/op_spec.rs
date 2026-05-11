@@ -17,8 +17,19 @@ pub struct OpSpec {
 
 impl OpSpec {
     /// Build the full argv (without the binary name) for `runner::spawn_lml`.
+    ///
+    /// Always prepends `--emit-json-events` so the lml binary streams
+    /// JSON-line OpEvents back to the TUI runner. Without it, lml's
+    /// plain stdout is wrapped as `OpEvent::Log` and no Progress /
+    /// FileDone events reach the compress dashboard — the bar stays at
+    /// 0/0 even while encoding is in flight.
     pub fn build_args(&self, input: Option<&str>, output: Option<&str>) -> Vec<String> {
-        let mut args: Vec<String> = vec![self.cmd.to_string()];
+        // `--emit-json-events` is a global flag on the lml CLI; it
+        // must come BEFORE the subcommand (clap rejects it otherwise).
+        let mut args: Vec<String> = vec![
+            "--emit-json-events".to_string(),
+            self.cmd.to_string(),
+        ];
         if let Some(i) = input {
             args.push(i.to_string());
         }
