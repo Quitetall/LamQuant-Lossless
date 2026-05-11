@@ -12,7 +12,7 @@
 
 use lamquant_firmware::dsp::biquad::{HpFilter, HpFilterBank, NUM_CHANNELS, WINDOW_SAMPLES};
 use lamquant_firmware::dsp::lifting::{
-    forward_all_channels, inverse_all_channels, Subbands,
+    forward_all_channels, inverse_all_channels, LiftingScratch, Subbands,
 };
 use lamquant_firmware::dsp::lpc::{analyze_all_channels, synthesize_all_channels, LpcOutput};
 use lamquant_firmware::safety::{EventType, SafetyState};
@@ -63,8 +63,12 @@ fn pipeline_deterministic() {
 
     let mut sb_a = Subbands::zeroed();
     let mut sb_b = Subbands::zeroed();
-    forward_all_channels(&lpc_a.residual, &mut sb_a);
-    forward_all_channels(&lpc_b.residual, &mut sb_b);
+    let mut scratch_a = Box::new(LiftingScratch::zeroed());
+    let mut scratch_b = Box::new(LiftingScratch::zeroed());
+    let mut resid_a = lpc_a.residual;
+    let mut resid_b = lpc_b.residual;
+    forward_all_channels(&mut resid_a, &mut scratch_a, &mut sb_a);
+    forward_all_channels(&mut resid_b, &mut scratch_b, &mut sb_b);
     assert_eq!(sb_a.l3_approx, sb_b.l3_approx, "L3 approx drifts");
     assert_eq!(sb_a.l3_detail, sb_b.l3_detail, "L3 detail drifts");
     assert_eq!(sb_a.l2_detail, sb_b.l2_detail, "L2 detail drifts");
@@ -82,10 +86,12 @@ fn lifting_inverse_recovers_residual() {
     let residual_orig = lpc.residual;
 
     let mut sb = Subbands::zeroed();
-    forward_all_channels(&lpc.residual, &mut sb);
+    let mut scratch = Box::new(LiftingScratch::zeroed());
+    let mut resid_work = lpc.residual;
+    forward_all_channels(&mut resid_work, &mut scratch, &mut sb);
 
     let mut recovered = [[0i32; WINDOW_SAMPLES]; NUM_CHANNELS];
-    inverse_all_channels(&sb, &mut recovered);
+    inverse_all_channels(&sb, &mut scratch, &mut recovered);
 
     for ch in 0..NUM_CHANNELS {
         for i in 0..WINDOW_SAMPLES {
@@ -131,14 +137,17 @@ fn full_pipeline_roundtrip() {
     hp.run(&mut signal, WINDOW_SAMPLES, HpFilter::Hz0_5, ALL_CHANNELS_MASK);
     let mut lpc = LpcOutput::zeroed();
     analyze_all_channels(&signal, &mut lpc);
+    let residual_orig = lpc.residual;
     let mut sb = Subbands::zeroed();
-    forward_all_channels(&lpc.residual, &mut sb);
+    let mut scratch = Box::new(LiftingScratch::zeroed());
+    let mut resid_work = lpc.residual;
+    forward_all_channels(&mut resid_work, &mut scratch, &mut sb);
 
     // Inverse: lifting → LPC → biquad output recovery (skip biquad inverse —
     // it's lossy by design; we recover the post-HP signal instead).
     let mut residual_back = [[0i32; WINDOW_SAMPLES]; NUM_CHANNELS];
-    inverse_all_channels(&sb, &mut residual_back);
-    assert_eq!(residual_back, lpc.residual, "lifting roundtrip lost data");
+    inverse_all_channels(&sb, &mut scratch, &mut residual_back);
+    assert_eq!(residual_back, residual_orig, "lifting roundtrip lost data");
 
     let mut signal_back = [[0i32; WINDOW_SAMPLES]; NUM_CHANNELS];
     synthesize_all_channels(&residual_back, &lpc.coeffs, &mut signal_back);
@@ -156,7 +165,9 @@ fn adversarial_all_zeros() {
     let mut lpc = LpcOutput::zeroed();
     analyze_all_channels(&buf, &mut lpc);
     let mut sb = Subbands::zeroed();
-    forward_all_channels(&lpc.residual, &mut sb);
+    let mut scratch = Box::new(LiftingScratch::zeroed());
+    let mut resid_work = lpc.residual;
+    forward_all_channels(&mut resid_work, &mut scratch, &mut sb);
     // No panics, no overflow.
 }
 
@@ -168,7 +179,9 @@ fn adversarial_max_amplitude() {
     let mut lpc = LpcOutput::zeroed();
     analyze_all_channels(&buf, &mut lpc);
     let mut sb = Subbands::zeroed();
-    forward_all_channels(&lpc.residual, &mut sb);
+    let mut scratch = Box::new(LiftingScratch::zeroed());
+    let mut resid_work = lpc.residual;
+    forward_all_channels(&mut resid_work, &mut scratch, &mut sb);
     // No panics from saturating math.
 }
 

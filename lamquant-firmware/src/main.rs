@@ -50,13 +50,23 @@ mod embedded {
 
     // ─── Global allocator ─────────────────────────────────────────────
     //
-    // Codec path uses Vec<i64> internally for LPC analysis (transient
-    // ~20 KB per channel during compute). 16 KB heap is too small for
-    // the full per-channel buffer; we re-use the heap by clearing
-    // between channels. Phase 7 polishes this with a fixed scratch arena.
+    // DSP path is alloc-free (lifting + LPC inlined, no Vec).
+    //
+    // **Known issue (Phase 7):** `neural::focal::forward` still uses
+    // transient `Vec<Vec<i16>>` activation buffers with a peak heap demand
+    // of ~80 KB (stage 3, focal1→focal2). With the 6 KB heap below, Mode 1
+    // (Neural) encoding will OOM at runtime on RP2350. This is **pre-
+    // existing** — the focal path was scaffolded with a TODO to swap
+    // `ActBuf` for a passed-in static scratch (see focal.rs:140). RP2350
+    // RAM cannot accommodate both the current 205 KB residual + 209 KB
+    // subbands + 80 KB focal heap; the proper fix overlays focal scratch
+    // on the post-lifting `residual` buffer (which is dead after lifting).
+    //
+    // 6 KB suffices for the rANS table builder + error fmt. Mode 2
+    // (lossless) is fully alloc-free post-DSP.
     #[global_allocator]
     static HEAP: Heap = Heap::empty();
-    const HEAP_SIZE: usize = 16 * 1024;
+    const HEAP_SIZE: usize = 6 * 1024;
 
     #[link_section = ".bss"]
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];

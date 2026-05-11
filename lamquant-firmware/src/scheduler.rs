@@ -23,7 +23,7 @@ use crate::codec::lpc_delta::LpcDelta;
 use crate::codec::quality::QualityMode;
 use crate::codec::rans_context::{RansContextEncoder, RansTables, RANS_BUF_SIZE};
 use crate::dsp::biquad::{HpFilter, HpFilterBank, NUM_CHANNELS, WINDOW_SAMPLES};
-use crate::dsp::lifting::{forward_all_channels, Subbands};
+use crate::dsp::lifting::{forward_all_channels, LiftingScratch, Subbands};
 use crate::dsp::lpc::{analyze_all_channels, LpcOutput};
 use crate::neural::{focal, snn};
 use crate::safety::SafetyState;
@@ -62,6 +62,7 @@ pub struct PipelineScheduler {
     pub hp: HpFilterBank,
     pub lpc: LpcOutput,
     pub subbands: Subbands,
+    pub lifting_scratch: LiftingScratch,
     pub fsq: FsqAdaptive,
     pub rans: RansContextEncoder,
     pub lpc_delta: LpcDelta,
@@ -81,6 +82,7 @@ impl PipelineScheduler {
             hp: HpFilterBank::new(),
             lpc: LpcOutput::zeroed(),
             subbands: Subbands::zeroed(),
+            lifting_scratch: LiftingScratch::zeroed(),
             fsq: FsqAdaptive::new(),
             rans: RansContextEncoder::new(RansTables::default_placeholder()),
             lpc_delta: LpcDelta::new(),
@@ -140,8 +142,18 @@ impl PipelineScheduler {
         // Stage 2: LPC analysis (order-8 per channel).
         analyze_all_channels(signal, &mut self.lpc);
 
-        // Stage 3: 3-level lifting DWT on the LPC residual.
-        forward_all_channels(&self.lpc.residual, &mut self.subbands);
+        // Stage 2b: pre-ictal snapshot of the LPC residual (first 313 samples,
+        // matching the L3-approx temporal length). Captured BEFORE lifting
+        // because lifting clobbers `self.lpc.residual` in place to avoid a
+        // 10 KB scratch buffer.
+        safety.push_preictal(&self.lpc.residual_l3_view(), now_ms);
+
+        // Stage 3: 3-level lifting DWT on the LPC residual (in place).
+        forward_all_channels(
+            &mut self.lpc.residual,
+            &mut self.lifting_scratch,
+            &mut self.subbands,
+        );
 
         // Stage 4: encode per active codec mode.
         let result = match self.codec_mode {
@@ -212,13 +224,12 @@ impl PipelineScheduler {
         };
 
         // Stage 5: safety hooks — push to BLE retry buffer, update counters.
+        // Pre-ictal capture moved to stage 2b (before lifting clobbers residual).
         safety.ble_push_packet(result.bytes, self.frame_seq);
         safety.faults.total_windows_encoded =
             safety.faults.total_windows_encoded.saturating_add(1);
 
-        // Stage 6: pre-ictal capture (always, even when SNN doesn't fire,
-        // so we have a 20 s lookback when seizure is detected later).
-        safety.push_preictal(&self.lpc.residual_l3_view(), now_ms);
+        let _ = now_ms;
 
         self.frame_seq = self.frame_seq.wrapping_add(1);
         result
