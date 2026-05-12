@@ -98,7 +98,23 @@ fn is_workflow_or_system_key(k: &str) -> bool {
 }
 
 #[test]
+#[ignore = "workflows.ts was deleted in 405c7f95 — WORKFLOWS table no longer \
+    referenced in GUI source. Test kept for reactivation if/when GUI \
+    workflow inventory returns. Run with --ignored to verify."]
 fn workflow_keys_match_between_ts_and_python() {
+    // Soft skip when the TS source is missing — keeps the test runnable via
+    // `--ignored` if/when the file comes back, without hard-failing CI on
+    // the current main where it doesn't exist.
+    let ts_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKFLOWS_TS);
+    if !ts_path.exists() {
+        eprintln!(
+            "SKIP: {} not present (workflows.ts deleted in 405c7f95)",
+            ts_path.display()
+        );
+        return;
+    }
+
     let ts = extract_ts_pairs();
     let py = extract_python_pairs();
 
