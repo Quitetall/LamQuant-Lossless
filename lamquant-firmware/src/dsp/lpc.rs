@@ -133,8 +133,10 @@ fn levinson_q31(r: &[i64], order: usize) -> Option<[i32; LPC_ORDER]> {
         if e == 0 {
             return None;
         }
-        // k_qa = -lam_Q56 / e_raw → Q56 quotient
-        let k_qa_full = (-lam_qa) / e;
+        // k_qa = -lam_Q56 / e_raw → Q56 quotient.
+        // wrapping_neg avoids UB on i128::MIN (astronomically unlikely on
+        // real EEG; lamu review fix).
+        let k_qa_full = lam_qa.wrapping_neg() / e;
         let k_qa = k_qa_full.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
 
         a_curr[m] = k_qa;
