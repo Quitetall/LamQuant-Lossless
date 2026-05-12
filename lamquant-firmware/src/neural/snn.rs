@@ -99,7 +99,7 @@ pub enum ActivityLevel {
 
 // ─── State (RAM-resident across windows) ───────────────────────────
 
-/// Memory-tight SNN runtime state. Total ~85 KB:
+/// Memory-tight SNN runtime state. Total ~110 KB:
 ///   activity_map         : 2.5 KB
 ///   scratch              : 28 KB
 ///   h_state              : 5 KB
@@ -324,11 +324,16 @@ fn apply_bidir_block_1(state: &mut SnnState) {
     accumulate_half_into_x(state);
 }
 
-/// x_buf[d][t] += dir_out[d][t] / 2 with i16 saturation.
+/// x_buf[d][t] += dir_out[d][t] / 2 with i16 saturation. Round-to-
+/// nearest (add +1 then >>1) so the staged-accumulate `x += fwd/2;
+/// x += bwd/2` matches the conceptual `x += (fwd+bwd)/2` to within
+/// a single LSB for any individual half, instead of dropping a bit
+/// on each odd half. (V4 Pro Finding 2 of 4e03bbae review.)
 fn accumulate_half_into_x(state: &mut SnnState) {
     for d in 0..D_MODEL {
         for t in 0..T_INPUT {
-            let sum = state.x_buf[d][t] as i32 + (state.dir_out[d][t] as i32 >> 1);
+            let half = (state.dir_out[d][t] as i32 + 1) >> 1;
+            let sum = state.x_buf[d][t] as i32 + half;
             state.x_buf[d][t] = if sum > i16::MAX as i32 { i16::MAX }
                                 else if sum < i16::MIN as i32 { i16::MIN }
                                 else { sum as i16 };
@@ -436,11 +441,14 @@ fn run_direction(state: &mut SnnState, dir: Dir, reverse: bool) {
 #[inline]
 fn dt_bias_q15(dt_bias_i8: i8, scale: f32) -> i32 {
     // dt_bias[0] real = dt_bias_i8 * scale. Q15 = round(real * 2^15).
+    // Round-to-nearest avoids ±1 LSB drift versus the truncation
+    // semantics of `as i32`. (V4 Pro Finding 1 of 4e03bbae review.)
     let real = (dt_bias_i8 as f32) * scale;
-    let q15 = real * 32768.0;
-    if q15 >= i32::MAX as f32 { i32::MAX }
-    else if q15 <= i32::MIN as f32 { i32::MIN }
-    else { q15 as i32 }
+    let raw = real * 32768.0;
+    let rounded = if raw >= 0.0 { raw + 0.5 } else { raw - 0.5 };
+    if rounded >= i32::MAX as f32 { i32::MAX }
+    else if rounded <= i32::MIN as f32 { i32::MIN }
+    else { rounded as i32 }
 }
 
 /// Convert an f32 scale factor into Q15. Saturating clamp.
