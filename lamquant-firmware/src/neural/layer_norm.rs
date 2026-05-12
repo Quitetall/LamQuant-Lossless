@@ -15,9 +15,10 @@
 
 use crate::neural::ssm_block::{D_MODEL, T_SEQ};
 
-/// LayerNorm's epsilon. PyTorch default = 1e-5 → Q30 = ~1073.
-/// We track it in Q30 to match the variance precision.
-const EPS_Q30: i64 = 1073;
+/// LayerNorm's epsilon. PyTorch default = 1e-5 → Q30 = round(1e-5 * 2^30).
+/// Earlier landed as 1073 (which is actually 1e-6) — off by 10×.
+/// (V4 Pro Finding 1 of 1113e7f3 review.)
+const EPS_Q30: i64 = 10737;
 
 /// Integer floor-sqrt of an i64 (n ≥ 0). Newton-Raphson, converges
 /// in O(log log n) iterations on the IMAC core. Returns 0 for n ≤ 0.
@@ -30,18 +31,22 @@ const EPS_Q30: i64 = 1073;
 /// the rescale-and-Newton dance on a chip without an FPU.
 pub fn isqrt_i64(n: i64) -> i64 {
     if n <= 1 { return n.max(0); }
-    // Seed with a power-of-two estimate so Newton converges fast.
-    let mut x = n;
-    let mut shift = 0u32;
-    while (x >> 2) >= 1 { x >>= 2; shift += 1; }
-    let mut y = x << shift; // crude seed ≥ true sqrt
-    // Newton-Raphson: y_{k+1} = (y + n/y) / 2 — converges quadratically.
+    // Seed strictly above sqrt(n): y = 2^ceil(bit_length(n) / 2).
+    // Guarantees Newton iterates monotonically decrease so the
+    // standard `z >= y` termination returns y = floor(sqrt(n)).
+    // Earlier seed `n >> 2^shift << shift` could land *below*
+    // sqrt(n) for non-power-of-4 inputs (e.g. n=25 → seed=4 < 5);
+    // Newton would then overshoot once and the loop exited
+    // returning the stale seed. (V4 Flash Finding 18 of 1113e7f3.)
+    let bits = 64 - n.leading_zeros();
+    let seed_shift = (bits + 1) / 2;
+    let mut y = 1i64 << seed_shift;
+    // Newton-Raphson: y_{k+1} = (y + n/y) / 2 — quadratic convergence.
     loop {
         let z = (y + n / y) / 2;
-        if z >= y { break; }
+        if z >= y { return y; }
         y = z;
     }
-    y
 }
 
 /// LayerNorm over the last axis (D_MODEL).
@@ -104,15 +109,21 @@ mod tests {
 
     #[test]
     fn isqrt_known_values() {
-        // sqrt(1<<30) = 1<<15 (true integer sqrt)
+        // Perfect squares
         assert_eq!(isqrt_i64(1 << 30), 1 << 15);
-        // sqrt(4<<30) = 2<<15
         assert_eq!(isqrt_i64(4 << 30), 2 << 15);
-        // sqrt(10000) ≈ 100
         assert_eq!(isqrt_i64(10000), 100);
-        // sqrt(0) = 0, sqrt(1) = 1
         assert_eq!(isqrt_i64(0), 0);
         assert_eq!(isqrt_i64(1), 1);
+        // Non-perfect (floor) — these caught the seed-undershoot bug.
+        assert_eq!(isqrt_i64(25), 5);
+        assert_eq!(isqrt_i64(26), 5);
+        assert_eq!(isqrt_i64(36), 6);
+        assert_eq!(isqrt_i64(99), 9);
+        assert_eq!(isqrt_i64(99 * 99 + 1), 99);
+        // Large range
+        assert_eq!(isqrt_i64(123_456_789), 11111);
+        assert_eq!(isqrt_i64((1i64 << 60) - 1), (1i64 << 30) - 1);
     }
 
     #[test]
