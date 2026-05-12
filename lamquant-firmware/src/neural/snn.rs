@@ -435,12 +435,15 @@ fn run_direction(state: &mut SnnState, dir: Dir, reverse: bool) {
         },
     };
 
-    // Copy norm_buf to a local so the borrow doesn't conflict with
-    // scratch/h_state below.
-    let norm_in = state.norm_buf;
+    // Rust's borrow checker supports disjoint-field borrows of a
+    // struct through `&mut self` — `&state.norm_buf` and
+    // `&mut state.scratch` are independent fields and can coexist.
+    // (V4 Flash Finding 2 of 2dab51a5 — eliminates a 20 KB stack
+    // copy per direction × 4 directions per inference.)
     let out_target = if reverse { &mut state.bwd_out } else { &mut state.fwd_out };
     ssm_block::selective_ssm_block(
-        &weights, &norm_in,
+        &weights,
+        &state.norm_buf,
         &mut state.scratch,
         &mut state.h_state,
         out_target,
