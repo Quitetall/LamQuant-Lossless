@@ -179,9 +179,8 @@ class TestProductionWireFormatE2E:
         packet = compress(tokens, subband, quality_mode=2)
         assert packet.data[:4] == b'LMQ3'
         roundtrip = decompress(packet)
-        # Length asserted dynamically — no magic number — so fixture
-        # shape changes don't break the test silently.
-        assert len(roundtrip.fsq_levels) == len(tokens.fsq_levels)
+        # `==` on lists enforces both equal length and equal contents,
+        # so a single assertion covers length + per-element roundtrip.
         assert roundtrip.fsq_levels == tokens.fsq_levels, \
             "per-timestep schedule must roundtrip exactly"
         assert roundtrip.side_info['adaptive'] is True
