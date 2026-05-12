@@ -285,11 +285,16 @@ fn swap_buffers(state: &mut SnnState) {
 }
 
 /// Convert an f32 scale factor into Q15. Saturating clamp.
+///
+/// Uses `>=` / `<=` for the bounds because `i32::MAX as f32` rounds
+/// up to 2_147_483_648.0 (one ULP past i32::MAX); a strict `>` would
+/// admit that exact float into the `as i32` cast, which is UB in Rust
+/// for out-of-range floats. (V4 Pro Finding 1 of 7ce5a488 review.)
 #[inline]
 fn scale_to_q15(s: f32) -> i32 {
     let v = s * 32768.0;
-    if v > i32::MAX as f32 { i32::MAX }
-    else if v < i32::MIN as f32 { i32::MIN }
+    if v >= i32::MAX as f32 { i32::MAX }
+    else if v <= i32::MIN as f32 { i32::MIN }
     else { v as i32 }
 }
 
