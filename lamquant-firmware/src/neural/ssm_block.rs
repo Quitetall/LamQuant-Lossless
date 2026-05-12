@@ -212,21 +212,33 @@ pub fn causal_conv1d_dw_silu(
     out: &mut [[i16; T_SEQ]; D_INNER],
 ) {
     for d in 0..D_INNER {
-        let bias_q15 = (b[d] as i32).wrapping_mul(b_scale_q15) >> 15;
+        let bias_q15: i64 = (b[d] as i64) * (b_scale_q15 as i64) >> 15;
         for t in 0..T_SEQ {
-            let mut acc: i32 = 0;
+            // i64 accumulator — acc magnitude ≤ D_CONV * 127 * 32767
+            // ≈ 16.6 M (fits i32 here), but the scale-fold below pushes
+            // up to acc * 32767 ≈ 5.4e11 which overflows i32.
+            // (V4 Pro Finding 1 of abb00d52 review.)
+            let mut acc: i64 = 0;
             for k in 0..D_CONV {
-                // padding=D_CONV-1, causal trim → tap index k samples x[t - (D_CONV-1-k)]
                 let off = (D_CONV - 1) as isize - k as isize;
                 let src_t = t as isize - off;
                 if src_t >= 0 && (src_t as usize) < T_SEQ {
-                    let wk = w[d * D_CONV + k] as i32;
-                    let xv = x[d][src_t as usize] as i32;
-                    acc = acc.wrapping_add(wk * xv);
+                    let wk = w[d * D_CONV + k] as i64;
+                    let xv = x[d][src_t as usize] as i64;
+                    acc += wk * xv;
                 }
             }
-            let scaled = (acc.wrapping_mul(w_scale_q15)) >> 15;
-            let y = silu_q15(scaled + bias_q15);
+            let scaled = (acc * w_scale_q15 as i64) >> 15;
+            let pre_silu = scaled + bias_q15;
+            // silu_q15 wants i32 input; clamp before passing.
+            let pre_i32 = if pre_silu > i32::MAX as i64 {
+                i32::MAX
+            } else if pre_silu < i32::MIN as i64 {
+                i32::MIN
+            } else {
+                pre_silu as i32
+            };
+            let y = silu_q15(pre_i32);
             out[d][t] = clamp_i16(y);
         }
     }
@@ -267,104 +279,74 @@ pub fn selective_scan(
         }
     }
 
-    // Process in chunks. Within a chunk we precompute the running
-    // log_P = cumsum(log_d_a) and walk h forward analytically.
+    // Sequential ZOH-discretized recurrence — algebraically equivalent
+    // to the Python parallel-scan form but stays in Q15 throughout
+    // (the parallel-scan's `exp(-log_p)` blows up to >1 when log_p<0,
+    // which Q15 can't represent. Sequential form sidesteps the issue
+    // since exp(dt*A) ∈ (0, 1] whenever A ≤ 0.)
+    //
+    //   h[t][n] = exp(dt[t] * A[n]) * h[t-1][n] + dt[t] * B[t][n] * x[t]
+    //   y[t]    = sum_n( C[t][n] * h[t][n] ) + D[d] * x[t]
+    //
+    // SCAN_CHUNK kept for tooling consistency / future parallel-scan
+    // variants on cores with FPU; the loop body itself is step-at-a-time.
+    // (V4 Pro Finding 2 of abb00d52 — parallel-scan overflow paths are
+    // structurally removed in this form.)
     let mut t_start: usize = 0;
     while t_start < T_SEQ {
         let t_end = min(t_start + SCAN_CHUNK, T_SEQ);
-        let chunk_len = t_end - t_start;
 
         for d in 0..D_INNER {
-            // a[n] = -exp(a_log[d][n]) — magnitude bounded since A_log
-            // is HiPPO-initialized then drifts.
-            let mut a_q15 = [0i32; D_STATE];
+            // |A[n]| in Q15. exp(A_log) ∈ (0, 1] for A_log ≤ 0
+            // (HiPPO-trained range). For A_log > 0 we cap at 1.0 since
+            // the recurrence is otherwise unstable.
+            let mut a_mag_q15 = [0i32; D_STATE];
             for n in 0..D_STATE {
                 let alog = a_log[d][n] as i32;
-                // exp(alog) via exp(-(-alog)) — domain check
-                let mag = exp_neg_q15(-alog); // negative-domain → 1/e^alog
-                a_q15[n] = -mag;
+                a_mag_q15[n] = if alog <= 0 {
+                    exp_neg_q15(-alog)
+                } else {
+                    32767
+                };
             }
 
-            // log_P[t][n] = cumsum over chunk of (dt[t] * a[n]).
-            // Stored Q15.
-            let mut log_p = [[0i32; D_STATE]; SCAN_CHUNK];
-            for ti in 0..chunk_len {
-                let t = if reverse { T_SEQ - 1 - (t_start + ti) } else { t_start + ti };
-                let dt = dt_seq[t] as i32;
+            for ti in t_start..t_end {
+                let t = if reverse { T_SEQ - 1 - ti } else { ti };
+                let xv = x[d][t] as i64;
+                let dt = dt_seq[t] as i64;
+                let dt_x_q15 = (dt * xv) >> 15;
+
                 for n in 0..D_STATE {
-                    let log_d_a = (dt.wrapping_mul(a_q15[n])) >> 15;
-                    let prev = if ti == 0 { 0 } else { log_p[ti - 1][n] };
-                    log_p[ti][n] = prev + log_d_a;
-                }
-            }
+                    // exp(dt * A[n]) = exp(-(dt * |A[n]|)) since A ≤ 0
+                    let dt_amag_q15 = ((dt * a_mag_q15[n] as i64) >> 15) as i32;
+                    let exp_dta_q15 = exp_neg_q15(dt_amag_q15);
 
-            // dBx[t][n] = x[d][t] * dt[t] * B[t][n], Q15.
-            let mut dbx_exp_n = [[0i32; D_STATE]; SCAN_CHUNK];
-            for ti in 0..chunk_len {
-                let t = if reverse { T_SEQ - 1 - (t_start + ti) } else { t_start + ti };
-                let xv = x[d][t] as i32;
-                let dt = dt_seq[t] as i32;
-                for n in 0..D_STATE {
-                    let bv = b_seq[t][n] as i32;
-                    let dbx = ((xv.wrapping_mul(dt) >> 15).wrapping_mul(bv)) >> 15;
-                    // multiply by exp(-log_P)
-                    let exp_n = exp_neg_q15(log_p[ti][n]);
-                    dbx_exp_n[ti][n] = (dbx.wrapping_mul(exp_n)) >> 15;
-                }
-            }
+                    // dBx[t][n] = dt * B[t][n] * x[d][t]   (Q15)
+                    let bv = b_seq[t][n] as i64;
+                    let dbx_q15 = (dt_x_q15 * bv) >> 15;
 
-            // h_chunk[ti][n] = exp(log_P[ti]) * (h_prev + cumsum(dbx*exp_nP)[ti])
-            // We accumulate per (ti, n).
-            for n in 0..D_STATE {
-                let mut cum: i64 = 0;
-                let h_prev = state[d][n] as i64; // Q23
-                for ti in 0..chunk_len {
-                    cum += dbx_exp_n[ti][n] as i64; // Q15
-                    // h[t][n] (Q23) = exp(log_p) * (h_prev_q23 + cum_q15 << 8)
-                    // We first lift cum to Q23 then add.
-                    let inner_q23: i64 = h_prev + ((cum) << 8);
-                    let exp_p_q15 = {
-                        // exp(log_p) → exp(-(-log_p)) → 1/exp_neg(-log_p) → reciprocal.
-                        // For numerical stability: exp(log_p) = 1 / exp(-log_p).
-                        // exp_neg only handles non-negative input; -log_p is non-negative when log_p ≤ 0.
-                        if log_p[ti][n] <= 0 {
-                            // log_p ≤ 0 → exp(log_p) ≤ 1, use exp_neg(-log_p)
-                            exp_neg_q15(-log_p[ti][n])
-                        } else {
-                            // log_p > 0 → exp(log_p) > 1, reciprocal of exp(-log_p)
-                            // Cap at Q15 max (32767 ≈ 1.0) — when log_p ≫ 0, h saturates
-                            // anyway. This is a known edge-case for unstable A.
-                            let denom = exp_neg_q15(log_p[ti][n]);
-                            if denom <= 0 { 32767 }
-                            else { ((1i32 << 30) / denom).min(32767) }
-                        }
-                    };
-                    let h_t = (inner_q23 * exp_p_q15 as i64) >> 15;
-                    let h_t_q23 = if h_t > i32::MAX as i64 {
+                    // h_new (Q23) = exp(dt*A) * h_prev_q23 + dbx_q15 << 8
+                    let h_prev = state[d][n] as i64;
+                    let h_new_q23: i64 = ((h_prev * exp_dta_q15 as i64) >> 15)
+                                       + (dbx_q15 << 8);
+                    let h_clipped: i32 = if h_new_q23 > i32::MAX as i64 {
                         i32::MAX
-                    } else if h_t < i32::MIN as i64 {
+                    } else if h_new_q23 < i32::MIN as i64 {
                         i32::MIN
                     } else {
-                        h_t as i32
+                        h_new_q23 as i32
                     };
-                    // y[t] += C[t][n] * h[t][n]
-                    let t = if reverse { T_SEQ - 1 - (t_start + ti) } else { t_start + ti };
-                    let c = c_seq[t][n] as i32;
-                    // c is Q15, h is Q23 → product Q38, shift to Q15
-                    let contrib = ((h_t_q23 as i64).wrapping_mul(c as i64)) >> 23;
+                    state[d][n] = h_clipped;
+
+                    // y[t] += C[t][n] * h[t][n]  (Q15 += Q15*Q23 >> 23)
+                    let c = c_seq[t][n] as i64;
+                    let contrib = (h_clipped as i64 * c) >> 23;
                     out[d][t] = out[d][t].wrapping_add(contrib as i32);
-
-                    if ti == chunk_len - 1 {
-                        state[d][n] = h_t_q23;
-                    }
                 }
-            }
 
-            // Skip connection: y[t] += D[d] * x[d][t]
-            for ti in 0..chunk_len {
-                let t = if reverse { T_SEQ - 1 - (t_start + ti) } else { t_start + ti };
-                let skip = ((d_skip[d] as i32).wrapping_mul(x[d][t] as i32)) >> 15;
-                out[d][t] = out[d][t].wrapping_add(skip);
+                // Skip connection: y[t] += D[d] * x[d][t]
+                let skip = (d_skip[d] as i64 * xv) >> 15;
+                out[d][t] = out[d][t].wrapping_add(skip as i32);
             }
         }
 
@@ -497,15 +479,17 @@ mod tests {
         selective_scan(&x, &a_log, &b_seq, &c_seq, &dt_seq, &d_skip,
                        &mut state, &mut out, false);
 
-        // y[0] = dBx[0] = 1 * 1 * 1 = 1 → out[0][0] ≈ 32767 Q15.
-        // y[1] = exp(log_d_a) * y[0] ≈ exp(-0.5) ≈ 0.6065 → 19872 Q15.
-        // (Both with our cumulative scan dynamics — bounds checked loose.)
+        // Closed-form: y[t] = exp(-0.5 * t) in Q15.
+        //   t=0 → 32767, t=1 → 19872, t=2 → 12055.
+        // Allow ±5% slack for LUT interp + chunked-scan drift.
         let y0 = out[0][0];
         let y1 = out[0][1];
-        assert!(y0 > 16000 && y0 < 40000,
-            "y[0] should be ≈ 1.0 Q15 (32767); got {}", y0);
-        assert!(y1.abs() < y0.abs() && y1 > 0,
-            "y[1] should be smaller than y[0] but positive; got y0={} y1={}",
-            y0, y1);
+        let y2 = out[0][2];
+        let approx = |actual: i32, expected: i32| -> bool {
+            (actual - expected).abs() <= 1700
+        };
+        assert!(approx(y0, 32767), "y[0] ≈ 32767 Q15; got {}", y0);
+        assert!(approx(y1, 19872), "y[1] ≈ 19872 Q15 (exp(-0.5)); got {}", y1);
+        assert!(approx(y2, 12055), "y[2] ≈ 12055 Q15 (exp(-1.0)); got {}", y2);
     }
 }
