@@ -119,16 +119,28 @@ class TestLmlVerify:
         assert r.returncode == 0, f"stderr: {r.stderr[:200]}"
 
     def test_exits_nonzero_on_corrupted_lml(self, encoded_lml, lml_cli_binary, tmp_path):
-        # Flip a byte deep inside the LML file.
+        # Flip a byte inside an LML1 packet's CRC-covered region.
+        # Per-packet CRC covers `header_var[4..18] || lpc_meta || payload`
+        # (see lml.rs:compress); container JSON metadata + offset table
+        # are explicitly out-of-CRC-contract for `verify`. The old
+        # `len//2` midpoint heuristic landed inside the JSON metadata
+        # blob on the 4-ch × 1-rec fixture and was silently passing
+        # whenever the metadata grew past file-midpoint (which it does
+        # for tiny fixtures). Anchor on the first LML1 magic byte and
+        # flip 25 bytes past it (3 bytes into lpc_meta, always
+        # CRC-protected).
         corrupted = tmp_path / "corrupted.lml"
         bytes_orig = bytearray(encoded_lml.read_bytes())
-        flip_idx = max(64, len(bytes_orig) // 2)
+        first_packet = bytes_orig.find(b"LML1", 32)
+        assert first_packet >= 0, "fixture missing LML1 packet magic"
+        flip_idx = first_packet + 25
+        assert flip_idx < len(bytes_orig), "fixture too small for CRC-covered flip"
         bytes_orig[flip_idx] ^= 0x01
         corrupted.write_bytes(bytes(bytes_orig))
 
         r = _run(lml_cli_binary, "verify", str(corrupted))
         assert r.returncode != 0, (
-            f"verify should detect single-byte corruption — "
+            f"verify should detect single-byte corruption in CRC-covered region — "
             f"returncode={r.returncode}, stdout={r.stdout[:200]}"
         )
 
