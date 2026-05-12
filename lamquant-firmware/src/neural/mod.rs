@@ -11,6 +11,7 @@
 
 pub mod focal;
 pub mod fsq;
+pub mod layer_norm;
 pub mod snn;
 pub mod ssm_block;
 pub mod ternary_mac;
