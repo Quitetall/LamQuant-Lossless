@@ -179,7 +179,9 @@ class TestProductionWireFormatE2E:
         packet = compress(tokens, subband, quality_mode=2)
         assert packet.data[:4] == b'LMQ3'
         roundtrip = decompress(packet)
-        assert len(roundtrip.fsq_levels) == 79
+        # Length asserted dynamically — no magic number — so fixture
+        # shape changes don't break the test silently.
+        assert len(roundtrip.fsq_levels) == len(tokens.fsq_levels)
         assert roundtrip.fsq_levels == tokens.fsq_levels, \
             "per-timestep schedule must roundtrip exactly"
         assert roundtrip.side_info['adaptive'] is True
@@ -218,33 +220,47 @@ class TestProductionWireFormatE2E:
         """Encoder(adaptive=True) with placeholder registry pin and no
         explicit --snn-checkpoint MUST raise AdaptiveFSQError — silent
         fallback to LMQ1 is forbidden.
+
+        Lazy-import contract: Encoder._ensure_codec does
+        `from lamquant_codec.models.snn import resolve_production_snn`
+        INSIDE the method, so each call freshly looks up the attribute
+        on the module. Monkeypatching the module attribute therefore
+        takes effect even though imports happen at call time. If a
+        future refactor hoists the import to module scope, this test
+        will need `monkeypatch.setattr` on the importing module as well.
         """
         from lamquant_codec.fileformat import Encoder
         from lamquant_codec.errors import AdaptiveFSQError
         import lamquant_codec.models.snn as snn_mod
 
-        # Force resolve_production_snn() to return None (matches the
-        # placeholder-pin state without depending on the live registry).
         monkeypatch.setattr(snn_mod, 'resolve_production_snn', lambda: None)
-        # Don't import resolve_production_snn alias if Encoder imports
-        # it lazily inside _ensure_codec.
 
         signal = np.random.randn(21, 2500).astype(np.float32) * 50
         encoder = Encoder(adaptive=True)
         with pytest.raises(AdaptiveFSQError, match="no SNN is available"):
             encoder.encode(signal)
 
-    def test_encoder_opt_out_via_adaptive_false(self):
-        """adaptive=False short-circuits SNN resolution entirely.
-        Real student_subband checkpoint produces an LMQ1 packet,
-        no AdaptiveFSQError even with the placeholder pin.
+    def test_encoder_opt_out_via_adaptive_false(self, monkeypatch):
+        """adaptive=False short-circuits SNN resolution entirely. The
+        production student_subband checkpoint produces an LMQ1 packet
+        even with the placeholder registry pin, and the resolver MUST
+        NOT be called (defensive — confirms the opt-out is structural,
+        not just a swallowed AdaptiveFSQError).
         """
         from lamquant_codec.fileformat import Encoder
         from pathlib import Path
+        import lamquant_codec.models.snn as snn_mod
+
         ckpt = Path('/mnt/4tb/LamQuant/weights/student_subband.ckpt')
         if not ckpt.is_file():
             pytest.skip(f"production checkpoint {ckpt} missing — skip "
                         f"opt-out smoke (CI image without weights/).")
+
+        def _boom():
+            raise AssertionError(
+                "resolve_production_snn must NOT be called when adaptive=False")
+        monkeypatch.setattr(snn_mod, 'resolve_production_snn', _boom)
+
         signal = np.random.randn(21, 2500).astype(np.float32) * 50
         encoder = Encoder(checkpoint=str(ckpt), adaptive=False)
         payload, levels = encoder.encode(signal)
