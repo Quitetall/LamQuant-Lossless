@@ -67,9 +67,16 @@ pub fn op_spec(op_id: &str) -> Option<OpSpec> {
             // LML and SHA-256 compares samples against the source EDF
             // before reporting success. The encode command runs in
             // lossless mode by default (noise_bits=0).
+            //
+            // --skip-existing makes encode idempotent: a fresh run on
+            // a clean output dir is unchanged, but Resume after a
+            // SIGKILL only re-encodes files whose .lml output is
+            // missing from the .lamquant-staging subdir. To force
+            // re-encode from scratch, the user removes the output
+            // dir manually (or picks Discard in the Resume panel).
             cmd: "encode", input: true, output: true,
             output_flag: "-o", recursive: true,
-            extra: &["--verify", "--cross-validate"],
+            extra: &["--verify", "--cross-validate", "--skip-existing"],
         },
         "encode_lma" => OpSpec {
             // Same as `encode` but packs the entire output into a
@@ -78,7 +85,7 @@ pub fn op_spec(op_id: &str) -> Option<OpSpec> {
             // encodes into a temp staging dir, then archives.
             cmd: "encode", input: true, output: true,
             output_flag: "-o", recursive: true,
-            extra: &["--verify", "--cross-validate", "--lma"],
+            extra: &["--verify", "--cross-validate", "--skip-existing", "--lma"],
         },
         "decode" | "decode_neural" => OpSpec {
             // --to-edf reconstructs a byte-identical EDF/BDF (header +
