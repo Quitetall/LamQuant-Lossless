@@ -151,6 +151,17 @@ impl SnnState {
     }
 }
 
+// Place the full SnnState in the `.bss.snn_overlay` section so the
+// linker overlays it with `lifting_scratch` + `lpc.residual` — both
+// are consumed before snn::inference() runs (Track B.4). The
+// `cfg(target_os = "none")` guard scopes this to the embedded build;
+// the host-verify test build uses the regular .bss to avoid clashing
+// with cargo-test's runtime layout.
+#[cfg(target_os = "none")]
+#[link_section = ".bss.snn_overlay"]
+static mut STATE: SnnState = SnnState::new();
+
+#[cfg(not(target_os = "none"))]
 static mut STATE: SnnState = SnnState::new();
 static SENSITIVITY: AtomicU8 = AtomicU8::new(SnnSensitivity::Medium as u8);
 

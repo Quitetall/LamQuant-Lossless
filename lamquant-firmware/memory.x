@@ -44,3 +44,31 @@ SECTIONS {
         __bi_entries_end = .;
     } > FLASH
 } INSERT AFTER .rodata;
+
+/* SNN scratch overlay (Track B.4).
+ *
+ * SsmScratch + activation ping-pongs in `neural::snn::STATE` consume
+ * ~270 KB worst-case under the current T=313 full-buffer impl. These
+ * buffers are only live during `snn::inference()`, which the
+ * scheduler runs AFTER `lifting_scratch` and `lpc.residual` have been
+ * consumed. We collapse the address ranges so the live-at-different-
+ * times buffers share physical RAM.
+ *
+ * Items tagged `#[link_section = ".bss.snn_overlay"]` land here.
+ * cargo size --release prints the section before/after to verify the
+ * overlap doesn't push past the 510 KB budget.
+ *
+ * Current impl note: SsmScratch is sized for full T=313 buffers. The
+ * production target is T-chunked CHUNK=32 buffers (~25 KB) per the
+ * v7.7.1 plan — that refactor is a follow-up commit. Until then, the
+ * overlay is necessary-but-not-sufficient.
+ */
+SECTIONS {
+    .bss.snn_overlay (NOLOAD) : ALIGN(8) {
+        __snn_overlay_start = .;
+        *(.bss.snn_overlay)
+        *(.bss.snn_overlay.*)
+        . = ALIGN(8);
+        __snn_overlay_end = .;
+    } > RAM
+} INSERT AFTER .bss;
