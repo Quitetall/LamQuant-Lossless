@@ -99,31 +99,31 @@ pub enum ActivityLevel {
 
 // ─── State (RAM-resident across windows) ───────────────────────────
 
+/// Memory-tight SNN runtime state. Total ~85 KB:
+///   activity_map         : 2.5 KB
+///   scratch              : 28 KB
+///   h_state              : 5 KB
+///   x_buf  / norm_buf    : 25 KB each (50 KB)
+///   dir_out (shared fwd/bwd) : 25 KB
+///
+/// |A| Q10 + D Q15 tables are NOT stored — computed per direction on
+/// the stack inside `run_direction` (save 10 KB BSS at the cost of
+/// ~5K of f32 Padé evals per inference; negligible vs the SSM math).
 struct SnnState {
     activity_map: [[u8; T_LATENT]; READOUT_DIM],
     activity_sum: u32,
     initialized: bool,
     scratch: SsmScratch,
     h_state: SsmHiddenState,
-    /// Block-output buffer (ping-ponged between layer 0 and layer 1).
+    /// Block input — accumulates the bidir residual in-place across
+    /// fwd then bwd within a block, then becomes the next block's
+    /// input on the second layer.
     x_buf:    [[i16; T_INPUT]; D_MODEL],
-    y_buf:    [[i16; T_INPUT]; D_MODEL],
-    /// Post-norm input shared by fwd and bwd within a block.
+    /// Layer norm output, ssm input for both fwd and bwd directions.
     norm_buf: [[i16; T_INPUT]; D_MODEL],
-    /// Per-direction fwd/bwd outputs, accumulated as residual.
-    fwd_out:  [[i16; T_INPUT]; D_MODEL],
-    bwd_out:  [[i16; T_INPUT]; D_MODEL],
-    /// |A| Q10 tables computed once at init from each layer's A_LOG.
-    /// layer 0 fwd/bwd + layer 1 fwd/bwd = 4 directions.
-    a_abs_q10_l0_fwd: [[i16; D_STATE]; D_INNER],
-    a_abs_q10_l0_bwd: [[i16; D_STATE]; D_INNER],
-    a_abs_q10_l1_fwd: [[i16; D_STATE]; D_INNER],
-    a_abs_q10_l1_bwd: [[i16; D_STATE]; D_INNER],
-    /// D skip-connection scaled to Q15.
-    d_q15_l0_fwd: [i16; D_INNER],
-    d_q15_l0_bwd: [i16; D_INNER],
-    d_q15_l1_fwd: [i16; D_INNER],
-    d_q15_l1_bwd: [i16; D_INNER],
+    /// Shared per-direction SSM output. fwd_out is fused into x_buf
+    /// before bwd is computed, so the same buffer serves both.
+    dir_out:  [[i16; T_INPUT]; D_MODEL],
 }
 
 impl SnnState {
@@ -135,18 +135,8 @@ impl SnnState {
             scratch:      SsmScratch::new(),
             h_state:      [[0; D_STATE]; D_INNER],
             x_buf:        [[0; T_INPUT]; D_MODEL],
-            y_buf:        [[0; T_INPUT]; D_MODEL],
             norm_buf:     [[0; T_INPUT]; D_MODEL],
-            fwd_out:      [[0; T_INPUT]; D_MODEL],
-            bwd_out:      [[0; T_INPUT]; D_MODEL],
-            a_abs_q10_l0_fwd: [[0; D_STATE]; D_INNER],
-            a_abs_q10_l0_bwd: [[0; D_STATE]; D_INNER],
-            a_abs_q10_l1_fwd: [[0; D_STATE]; D_INNER],
-            a_abs_q10_l1_bwd: [[0; D_STATE]; D_INNER],
-            d_q15_l0_fwd: [0; D_INNER],
-            d_q15_l0_bwd: [0; D_INNER],
-            d_q15_l1_fwd: [0; D_INNER],
-            d_q15_l1_bwd: [0; D_INNER],
+            dir_out:      [[0; T_INPUT]; D_MODEL],
         }
     }
 }
@@ -170,34 +160,6 @@ static SENSITIVITY: AtomicU8 = AtomicU8::new(SnnSensitivity::Medium as u8);
 pub fn init() {
     unsafe {
         STATE = SnnState::new();
-        // Precompute |A| Q10 tables (one per direction per layer).
-        // Real A_log = A_LOG[i] * A_LOG_SCALE. |A| = exp(A_log).
-        // Stored as Q10 i16: |A|_q10 = round(|A| * 1024), clamped to i16.
-        build_a_abs_q10(
-            &layer0_fwd::A_LOG, layer0_fwd::A_LOG_SCALE,
-            &mut STATE.a_abs_q10_l0_fwd);
-        build_a_abs_q10(
-            &layer0_bwd::A_LOG, layer0_bwd::A_LOG_SCALE,
-            &mut STATE.a_abs_q10_l0_bwd);
-        build_a_abs_q10(
-            &layer1_fwd::A_LOG, layer1_fwd::A_LOG_SCALE,
-            &mut STATE.a_abs_q10_l1_fwd);
-        build_a_abs_q10(
-            &layer1_bwd::A_LOG, layer1_bwd::A_LOG_SCALE,
-            &mut STATE.a_abs_q10_l1_bwd);
-        // Precompute D as Q15 i16 (D is small bounded real value).
-        build_d_q15(
-            &layer0_fwd::D, layer0_fwd::D_SCALE,
-            &mut STATE.d_q15_l0_fwd);
-        build_d_q15(
-            &layer0_bwd::D, layer0_bwd::D_SCALE,
-            &mut STATE.d_q15_l0_bwd);
-        build_d_q15(
-            &layer1_fwd::D, layer1_fwd::D_SCALE,
-            &mut STATE.d_q15_l1_fwd);
-        build_d_q15(
-            &layer1_bwd::D, layer1_bwd::D_SCALE,
-            &mut STATE.d_q15_l1_bwd);
         STATE.initialized = true;
     }
     SENSITIVITY.store(SnnSensitivity::Medium as u8, Ordering::Relaxed);
@@ -209,24 +171,27 @@ pub fn init() {
 ///   A_log_real = A_LOG[i] * A_LOG_SCALE       (f32)
 ///   |A|_real   = exp(A_log_real)              (always positive)
 ///   |A|_q10    = clamp_i16(round(|A| * 1024))
+/// Round-to-nearest-i16 without libm. `f32::round` lives in `std`,
+/// not in `core::f32`, so we inline it for the no_std target.
+#[inline]
+fn round_f32_to_i16(x: f32) -> i16 {
+    let r = if x >= 0.0 { x + 0.5 } else { x - 0.5 };
+    if r >= i16::MAX as f32 { i16::MAX }
+    else if r <= i16::MIN as f32 { i16::MIN }
+    else { r as i16 }
+}
+
 fn build_a_abs_q10(
     a_log: &[i16; D_INNER * D_STATE], a_log_scale: f32,
     out: &mut [[i16; D_STATE]; D_INNER],
 ) {
-    let log_2_lookup: f32 = a_log_scale; // alias for clarity
     for d in 0..D_INNER {
         for n in 0..D_STATE {
-            let alog_real = (a_log[d * D_STATE + n] as f32) * log_2_lookup;
-            // Approximate exp via Taylor-bounded helper since libm
-            // isn't available on the firmware target. Build LUT in
-            // f32 host arithmetic — host-verify only uses this path.
-            // On RV32IMAC this runs at init only (~1280 entries), so
-            // we accept the f32 emulation cost on the embedded build.
+            let alog_real = (a_log[d * D_STATE + n] as f32) * a_log_scale;
+            // Padé exp approximant (no libm dep). Init-only path
+            // — embedded build runs this ~1280 times at boot.
             let a_real = exp_f32(alog_real);
-            let q10 = (a_real * 1024.0).round();
-            out[d][n] = if q10 >= i16::MAX as f32 { i16::MAX }
-                        else if q10 <= i16::MIN as f32 { i16::MIN }
-                        else { q10 as i16 };
+            out[d][n] = round_f32_to_i16(a_real * 1024.0);
         }
     }
 }
@@ -234,10 +199,7 @@ fn build_a_abs_q10(
 fn build_d_q15(d_table: &[i8; D_INNER], d_scale: f32, out: &mut [i16; D_INNER]) {
     for d in 0..D_INNER {
         let real = (d_table[d] as f32) * d_scale;
-        let q15 = (real * 32768.0).round();
-        out[d] = if q15 >= i16::MAX as f32 { i16::MAX }
-                 else if q15 <= i16::MIN as f32 { i16::MIN }
-                 else { q15 as i16 };
+        out[d] = round_f32_to_i16(real * 32768.0);
     }
 }
 
@@ -285,11 +247,11 @@ pub fn inference(l3: &[[i16; T_INPUT]; INPUT_CH]) {
         for d in 0..D_MODEL { state.x_buf[d][t] = col_out[d]; }
     }
 
-    // Stages 2 & 3 — two BidirectionalSSM blocks.
+    // Stages 2 & 3 — two BidirectionalSSM blocks. Residual fused
+    // in-place into x_buf so it becomes the next layer's input.
     apply_bidir_block_0(state);
-    swap_buffers(state); // y_buf → x_buf for layer 1
     apply_bidir_block_1(state);
-    // After layer 1: state.y_buf holds the final per-timestep activations.
+    // After layer 1: state.x_buf holds the final per-timestep activations.
 
     // Stage 4 — readout: Linear(40 → 8) per timestep, then threshold.
     let rw_scale = scale_to_q15(readout::READOUT_WEIGHT_SCALE);
@@ -298,7 +260,7 @@ pub fn inference(l3: &[[i16; T_INPUT]; INPUT_CH]) {
     let mut col_d:      [i16; D_MODEL]    = [0; D_MODEL];
     let mut col_logits: [i16; READOUT_DIM] = [0; READOUT_DIM];
     for t in 0..T_LATENT {
-        for d in 0..D_MODEL { col_d[d] = state.y_buf[d][t]; }
+        for d in 0..D_MODEL { col_d[d] = state.x_buf[d][t]; }
         ssm_block::linear_i8_i16(
             &readout::READOUT_WEIGHT, rw_scale,
             Some((&readout::READOUT_BIAS, rb_scale)),
@@ -338,9 +300,13 @@ fn apply_bidir_block_0(state: &mut SnnState) {
         &layer0_norm::NORM_BIAS,   gb,
         &mut state.norm_buf,
     );
+    // Residual fused IN-PLACE into x_buf: after each direction we
+    // add dir_out / 2 to x_buf. This avoids holding fwd_out + bwd_out
+    // simultaneously (saves 25 KB SRAM).
     run_direction(state, Dir::L0Fwd, false);
+    accumulate_half_into_x(state);
     run_direction(state, Dir::L0Bwd, true);
-    fuse_residual(state);
+    accumulate_half_into_x(state);
 }
 
 fn apply_bidir_block_1(state: &mut SnnState) {
@@ -353,8 +319,21 @@ fn apply_bidir_block_1(state: &mut SnnState) {
         &mut state.norm_buf,
     );
     run_direction(state, Dir::L1Fwd, false);
+    accumulate_half_into_x(state);
     run_direction(state, Dir::L1Bwd, true);
-    fuse_residual(state);
+    accumulate_half_into_x(state);
+}
+
+/// x_buf[d][t] += dir_out[d][t] / 2 with i16 saturation.
+fn accumulate_half_into_x(state: &mut SnnState) {
+    for d in 0..D_MODEL {
+        for t in 0..T_INPUT {
+            let sum = state.x_buf[d][t] as i32 + (state.dir_out[d][t] as i32 >> 1);
+            state.x_buf[d][t] = if sum > i16::MAX as i32 { i16::MAX }
+                                else if sum < i16::MIN as i32 { i16::MIN }
+                                else { sum as i16 };
+        }
+    }
 }
 
 /// Drive `selective_ssm_block` for one direction. The weights borrow
@@ -365,16 +344,23 @@ fn apply_bidir_block_1(state: &mut SnnState) {
 /// the mutable fields. To achieve that, we copy the small Q10/Q15
 /// tables onto the stack first.
 fn run_direction(state: &mut SnnState, dir: Dir, reverse: bool) {
-    // Stack copies of the small tables so the immutable borrow on
-    // `state` is released before we touch scratch / h_state.
+    // Build the per-direction |A| Q10 + D Q15 tables on the stack
+    // here (~3 KB). Saves 10 KB BSS vs storing four copies in
+    // SnnState. Padé exp is cheap relative to the SSM math.
     let mut a_abs:  [[i16; D_STATE]; D_INNER] = [[0; D_STATE]; D_INNER];
     let mut d_skip: [i16; D_INNER]            = [0; D_INNER];
-    match dir {
-        Dir::L0Fwd => { a_abs = state.a_abs_q10_l0_fwd; d_skip = state.d_q15_l0_fwd; }
-        Dir::L0Bwd => { a_abs = state.a_abs_q10_l0_bwd; d_skip = state.d_q15_l0_bwd; }
-        Dir::L1Fwd => { a_abs = state.a_abs_q10_l1_fwd; d_skip = state.d_q15_l1_fwd; }
-        Dir::L1Bwd => { a_abs = state.a_abs_q10_l1_bwd; d_skip = state.d_q15_l1_bwd; }
-    }
+    let (a_log, a_log_scale, d_table, d_scale) = match dir {
+        Dir::L0Fwd => (&layer0_fwd::A_LOG, layer0_fwd::A_LOG_SCALE,
+                       &layer0_fwd::D,     layer0_fwd::D_SCALE),
+        Dir::L0Bwd => (&layer0_bwd::A_LOG, layer0_bwd::A_LOG_SCALE,
+                       &layer0_bwd::D,     layer0_bwd::D_SCALE),
+        Dir::L1Fwd => (&layer1_fwd::A_LOG, layer1_fwd::A_LOG_SCALE,
+                       &layer1_fwd::D,     layer1_fwd::D_SCALE),
+        Dir::L1Bwd => (&layer1_bwd::A_LOG, layer1_bwd::A_LOG_SCALE,
+                       &layer1_bwd::D,     layer1_bwd::D_SCALE),
+    };
+    build_a_abs_q10(a_log, a_log_scale, &mut a_abs);
+    build_d_q15(d_table, d_scale, &mut d_skip);
 
     let weights = match dir {
         Dir::L0Fwd => SsmBlockWeights {
@@ -435,34 +421,16 @@ fn run_direction(state: &mut SnnState, dir: Dir, reverse: bool) {
         },
     };
 
-    // Rust's borrow checker supports disjoint-field borrows of a
-    // struct through `&mut self` — `&state.norm_buf` and
-    // `&mut state.scratch` are independent fields and can coexist.
-    // (V4 Flash Finding 2 of 2dab51a5 — eliminates a 20 KB stack
-    // copy per direction × 4 directions per inference.)
-    let out_target = if reverse { &mut state.bwd_out } else { &mut state.fwd_out };
+    // Disjoint-field borrow: norm_buf immutable + scratch / h_state /
+    // dir_out mutable, all distinct SnnState fields.
     ssm_block::selective_ssm_block(
         &weights,
         &state.norm_buf,
         &mut state.scratch,
         &mut state.h_state,
-        out_target,
+        &mut state.dir_out,
         reverse,
     );
-}
-
-fn fuse_residual(state: &mut SnnState) {
-    for d in 0..D_MODEL {
-        for t in 0..T_INPUT {
-            let x = state.x_buf[d][t] as i32;
-            let f = state.fwd_out[d][t] as i32;
-            let b = state.bwd_out[d][t] as i32;
-            let sum = x + ((f + b) >> 1);
-            state.y_buf[d][t] = if sum > i16::MAX as i32 { i16::MAX }
-                                else if sum < i16::MIN as i32 { i16::MIN }
-                                else { sum as i16 };
-        }
-    }
 }
 
 #[inline]
@@ -473,14 +441,6 @@ fn dt_bias_q15(dt_bias_i8: i8, scale: f32) -> i32 {
     if q15 >= i32::MAX as f32 { i32::MAX }
     else if q15 <= i32::MIN as f32 { i32::MIN }
     else { q15 as i32 }
-}
-
-fn swap_buffers(state: &mut SnnState) {
-    for d in 0..D_MODEL {
-        for t in 0..T_INPUT {
-            state.x_buf[d][t] = state.y_buf[d][t];
-        }
-    }
 }
 
 /// Convert an f32 scale factor into Q15. Saturating clamp.

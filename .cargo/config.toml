@@ -1,15 +1,8 @@
 # Workspace-level cargo config.
 #
-# Target-scoped: rustflags here apply ONLY when building for that target.
-# Host crates (lamquant-core, gui) keep their default linking.
-#
-# RP2350 firmware (Hazard3 RISC-V): pull in memory.x and riscv-rt link.x.
-
-[target.riscv32imac-unknown-none-elf]
-rustflags = [
-    # memory.x defines MEMORY + REGION_ALIAS (must come BEFORE link.x).
-    # link.x (from riscv-rt) defines section layout.
-    "-C", "link-arg=-Tmemory.x",
-    "-C", "link-arg=-Tlink.x",
-    "-C", "no-vectorize-loops",
-]
+# RP2350 firmware target rustflags are defined in
+# `lamquant-firmware/.cargo/config.toml` only. Cargo MERGES (not
+# overrides) rustflags arrays across all parent configs, so duplicating
+# them here would emit `-Tmemory.x -Tlink.x` twice on the linker
+# command line, producing "region 'BOOT_LOADER' already defined".
+# Single source of truth lives next to the firmware crate.

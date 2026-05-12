@@ -369,39 +369,58 @@ pub struct SsmBlockWeights<'a> {
     pub out_proj_w:   &'a [i8], pub out_proj_w_scale_q15: i32,
 }
 
-/// Per-direction scratch — owned by the caller, shared across blocks
-/// and across windows. ~16 KB on RV32IMAC at SCAN_CHUNK=32.
+/// Per-direction scratch — chunk-sized buffers + cross-chunk conv
+/// history. Total ≈ 27 KB at SCAN_CHUNK=32:
+///   x_proj  : 80×32×2 =   5120 B
+///   z       : 80×32×2 =   5120 B
+///   x_conv  : 80×32×2 =   5120 B
+///   b_seq   : 32×16×2 =   1024 B
+///   c_seq   : 32×16×2 =   1024 B
+///   dt_seq  : 32×2    =     64 B
+///   y_q15   : 80×32×4 =  10240 B
+///   conv_hist: 80×3×2 =    480 B
+///
+/// Down from the full-T impl's ~270 KB. Shared across both directions
+/// (fwd, bwd) and both layers — total firmware footprint ~27 KB.
 pub struct SsmScratch {
-    pub x_proj:   [[i16; T_SEQ]; D_INNER],
-    pub z:        [[i16; T_SEQ]; D_INNER],
-    pub x_conv:   [[i16; T_SEQ]; D_INNER],
-    pub b_seq:    [[i16; D_STATE]; T_SEQ],
-    pub c_seq:    [[i16; D_STATE]; T_SEQ],
-    pub dt_seq:   [i16; T_SEQ],
-    pub y_q15:    [[i32; T_SEQ]; D_INNER],
+    pub x_proj:    [[i16; SCAN_CHUNK]; D_INNER],
+    pub z:         [[i16; SCAN_CHUNK]; D_INNER],
+    pub x_conv:    [[i16; SCAN_CHUNK]; D_INNER],
+    pub b_seq:     [[i16; D_STATE]; SCAN_CHUNK],
+    pub c_seq:     [[i16; D_STATE]; SCAN_CHUNK],
+    pub dt_seq:    [i16; SCAN_CHUNK],
+    pub y_q15:     [[i32; SCAN_CHUNK]; D_INNER],
+    /// Last D_CONV-1 timesteps of x_proj across chunk boundaries.
+    /// Lives between chunks within one direction; reset at the start
+    /// of every selective_ssm_block call.
+    pub conv_hist: [[i16; D_CONV]; D_INNER],
 }
 
 impl SsmScratch {
     pub const fn new() -> Self {
         Self {
-            x_proj: [[0; T_SEQ]; D_INNER],
-            z:      [[0; T_SEQ]; D_INNER],
-            x_conv: [[0; T_SEQ]; D_INNER],
-            b_seq:  [[0; D_STATE]; T_SEQ],
-            c_seq:  [[0; D_STATE]; T_SEQ],
-            dt_seq: [0; T_SEQ],
-            y_q15:  [[0; T_SEQ]; D_INNER],
+            x_proj:    [[0; SCAN_CHUNK]; D_INNER],
+            z:         [[0; SCAN_CHUNK]; D_INNER],
+            x_conv:    [[0; SCAN_CHUNK]; D_INNER],
+            b_seq:     [[0; D_STATE]; SCAN_CHUNK],
+            c_seq:     [[0; D_STATE]; SCAN_CHUNK],
+            dt_seq:    [0; SCAN_CHUNK],
+            y_q15:     [[0; SCAN_CHUNK]; D_INNER],
+            conv_hist: [[0; D_CONV]; D_INNER],
         }
     }
 }
 
 /// Run the full SelectiveSSM forward pass for one direction (fwd or bwd).
 ///
-/// Mirrors `ai_models/snn/mamba_ssm_minimal.py::SelectiveSSM.forward`.
+/// Mirrors `ai_models/snn/mamba_ssm_minimal.py::SelectiveSSM.forward`,
+/// pipelined in chunks of SCAN_CHUNK timesteps to bound the working
+/// set to ~27 KB. Each chunk: in_proj → causal conv (with cross-chunk
+/// history) → x_proj_ssm → softplus(dt) → selective_scan → silu(z)
+/// gate → out_proj.
 ///
-/// `x_in` is the LayerNorm output `[D_MODEL][T]` in Q15. `out` receives
-/// the post-out_proj `[D_MODEL][T]`. `state` is the SSM hidden state,
-/// reset to zero per call (matches Python `h = torch.zeros(...)`).
+/// `state` and `scratch.conv_hist` are zeroed at the start of every
+/// call (matches Python `h = torch.zeros(...)` per forward).
 pub fn selective_ssm_block(
     w:       &SsmBlockWeights,
     x_in:    &[[i16; T_SEQ]; D_MODEL],
@@ -410,91 +429,189 @@ pub fn selective_ssm_block(
     out:     &mut [[i16; T_SEQ]; D_MODEL],
     reverse: bool,
 ) {
-    // Stage 1 — in_proj: Linear(d_model → 2 * d_inner)
-    //   Output is split into (x_proj, z). x_proj feeds the conv+SSM
-    //   pipeline; z feeds the silu gate.
-    //   Row-major IN_PROJ_W layout: [2*d_inner][d_model]
-    let mut col_in:  [i16; D_MODEL]        = [0; D_MODEL];
-    let mut col_out: [i16; 2 * D_INNER]    = [0; 2 * D_INNER];
-    for t in 0..T_SEQ {
-        for d in 0..D_MODEL { col_in[d] = x_in[d][t]; }
-        linear_i8_i16(w.in_proj_w, w.in_proj_w_scale_q15, None, &col_in, &mut col_out);
-        for d in 0..D_INNER {
-            scratch.x_proj[d][t] = col_out[d];
-            scratch.z[d][t]      = col_out[D_INNER + d];
-        }
+    // Reset state + conv history at the start of every direction.
+    for d in 0..D_INNER {
+        for n in 0..D_STATE { state[d][n] = 0; }
+        for k in 0..D_CONV  { scratch.conv_hist[d][k] = 0; }
     }
 
-    // Stage 2 — depthwise causal conv1d + silu on x_proj.
-    causal_conv1d_dw_silu(
-        w.conv1d_w, w.conv1d_w_scale_q15,
-        w.conv1d_b, w.conv1d_b_scale_q15,
-        &scratch.x_proj, &mut scratch.x_conv,
-    );
-
-    // Stage 3 — x_proj_ssm: Linear(d_inner → 2*d_state + 1) per timestep.
-    //   Output splits into (B, C, dt_raw).
-    //   Row-major X_PROJ_W layout: [2*d_state + 1][d_inner]
     const SSM_OUT: usize = 2 * D_STATE + 1;
-    let mut col_xc:  [i16; D_INNER]    = [0; D_INNER];
-    let mut col_ssm: [i16; SSM_OUT]    = [0; SSM_OUT];
-    for t in 0..T_SEQ {
-        for d in 0..D_INNER { col_xc[d] = scratch.x_conv[d][t]; }
-        linear_i8_i16(w.x_proj_w, w.x_proj_w_scale_q15, None, &col_xc, &mut col_ssm);
-        for n in 0..D_STATE {
-            scratch.b_seq[t][n] = col_ssm[n];
-            scratch.c_seq[t][n] = col_ssm[D_STATE + n];
-        }
-        // dt = softplus(dt_raw + dt_bias). dt_bias is per-call constant.
-        let dt_raw = col_ssm[2 * D_STATE] as i32;
-        let dt_q15 = softplus_q15(dt_raw + w.dt_bias_q15);
-        scratch.dt_seq[t] = if dt_q15 > i16::MAX as i32 {
-            i16::MAX
-        } else if dt_q15 < 0 {
-            0
-        } else {
-            dt_q15 as i16
-        };
-    }
+    let mut col_in:  [i16; D_MODEL]      = [0; D_MODEL];
+    let mut col_io2: [i16; 2 * D_INNER]  = [0; 2 * D_INNER];
+    let mut col_xc:  [i16; D_INNER]      = [0; D_INNER];
+    let mut col_ssm: [i16; SSM_OUT]      = [0; SSM_OUT];
+    let mut col_yg:  [i16; D_INNER]      = [0; D_INNER];
+    let mut col_op:  [i16; D_MODEL]      = [0; D_MODEL];
 
-    // Stage 4 — selective_scan.
-    // Initialize y_q15 to zero (selective_scan accumulates into it).
+    let mut t_start: usize = 0;
+    while t_start < T_SEQ {
+        let t_end = min(t_start + SCAN_CHUNK, T_SEQ);
+        let chunk_len = t_end - t_start;
+
+        // Stage 1 — in_proj for chunk. Split into x_proj_chunk and z_chunk.
+        for ti in 0..chunk_len {
+            let t_abs = if reverse { T_SEQ - 1 - (t_start + ti) } else { t_start + ti };
+            for d in 0..D_MODEL { col_in[d] = x_in[d][t_abs]; }
+            linear_i8_i16(w.in_proj_w, w.in_proj_w_scale_q15, None, &col_in, &mut col_io2);
+            for d in 0..D_INNER {
+                scratch.x_proj[d][ti] = col_io2[d];
+                scratch.z[d][ti]      = col_io2[D_INNER + d];
+            }
+        }
+
+        // Stage 2 — depthwise causal conv1d + silu, with cross-chunk
+        // history. conv_hist[d][..] stores the last D_CONV-1 x_proj
+        // samples from the previous chunk.
+        chunked_causal_conv1d_dw_silu(
+            w.conv1d_w, w.conv1d_w_scale_q15,
+            w.conv1d_b, w.conv1d_b_scale_q15,
+            &scratch.x_proj, &mut scratch.x_conv,
+            &mut scratch.conv_hist, chunk_len,
+        );
+
+        // Stage 3 — x_proj_ssm + softplus(dt).
+        for ti in 0..chunk_len {
+            for d in 0..D_INNER { col_xc[d] = scratch.x_conv[d][ti]; }
+            linear_i8_i16(w.x_proj_w, w.x_proj_w_scale_q15, None, &col_xc, &mut col_ssm);
+            for n in 0..D_STATE {
+                scratch.b_seq[ti][n] = col_ssm[n];
+                scratch.c_seq[ti][n] = col_ssm[D_STATE + n];
+            }
+            let dt_raw = col_ssm[2 * D_STATE] as i32;
+            let dt_q15 = softplus_q15(dt_raw + w.dt_bias_q15);
+            scratch.dt_seq[ti] = if dt_q15 > i16::MAX as i32 { i16::MAX }
+                                 else if dt_q15 < 0 { 0 }
+                                 else { dt_q15 as i16 };
+        }
+
+        // Stage 4 — selective_scan accumulates into y_q15[d][0..chunk_len].
+        for d in 0..D_INNER {
+            for ti in 0..chunk_len { scratch.y_q15[d][ti] = 0; }
+        }
+        selective_scan_chunk(
+            &scratch.x_conv, w.a_abs_q10,
+            &scratch.b_seq, &scratch.c_seq,
+            &scratch.dt_seq, w.d_skip_q15,
+            state, &mut scratch.y_q15, chunk_len,
+        );
+
+        // Stages 5+6 — gate y *= silu(z), then out_proj per timestep.
+        for ti in 0..chunk_len {
+            let t_abs = if reverse { T_SEQ - 1 - (t_start + ti) } else { t_start + ti };
+            for d in 0..D_INNER {
+                let y    = scratch.y_q15[d][ti];
+                let z    = scratch.z[d][ti] as i32;
+                let gate = silu_q15(z);
+                let prod = (y as i64 * gate as i64) >> 15;
+                col_yg[d] = clamp_i16(prod as i32);
+            }
+            linear_i8_i16(w.out_proj_w, w.out_proj_w_scale_q15, None, &col_yg, &mut col_op);
+            for d in 0..D_MODEL { out[d][t_abs] = col_op[d]; }
+        }
+
+        t_start = t_end;
+    }
+}
+
+/// Chunk-local causal conv1d. The first D_CONV-1 taps of the first
+/// chunk come from `conv_hist` (carried across chunks); the rest
+/// come from the chunk's x_proj. At the end, the last D_CONV-1
+/// samples are saved back into conv_hist for the next chunk.
+fn chunked_causal_conv1d_dw_silu(
+    w: &[i8; D_INNER * D_CONV], w_scale_q15: i32,
+    b: &[i8; D_INNER],          b_scale_q15: i32,
+    x_proj_chunk: &[[i16; SCAN_CHUNK]; D_INNER],
+    out: &mut [[i16; SCAN_CHUNK]; D_INNER],
+    conv_hist: &mut [[i16; D_CONV]; D_INNER],
+    chunk_len: usize,
+) {
     for d in 0..D_INNER {
-        for t in 0..T_SEQ {
-            scratch.y_q15[d][t] = 0;
+        let bias_q15: i64 = (b[d] as i64) * (b_scale_q15 as i64) >> 15;
+        for ti in 0..chunk_len {
+            let mut acc: i64 = 0;
+            for k in 0..D_CONV {
+                // Tap k samples x_proj[d][t - (D_CONV - 1 - k)].
+                let off = (D_CONV - 1) as isize - k as isize;
+                let src = ti as isize - off;
+                let sample: i64 = if src >= 0 {
+                    x_proj_chunk[d][src as usize] as i64
+                } else {
+                    // Pull from cross-chunk history. conv_hist[d][i]
+                    // stores x_proj[d][previous_chunk_end - (D_CONV-1-i)].
+                    // Equivalently, conv_hist[d][D_CONV-1+src] for src<0.
+                    let hist_idx = (D_CONV as isize - 1 + src) as usize;
+                    conv_hist[d][hist_idx] as i64
+                };
+                let wk = w[d * D_CONV + k] as i64;
+                acc += wk * sample;
+            }
+            let scaled = (acc * w_scale_q15 as i64) >> 15;
+            let pre = scaled + bias_q15;
+            let pre_i32 = if pre > i32::MAX as i64 { i32::MAX }
+                          else if pre < i32::MIN as i64 { i32::MIN }
+                          else { pre as i32 };
+            out[d][ti] = clamp_i16(silu_q15(pre_i32));
         }
+        // Save last D_CONV-1 samples for next chunk's left context.
+        // conv_hist[d][i] = x_proj_chunk[d][chunk_len - (D_CONV-1) + i]
+        for i in 0..(D_CONV - 1) {
+            let src_idx = chunk_len as isize - (D_CONV - 1) as isize + i as isize;
+            conv_hist[d][i] = if src_idx >= 0 && (src_idx as usize) < chunk_len {
+                x_proj_chunk[d][src_idx as usize]
+            } else {
+                0
+            };
+        }
+        // Last slot of conv_hist is unused (we only need D_CONV-1
+        // samples of history); keep it zero.
+        conv_hist[d][D_CONV - 1] = 0;
     }
-    selective_scan(
-        &scratch.x_conv,
-        w.a_abs_q10,
-        &scratch.b_seq,
-        &scratch.c_seq,
-        &scratch.dt_seq,
-        w.d_skip_q15,
-        state,
-        &mut scratch.y_q15,
-        reverse,
-    );
+}
 
-    // Stage 5 — gate: y *= silu(z).
-    let mut y_gated: [[i16; T_SEQ]; D_INNER] = [[0; T_SEQ]; D_INNER];
+/// Chunk-local selective scan. Operates on chunk-sized buffers and
+/// accumulates into `out[d][0..chunk_len]`. `state` persists across
+/// chunks within a direction.
+///
+/// Algorithm: sequential ZOH recurrence
+///   h[t][n] = exp(dt[t] * A[n]) * h[t-1][n] + dt[t] * B[t][n] * x[t]
+///   y[t]    = sum_n( C[t][n] * h[t][n] ) + D[d] * x[t]
+fn selective_scan_chunk(
+    x:        &[[i16; SCAN_CHUNK]; D_INNER],
+    a_abs:    &[[i16; D_STATE]; D_INNER],
+    b_seq:    &[[i16; D_STATE]; SCAN_CHUNK],
+    c_seq:    &[[i16; D_STATE]; SCAN_CHUNK],
+    dt_seq:   &[i16; SCAN_CHUNK],
+    d_skip:   &[i16; D_INNER],
+    state:    &mut SsmHiddenState,
+    out:      &mut [[i32; SCAN_CHUNK]; D_INNER],
+    chunk_len: usize,
+) {
     for d in 0..D_INNER {
-        for t in 0..T_SEQ {
-            let y    = scratch.y_q15[d][t];
-            let z    = scratch.z[d][t] as i32;
-            let gate = silu_q15(z);
-            let prod = (y as i64 * gate as i64) >> 15;
-            y_gated[d][t] = clamp_i16(prod as i32);
+        let mut a_abs_q10 = [0i32; D_STATE];
+        for n in 0..D_STATE { a_abs_q10[n] = a_abs[d][n] as i32; }
+        for ti in 0..chunk_len {
+            let xv = x[d][ti] as i64;
+            let dt = dt_seq[ti] as i64;
+            let dt_x_q15 = (dt * xv) >> 15;
+            for n in 0..D_STATE {
+                let dt_amag_q15 = ((dt * a_abs_q10[n] as i64) >> 10) as i32;
+                let exp_dta_q15 = exp_neg_q15(dt_amag_q15);
+                let bv = b_seq[ti][n] as i64;
+                let dbx_q15 = (dt_x_q15 * bv) >> 15;
+                let h_prev = state[d][n] as i64;
+                let h_new_q23: i64 = ((h_prev * exp_dta_q15 as i64) >> 15)
+                                   + (dbx_q15 << 8);
+                let h_clipped: i32 = if h_new_q23 > i32::MAX as i64 { i32::MAX }
+                                     else if h_new_q23 < i32::MIN as i64 { i32::MIN }
+                                     else { h_new_q23 as i32 };
+                state[d][n] = h_clipped;
+                let c = c_seq[ti][n] as i64;
+                let contrib = (h_clipped as i64 * c) >> 23;
+                out[d][ti] = out[d][ti].wrapping_add(contrib as i32);
+            }
+            let skip = (d_skip[d] as i64 * xv) >> 15;
+            out[d][ti] = out[d][ti].wrapping_add(skip as i32);
         }
-    }
-
-    // Stage 6 — out_proj: Linear(d_inner → d_model) per timestep.
-    let mut col_yg: [i16; D_INNER] = [0; D_INNER];
-    let mut col_op: [i16; D_MODEL] = [0; D_MODEL];
-    for t in 0..T_SEQ {
-        for d in 0..D_INNER { col_yg[d] = y_gated[d][t]; }
-        linear_i8_i16(w.out_proj_w, w.out_proj_w_scale_q15, None, &col_yg, &mut col_op);
-        for d in 0..D_MODEL { out[d][t] = col_op[d]; }
     }
 }
 
