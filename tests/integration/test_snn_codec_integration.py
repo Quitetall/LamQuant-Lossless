@@ -158,6 +158,100 @@ class TestAdaptiveCompress:
             f"2x larger than uniform ({len(p_uniform.data)} bytes)")
 
 
+class TestProductionWireFormatE2E:
+    """Track A.6 — end-to-end wire-format roundtrips that bind the
+    production Encoder / NeuralWriter / LMQReader / typed decompress
+    surfaces to the LMQ3 adaptive contract.
+    """
+
+    def test_lmq3_roundtrip_via_typed_pipeline(self, subband, mock_encoder, mamba_snn):
+        """encode(snn=..) → compress → decompress preserves the full
+        per-timestep FSQ schedule. fsq_levels[0] still works for legacy
+        readers that only sample t=0.
+        """
+        from lamquant_codec.encode import encode
+        from lamquant_codec.compress import compress
+        from lamquant_codec.decompress import decompress
+        tokens = encode(subband, mock_encoder, snn=mamba_snn)
+        assert tokens.fsq_levels is not None
+        if len(set(tokens.fsq_levels)) <= 1:
+            pytest.skip("SNN produced uniform schedule — no LMQ3 path exercised.")
+        packet = compress(tokens, subband, quality_mode=2)
+        assert packet.data[:4] == b'LMQ3'
+        roundtrip = decompress(packet)
+        assert len(roundtrip.fsq_levels) == 79
+        assert roundtrip.fsq_levels == tokens.fsq_levels, \
+            "per-timestep schedule must roundtrip exactly"
+        assert roundtrip.side_info['adaptive'] is True
+
+    def test_neuralwriter_writes_adaptive_window(self, tmp_path, subband, mock_encoder, mamba_snn):
+        """NeuralWriter auto-sets FLAG_ADAPTIVE_FSQ + zeroes header
+        fsq_levels when the payload magic is LMQ3. LMQReader reads back
+        the same bits.
+        """
+        from lamquant_codec.encode import encode
+        from lamquant_codec.compress import compress
+        from lamquant_codec.fileformat import (
+            NeuralWriter, LMQReader, FLAG_ADAPTIVE_FSQ,
+        )
+        tokens = encode(subband, mock_encoder, snn=mamba_snn)
+        if len(set(tokens.fsq_levels)) <= 1:
+            pytest.skip("SNN produced uniform schedule — no LMQ3 path exercised.")
+        packet = compress(tokens, subband, quality_mode=2)
+        assert packet.data[:4] == b'LMQ3'
+
+        path = str(tmp_path / 'adaptive.lmq')
+        with NeuralWriter(path) as w:
+            w.write_window(packet.data, timestamp_us=12345)
+
+        with LMQReader(path) as r:
+            wins = list(r)
+        assert len(wins) == 1
+        win = wins[0]
+        assert win.header.flags & FLAG_ADAPTIVE_FSQ, \
+            "FLAG_ADAPTIVE_FSQ must be set on LMQ3 windows"
+        assert win.header.fsq_levels == b'\x00' * 10, \
+            "header fsq_levels MUST be zero for adaptive — schedule is in payload"
+        assert win.payload[:4] == b'LMQ3'
+
+    def test_encoder_raises_when_no_snn_pin(self, tmp_path, monkeypatch):
+        """Encoder(adaptive=True) with placeholder registry pin and no
+        explicit --snn-checkpoint MUST raise AdaptiveFSQError — silent
+        fallback to LMQ1 is forbidden.
+        """
+        from lamquant_codec.fileformat import Encoder
+        from lamquant_codec.errors import AdaptiveFSQError
+        import lamquant_codec.models.snn as snn_mod
+
+        # Force resolve_production_snn() to return None (matches the
+        # placeholder-pin state without depending on the live registry).
+        monkeypatch.setattr(snn_mod, 'resolve_production_snn', lambda: None)
+        # Don't import resolve_production_snn alias if Encoder imports
+        # it lazily inside _ensure_codec.
+
+        signal = np.random.randn(21, 2500).astype(np.float32) * 50
+        encoder = Encoder(adaptive=True)
+        with pytest.raises(AdaptiveFSQError, match="no SNN is available"):
+            encoder.encode(signal)
+
+    def test_encoder_opt_out_via_adaptive_false(self):
+        """adaptive=False short-circuits SNN resolution entirely.
+        Real student_subband checkpoint produces an LMQ1 packet,
+        no AdaptiveFSQError even with the placeholder pin.
+        """
+        from lamquant_codec.fileformat import Encoder
+        from pathlib import Path
+        ckpt = Path('/mnt/4tb/LamQuant/weights/student_subband.ckpt')
+        if not ckpt.is_file():
+            pytest.skip(f"production checkpoint {ckpt} missing — skip "
+                        f"opt-out smoke (CI image without weights/).")
+        signal = np.random.randn(21, 2500).astype(np.float32) * 50
+        encoder = Encoder(checkpoint=str(ckpt), adaptive=False)
+        payload, levels = encoder.encode(signal)
+        assert payload[:4] == b'LMQ1', f"adaptive=False must emit LMQ1, got {payload[:4]!r}"
+        assert levels == b'\x02' * 10
+
+
 class TestHiPPOInitialization:
     """Verify HiPPO-LegS A_log initialization in SelectiveSSM."""
 
