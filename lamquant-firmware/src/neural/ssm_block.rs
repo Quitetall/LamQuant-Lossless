@@ -262,7 +262,7 @@ pub type SsmHiddenState = [[i32; D_STATE]; D_INNER];
 /// simply reverses the t-axis and the scan handles both passes uniformly.
 pub fn selective_scan(
     x:        &[[i16; T_SEQ]; D_INNER],    // post-conv x, Q15
-    a_log:    &[[i16; D_STATE]; D_INNER],  // trained log(A), Q15
+    a_abs:    &[[i16; D_STATE]; D_INNER],  // |A| = exp(A_log), Q10 (range [0, 32))
     b_seq:    &[[i16; D_STATE]; T_SEQ],    // per-t B, Q15
     c_seq:    &[[i16; D_STATE]; T_SEQ],    // per-t C, Q15
     dt_seq:   &[i16; T_SEQ],               // softplus(dt + dt_bias), Q15
@@ -297,17 +297,13 @@ pub fn selective_scan(
         let t_end = min(t_start + SCAN_CHUNK, T_SEQ);
 
         for d in 0..D_INNER {
-            // |A[n]| in Q15. exp(A_log) ∈ (0, 1] for A_log ≤ 0
-            // (HiPPO-trained range). For A_log > 0 we cap at 1.0 since
-            // the recurrence is otherwise unstable.
-            let mut a_mag_q15 = [0i32; D_STATE];
+            // |A[n]| Q10 (range [0, ~32)). Trained A_log produces real
+            // |A| in [1.5, 16], which Q10 represents exactly. No clamp
+            // branch needed — the values are non-negative by construction
+            // (they're exp(real A_log)).
+            let mut a_abs_q10 = [0i32; D_STATE];
             for n in 0..D_STATE {
-                let alog = a_log[d][n] as i32;
-                a_mag_q15[n] = if alog <= 0 {
-                    exp_neg_q15(-alog)
-                } else {
-                    32767
-                };
+                a_abs_q10[n] = a_abs[d][n] as i32;
             }
 
             for ti in t_start..t_end {
@@ -317,8 +313,11 @@ pub fn selective_scan(
                 let dt_x_q15 = (dt * xv) >> 15;
 
                 for n in 0..D_STATE {
-                    // exp(dt * A[n]) = exp(-(dt * |A[n]|)) since A ≤ 0
-                    let dt_amag_q15 = ((dt * a_mag_q15[n] as i64) >> 15) as i32;
+                    // exp(dt * A[n]) = exp(-(dt * |A[n]|)) since A ≤ 0.
+                    // dt (Q15) × |A| (Q10) → Q25 product; >> 10 to Q15
+                    // gives dt*|A| as a Q15 magnitude suitable for
+                    // exp_neg_q15 (which clamps inputs above 8.0).
+                    let dt_amag_q15 = ((dt * a_abs_q10[n] as i64) >> 10) as i32;
                     let exp_dta_q15 = exp_neg_q15(dt_amag_q15);
 
                     // dBx[t][n] = dt * B[t][n] * x[d][t]   (Q15)
@@ -362,8 +361,10 @@ pub struct SsmBlockWeights<'a> {
     pub conv1d_w:     &'a [i8; D_INNER * D_CONV], pub conv1d_w_scale_q15: i32,
     pub conv1d_b:     &'a [i8; D_INNER],          pub conv1d_b_scale_q15: i32,
     pub x_proj_w:     &'a [i8], pub x_proj_w_scale_q15: i32,
-    pub a_log:        &'a [[i16; D_STATE]; D_INNER],
-    pub d_skip:       &'a [i16; D_INNER],
+    /// |A| = exp(A_log) in Q10. Range [0, 32). Converted once at
+    /// init from the trained A_LOG i16 table (scale ≈ 1.09e-4).
+    pub a_abs_q10:    &'a [[i16; D_STATE]; D_INNER],
+    pub d_skip_q15:   &'a [i16; D_INNER],
     pub dt_bias_q15:  i32,
     pub out_proj_w:   &'a [i8], pub out_proj_w_scale_q15: i32,
 }
@@ -391,6 +392,109 @@ impl SsmScratch {
             dt_seq: [0; T_SEQ],
             y_q15:  [[0; T_SEQ]; D_INNER],
         }
+    }
+}
+
+/// Run the full SelectiveSSM forward pass for one direction (fwd or bwd).
+///
+/// Mirrors `ai_models/snn/mamba_ssm_minimal.py::SelectiveSSM.forward`.
+///
+/// `x_in` is the LayerNorm output `[D_MODEL][T]` in Q15. `out` receives
+/// the post-out_proj `[D_MODEL][T]`. `state` is the SSM hidden state,
+/// reset to zero per call (matches Python `h = torch.zeros(...)`).
+pub fn selective_ssm_block(
+    w:       &SsmBlockWeights,
+    x_in:    &[[i16; T_SEQ]; D_MODEL],
+    scratch: &mut SsmScratch,
+    state:   &mut SsmHiddenState,
+    out:     &mut [[i16; T_SEQ]; D_MODEL],
+    reverse: bool,
+) {
+    // Stage 1 — in_proj: Linear(d_model → 2 * d_inner)
+    //   Output is split into (x_proj, z). x_proj feeds the conv+SSM
+    //   pipeline; z feeds the silu gate.
+    //   Row-major IN_PROJ_W layout: [2*d_inner][d_model]
+    let mut col_in:  [i16; D_MODEL]        = [0; D_MODEL];
+    let mut col_out: [i16; 2 * D_INNER]    = [0; 2 * D_INNER];
+    for t in 0..T_SEQ {
+        for d in 0..D_MODEL { col_in[d] = x_in[d][t]; }
+        linear_i8_i16(w.in_proj_w, w.in_proj_w_scale_q15, None, &col_in, &mut col_out);
+        for d in 0..D_INNER {
+            scratch.x_proj[d][t] = col_out[d];
+            scratch.z[d][t]      = col_out[D_INNER + d];
+        }
+    }
+
+    // Stage 2 — depthwise causal conv1d + silu on x_proj.
+    causal_conv1d_dw_silu(
+        w.conv1d_w, w.conv1d_w_scale_q15,
+        w.conv1d_b, w.conv1d_b_scale_q15,
+        &scratch.x_proj, &mut scratch.x_conv,
+    );
+
+    // Stage 3 — x_proj_ssm: Linear(d_inner → 2*d_state + 1) per timestep.
+    //   Output splits into (B, C, dt_raw).
+    //   Row-major X_PROJ_W layout: [2*d_state + 1][d_inner]
+    const SSM_OUT: usize = 2 * D_STATE + 1;
+    let mut col_xc:  [i16; D_INNER]    = [0; D_INNER];
+    let mut col_ssm: [i16; SSM_OUT]    = [0; SSM_OUT];
+    for t in 0..T_SEQ {
+        for d in 0..D_INNER { col_xc[d] = scratch.x_conv[d][t]; }
+        linear_i8_i16(w.x_proj_w, w.x_proj_w_scale_q15, None, &col_xc, &mut col_ssm);
+        for n in 0..D_STATE {
+            scratch.b_seq[t][n] = col_ssm[n];
+            scratch.c_seq[t][n] = col_ssm[D_STATE + n];
+        }
+        // dt = softplus(dt_raw + dt_bias). dt_bias is per-call constant.
+        let dt_raw = col_ssm[2 * D_STATE] as i32;
+        let dt_q15 = softplus_q15(dt_raw + w.dt_bias_q15);
+        scratch.dt_seq[t] = if dt_q15 > i16::MAX as i32 {
+            i16::MAX
+        } else if dt_q15 < 0 {
+            0
+        } else {
+            dt_q15 as i16
+        };
+    }
+
+    // Stage 4 — selective_scan.
+    // Initialize y_q15 to zero (selective_scan accumulates into it).
+    for d in 0..D_INNER {
+        for t in 0..T_SEQ {
+            scratch.y_q15[d][t] = 0;
+        }
+    }
+    selective_scan(
+        &scratch.x_conv,
+        w.a_abs_q10,
+        &scratch.b_seq,
+        &scratch.c_seq,
+        &scratch.dt_seq,
+        w.d_skip_q15,
+        state,
+        &mut scratch.y_q15,
+        reverse,
+    );
+
+    // Stage 5 — gate: y *= silu(z).
+    let mut y_gated: [[i16; T_SEQ]; D_INNER] = [[0; T_SEQ]; D_INNER];
+    for d in 0..D_INNER {
+        for t in 0..T_SEQ {
+            let y    = scratch.y_q15[d][t];
+            let z    = scratch.z[d][t] as i32;
+            let gate = silu_q15(z);
+            let prod = (y as i64 * gate as i64) >> 15;
+            y_gated[d][t] = clamp_i16(prod as i32);
+        }
+    }
+
+    // Stage 6 — out_proj: Linear(d_inner → d_model) per timestep.
+    let mut col_yg: [i16; D_INNER] = [0; D_INNER];
+    let mut col_op: [i16; D_MODEL] = [0; D_MODEL];
+    for t in 0..T_SEQ {
+        for d in 0..D_INNER { col_yg[d] = y_gated[d][t]; }
+        linear_i8_i16(w.out_proj_w, w.out_proj_w_scale_q15, None, &col_yg, &mut col_op);
+        for d in 0..D_MODEL { out[d][t] = col_op[d]; }
     }
 }
 
@@ -459,11 +563,10 @@ mod tests {
         let mut x = [[0i16; T_SEQ]; D_INNER];
         x[0][0] = 32767; // x[d=0, t=0] = 1.0
         let mut a_log = [[0i16; D_STATE]; D_INNER];
-        // A_log = ln(0.1) ≈ -2.303 → Q15 ≈ -75469 — too big for i16.
-        // Use A_log = ln(0.25) ≈ -1.386 → Q15 ≈ -45426 — also overflow.
-        // The trained range tends to be in [-2, +1]; we test with smaller A.
-        // A = -0.5 → A_log = ln(0.5) ≈ -0.693 → Q15 ≈ -22713.
-        a_log[0][0] = -22713;
+        // |A| = 0.5 in Q10 → 512. (Kernel expects |A| Q10 since the
+        // trained A_log range produces |A| in [1.5, 16], which doesn't
+        // fit Q15.)
+        a_log[0][0] = 512;
         let mut b_seq = [[0i16; D_STATE]; T_SEQ];
         let mut c_seq = [[0i16; D_STATE]; T_SEQ];
         let mut dt_seq = [0i16; T_SEQ];
