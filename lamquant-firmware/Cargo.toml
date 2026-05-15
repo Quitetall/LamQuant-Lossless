@@ -46,6 +46,14 @@ lamquant-weights = { path = "../lamquant-weights", default-features = false, fea
 # the actual global allocator instance (see main.rs).
 embedded-alloc = "0.6"
 
+# `libm` provides no_std f64 transcendentals — used only by the adaptive
+# LPC path (AIC/MDL penalty needs `ln(e/n)`). Fixed-order LPC and all
+# other DSP stays integer-only. Pulled in unconditionally because the
+# host-verify test path needs it too; the symbol set is small enough
+# (a single `log` call) that link-time DCE keeps cost negligible on
+# the embedded target.
+libm = "0.2"
+
 # Bare-metal-only deps. Cargo target-specific dependency tables apply
 # automatically when --target matches.
 [target.riscv32imac-unknown-none-elf.dependencies]
