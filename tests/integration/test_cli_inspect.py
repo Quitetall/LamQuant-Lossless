@@ -39,11 +39,19 @@ def tiny_edf(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def encoded_lml(tmp_path: Path, tiny_edf: Path, lml_cli_binary: Path) -> Path:
-    """An LML file encoded from tiny_edf via the binary."""
+    """An LML file encoded from tiny_edf via the binary.
+
+    Uses `--no-bundle` so the encoder emits a bare `.lml` rather than
+    the default per-EDF `.lma` archive — these inspection tests want
+    to point `lml info` / `lml verify` / etc. at the raw `.lml`. The
+    sidecar-preservation contract lives in
+    `test_sidecar_preservation.py`.
+    """
     out_dir = tmp_path / "lml"
     out_dir.mkdir()
     result = subprocess.run(
-        [str(lml_cli_binary), "encode", str(tiny_edf), "-o", str(out_dir)],
+        [str(lml_cli_binary), "encode", str(tiny_edf),
+         "-o", str(out_dir), "--no-bundle"],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, (

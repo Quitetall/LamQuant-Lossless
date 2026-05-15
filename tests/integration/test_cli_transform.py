@@ -53,10 +53,17 @@ def _sha256(p: Path) -> str:
 
 class TestLmlEncode:
 
+    # The default encode output is a per-EDF `.lma` archive (which
+    # also bundles every sibling sidecar — see
+    # `test_sidecar_preservation.py`). For these tests we pass
+    # `--no-bundle` to keep the bare `.lml` shape that the rest of the
+    # subtest assertions inspect.
+
     def test_produces_lml_file(self, tiny_edf, tmp_path, lml_cli_binary):
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
-        r = _run(lml_cli_binary, "encode", str(tiny_edf), "-o", str(out_dir))
+        r = _run(lml_cli_binary, "encode", str(tiny_edf),
+                 "-o", str(out_dir), "--no-bundle")
         assert r.returncode == 0, f"stderr: {r.stderr[:200]}"
         files = list(out_dir.glob("*.lml"))
         assert len(files) == 1
@@ -65,7 +72,8 @@ class TestLmlEncode:
     def test_output_starts_with_lml_magic(self, tiny_edf, tmp_path, lml_cli_binary):
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
-        r = _run(lml_cli_binary, "encode", str(tiny_edf), "-o", str(out_dir))
+        r = _run(lml_cli_binary, "encode", str(tiny_edf),
+                 "-o", str(out_dir), "--no-bundle")
         assert r.returncode == 0
         produced = next(out_dir.glob("*.lml"))
         assert produced.read_bytes()[:4] == b"LML1"
@@ -79,10 +87,12 @@ class TestLmlEncode:
 class TestLmlDecode:
 
     def test_decode_produces_output(self, tiny_edf, tmp_path, lml_cli_binary):
-        # Encode first.
+        # Encode first — `--no-bundle` to inspect the raw `.lml` rather
+        # than the default per-EDF `.lma` archive.
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
-        r = _run(lml_cli_binary, "encode", str(tiny_edf), "-o", str(out_dir))
+        r = _run(lml_cli_binary, "encode", str(tiny_edf),
+                 "-o", str(out_dir), "--no-bundle")
         assert r.returncode == 0
         lml_file = next(out_dir.glob("*.lml"))
 
@@ -165,9 +175,13 @@ class TestLmlExtract:
 class TestLmlDiff:
 
     def test_diff_zero_on_identical_files(self, tiny_edf, tmp_path, lml_cli_binary):
+        # `--no-bundle` so `lml diff` sees the raw `.lml` it expects;
+        # the default per-EDF `.lma` path is covered in the
+        # archive-roundtrip suite.
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
-        r = _run(lml_cli_binary, "encode", str(tiny_edf), "-o", str(out_dir))
+        r = _run(lml_cli_binary, "encode", str(tiny_edf),
+                 "-o", str(out_dir), "--no-bundle")
         assert r.returncode == 0
         original = next(out_dir.glob("*.lml"))
 
