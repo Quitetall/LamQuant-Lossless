@@ -274,7 +274,12 @@ fn levinson_q31_adaptive(r: &[i64], n_samples: usize) -> Option<([i32; LPC_ORDER
     const HALF_QA: i128 = 1 << (QA - 1);
     const ONE_QA: i128 = 1 << QA;
     const QA_TO_Q31_SHIFT: u32 = QA - 31;
-    const ORDER_BIT_COST: f64 = 22.18; // 32 * ln 2
+    // Exact `32 · ln 2` (≈ 22.18070977791825). Truncating to 22.18 — as an
+    // earlier revision did — left the firmware scorer at a slightly different
+    // operating point than the host's `0.72·n·ln(e/n) + ORDER_BIT_COST·k`,
+    // so borderline AIC ties resolved differently between the two paths
+    // (lamu review fix on the initial commit).
+    const ORDER_BIT_COST: f64 = 32.0 * core::f64::consts::LN_2;
 
     let mut a_prev = [0i64; LPC_ORDER];
     let mut a_curr = [0i64; LPC_ORDER];
@@ -473,8 +478,10 @@ pub fn analyze_all_channels(
 /// Mode-dispatching analysis entry point.
 ///
 /// `Fixed` is the existing constant-time path (full order-8 Levinson on
-/// every channel) and writes zero into the new `orders` output to keep
-/// callers from accidentally treating it as a live signal.
+/// every channel) and writes `LPC_ORDER` into every `orders[ch]` slot —
+/// the value the decoder assumes when no per-channel order signal is
+/// emitted alongside the residual. (Zero would be wrong: the decoder
+/// would skip prediction entirely and apply only bias_restore.)
 /// `Adaptive` walks the Levinson + AIC/MDL scorer per channel and emits
 /// the chosen per-channel order.
 /// `Anytime` selects between the two based on the `time_remaining`
