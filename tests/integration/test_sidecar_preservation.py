@@ -226,6 +226,73 @@ class TestSidecarPreservationNoBundle:
             )
 
 
+class TestSidecarStemCollision:
+    """When two EDFs in the same directory share a stem prefix
+    (e.g. `recording.edf` and `recording_extra.edf`), the encoder
+    must attribute each sidecar to the EDF with the *longest*
+    matching stem. Without disambiguation `find_sidecars` greedily
+    matches anything starting with its stem followed by `.` or `_`
+    and would silently duplicate `recording_extra.tse` into both
+    archives — a real bug lamu flagged on the initial commit.
+    """
+
+    def test_longer_stem_sidecars_not_misattributed(
+        self, tmp_path, lml_cli_binary
+    ):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        short_edf = src_dir / "recording.edf"
+        long_edf = src_dir / "recording_extra.edf"
+        create_edf(str(short_edf), n_channels=4, n_records=2, sample_rate=250)
+        create_edf(str(long_edf), n_channels=4, n_records=2, sample_rate=250)
+
+        # Each EDF has its own sidecar.
+        short_sidecar = src_dir / "recording.tse"
+        long_sidecar = src_dir / "recording_extra.tse"
+        short_payload = b"belongs to recording.edf\n"
+        long_payload = b"belongs to recording_extra.edf\n"
+        short_sidecar.write_bytes(short_payload)
+        long_sidecar.write_bytes(long_payload)
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        result = subprocess.run(
+            [str(lml_cli_binary), "encode", str(short_edf),
+             "-o", str(out_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr[:300]
+        archive = next(out_dir.rglob("*.lma"))
+
+        # The archive for `recording.edf` must contain its own sidecar
+        # and MUST NOT contain `recording_extra.tse`.
+        listing = subprocess.run(
+            [str(lml_cli_binary), "list-archive", str(archive)],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert listing.returncode == 0
+        assert "recording.tse" in listing.stdout, (
+            f"sidecar of recording.edf missing from its own archive:\n"
+            f"{listing.stdout[:600]}"
+        )
+        assert "recording_extra.tse" not in listing.stdout, (
+            f"recording_extra.tse misattributed to recording.edf — "
+            f"stem-collision disambiguation broken:\n{listing.stdout[:600]}"
+        )
+
+        # And extract-time byte-for-byte equality on the rightful sidecar.
+        extracted = tmp_path / "ext"
+        extracted.mkdir()
+        r = subprocess.run(
+            [str(lml_cli_binary), "extract", str(archive),
+             "-o", str(extracted)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert r.returncode == 0
+        recovered = next(extracted.rglob("recording.tse"))
+        assert recovered.read_bytes() == short_payload
+
+
 class TestSidecarLossWarnings:
     """If someone *forces* the silently-lossy historical behaviour
     (whatever shape it takes — perhaps a future `--no-sidecars` flag),
