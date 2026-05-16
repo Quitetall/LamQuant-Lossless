@@ -96,6 +96,9 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           python -m pip install --upgrade pip
+          # torch is needed for some L5 / cross_lang tests that import
+          # ai_models.* indirectly via conftest fixtures.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install numpy scipy numba pytest hypothesis maturin
           # Persist venv activation for subsequent steps so maturin
           # can find VIRTUAL_ENV.
