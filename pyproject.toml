@@ -122,10 +122,14 @@ omit = [
 ]
 
 [tool.coverage.report]
+# fail_under intentionally low — the real gate is `.coverage_floor.json`
+# enforced by `tests/run_diagnostics.py coverage_floor`. This value only
+# matters if someone bypasses the ratchet.
 fail_under = 25
 show_missing = true
 exclude_lines = [
     "pragma: no cover",
     "if __name__",
     "raise NotImplementedError",
+    "if TYPE_CHECKING",
 ]

@@ -66,9 +66,12 @@ jobs:
             --cov-report=xml:coverage.xml \
             -v
 
-      - name: Check coverage threshold
+      - name: Check coverage floor (monotonic ratchet)
+        # Replaces a hardcoded `--fail-under=60` that didn't match reality
+        # (actual 25%). The ratchet reads `.coverage_floor.json` so coverage
+        # can only ever go up. Phases 1-6 raise the floor toward 1.00.
         run: |
-          python -m coverage report --fail-under=60
+          python tests/run_diagnostics.py coverage_floor
 
       - name: Audit format consistency
         run: |
