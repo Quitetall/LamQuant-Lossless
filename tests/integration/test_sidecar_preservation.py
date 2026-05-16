@@ -292,6 +292,59 @@ class TestSidecarStemCollision:
         recovered = next(extracted.rglob("recording.tse"))
         assert recovered.read_bytes() == short_payload
 
+    def test_longer_stem_edf_keeps_its_own_sidecar(
+        self, tmp_path, lml_cli_binary
+    ):
+        # Closes the disambiguation loop: encoding the *longer*-stem
+        # EDF must still surface its own sidecar (the short-stem EDF
+        # must not falsely lay claim to it). Lamu review nit on
+        # b4071089.
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        short_edf = src_dir / "recording.edf"
+        long_edf = src_dir / "recording_extra.edf"
+        create_edf(str(short_edf), n_channels=4, n_records=2, sample_rate=250)
+        create_edf(str(long_edf), n_channels=4, n_records=2, sample_rate=250)
+        (src_dir / "recording.tse").write_bytes(b"short payload\n")
+        long_payload = b"belongs to recording_extra.edf\n"
+        (src_dir / "recording_extra.tse").write_bytes(long_payload)
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        result = subprocess.run(
+            [str(lml_cli_binary), "encode", str(long_edf),
+             "-o", str(out_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr[:300]
+
+        archive = next(out_dir.rglob("recording_extra.lma"))
+        listing = subprocess.run(
+            [str(lml_cli_binary), "list-archive", str(archive)],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert listing.returncode == 0
+        assert "recording_extra.tse" in listing.stdout, (
+            f"recording_extra.tse missing from its own archive — "
+            f"longer-stem EDF lost its sidecar:\n{listing.stdout[:600]}"
+        )
+        # And the SHORT-stem sidecar must NOT have been pulled in.
+        assert (
+            "recording.tse" not in listing.stdout
+            or "recording_extra.tse" in listing.stdout
+        ), "unexpected short-stem sidecar leakage"
+
+        extracted = tmp_path / "ext"
+        extracted.mkdir()
+        r = subprocess.run(
+            [str(lml_cli_binary), "extract", str(archive),
+             "-o", str(extracted)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert r.returncode == 0
+        recovered = next(extracted.rglob("recording_extra.tse"))
+        assert recovered.read_bytes() == long_payload
+
 
 class TestSidecarLossWarnings:
     """If someone *forces* the silently-lossy historical behaviour
