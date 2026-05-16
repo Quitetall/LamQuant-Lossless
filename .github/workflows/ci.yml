@@ -102,7 +102,9 @@ jobs:
           # torch is needed for some L5 / cross_lang tests that import
           # ai_models.* indirectly via conftest fixtures.
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy scipy numba pytest hypothesis maturin
+          # zstandard is required by tests/codec/cross_lang/test_lma_cross_lang.py
+          # (LMA archive non-EDF entries are zstd-compressed).
+          pip install numpy scipy numba pytest hypothesis maturin zstandard
           # Persist venv activation for subsequent steps so maturin
           # can find VIRTUAL_ENV.
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
