@@ -93,8 +93,14 @@ jobs:
 
       - name: Install dependencies + maturin
         run: |
+          python -m venv .venv
+          source .venv/bin/activate
           python -m pip install --upgrade pip
           pip install numpy scipy numba pytest hypothesis maturin
+          # Persist venv activation for subsequent steps so maturin
+          # can find VIRTUAL_ENV.
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Build + install lamquant_core wheel (PyO3)
         run: |
@@ -123,9 +129,15 @@ jobs:
 
       - name: Install dependencies + maturin
         run: |
+          python -m venv .venv
+          source .venv/bin/activate
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard maturin
+          # Persist venv activation for subsequent steps so maturin
+          # can find VIRTUAL_ENV.
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Build PyO3 wheel
         run: |
