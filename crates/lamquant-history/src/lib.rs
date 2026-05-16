@@ -105,17 +105,23 @@ pub struct History {
 
 impl History {
     pub fn load() -> Self {
-        let Some(path) = history_path() else { return Self::default(); };
+        let Some(path) = history_path() else {
+            return Self::default();
+        };
         Self::load_from(&path)
     }
 
     pub fn load_from(path: &Path) -> Self {
-        let Ok(text) = fs::read_to_string(path) else { return Self::default(); };
+        let Ok(text) = fs::read_to_string(path) else {
+            return Self::default();
+        };
         Self::parse(&text)
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let Some(path) = history_path() else { return Ok(()); };
+        let Some(path) = history_path() else {
+            return Ok(());
+        };
         self.save_to(&path)
     }
 
@@ -146,9 +152,10 @@ impl History {
             // gets a unique timestamp; our own previously-saved ops match
             // exactly and get skipped here.
             for op in on_disk.recent_operations {
-                let dup = merged.recent_operations.iter().any(|x| {
-                    x.action == op.action && x.target == op.target && x.when == op.when
-                });
+                let dup = merged
+                    .recent_operations
+                    .iter()
+                    .any(|x| x.action == op.action && x.target == op.target && x.when == op.when);
                 if !dup {
                     merged.recent_operations.push(op);
                 }
@@ -227,14 +234,14 @@ impl History {
             if !h.recent_paths.inputs.is_empty()
                 || !h.recent_paths.outputs.is_empty()
                 || !h.recent_operations.is_empty()
-                || h.schema_version != ""
+                || !h.schema_version.is_empty()
             {
                 return h;
             }
         }
         // Legacy flat shape: pre-Phase-2 had `recent_inputs` / `recent_outputs`
         // at the top level. Migrate quietly so users don't lose history.
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Default)]
         #[serde(default)]
         struct LegacyHistory {
             recent_inputs: Vec<String>,
@@ -243,18 +250,6 @@ impl History {
             last_input: Option<String>,
             last_output: Option<String>,
             interrupted: bool,
-        }
-        impl Default for LegacyHistory {
-            fn default() -> Self {
-                Self {
-                    recent_inputs: Vec::new(),
-                    recent_outputs: Vec::new(),
-                    last_op: None,
-                    last_input: None,
-                    last_output: None,
-                    interrupted: false,
-                }
-            }
         }
         if let Ok(l) = serde_json::from_str::<LegacyHistory>(text) {
             return History {
@@ -293,7 +288,11 @@ fn utc_now_iso() -> String {
 
 fn days_to_ymd(days: i64) -> (i32, u32, u32) {
     let z = days + 719468;
-    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let era = if z >= 0 {
+        z / 146097
+    } else {
+        (z - 146096) / 146097
+    };
     let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
@@ -332,15 +331,18 @@ impl LockGuard {
                     unsafe {
                         let _ = libc_flock(fd, 2); // LOCK_EX
                     }
-                    return LockGuard { _file: Some(file), fd: Some(fd) };
+                    LockGuard {
+                        _file: Some(file),
+                        fd: Some(fd),
+                    }
                 }
                 #[cfg(windows)]
                 {
-                    return LockGuard { _file: Some(file) };
+                    LockGuard { _file: Some(file) }
                 }
                 #[cfg(not(any(unix, windows)))]
                 {
-                    return LockGuard { _file: Some(file) };
+                    LockGuard { _file: Some(file) }
                 }
             }
             Err(_) => LockGuard {
@@ -390,7 +392,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("history.json");
         let prev = std::env::var_os("LAMQUANT_HISTORY");
-        unsafe { std::env::set_var("LAMQUANT_HISTORY", &path); }
+        unsafe {
+            std::env::set_var("LAMQUANT_HISTORY", &path);
+        }
         f(&path);
         match prev {
             Some(v) => unsafe { std::env::set_var("LAMQUANT_HISTORY", v) },
@@ -406,7 +410,10 @@ mod tests {
             h.add_input("/data/b.edf");
             h.save().expect("save");
             let loaded = History::load();
-            assert_eq!(loaded.recent_paths.inputs, vec!["/data/b.edf", "/data/a.edf"]);
+            assert_eq!(
+                loaded.recent_paths.inputs,
+                vec!["/data/b.edf", "/data/a.edf"]
+            );
         });
     }
 

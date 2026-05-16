@@ -55,7 +55,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard
+          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss
 
       - name: Run Python fast lane (no slow/perf/data/checkpoint)
         run: |
@@ -133,7 +133,7 @@ jobs:
           source .venv/bin/activate
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard maturin
+          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss maturin
           # Persist venv activation for subsequent steps so maturin
           # can find VIRTUAL_ENV.
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
