@@ -25,6 +25,14 @@ jobs:
             os: ubuntu-latest
             binary: lml
             name: lml-linux-aarch64
+          # Phase 2.3 — fully-static musl build. Single artifact ships
+          # everywhere from CentOS 7 to Alpine to embedded host BSPs
+          # without libc / glibc-version drift. Uses the same release
+          # profile (LTO, strip) as the gnu lane.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            binary: lml
+            name: lml-linux-x86_64-musl
           - target: x86_64-apple-darwin
             os: macos-latest
             binary: lml
@@ -58,6 +66,11 @@ jobs:
             os: windows-latest
             binary: lamquant
             name: lamquant-windows-x86_64.exe
+          # Phase 2.3 — fully-static musl `lamquant` launcher.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            binary: lamquant
+            name: lamquant-linux-x86_64-musl
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -66,11 +79,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
+      - name: Install cross-compilation tools (aarch64-gnu)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Build release binary
         run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin ${{ matrix.binary }} --target ${{ matrix.target }}
