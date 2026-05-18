@@ -27,8 +27,15 @@ dependencies = [
 ]
 
 [project.scripts]
+# `lamquant` (no entry here) is the Rust TUI launcher binary
+# (lamquant-core/src/bin/lamquant.rs, installed to ~/.cargo/bin/
+# via `cargo install --path lamquant-core`). Adding a Python
+# console-script with the same name shadows the Rust binary on
+# PATH (pip puts ~/.local/bin/ ahead of ~/.cargo/bin/) and breaks
+# the "lamquant <no args> → TUI" contract. Python codec CLI users
+# invoke `python -m lamquant_codec.cli_entry` directly, or use one
+# of the dedicated entry points below.
 oh = "lamquant_codec.cli_entry:main"
-lamquant = "lamquant_codec.cli_entry:main"
 lamquant-decode = "lamquant_codec.cli_codec:main"
 lamquant-export = "lamquant_codec.export:main"
 lamquant-visualize = "tools.visualize_pipeline:main"
