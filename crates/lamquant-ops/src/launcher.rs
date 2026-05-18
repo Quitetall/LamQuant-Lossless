@@ -49,11 +49,46 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         "setup_musl"   => ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-core/Cargo.toml", "--bin", "lml", "--target", "x86_64-unknown-linux-musl"], "static linux build"),
         "setup_windows"=> ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-core/Cargo.toml", "--bin", "lml", "--target", "x86_64-pc-windows-gnu"], "windows build"),
 
-        // GUI / visualization launchers
-        "gui"                => ("lamquant-gui",  vec![], "Vision GUI"),
-        "viz_lamquant-gui"   => ("lamquant-gui",  vec![], "Vision GUI"),
-        "viz_eeglab"         => ("eeglab",        vec![], "EEGLab"),
-        "viz_mne"            => ("python3",       vec!["-c", "import mne; mne.gui.browse_raw()"], "MNE-Python viewer"),
+        // GUI / visualization launchers — T5 pipe shape (ADR 0020).
+        //
+        // `$INPUT` in args is substituted at dispatch time by
+        // `app.rs::start_launcher` with the path the user picked in
+        // the visualization panel's file browser. Tools that genuinely
+        // can't accept piped input (license-locked hardware GUIs,
+        // network-only studios) live in the `viz_legacy_*` namespace
+        // below — sequestered, not deleted.
+        "gui"                => ("lamquant-gui",  vec!["$INPUT"],            "Vision GUI"),
+        "viz_lamquant-gui"   => ("lamquant-gui",  vec!["$INPUT"],            "Vision GUI"),
+        "viz_eeglab"         => ("eeglab",        vec!["$INPUT"],            "EEGLab"),
+        // MNE-Python wrapper: load the file path the user picked,
+        // open the standard raw browser. `$INPUT` is substituted
+        // before exec so the `-c` payload sees a concrete path.
+        "viz_mne"            => (
+            "python3",
+            vec![
+                "-c",
+                "import sys, mne; \
+                 raw = mne.io.read_raw(sys.argv[1], preload=False); \
+                 raw.plot(block=True)",
+                "$INPUT",
+            ],
+            "MNE-Python viewer",
+        ),
+
+        // ── viz_legacy_* — sequestered: pipe-incompatible tools ──
+        //
+        // OpenBCIGUI, BVAnalyzer, BESA all open to their own
+        // internal file pickers / hardware streams; they ignore
+        // command-line file arguments. Kept callable (sequester-not-
+        // delete) but moved to a separate namespace so the main
+        // viz panel can render them in a "legacy launchers"
+        // subsection with a clear note.
+        "viz_legacy_OpenBCIGUI" => ("OpenBCIGUI", vec![], "OpenBCI GUI (legacy: no piped input)"),
+        "viz_legacy_BVAnalyzer" => ("BVAnalyzer", vec![], "BrainVision Analyzer (legacy: no piped input)"),
+        "viz_legacy_besa"       => ("besa",       vec![], "BESA (legacy: no piped input)"),
+        // Original aliases kept callable so any stale launcher ID
+        // out in the world still resolves. Each delegates to the
+        // legacy entry above.
         "viz_OpenBCIGUI"     => ("OpenBCIGUI",    vec![], "OpenBCI GUI"),
         "viz_BVAnalyzer"     => ("BVAnalyzer",    vec![], "BrainVision Analyzer"),
         "viz_besa"           => ("besa",          vec![], "BESA"),
