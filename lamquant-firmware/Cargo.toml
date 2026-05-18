@@ -33,6 +33,21 @@ default = []
 # reference output without flashing the device.
 host-verify = []
 
+# Per-target features (ADR 0019). Pick exactly one when cross-
+# compiling — build.rs enforces mutual exclusion and copies the
+# matching `memory/<id>.x` linker script to OUT_DIR.
+#
+# Selecting none falls back to the repo-root `memory.x` (currently
+# RP2350) so existing `cargo build --target riscv32imac-unknown-none-elf`
+# flows keep working while per-target HAL bringup lands incrementally.
+target-rp2350 = []
+target-nrf54l15 = []
+target-esp32p4 = []
+target-stm32n6 = []
+# Sequestered ESP32-S3 build (sequester-not-delete; not part of the
+# canonical hub but still callable per ADR 0019 T6.6).
+target-esp32s3 = []
+
 [dependencies]
 # Core codec — no_std, alloc-only. Used by both lib (host tests) and bin.
 lamquant-core = { path = "../lamquant-core", default-features = false }
