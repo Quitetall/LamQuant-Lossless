@@ -61,28 +61,24 @@ impl OpSpec {
 /// `specs/ui-parity.md::Op IDs`.
 pub fn op_spec(op_id: &str) -> Option<OpSpec> {
     Some(match op_id {
-        "encode" | "encode_neural" => OpSpec {
-            // Paranoid clinical-grade defaults: --verify confirms the
-            // container CRC; --cross-validate decodes the just-written
-            // LML and SHA-256 compares samples against the source EDF
-            // before reporting success. The encode command runs in
-            // lossless mode by default (noise_bits=0).
+        "encode_neural" => OpSpec {
+            // Neural-codec encode (LMQ). Lossy by design -- different
+            // contract from Lossless; operator picks it explicitly.
             //
-            // --skip-existing makes encode idempotent: a fresh run on
-            // a clean output dir is unchanged, but Resume after a
-            // SIGKILL only re-encodes files whose .lml output is
-            // missing from the .lamquant-staging subdir. To force
-            // re-encode from scratch, the user removes the output
-            // dir manually (or picks Discard in the Resume panel).
+            // --verify confirms container CRC; --cross-validate decodes
+            // the just-written LMQ and SHA-256 compares samples against
+            // the source. --skip-existing makes the op idempotent.
             cmd: "encode", input: true, output: true,
             output_flag: "-o", recursive: true,
             extra: &["--verify", "--cross-validate", "--skip-existing"],
         },
         "encode_lma" => OpSpec {
-            // Same as `encode` but packs the entire output into a
-            // single .lma archive instead of a directory of .lml
-            // files. The TUI output picker takes a .lma path; lml
-            // encodes into a temp staging dir, then archives.
+            // Default Lossless mode in the TUI. Packs the entire
+            // output into per-recording .lma archives so siblings can't
+            // be silently lost. The previously-defined "encode"
+            // (bare-LML) op-id was removed in v1.1 -- the TUI never
+            // wires to it anymore, and CLI users who want bare LML
+            // pass --no-bundle / --bare-lml directly to `lml encode`.
             cmd: "encode", input: true, output: true,
             output_flag: "-o", recursive: true,
             extra: &["--verify", "--cross-validate", "--skip-existing", "--lma"],
