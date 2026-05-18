@@ -24,7 +24,7 @@ pub mod runner;
 pub mod sink;
 pub mod transport;
 
-pub use launcher::launcher;
+pub use launcher::{blut_launcher, launcher};
 pub use op_spec::{op_spec, OpSpec};
 pub use runner::{spawn_blut, spawn_command, spawn_lml, OpHandle};
 pub use sink::{MpscSink, OpEventSink, OpProgressSnapshot, OpState};

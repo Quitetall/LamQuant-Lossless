@@ -3,6 +3,17 @@
 //! Used for training, eagle validator, pytest, install scripts, GUI launch
 //! — anything where the front-end shells out to a different binary. Keep
 //! this table in sync with `specs/ui-parity.md::Op IDs`.
+//!
+//! ## BLUT recipe dispatch
+//!
+//! Training-tier launchers (`cockpit_data_prep`,
+//! `cockpit_train_encoder`, etc.) resolve via [`blut_launcher`]
+//! instead of [`launcher`], returning a `(recipe, args_json,
+//! label)` triple. App-layer dispatch must check `blut_launcher`
+//! FIRST and call `runner::spawn_blut` for matching IDs — that
+//! path tails `status.jsonl` and translates `StageEvent`s into
+//! `OpEvent`s for the dashboard, which the raw `spawn_command`
+//! path cannot do.
 
 /// Look up an external command spec by op id. Returns `(program, args, label)`.
 pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static str)> {
@@ -230,6 +241,52 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
     })
 }
 
+/// Resolve a cockpit-tier BLUT launcher id to `(recipe_name,
+/// args_json, label)`. App-layer dispatch must call
+/// [`runner::spawn_blut`](crate::runner::spawn_blut) for these
+/// ids — only that path tails `status.jsonl` and translates
+/// `StageEvent`s back to `OpEvent`s.
+///
+/// Defaults reflect repo-relative layout (`./data/lma`,
+/// `runs/...`). Override per-launcher by env or by editing the
+/// args JSON inline below — JSON is the only knob until a
+/// recipe-args wizard panel ships (post-C3).
+pub fn blut_launcher(
+    id: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match id {
+        // Full data prep — LMA conversion. `output_dir` is the
+        // only required field; rest default in
+        // `lamquant_data_prep::Args` (see
+        // /home/brianklam/blut/src/recipes/lamquant_data_prep.rs).
+        "cockpit_data_prep" => (
+            "lamquant_data_prep",
+            r#"{"output_dir":"./data/lma"}"#,
+            "BLUT: data prep (LML → LMA)",
+        ),
+        // Encoder recipe — all fields default in
+        // `lamquant_encoder::Args`, so `{}` accepts every default
+        // (preset=fast, tier=0, seed=42, val_fraction=0.05,
+        // mae_pretrain=false).
+        "cockpit_train_encoder" => (
+            "lamquant_encoder",
+            "{}",
+            "BLUT: encoder train",
+        ),
+        "cockpit_train_snn" => (
+            "lamquant_snn",
+            "{}",
+            "BLUT: SNN train",
+        ),
+        "cockpit_train_oracle" => (
+            "lamquant_oracle",
+            "{}",
+            "BLUT: oracle (teacher) train",
+        ),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +300,27 @@ mod tests {
     #[test]
     fn unknown_op_returns_none() {
         assert!(launcher("not_a_real_op").is_none());
+    }
+
+    #[test]
+    fn blut_launcher_resolves_cockpit_ids() {
+        let (rec, json, _) = blut_launcher("cockpit_train_encoder").unwrap();
+        assert_eq!(rec, "lamquant_encoder");
+        // Args JSON must parse — guard against typos like a stray
+        // trailing comma.
+        let _: serde_json::Value = serde_json::from_str(json).unwrap();
+
+        let (rec, json, _) = blut_launcher("cockpit_data_prep").unwrap();
+        assert_eq!(rec, "lamquant_data_prep");
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(v.get("output_dir").is_some(), "output_dir is required");
+    }
+
+    #[test]
+    fn blut_launcher_unknown_returns_none() {
+        assert!(blut_launcher("not_a_real_blut_op").is_none());
+        // Non-BLUT IDs (e.g. train_encoder) must NOT resolve via
+        // the BLUT table — they live in `launcher()`.
+        assert!(blut_launcher("train_encoder").is_none());
     }
 }
