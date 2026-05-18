@@ -266,8 +266,136 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
             "tail latest log",
         ),
 
-        // Firmware exports
-        "fw_export" => ("python", vec!["scripts/export_weights.py"], "export weights"),
+        // ── Firmware Hub (T6 / ADR 0019) ─────────────────────────
+        //
+        // Replaces the pre-T6 missing `scripts/firmware/build_*.sh`
+        // scripts with `cargo build` + `probe-rs run` directly.
+        // 4 Raytac module targets: RP2350 (Hazard3 RISC-V),
+        // NRF54L15 (Cortex-M33 + BLE 6.0), ESP32-P4 (HP400 RISC-V),
+        // STM32N6 (Cortex-M55 + NPU). ESP32-S3 sequestered to
+        // `fw_legacy_esp32s3` (probe-rs upstream lacks ESP32-S3
+        // support today; user-facing alias `fw_export` and panel
+        // entries kept callable per sequester-not-delete).
+
+        // Device enumeration — single source of truth for "what's
+        // plugged in." The firmware panel parses this output to
+        // populate target rows.
+        "fw_list_devices" => ("probe-rs", vec!["list"], "list connected debug probes"),
+
+        // Per-target cargo build. Per-target Cargo features and
+        // memory.x land in lamquant-firmware/ during HAL bringup;
+        // until then the build fails clean with a "feature not
+        // enabled" error rather than producing a wrong-arch binary.
+        "fw_build_rp2350" => (
+            "cargo",
+            vec![
+                "build", "--manifest-path", "lamquant-firmware/Cargo.toml",
+                "--target", "riscv32imac-unknown-none-elf",
+                "--features", "target-rp2350",
+                "--release",
+            ],
+            "build firmware: RP2350 (Raytac)",
+        ),
+        "fw_build_nrf54l15" => (
+            "cargo",
+            vec![
+                "build", "--manifest-path", "lamquant-firmware/Cargo.toml",
+                "--target", "thumbv8m.main-none-eabihf",
+                "--features", "target-nrf54l15",
+                "--release",
+            ],
+            "build firmware: NRF54L15 (Raytac)",
+        ),
+        "fw_build_esp32p4" => (
+            "cargo",
+            vec![
+                "build", "--manifest-path", "lamquant-firmware/Cargo.toml",
+                "--target", "riscv32imafc-unknown-none-elf",
+                "--features", "target-esp32p4",
+                "--release",
+            ],
+            "build firmware: ESP32-P4 (Raytac)",
+        ),
+        "fw_build_stm32n6" => (
+            "cargo",
+            vec![
+                "build", "--manifest-path", "lamquant-firmware/Cargo.toml",
+                "--target", "thumbv8m.main-none-eabihf",
+                "--features", "target-stm32n6",
+                "--release",
+            ],
+            "build firmware: STM32N6 (Raytac)",
+        ),
+
+        // Per-target flash via probe-rs. Chip IDs match what
+        // `probe-rs list-chips` reports. ESP32-P4 currently lacks
+        // upstream probe-rs support; the entry stays callable so
+        // the panel can show a clear "probe-rs chip-id pending"
+        // status instead of a missing-launcher error.
+        "fw_flash_rp2350" => (
+            "probe-rs",
+            vec![
+                "run", "--chip", "RP2350",
+                "target/riscv32imac-unknown-none-elf/release/lamquant-firmware",
+            ],
+            "flash firmware: RP2350",
+        ),
+        "fw_flash_nrf54l15" => (
+            "probe-rs",
+            vec![
+                "run", "--chip", "nRF54L15",
+                "target/thumbv8m.main-none-eabihf/release/lamquant-firmware",
+            ],
+            "flash firmware: NRF54L15",
+        ),
+        "fw_flash_esp32p4" => (
+            "probe-rs",
+            vec![
+                "run", "--chip", "ESP32-P4",
+                "target/riscv32imafc-unknown-none-elf/release/lamquant-firmware",
+            ],
+            "flash firmware: ESP32-P4 (probe-rs support pending upstream)",
+        ),
+        "fw_flash_stm32n6" => (
+            "probe-rs",
+            vec![
+                "run", "--chip", "STM32N657NI",
+                "target/thumbv8m.main-none-eabihf/release/lamquant-firmware",
+            ],
+            "flash firmware: STM32N6",
+        ),
+
+        // Weight export — supports T6.3 $WEIGHTS / $OUTPUT
+        // substitution following the T5 $INPUT pattern. The Python
+        // script accepts `--weights <path> --out <path>`; explicit
+        // file picking happens in the firmware panel.
+        "fw_export" => (
+            "python",
+            vec![
+                "scripts/export_weights.py",
+                "--weights", "$WEIGHTS",
+                "--out", "$OUTPUT",
+            ],
+            "export weights (training side)",
+        ),
+
+        // ── Sequestered: ESP32-S3 ────────────────────────────────
+        //
+        // ESP32-S3 dropped per the firmware-hub vision (4 Raytac
+        // modules only). Sequester-not-delete policy keeps the
+        // launcher entry callable — direct users still get a
+        // working build path while the canonical hub focuses on
+        // the 4 target modules.
+        "fw_legacy_esp32s3" => (
+            "cargo",
+            vec![
+                "build", "--manifest-path", "lamquant-firmware/Cargo.toml",
+                "--target", "xtensa-esp32s3-none-elf",
+                "--features", "target-esp32s3",
+                "--release",
+            ],
+            "build firmware: ESP32-S3 (legacy: not part of T6 hub)",
+        ),
 
         // Cockpit BLUT integrations (T3.2 — Python cockpit parity).
         // `cockpit_jobs` lists BLUT's per-job state via the `blut jobs`
