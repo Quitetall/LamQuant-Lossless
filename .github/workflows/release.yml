@@ -12,8 +12,8 @@ permissions:
 # strip, and softprops/action-gh-release all honour it. We pin it to
 # the commit timestamp of the tag (set per-job, see "Pin SOURCE_DATE_EPOCH"
 # step below) so re-running the same release tag produces byte-identical
-# artifacts. CARGO_TARGET_DIR is fixed for the same reason — relative
-# paths in debuginfo would otherwise vary per runner.
+# artifacts. --remap-path-prefix scrubs runner-local absolute paths
+# (workspace + target dir, both inside the workspace) from debuginfo.
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "--remap-path-prefix=/home/runner/work=/__w --remap-path-prefix=${{ github.workspace }}=/__w/lamquant"
@@ -194,8 +194,47 @@ jobs:
           path: ${{ matrix.artifact_glob }}
           if-no-files-found: warn
 
+  # ──────────────────────────────────────────────────────────────────
+  # sbom — Phase 2.5. Emits an SPDX 2.3 + CycloneDX 1.5 SBOM of the
+  # Rust dependency graph using cargo-sbom (SPDX) and cargo-cyclonedx
+  # (CycloneDX, complementary format that downstream supply-chain
+  # tooling — Trivy, Grype, Dependency-Track — consumes natively).
+  # Both artifacts ship next to the binaries in the GH release.
+  # ──────────────────────────────────────────────────────────────────
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-sbom + cargo-cyclonedx
+        run: |
+          cargo install cargo-sbom --locked
+          cargo install cargo-cyclonedx --locked
+
+      - name: Emit SPDX SBOM (lamquant-core)
+        run: |
+          cargo sbom --output-format spdx_json_2_3 \
+            --cargo-package lamquant-core \
+            > lamquant-core.spdx.json
+
+      - name: Emit CycloneDX SBOM (workspace)
+        run: |
+          cargo cyclonedx --format json --output-cdx --spec-version 1.5
+          # cargo-cyclonedx writes per-crate files inside each crate dir;
+          # collect the lamquant-core one to ship with the release.
+          cp lamquant-core/lamquant-core.cdx.json .
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sboms
+          path: |
+            lamquant-core.spdx.json
+            lamquant-core.cdx.json
+
   create-release:
-    needs: [build-binaries, build-gui]
+    needs: [build-binaries, build-gui, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
