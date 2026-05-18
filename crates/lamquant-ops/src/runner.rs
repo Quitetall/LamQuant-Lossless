@@ -501,7 +501,16 @@ fn tail_status_jsonl(
             return;
         }
         let mut buf = String::new();
-        let read = std::io::Read::read_to_string(&mut file, &mut buf).unwrap_or(0);
+        let read = match std::io::Read::read_to_string(&mut file, &mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                sink.emit(OpEvent::Log {
+                    ts_ms: OpEvent::now_ms(),
+                    message: format!("[status.jsonl] read failed: {}", e),
+                });
+                return;
+            }
+        };
         if read > 0 {
             pos += read as u64;
             leftover.push_str(&buf);
@@ -554,7 +563,12 @@ fn stage_event_to_op_event(line: &str) -> OpEvent {
             message: format!("[stage {}] {} begin", node_idx, stage_name),
         },
         "stage_end" => {
-            // Duration default-serializes as {secs, nanos}.
+            // `std::time::Duration`'s serde::Serialize impl emits
+            // `{secs: u64, nanos: u32}` and BLUT uses the default
+            // derive on its `StageEvent::StageEnd { elapsed:
+            // Duration, .. }`. Pinned by the
+            // `stage_end_maps_to_filedone_with_elapsed_ms` fixture
+            // below — change either side and that test fails.
             let ms = v
                 .get("elapsed")
                 .and_then(|e| {
@@ -615,6 +629,12 @@ fn stage_event_to_op_event(line: &str) -> OpEvent {
             }
         }
         "stage_step" => {
+            // Progress requires BOTH step and total > 0. total == 0
+            // means "trainer doesn't know how many steps remain"
+            // (e.g. streaming dataset), which would render as a
+            // 0/0 bar — useless. Downgrade to Log so the user
+            // still sees the per-step update without a misleading
+            // bar.
             let update = v.get("update");
             let step = update.and_then(|u| u.get("step")).and_then(|s| s.as_u64());
             let total = update.and_then(|u| u.get("total")).and_then(|t| t.as_u64());
@@ -817,6 +837,16 @@ mod tests {
                 assert!(message.contains("train_joint"));
             }
             other => panic!("expected Progress, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stage_step_with_zero_total_falls_back_to_log() {
+        // Unknown total (streaming dataset) — bar would render 0/0.
+        let line = r#"{"kind":"stage_step","node_idx":6,"stage_name":"train_joint","update":{"step":42,"total":0}}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::Log { .. } => {}
+            other => panic!("expected Log for total=0, got {:?}", other),
         }
     }
 
