@@ -6,7 +6,8 @@
 //! provide `MpscSink`; cross-process consumers (Tauri GUI) provide their own
 //! sink that updates a shared snapshot AND emits state-transition events.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -219,6 +220,431 @@ fn spawn_internal<S: OpEventSink>(
     OpHandle { kill_tx, killed }
 }
 
+/// Spawn `blut recipe run <recipe> --args '<json>'`, tail its
+/// `status.jsonl`, and translate every `StageEvent` into the
+/// matching `OpEvent` for the host dashboard.
+///
+/// BLUT's wire format (`blut::framework::status::StageEvent`)
+/// lives in a separate crate; we parse the JSON lines with
+/// `serde_json::Value` rather than depending on blut directly,
+/// so a BLUT bump can't ripple a recompile through every LamQuant
+/// crate. Wire shape is captured by the `stage_event_to_op_event`
+/// fixture tests below — any drift breaks those tests, not silent
+/// at runtime.
+///
+/// Cancel: `kill()` on the returned handle spawns `blut cancel
+/// <job_id>` (graceful) and only falls back to `child.kill()` if
+/// the job_id hasn't appeared in BLUT's stderr yet. Matches BLUT's
+/// own SIGTERM-then-SIGKILL semantics in `jobs::cancel_job`.
+pub fn spawn_blut<S: OpEventSink>(
+    recipe: String,
+    args_json: String,
+    sink: S,
+) -> OpHandle {
+    let (kill_tx, kill_rx) = mpsc::channel::<()>();
+    let killed = Arc::new(Mutex::new(false));
+    let killed_supervisor = Arc::clone(&killed);
+
+    let sink = Arc::new(sink);
+    let job_id_shared: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    thread::spawn(move || {
+        let op_id = format!("blut:{}", recipe);
+        sink.emit(OpEvent::Started {
+            ts_ms: OpEvent::now_ms(),
+            op_id: op_id.clone(),
+            total: None,
+        });
+        sink.emit(OpEvent::Log {
+            ts_ms: OpEvent::now_ms(),
+            message: format!("$ blut recipe run {} --args '{}'", recipe, args_json),
+        });
+
+        let spawn = Command::new("blut")
+            .arg("recipe")
+            .arg("run")
+            .arg(&recipe)
+            .arg("--args")
+            .arg(&args_json)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match spawn {
+            Ok(c) => c,
+            Err(e) => {
+                sink.emit(OpEvent::Error {
+                    ts_ms: OpEvent::now_ms(),
+                    message: format!("spawn blut: {}", e),
+                });
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stdout_sink = Arc::clone(&sink);
+        let h_out = stdout.map(|s| {
+            thread::spawn(move || {
+                for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
+                    stdout_sink.emit(OpEvent::Log {
+                        ts_ms: OpEvent::now_ms(),
+                        message: line,
+                    });
+                }
+            })
+        });
+
+        // Stderr reader extracts `job <id>` and `dir <path>` (BLUT
+        // prints them as eprintln preamble) and forwards everything
+        // else as Log. Once a job_dir is captured, spawn the
+        // status.jsonl tailer.
+        let stderr_sink = Arc::clone(&sink);
+        let job_id_writer = Arc::clone(&job_id_shared);
+        let job_dir_tx: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let job_dir_writer = Arc::clone(&job_dir_tx);
+        let h_err = stderr.map(|s| {
+            thread::spawn(move || {
+                for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
+                    if let Some(rest) = strip_field(&line, "job") {
+                        if let Ok(mut g) = job_id_writer.lock() {
+                            if g.is_none() {
+                                *g = Some(rest.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = strip_field(&line, "dir") {
+                        if let Ok(mut g) = job_dir_writer.lock() {
+                            if g.is_none() {
+                                *g = Some(PathBuf::from(rest));
+                            }
+                        }
+                    }
+                    stderr_sink.emit(OpEvent::Log {
+                        ts_ms: OpEvent::now_ms(),
+                        message: format!("[stderr] {}", line),
+                    });
+                }
+            })
+        });
+
+        // Status tailer thread — waits for the job_dir to appear,
+        // then poll-tails status.jsonl until EOF + child exit.
+        let tailer_sink = Arc::clone(&sink);
+        let tailer_dir = Arc::clone(&job_dir_tx);
+        let tailer_stop = Arc::new(Mutex::new(false));
+        let tailer_stop_signal = Arc::clone(&tailer_stop);
+        let h_tail = thread::spawn(move || {
+            // Wait up to 30s for a job_dir; bail quietly if BLUT
+            // never printed one (clap parse error etc.).
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let job_dir = loop {
+                if let Ok(g) = tailer_dir.lock() {
+                    if let Some(p) = g.clone() {
+                        break p;
+                    }
+                }
+                if *tailer_stop_signal.lock().expect("tailer stop poisoned") {
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            };
+            tail_status_jsonl(&job_dir.join("status.jsonl"), tailer_stop_signal, tailer_sink);
+        });
+
+        // Supervisor poll loop.
+        let mut was_killed = false;
+        let exit_status = loop {
+            match kill_rx.try_recv() {
+                Ok(_) => {
+                    was_killed = true;
+                    let id_opt = job_id_shared.lock().ok().and_then(|g| g.clone());
+                    if let Some(id) = id_opt {
+                        sink.emit(OpEvent::Log {
+                            ts_ms: OpEvent::now_ms(),
+                            message: format!(">> blut cancel {}", id),
+                        });
+                        // Best-effort graceful cancel; BLUT walks
+                        // SIGTERM → grace → SIGKILL itself.
+                        let _ = Command::new("blut")
+                            .arg("cancel")
+                            .arg(&id)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    } else {
+                        sink.emit(OpEvent::Log {
+                            ts_ms: OpEvent::now_ms(),
+                            message: format!(">> SIGKILL (PID {}, no job_id yet)", child.id()),
+                        });
+                        let _ = child.kill();
+                    }
+                    break child.wait();
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {}
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(e) => {
+                    sink.emit(OpEvent::Error {
+                        ts_ms: OpEvent::now_ms(),
+                        message: format!("blut wait failed: {}", e),
+                    });
+                    return;
+                }
+            }
+        };
+
+        if was_killed {
+            *killed_supervisor.lock().expect("kill flag poisoned") = true;
+        }
+        *tailer_stop.lock().expect("tailer stop poisoned") = true;
+
+        if let Some(h) = h_out {
+            let _ = h.join();
+        }
+        if let Some(h) = h_err {
+            let _ = h.join();
+        }
+        let _ = h_tail.join();
+
+        match exit_status {
+            Ok(_) if was_killed => {
+                sink.emit(OpEvent::Error {
+                    ts_ms: OpEvent::now_ms(),
+                    message: format!("{} cancelled by user", op_id),
+                });
+            }
+            Ok(s) if s.success() => {
+                sink.emit(OpEvent::Done {
+                    ts_ms: OpEvent::now_ms(),
+                    message: format!("{} completed (exit 0)", op_id),
+                });
+            }
+            Ok(s) => {
+                sink.emit(OpEvent::Error {
+                    ts_ms: OpEvent::now_ms(),
+                    message: format!("{} exited with code {}", op_id, s.code().unwrap_or(-1)),
+                });
+            }
+            Err(e) => {
+                sink.emit(OpEvent::Error {
+                    ts_ms: OpEvent::now_ms(),
+                    message: format!("blut wait failed: {}", e),
+                });
+            }
+        }
+    });
+
+    OpHandle { kill_tx, killed }
+}
+
+/// Pull `<value>` from a `^<field>\s+<value>$` line. Returns None if
+/// the prefix doesn't match. BLUT emits `job    <id>`, `dir    <path>`
+/// etc. with run-of-whitespace separators (`eprintln!("job    {id}")`).
+fn strip_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(field)?;
+    let trimmed = rest.trim_start();
+    if trimmed.len() == rest.len() {
+        // No whitespace between field and value — false prefix match
+        // (e.g. "jobs" vs "job"). Reject.
+        return None;
+    }
+    let value = trimmed.trim_end();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Tail `path` line-by-line until `stop` is set or the file is
+/// removed. Each line is parsed as a BLUT `StageEvent` and
+/// forwarded as the corresponding `OpEvent` via `sink`. Lines that
+/// don't parse are forwarded as Log so the user sees malformed
+/// entries instead of silent drops.
+fn tail_status_jsonl(
+    path: &std::path::Path,
+    stop: Arc<Mutex<bool>>,
+    sink: Arc<dyn OpEventSink>,
+) {
+    // Wait for the file to appear (status writer creates it on
+    // first StageBegin, which can lag a few hundred ms behind plan
+    // compile).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let file = loop {
+        if *stop.lock().expect("tailer stop poisoned") {
+            return;
+        }
+        match std::fs::OpenOptions::new().read(true).open(path) {
+            Ok(f) => break f,
+            Err(_) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return,
+        }
+    };
+
+    let mut file = file;
+    let mut pos: u64 = 0;
+    let mut leftover = String::new();
+    loop {
+        if let Err(e) = file.seek(SeekFrom::Start(pos)) {
+            sink.emit(OpEvent::Log {
+                ts_ms: OpEvent::now_ms(),
+                message: format!("[status.jsonl] seek failed: {}", e),
+            });
+            return;
+        }
+        let mut buf = String::new();
+        let read = std::io::Read::read_to_string(&mut file, &mut buf).unwrap_or(0);
+        if read > 0 {
+            pos += read as u64;
+            leftover.push_str(&buf);
+            // Drain whole lines; keep trailing partial in `leftover`.
+            while let Some(idx) = leftover.find('\n') {
+                let line: String = leftover.drain(..=idx).collect();
+                let line = line.trim_end_matches(['\n', '\r']).to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                let ev = stage_event_to_op_event(&line);
+                sink.emit(ev);
+            }
+        }
+        if *stop.lock().expect("tailer stop poisoned") {
+            // Final drain pass after child exit, then bail.
+            if !leftover.trim().is_empty() {
+                let ev = stage_event_to_op_event(&leftover);
+                sink.emit(ev);
+            }
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Translate one BLUT `StageEvent` JSON line into the matching
+/// `OpEvent`. Wire format pinned by `blut::framework::status` —
+/// every variant carries `"kind"` as discriminator (snake_case).
+fn stage_event_to_op_event(line: &str) -> OpEvent {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => {
+            return OpEvent::Log {
+                ts_ms: OpEvent::now_ms(),
+                message: format!("[status.jsonl] {}", line),
+            };
+        }
+    };
+    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+    let stage_name = v
+        .get("stage_name")
+        .and_then(|s| s.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let node_idx = v.get("node_idx").and_then(|n| n.as_u64()).unwrap_or(0);
+    match kind {
+        "stage_begin" => OpEvent::Log {
+            ts_ms: OpEvent::now_ms(),
+            message: format!("[stage {}] {} begin", node_idx, stage_name),
+        },
+        "stage_end" => {
+            // Duration default-serializes as {secs, nanos}.
+            let ms = v
+                .get("elapsed")
+                .and_then(|e| {
+                    let secs = e.get("secs").and_then(|s| s.as_u64()).unwrap_or(0);
+                    let nanos = e.get("nanos").and_then(|n| n.as_u64()).unwrap_or(0);
+                    Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
+                })
+                .unwrap_or(0);
+            OpEvent::FileDone {
+                ts_ms: OpEvent::now_ms(),
+                path: stage_name,
+                success: true,
+                ms,
+                cr: None,
+                bytes_in: None,
+                bytes_out: None,
+                samples: None,
+                duration_s: None,
+                n_channels: None,
+                sample_rate: None,
+                sha256: None,
+                n_windows: None,
+            }
+        }
+        "stage_skipped" => OpEvent::FileDone {
+            ts_ms: OpEvent::now_ms(),
+            path: format!("{} (cached)", stage_name),
+            success: true,
+            ms: 0,
+            cr: None,
+            bytes_in: None,
+            bytes_out: None,
+            samples: None,
+            duration_s: None,
+            n_channels: None,
+            sample_rate: None,
+            sha256: None,
+            n_windows: None,
+        },
+        "stage_failed" => {
+            let err = v
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("(no message)");
+            OpEvent::Error {
+                ts_ms: OpEvent::now_ms(),
+                message: format!("[stage {}] {} failed: {}", node_idx, stage_name, err),
+            }
+        }
+        "stage_blocked" => {
+            let res = v
+                .get("resource")
+                .and_then(|r| r.as_str())
+                .unwrap_or("?");
+            OpEvent::Log {
+                ts_ms: OpEvent::now_ms(),
+                message: format!("[stage {}] {} blocked on {}", node_idx, stage_name, res),
+            }
+        }
+        "stage_step" => {
+            let update = v.get("update");
+            let step = update.and_then(|u| u.get("step")).and_then(|s| s.as_u64());
+            let total = update.and_then(|u| u.get("total")).and_then(|t| t.as_u64());
+            match (step, total) {
+                (Some(s), Some(t)) if t > 0 => OpEvent::Progress {
+                    ts_ms: OpEvent::now_ms(),
+                    current: s,
+                    total: t,
+                    message: format!("[stage {}] {}", node_idx, stage_name),
+                },
+                _ => OpEvent::Log {
+                    ts_ms: OpEvent::now_ms(),
+                    message: format!(
+                        "[stage {}] {} step {}",
+                        node_idx,
+                        stage_name,
+                        update
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|| "(no update)".to_string())
+                    ),
+                },
+            }
+        }
+        other => OpEvent::Log {
+            ts_ms: OpEvent::now_ms(),
+            message: format!("[status.jsonl] unknown kind '{}': {}", other, line),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +722,162 @@ mod tests {
             }
         }
         assert!(saw_done, "expected Done event from fast-exit fixture");
+    }
+
+    // ── status.jsonl ↔ OpEvent translator fixture tests ─────────
+    //
+    // Every wire variant captured by `blut::framework::status::
+    // StageEvent` is round-tripped here. If BLUT's wire format
+    // changes, these tests fail loudly instead of the bridge
+    // silently dropping events at runtime.
+
+    #[test]
+    fn strip_field_extracts_value() {
+        assert_eq!(strip_field("job    abc-123", "job"), Some("abc-123"));
+        assert_eq!(strip_field("dir /var/jobs/x", "dir"), Some("/var/jobs/x"));
+        // No whitespace between prefix and value → not a real match.
+        assert_eq!(strip_field("jobs 5", "job"), None);
+        // Field but no value.
+        assert_eq!(strip_field("job    ", "job"), None);
+    }
+
+    #[test]
+    fn stage_begin_maps_to_log() {
+        let line = r#"{"kind":"stage_begin","node_idx":3,"stage_name":"lamquant_train_joint","input_hash":"abc"}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::Log { message, .. } => {
+                assert!(message.contains("stage 3"));
+                assert!(message.contains("lamquant_train_joint"));
+                assert!(message.contains("begin"));
+            }
+            other => panic!("expected Log, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stage_end_maps_to_filedone_with_elapsed_ms() {
+        // Duration default-serializes as {secs, nanos}; 2s 500ms.
+        let line = r#"{"kind":"stage_end","node_idx":1,"stage_name":"build_manifest","output_hash":"deadbeef","elapsed":{"secs":2,"nanos":500000000}}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::FileDone { path, success, ms, .. } => {
+                assert_eq!(path, "build_manifest");
+                assert!(success);
+                assert_eq!(ms, 2500);
+            }
+            other => panic!("expected FileDone, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stage_skipped_maps_to_cached_filedone() {
+        let line = r#"{"kind":"stage_skipped","node_idx":2,"stage_name":"precompute_l3","cache_key":"xyz"}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::FileDone { path, success, ms, .. } => {
+                assert!(path.contains("precompute_l3"));
+                assert!(path.contains("cached"));
+                assert!(success);
+                assert_eq!(ms, 0);
+            }
+            other => panic!("expected FileDone, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stage_failed_maps_to_error() {
+        let line = r#"{"kind":"stage_failed","node_idx":4,"stage_name":"train_joint","error":"cuda OOM"}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::Error { message, .. } => {
+                assert!(message.contains("train_joint"));
+                assert!(message.contains("cuda OOM"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stage_blocked_maps_to_log_with_resource() {
+        let line = r#"{"kind":"stage_blocked","node_idx":5,"stage_name":"train_teacher","resource":"gpu"}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::Log { message, .. } => {
+                assert!(message.contains("train_teacher"));
+                assert!(message.contains("blocked"));
+                assert!(message.contains("gpu"));
+            }
+            other => panic!("expected Log, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stage_step_with_step_total_maps_to_progress() {
+        let line = r#"{"kind":"stage_step","node_idx":6,"stage_name":"train_joint","update":{"step":42,"total":100,"loss":0.123}}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::Progress { current, total, message, .. } => {
+                assert_eq!(current, 42);
+                assert_eq!(total, 100);
+                assert!(message.contains("train_joint"));
+            }
+            other => panic!("expected Progress, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stage_step_without_total_falls_back_to_log() {
+        let line = r#"{"kind":"stage_step","node_idx":6,"stage_name":"train_joint","update":{"epoch":3}}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::Log { message, .. } => {
+                assert!(message.contains("train_joint"));
+            }
+            other => panic!("expected Log, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn malformed_line_falls_back_to_log() {
+        let ev = stage_event_to_op_event("not json at all");
+        match ev {
+            OpEvent::Log { message, .. } => {
+                assert!(message.contains("not json"));
+            }
+            other => panic!("expected Log, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unknown_kind_falls_back_to_log() {
+        let line = r#"{"kind":"future_variant","stage_name":"x","node_idx":0}"#;
+        match stage_event_to_op_event(line) {
+            OpEvent::Log { message, .. } => {
+                assert!(message.contains("unknown kind"));
+                assert!(message.contains("future_variant"));
+            }
+            other => panic!("expected Log, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spawn_blut_missing_binary_emits_error() {
+        // Force a binary-not-found path by temporarily clearing PATH.
+        // Skip if test env can't override PATH safely.
+        let (sink, rx) = channel();
+        // Use a recipe name we know doesn't exist + bogus args. If
+        // `blut` is installed, BLUT will exit with a recipe-not-
+        // found error; if not installed, spawn fails. Either way
+        // we get an Error event.
+        let _h = spawn_blut(
+            "__nonexistent_recipe__".to_string(),
+            "{}".to_string(),
+            sink,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_error = false;
+        while Instant::now() < deadline {
+            if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100)) {
+                if matches!(ev, OpEvent::Error { .. }) {
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_error, "expected Error within 5s for missing recipe");
     }
 }

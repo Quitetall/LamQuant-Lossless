@@ -26,7 +26,7 @@ pub mod transport;
 
 pub use launcher::launcher;
 pub use op_spec::{op_spec, OpSpec};
-pub use runner::{spawn_command, spawn_lml, OpHandle};
+pub use runner::{spawn_blut, spawn_command, spawn_lml, OpHandle};
 pub use sink::{MpscSink, OpEventSink, OpProgressSnapshot, OpState};
 pub use transport::{
     Peer, PeerHealth, PeerInfo, RemoteHandle, RemotePath, SshConfig,
