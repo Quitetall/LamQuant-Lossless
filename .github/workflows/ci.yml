@@ -7,18 +7,55 @@ on:
     branches: [main]
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # rust-tests — cross-platform test matrix (Phase 2.1 + 2.2).
+  # Lints (fmt + clippy) run on Linux only; build + test runs on
+  # Linux, macOS x86_64, macOS aarch64 (Apple Silicon), and
+  # Windows MSVC. Phase 2 of the CI lane plan.
+  # ─────────────────────────────────────────────────────────────────
   rust-tests:
-    runs-on: ubuntu-latest
+    name: rust-tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            lint: true
+            smoke_sh: bash
+          - os: macos-13         # x86_64
+            lint: false
+            smoke_sh: bash
+          - os: macos-14         # aarch64 (Apple Silicon)
+            lint: false
+            smoke_sh: bash
+          - os: windows-latest   # MSVC default
+            lint: false
+            smoke_sh: bash       # `bash` ships in default Windows runners (git-bash)
     steps:
+      - name: Enable git long-paths (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+          workspaces: |
+            .
+            lamquant-core
+
       - name: Check formatting
+        if: matrix.lint
         run: cargo fmt --manifest-path lamquant-core/Cargo.toml -- --check
 
       - name: Clippy
+        if: matrix.lint
         run: cargo clippy --manifest-path lamquant-core/Cargo.toml -- -D warnings
 
       - name: Run Rust tests
@@ -28,9 +65,16 @@ jobs:
         run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin lml
 
       - name: Binary smoke test
+        shell: ${{ matrix.smoke_sh }}
         run: |
-          ls -lh target/release/lml
-          target/release/lml help
+          ls -lh target/release/lml* || dir target\\release\\lml.exe
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./target/release/lml.exe help
+            ./target/release/lml.exe self-test
+          else
+            ./target/release/lml help
+            ./target/release/lml self-test
+          fi
 
   # ─────────────────────────────────────────────────────────────────
   # python-fast — runs on every PR and push.
