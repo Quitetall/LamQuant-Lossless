@@ -54,11 +54,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          # einops + torchaudio: required by Phase 5 vendored
-          # discriminator tests (encodec_msstftd uses rearrange +
-          # torchaudio.transforms.Spectrogram).
-          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss pyyaml einops torchaudio
+          # torch + torchaudio must come from the same PyTorch CPU
+          # wheel index — torchaudio's _torchaudio.abi3.so links
+          # against the installed torch ABI and PyPI wheels were
+          # built against a different libtorch.
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          # einops: required by Phase 5 vendored discriminator tests
+          # (encodec_msstftd uses einops.rearrange).
+          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss pyyaml einops
 
       - name: Run Python fast lane (no slow/perf/data/checkpoint)
         run: |
@@ -143,8 +146,10 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss maturin pyyaml einops torchaudio
+          # Match python-fast: torch+torchaudio share the PyTorch
+          # CPU wheel index so ABI links stay consistent.
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss maturin pyyaml einops
           # Persist venv activation for subsequent steps so maturin
           # can find VIRTUAL_ENV.
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
