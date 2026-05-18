@@ -27,9 +27,11 @@ LamQuant compresses EEG recordings for clinical storage and on-device transmissi
 
 **LML (Lossless)** -- bit-exact EDF/BDF roundtrip. Le Gall 5/3 integer lifting DWT -> LPC(2) -> bias cancellation -> Golomb-Rice entropy coding. ~2.3x compression ratio on clinical EEG. Verified on 76,254 files across 7 datasets with zero failures.
 
+**LMA (Archive)** -- the **default output unit**. One `.lma` archive per recording bundles the `.lml` signal + the original source-format bytes (`.edf` / `.vhdr+.vmrk+.eeg` / `.dcm` / `.set+.fdt` / `.cnt` / `.raw+sidecar`) + every sibling annotation file (TUH `.tse`, `.csv_bi`, `.lbl_bi`, `_summary.txt`, etc.) via the LML → zstd → store cascade. SHA-256 per entry, mtime preserved, byte-exact extract on every format. **No byte ever lost.** Operators who delete originals after encoding recover everything via `lml extract`.
+
 **LMQ (Neural)** -- ternary encoder (W2A16, 2.6M params) + Vocos iSTFT decoder (up to 845M params) + Adaptive SNAC FSQ + rANS entropy coding. Targets 50-100x compression at R > 0.90. Currently training.
 
-**LMA (Archive)** -- container format bundling LML-encoded EDF signals and zstd-compressed sidecars (annotations, CSVs, READMEs, any file type) into a single archive with SHA-256 integrity, preserved timestamps, and bit-exact reconstruction.
+Bare `.lml` (signal-only, no archive envelope) is available via `--no-bundle` / `--bare-lml`, but prints a loud data-loss warning every invocation that has to be paired with `--i-understand-data-loss` to silence. The encoder will not let you drop sibling files quietly.
 
 > Not a cleared medical device. FDA 510(k) submission in preparation. See [docs/SAFETY.md](docs/SAFETY.md).
 
