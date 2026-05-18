@@ -1,0 +1,10 @@
+{
+  "name": "max_channels_512",
+  "category": "edge",
+  "n_channels": 512,
+  "total_samples": 256,
+  "sample_rate": 250.0,
+  "lml_sha256": "e3f03edf2132f656652e74c989a5b3e86a1bc0c8c5a8e56ea70376ecc5122b48",
+  "corrupt": null,
+  "expected_error_kind": null
+}

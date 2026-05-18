@@ -1,0 +1,10 @@
+{
+  "name": "basic_4ch_1024s_250hz",
+  "category": "round-trip",
+  "n_channels": 4,
+  "total_samples": 1024,
+  "sample_rate": 250.0,
+  "lml_sha256": "ff700d078b9708b97ce245328c991b7ce1e4ed75369481a4d8e1b7cae58c60c2",
+  "corrupt": null,
+  "expected_error_kind": null
+}

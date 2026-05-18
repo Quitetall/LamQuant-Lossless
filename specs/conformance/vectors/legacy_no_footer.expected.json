@@ -1,0 +1,10 @@
+{
+  "name": "legacy_no_footer",
+  "category": "version compat",
+  "n_channels": 2,
+  "total_samples": 1024,
+  "sample_rate": 250.0,
+  "lml_sha256": "28dcb9074694b64c7f15cad9489513a09a06d8fe95bcd1417520317fabe55120",
+  "corrupt": "legacy_no_footer",
+  "expected_error_kind": null
+}

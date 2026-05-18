@@ -1,0 +1,10 @@
+{
+  "name": "single_channel_long",
+  "category": "edge",
+  "n_channels": 1,
+  "total_samples": 1000000,
+  "sample_rate": 250.0,
+  "lml_sha256": "61b0ffad248f9e2444e4860cdd6bf0b7050c7c4ff2a8a16c3ded2855988f9f20",
+  "corrupt": null,
+  "expected_error_kind": null
+}

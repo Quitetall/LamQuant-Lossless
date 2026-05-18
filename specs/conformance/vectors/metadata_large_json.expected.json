@@ -1,0 +1,10 @@
+{
+  "name": "metadata_large_json",
+  "category": "metadata",
+  "n_channels": 2,
+  "total_samples": 256,
+  "sample_rate": 250.0,
+  "lml_sha256": "f857901aaa16fb63fdfc81521e5c6c148fb9087a9b981f53f634acbd95ecaf23",
+  "corrupt": null,
+  "expected_error_kind": null
+}

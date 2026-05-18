@@ -1,0 +1,10 @@
+{
+  "name": "min_samples_1ch",
+  "category": "edge",
+  "n_channels": 1,
+  "total_samples": 16,
+  "sample_rate": 250.0,
+  "lml_sha256": "9ccefe9f3676af5d732a59fffe5b3dd148262d8df447a8d0304bdc410ad69a0d",
+  "corrupt": null,
+  "expected_error_kind": null
+}

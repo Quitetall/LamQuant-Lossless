@@ -1,0 +1,10 @@
+{
+  "name": "truncated_window",
+  "category": "corruption",
+  "n_channels": 2,
+  "total_samples": 1024,
+  "sample_rate": 250.0,
+  "lml_sha256": "59f577d11940fb60d257b84d6d4282732263812fd5ed762d610396d44def44cc",
+  "corrupt": "truncate",
+  "expected_error_kind": "Truncated"
+}

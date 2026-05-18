@@ -1,0 +1,10 @@
+{
+  "name": "bitflipped_signal_byte",
+  "category": "corruption",
+  "n_channels": 2,
+  "total_samples": 1024,
+  "sample_rate": 250.0,
+  "lml_sha256": "5a7a3081a5f7c3b26781aae7cd139fae3e04cccb5febe5fa8fe7ab4c6394cd05",
+  "corrupt": "bitflip",
+  "expected_error_kind": "CrcMismatch"
+}

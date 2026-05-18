@@ -1,0 +1,10 @@
+{
+  "name": "corrupt_crc",
+  "category": "corruption",
+  "n_channels": 2,
+  "total_samples": 1024,
+  "sample_rate": 250.0,
+  "lml_sha256": "9bb0a569b8e874ea320853bd055b7a79c108344800eb4003bf18f6f354af00ed",
+  "corrupt": "crc",
+  "expected_error_kind": "CrcMismatch"
+}

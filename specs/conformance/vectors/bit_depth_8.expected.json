@@ -1,0 +1,10 @@
+{
+  "name": "bit_depth_8",
+  "category": "rate/depth",
+  "n_channels": 4,
+  "total_samples": 1024,
+  "sample_rate": 250.0,
+  "lml_sha256": "6f89fcabe68f4d9eedcc4188e1412bcb82e04b2f1fcb3f84387ddf3090fa2cbe",
+  "corrupt": null,
+  "expected_error_kind": null
+}

@@ -1,0 +1,10 @@
+{
+  "name": "sample_rate_4000hz",
+  "category": "rate/depth",
+  "n_channels": 4,
+  "total_samples": 1024,
+  "sample_rate": 4000.0,
+  "lml_sha256": "26a844471f773a9c69136f0f588fde986e22b14b02aa85e49ad7d24b11c0a518",
+  "corrupt": null,
+  "expected_error_kind": null
+}

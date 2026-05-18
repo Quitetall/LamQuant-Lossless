@@ -127,6 +127,35 @@ jobs:
               --lib
 
   # ─────────────────────────────────────────────────────────────────
+  # conformance — Phase 8 / Item E.
+  # Validates the 13 committed LML wire-format test vectors against
+  # the release lml binary: structural fields + SHA-256 match per
+  # `.expected.json`; negative vectors error with the documented kind.
+  # ─────────────────────────────────────────────────────────────────
+  conformance:
+    name: lml wire-format conformance
+    needs: rust-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: conformance
+          workspaces: lamquant-core
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build release lml binary
+        run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin lml --features host
+      - name: Run conformance suite
+        run: |
+          python3 specs/conformance/verify.py \
+            --reader target/release/lml \
+            specs/conformance/vectors/*.lml
+
+  # ─────────────────────────────────────────────────────────────────
   # python-fast — runs on every PR and push.
   # Filters: -m "not slow and not perf and not data and not checkpoint"
   # so the fast lane skips real-EEG, trained-checkpoint, and perf
@@ -294,6 +323,21 @@ jobs:
         run: |
           cd lamquant-core
           cargo +nightly fuzz run roundtrip -- -max_total_time=60
+
+      - name: Fuzz container_header (60s)
+        run: |
+          cd lamquant-core
+          cargo +nightly fuzz run container_header -- -max_total_time=60
+
+      - name: Fuzz offset_table (60s)
+        run: |
+          cd lamquant-core
+          cargo +nightly fuzz run offset_table -- -max_total_time=60
+
+      - name: Fuzz lma_manifest (60s)
+        run: |
+          cd lamquant-core
+          cargo +nightly fuzz run lma_manifest -- -max_total_time=60
 
       - name: Generate C FFI header
         run: |

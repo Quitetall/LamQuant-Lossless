@@ -1,0 +1,10 @@
+{
+  "name": "metadata_unicode",
+  "category": "metadata",
+  "n_channels": 2,
+  "total_samples": 256,
+  "sample_rate": 250.0,
+  "lml_sha256": "ba19e8debc3274cb7f2bd608d3dc9b2faa87aa955d611cc8ccb0aa207c1d2b5f",
+  "corrupt": null,
+  "expected_error_kind": null
+}
