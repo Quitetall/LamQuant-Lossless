@@ -24,7 +24,7 @@ import os
 import pytest
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-sys.path.insert(0, os.path.join(_REPO, 'lamquant_codec'))
+sys.path.insert(0, os.path.join(_REPO, 'reference_implementations', 'python_codec', 'lamquant_codec'))
 
 
 # ============================================================

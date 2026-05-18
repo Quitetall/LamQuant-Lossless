@@ -26,7 +26,10 @@ sys.path.insert(0, os.path.join(_REPO, "ai_models", "oracle"))
 sys.path.insert(0, os.path.join(_REPO, "ai_models", "snn"))
 sys.path.insert(0, os.path.join(_REPO, "ai_models", "dataset_sim"))
 sys.path.insert(0, os.path.join(_REPO, "ai_models", "decoder"))
-sys.path.insert(0, os.path.join(_REPO, "lamquant_codec"))
+sys.path.insert(
+    0,
+    os.path.join(_REPO, "reference_implementations", "python_codec", "lamquant_codec"),
+)
 
 from lamquant_codec.codec_types import EEGPacket
 from lamquant_codec.benchmark import Benchmark
