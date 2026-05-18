@@ -14,6 +14,11 @@
   <strong>Clinical-grade lossless + neural EEG compression codec targeting FDA 510(k) clearance</strong>
 </p>
 
+<p align="center">
+  <em>EEG storage shrunk ~3× lossless vs zstd, with bit-exact roundtrip + random-access seek tables.</em><br/>
+  <em>For who, when, and why: <a href="docs/PROBLEM.md">docs/PROBLEM.md</a>. For numbers: <a href="docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</em>
+</p>
+
 ---
 
 ## What is LamQuant?
