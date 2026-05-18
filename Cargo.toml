@@ -23,6 +23,10 @@ default-members = [
 # deps. Drive it explicitly via `cd lamquant-core && cargo +nightly fuzz`.
 exclude = [
     "lamquant-core/fuzz",
+    # BLUT is its own Cargo workspace; included via git submodule but
+    # NEVER absorbed into the LamQuant workspace. Build via
+    # `cd blut && cargo build`. See ADR 0017.
+    "blut",
 ]
 
 # Custom profile for firmware builds. Use with:
