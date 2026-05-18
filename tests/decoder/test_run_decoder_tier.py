@@ -35,9 +35,22 @@ def _stub(name: str, **attrs) -> types.ModuleType:
     return mod
 
 
+_STUBBED = ("vocos_decoder", "discriminator", "lamquant_codec",
+             "lamquant_codec.models", "lamquant_codec.models.encoder",
+             "raw_window_dataset", "data_types", "auraloss", "auraloss.freq",
+             "ai_models.decoder.run_decoder_tier_under_test")
+
+
 @pytest.fixture(scope="module")
 def rdt():
-    """Load run_decoder_tier module with heavy deps stubbed out."""
+    """Load run_decoder_tier module with heavy deps stubbed out.
+
+    Stubs are cleaned up at fixture finalisation so they don't bleed
+    into later test modules (e.g. the real `data_types` is loaded by
+    integration tests that import the joint codec).
+    """
+    pre_loaded = {n: sys.modules.get(n) for n in _STUBBED}
+
     # Stub heavy modules referenced at import-time
     if "vocos_decoder" not in sys.modules:
         m = _stub("vocos_decoder",
@@ -70,7 +83,14 @@ def rdt():
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # type: ignore[union-attr]
-    return module
+    try:
+        yield module
+    finally:
+        for name, prev in pre_loaded.items():
+            if prev is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
 
 
 # ---------------------------------------------------------------------------
