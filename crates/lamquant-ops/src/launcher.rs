@@ -234,6 +234,22 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         // Firmware exports
         "fw_export" => ("python", vec!["scripts/export_weights.py"], "export weights"),
 
+        // Cockpit BLUT integrations (T3.2 — Python cockpit parity).
+        // `cockpit_jobs` lists BLUT's per-job state via the `blut jobs`
+        // subcommand. Same data the Python cockpit's queue/history
+        // screens used to compose by hand; BLUT now owns the table.
+        "cockpit_jobs" => ("blut", vec!["jobs"], "BLUT: list training jobs"),
+        // `cockpit_export` mirrors the Python cockpit `_screen_export`
+        // weight-export flow. Today it shells the same training-side
+        // script `fw_export` uses; a follow-up sprint promotes this
+        // to a typed BLUT stage with explicit `--weights` + `--out`
+        // arguments (Track E in the plan also touches this path).
+        "cockpit_export" => (
+            "python",
+            vec!["scripts/export_weights.py"],
+            "Export weights (training side)",
+        ),
+
         // Syscheck (handled in-process for the most part, but expose Python self-test)
         "syscheck_py" => ("python", vec!["-m", "lamquant_codec.cli.syscheck"], "syscheck (python)"),
 
