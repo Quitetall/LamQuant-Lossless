@@ -1,0 +1,31 @@
+{% include "_header.rs.j2" %}
+//! Build-time metadata. Mirrors `.exportlock.json` exactly.
+
+pub const SCHEMA_VERSION: &str = "{{ schema_version }}";
+pub const MODEL_VERSION: &str = "{{ model_version }}";
+pub const ARCHITECTURE: &str = "{{ arch_name }}";
+pub const ENCODER_CLASS: &str = "{{ encoder_class }}";
+pub const ENCODER_WIDTH: usize = {{ encoder_width }};
+pub const N_FOCAL_BLOCKS: usize = {{ n_focal_blocks }};
+pub const LATENT_DIMS: usize = {{ latent_dims }};
+pub const LATENT_TIMESTEPS: usize = {{ latent_timesteps }};
+
+pub const CHECKPOINT_NAME: &str = "{{ ckpt_basename }}";
+pub const CHECKPOINT_SHA256: [u8; 32] = [
+    {%- for byte in ckpt_sha256_bytes %}
+    {%- if loop.index0 % 8 == 0 %}
+    {% endif %}
+    0x{{ "%02x" | format(byte) }},
+    {%- endfor %}
+];
+
+pub const EXPORTER_VERSION: &str = "{{ exporter_version }}";
+pub const GIT_COMMIT: &str = "{{ git_commit }}";
+pub const EXPORT_TIMESTAMP_UNIX: u64 = {{ export_timestamp_unix }};
+
+/// CRC-32 over all weight byte arrays in deterministic enumeration order.
+/// Verified at boot; mismatch → safe mode.
+pub const FIRMWARE_CRC32: u32 = 0x{{ "%08X" | format(firmware_crc32) }};
+
+/// True once the codegen tool has populated this crate.
+pub const IS_INITIALIZED: bool = true;

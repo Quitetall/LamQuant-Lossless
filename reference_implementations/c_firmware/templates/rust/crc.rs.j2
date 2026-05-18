@@ -1,0 +1,13 @@
+{% include "_header.rs.j2" %}
+//! CRC-32 over all weight byte arrays. Verified at boot.
+//! Mirrors `metadata::FIRMWARE_CRC32`.
+
+pub const FIRMWARE_EXPECTED_CRC32: u32 = 0x{{ "%08X" | format(firmware_crc32) }};
+
+/// Order of buffers used to compute the CRC. Firmware must walk this list
+/// in the same order during boot integrity check.
+pub const CRC_BUFFER_ORDER: &[&str] = &[
+    {% for name in buffer_order -%}
+    "{{ name }}",
+    {% endfor %}
+];

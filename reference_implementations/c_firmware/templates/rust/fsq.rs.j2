@@ -1,0 +1,42 @@
+{% include "_header.rs.j2" %}
+//! FSQ lattice + rANS frequency table. Calibrated from {{ calibration_n }}
+//! random-clamped EEG forward passes. Latent range [{{ "%.3f" | format(vmin_float) }}, {{ "%.3f" | format(vmax_float) }}],
+//! entropy {{ "%.3f" | format(entropy_bps) }} bps.
+
+use crate::types::FsqLattice;
+
+pub const NUM_LEVELS: usize = {{ num_levels }};
+pub const RANS_TOTAL: u32 = {{ total_freq }};
+
+pub static LEVELS: [i32; 4] = [
+    {% for v in levels %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+];
+
+pub const QUANT_SCALE_Q31: i32 = {{ quant_scale_q31 }};
+
+pub static RANS_FREQ: [u32; NUM_LEVELS] = [
+    {%- for chunk in freq | batch(8) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+pub static RANS_START: [u32; NUM_LEVELS] = [
+    {%- for chunk in start | batch(8) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+pub const VMIN_Q31: i32 = {{ vmin_q31 }};
+pub const VMAX_Q31: i32 = {{ vmax_q31 }};
+pub const INV_RANGE_Q31: i32 = {{ inv_range_q31 }};
+
+pub const LATTICE: FsqLattice = FsqLattice {
+    levels: &LEVELS,
+    quant_scale_q31: QUANT_SCALE_Q31,
+    rans_freq: &RANS_FREQ,
+    rans_start: &RANS_START,
+    rans_total: RANS_TOTAL,
+    vmin_q31: VMIN_Q31,
+    vmax_q31: VMAX_Q31,
+    inv_range_q31: INV_RANGE_Q31,
+};

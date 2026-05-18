@@ -1,0 +1,241 @@
+# LamQuant weight-export schema (v1.0).
+# Single source of truth for layer layout, dtypes, and Q-formats.
+#
+# Consumed by `firmware/export_firmware.py` (both C and Rust emitters).
+# Edit this file to declare new architectures or new layers — DO NOT add
+# layer logic to the Python emitters.
+
+[meta]
+schema_version = "1.0"
+target_crate = "lamquant-weights"
+output_subdir = "src/generated"
+
+# ───────────────────────────────────────────────────────────────────
+# Architecture variants
+# ───────────────────────────────────────────────────────────────────
+# Selected at export time via `--arch <name>`. Each arch fills the
+# `out_channels` placeholder marked as `_arch_width` in the layer table.
+
+[architectures.subband_v1]
+display_name = "Gen 7.1 Subband"
+encoder_class = "TernaryMobileNetV5_Subband"
+encoder_width = 128
+n_focal_blocks = 3
+latent_dims = 32
+latent_timesteps = 79
+checkpoint_globs = [
+    "weights/student_subband_gold.ckpt",
+    "weights/student_subband_std.ckpt",
+    "weights/student_subband_fast.ckpt",
+    "weights/student_subband.ckpt",
+]
+
+[architectures.subband_v2]
+display_name = "Gen 7.6.1 Subband V2 (depthwise-separable focal)"
+encoder_class = "TernaryMobileNetV5_Subband_V2"
+encoder_width = 216
+n_focal_blocks = 4
+latent_dims = 32
+latent_timesteps = 79
+checkpoint_globs = [
+    "weights/student_subband_v2_gold.ckpt",
+    "weights/student_subband_v2.ckpt",
+]
+
+[architectures.legacy_v7_0]
+display_name = "Gen 7.0 (full-band, deprecated)"
+encoder_class = "TernaryMobileNetV5"
+encoder_width = 96
+n_focal_blocks = 4
+latent_dims = 32
+latent_timesteps = 313
+checkpoint_globs = ["weights/student_hardened.ckpt"]
+
+# ───────────────────────────────────────────────────────────────────
+# Encoder layer descriptors (subband_v1 default — V2/legacy override)
+# ───────────────────────────────────────────────────────────────────
+# Each entry = one TernaryConv1d / INT8Conv1d / GroupNorm in the model.
+# `out_channels = "_arch_width"` is replaced at export time with the
+# value from `architectures.<name>.encoder_width`.
+
+[[layers]]
+name = "premix"
+in_channels = 21
+out_channels = 21
+kernel_size = 1
+stride = 1
+weight_kind = "ternary_2bit_packed"
+has_alphas = true
+has_norm = false
+has_shortcut = false
+
+[[layers]]
+name = "focal1_conv"
+in_channels = 21
+out_channels = "_arch_width"
+kernel_size = 3
+stride = 2
+weight_kind = "ternary_2bit_packed"
+has_alphas = true
+has_norm = true
+has_shortcut = true
+
+[[layers]]
+name = "focal2"
+in_channels = "_arch_width"
+out_channels = "_arch_width"
+kernel_size = 5
+stride = 1
+weight_kind = "ternary_2bit_packed"
+has_alphas = true
+has_norm = true
+has_shortcut = false
+
+[[layers]]
+name = "focal3"
+in_channels = "_arch_width"
+out_channels = "_arch_width"
+kernel_size = 7
+stride = 2
+weight_kind = "ternary_2bit_packed"
+has_alphas = true
+has_norm = true
+has_shortcut = true
+
+[[layers]]
+name = "dw_gate"
+in_channels = "_arch_width"
+out_channels = "_arch_width"
+kernel_size = 3
+stride = 1
+weight_kind = "ternary_2bit_packed"
+groups = "_arch_width"   # depthwise: groups == in_channels
+has_alphas = true
+has_norm = false
+has_shortcut = false
+
+[[layers]]
+name = "bneck_v"
+in_channels = "_arch_width"
+out_channels = 32
+kernel_size = 1
+stride = 1
+weight_kind = "int8"
+has_alphas = false
+has_quant_scale = true   # INT8Conv1d uses per-output-channel quant_scale
+has_norm = false
+has_shortcut = false
+
+[[layers]]
+name = "bneck_g"
+in_channels = "_arch_width"
+out_channels = 32
+kernel_size = 1
+stride = 1
+weight_kind = "ternary_2bit_packed"
+has_alphas = true
+has_norm = false
+has_shortcut = false
+
+# ───────────────────────────────────────────────────────────────────
+# Cayley rotation matrix
+# ───────────────────────────────────────────────────────────────────
+
+[rotation]
+# Q = (I - A)(I + A)^{-1}, where A = rotation_A - rotation_A.T (skew-sym).
+source_param = "rotation_A"
+dim = 32
+storage_dtype = "i16"
+storage_q_format = "Q15"   # promote to Q31 at runtime: q31 = (q15 << 16)
+
+# ───────────────────────────────────────────────────────────────────
+# FSQ + rANS lattice
+# ───────────────────────────────────────────────────────────────────
+
+[fsq]
+# 4D product quantizer. Total codebook = product(levels) = 1200 codewords.
+levels = [8, 6, 5, 5]
+quant_scale_q31 = 1073741824   # 0.5 in Q31
+n_freq_bins = 16
+rans_total_freq = 4096
+calibration_n_samples = 50      # forward passes used to estimate latent dist
+calibration_input_shape = [4, 21, 2500]
+calibration_input_clamp = 50
+
+# ───────────────────────────────────────────────────────────────────
+# Mamba SNN (separate checkpoint, exported alongside the encoder)
+# ───────────────────────────────────────────────────────────────────
+
+[snn]
+encoder_class = "MambaSNN"
+in_channels = 21
+d_model = 21
+n_layers = 2
+n_groups = 8
+stride = 1
+spatial_mix_hidden = 40
+ssm_state_dim = 16
+checkpoint_globs = [
+    "weights/mamba_snn_gold.ckpt",
+    "weights/mamba_snn.ckpt",
+]
+
+# Per-tensor storage formats (mirrors C export):
+[[snn.tensors]]
+name = "spatial_mix.weight"
+storage = "i8"
+has_scale = true   # float32 per-tensor scale, embedded as `_scale: f32`
+
+[[snn.tensors]]
+name = "spatial_mix.bias"
+storage = "i8"
+has_scale = true
+
+[[snn.tensors]]
+name = "a_log"   # state transition (per layer, per direction)
+storage = "i16"
+storage_q_format = "Q15"
+
+[[snn.tensors]]
+name = "B"       # input projection
+storage = "i8"
+
+[[snn.tensors]]
+name = "C"       # output projection
+storage = "i8"
+
+[[snn.tensors]]
+name = "delta"   # step size
+storage = "i8"
+
+[[snn.tensors]]
+name = "norm.weight"   # RMSNorm gamma
+storage = "f32"
+
+[[snn.tensors]]
+name = "norm.bias"     # RMSNorm beta
+storage = "f32"
+
+[[snn.tensors]]
+name = "readout.weight"
+storage = "i8"
+has_scale = true
+
+[[snn.tensors]]
+name = "readout.bias"
+storage = "i8"
+has_scale = true
+
+# ───────────────────────────────────────────────────────────────────
+# Toeplitz LFSR seeds (compressed sensing rows, one per channel)
+# ───────────────────────────────────────────────────────────────────
+
+[toeplitz]
+n_channels = 21
+seed_dtype = "u32"
+seeds = [
+    0xACE1, 0xBE37, 0xCAFE, 0xDEAD, 0xF00D, 0x1337,
+    0xB00B, 0xFACE, 0xD00D, 0xBEEF, 0xC0DE, 0xBAD1,
+    0xFEED, 0xDAD1, 0xAB1E, 0xACDC, 0xB1A5, 0xCA5E,
+    0xDE1F, 0xEF01, 0xF1A7,
+]

@@ -1,0 +1,18 @@
+{% include "_header.rs.j2" %}
+//! Cayley rotation matrix Q = (I-A)(I+A)^{-1}, applied to the latent
+//! before FSQ quantization. {{ dim }}×{{ dim }} row-major Q15.
+
+use crate::types::RotationMatrix32;
+
+pub const DIM: usize = {{ dim }};
+
+#[link_section = ".sram4_tnn"]
+pub static ROTATION_Q_Q15: [i16; {{ q_q15 | length }}] = [
+    {%- for chunk in q_q15 | batch(12) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+pub const ROTATION: RotationMatrix32 = RotationMatrix32 {
+    q_q15: &ROTATION_Q_Q15,
+};

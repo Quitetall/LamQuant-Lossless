@@ -1,0 +1,37 @@
+; LamQuant Gen 6: Event-Driven LC-ADC Trigger
+; Runs on the RP2350 PIO State Machine
+
+.program lc_adc_trigger
+
+; The PIO monitors the digital output of the Level-Crossing Comparator.
+; Once a threshold is breached, the hardware comparator drives the pin HIGH.
+; The PIO instantly pushes a token to the RX FIFO, which is bound to DMA IRQ0,
+; waking the Hazard3 core from the WFI state in <1us without constant polling.
+
+.wrap_target
+    wait 1 pin 0      ; Block execution entirely until the LC-ADC pin goes HIGH
+    
+    set x, 1          ; Prepare an arbitrary non-zero token
+    in x, 32          ; Shift the token into the Input Shift Register (ISR)
+    push block        ; Push to the RX FIFO, instantly triggering the DMA transfer
+    
+    wait 0 pin 0      ; Block until the analog comparator resets to LOW (debounce)
+.wrap
+
+% c-sdk {
+static inline void lc_adc_trigger_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_config c = lc_adc_trigger_program_get_default_config(offset);
+    
+    // Map the Wait pin to the comparator GPIO
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    
+    // Initialize GPIO for PIO use
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false); // Input
+    
+    // Load and start State Machine
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

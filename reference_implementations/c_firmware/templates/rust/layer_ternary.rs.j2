@@ -1,0 +1,73 @@
+{% include "_header.rs.j2" %}
+//! {{ layer.name }}: {{ layer.in_channels }} → {{ layer.out_channels }}, k={{ layer.kernel_size }}, stride={{ layer.stride }}{% if layer.groups %}, depthwise (groups={{ layer.groups }}){% endif %}.
+//! Ternary 2-bit-packed weights, per-output Q15 alphas{% if layer.has_norm %}, GroupNorm (Q7 weight + Q15 bias){% endif %}.
+
+{% if layer.groups %}
+use crate::types::DepthwiseTernaryConvWeights;
+{% elif layer.has_norm %}
+use crate::types::{NormParams, TernaryConvWeights};
+{% else %}
+use crate::types::TernaryConvWeights;
+{% endif %}
+
+pub const IN_CHANNELS: usize = {{ layer.in_channels }};
+pub const OUT_CHANNELS: usize = {{ layer.out_channels }};
+pub const KERNEL_SIZE: usize = {{ layer.kernel_size }};
+pub const STRIDE: usize = {{ layer.stride }};
+{% if layer.groups %}pub const GROUPS: usize = {{ layer.groups }};
+{% endif %}pub const N_PACKED_BYTES: usize = {{ packed | length }};
+pub const N_WEIGHTS: usize = {{ n_weights }};
+
+#[link_section = ".sram4_tnn"]
+pub static PACKED_WEIGHTS: [u8; N_PACKED_BYTES] = [
+    {%- for chunk in packed | batch(12) %}
+    {% for b in chunk %}0x{{ "%02X" | format(b) }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+pub static ALPHAS_Q15: [i16; OUT_CHANNELS] = [
+    {%- for chunk in alphas | batch(12) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+{% if layer.has_norm %}
+pub static NORM_WEIGHT_Q7: [i8; OUT_CHANNELS] = [
+    {%- for chunk in norm_weight | batch(16) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+pub static NORM_BIAS_Q15: [i16; OUT_CHANNELS] = [
+    {%- for chunk in norm_bias | batch(12) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+{% endif %}
+
+{% if layer.groups %}
+pub const WEIGHTS: DepthwiseTernaryConvWeights<OUT_CHANNELS, KERNEL_SIZE> =
+    DepthwiseTernaryConvWeights {
+        packed: &PACKED_WEIGHTS,
+        alphas_q15: &ALPHAS_Q15,
+    };
+{% else %}
+pub const WEIGHTS: TernaryConvWeights<IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE> =
+    TernaryConvWeights {
+        packed: &PACKED_WEIGHTS,
+        alphas_q15: &ALPHAS_Q15,
+        {% if layer.has_norm -%}
+        norm: Some(NormParams {
+            weight_q7: &NORM_WEIGHT_Q7,
+            bias_q15: &NORM_BIAS_Q15,
+        }),
+        {%- else -%}
+        norm: None,
+        {%- endif %}
+    };
+{% endif %}
+
+const _: () = assert!(
+    WEIGHTS.is_packed_len_valid(),
+    "{{ layer.name }}: packed weights length mismatches expected"
+);

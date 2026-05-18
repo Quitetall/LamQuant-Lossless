@@ -1,0 +1,6 @@
+#ifndef FIRMWARE_CRC_H
+#define FIRMWARE_CRC_H
+
+#define FIRMWARE_CRC32 0x919C146Fu
+
+#endif // FIRMWARE_CRC_H

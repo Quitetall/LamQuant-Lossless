@@ -1,0 +1,11 @@
+{% include "_header.rs.j2" %}
+//! LFSR seeds for per-channel Toeplitz compressed-sensing rows.
+//! Constants — same across all checkpoints.
+
+pub const N_CHANNELS: usize = {{ seeds | length }};
+
+pub static SEEDS: [u32; N_CHANNELS] = [
+    {%- for chunk in seeds | batch(6) %}
+    {% for v in chunk %}0x{{ "%04X" | format(v) }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];

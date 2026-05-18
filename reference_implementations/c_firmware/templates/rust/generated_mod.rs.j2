@@ -1,0 +1,19 @@
+{% include "_header.rs.j2" %}
+//! Top-level re-exports for the active architecture variant.
+
+pub mod focal {
+    {% for layer in ternary_layers %}
+    pub mod {{ layer.name }};
+    {%- endfor %}
+    {% for layer in int8_layers %}
+    pub mod {{ layer.name }};
+    {%- endfor %}
+}
+
+pub mod rotation;
+pub mod fsq;
+pub mod toeplitz;
+pub mod crc;
+{% if has_snn %}
+pub mod snn;
+{% endif %}

@@ -1,0 +1,35 @@
+{% include "_header.rs.j2" %}
+//! {{ layer.name }}: {{ layer.in_channels }} → {{ layer.out_channels }}, k={{ layer.kernel_size }}, INT8.
+//! Output bottleneck — higher precision than ternary because this sets
+//! the scale of the latent that downstream FSQ quantizes.
+
+use crate::types::Int8ConvWeights;
+
+pub const IN_CHANNELS: usize = {{ layer.in_channels }};
+pub const OUT_CHANNELS: usize = {{ layer.out_channels }};
+pub const KERNEL_SIZE: usize = {{ layer.kernel_size }};
+pub const N_WEIGHTS: usize = {{ weights | length }};
+
+#[link_section = ".sram4_tnn"]
+pub static WEIGHTS_RAW: [i8; N_WEIGHTS] = [
+    {%- for chunk in weights | batch(16) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+pub static SCALES_Q15: [i16; OUT_CHANNELS] = [
+    {%- for chunk in scales | batch(12) %}
+    {% for v in chunk %}{{ v }},{% if not loop.last %} {% endif %}{% endfor %}
+    {%- endfor %}
+];
+
+pub const WEIGHTS: Int8ConvWeights<IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE> =
+    Int8ConvWeights {
+        weights: &WEIGHTS_RAW,
+        scales_q15: &SCALES_Q15,
+    };
+
+const _: () = assert!(
+    WEIGHTS.is_weights_len_valid(),
+    "{{ layer.name }}: weights length mismatches IN*OUT*K"
+);
