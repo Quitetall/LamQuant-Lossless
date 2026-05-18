@@ -10,6 +10,7 @@ Verifies:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
@@ -130,9 +131,13 @@ def test_window_selection_status_epilepticus_capped():
 
 LML_ROOT = Path("/mnt/4tb/data/lml/edf.lml")
 LABELS_DIR = Path("/mnt/4tb/LamQuant/ai_models/snn/labels")
+_HAS_LAMQUANT_CORE = importlib.util.find_spec("lamquant_core") is not None
 REQUIRES_REAL_DATA = pytest.mark.skipif(
-    not LML_ROOT.exists() or not LABELS_DIR.exists(),
-    reason="requires real LML+labels data at /mnt/4tb",
+    not LML_ROOT.exists() or not LABELS_DIR.exists() or not _HAS_LAMQUANT_CORE,
+    reason=(
+        "requires real LML+labels data at /mnt/4tb AND the `lamquant_core` "
+        "pyo3 binding (install via `maturin develop --release -m lamquant-core/Cargo.toml`)"
+    ),
 )
 
 
