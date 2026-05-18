@@ -129,6 +129,84 @@ jobs:
             cp target/${{ matrix.target }}/release/${{ matrix.binary }} ${{ matrix.name }}
           fi
 
+      # ────────────────────────────────────────────────────────────────
+      # Phase 7.7 — code signing slots. Both stay opt-in via repo
+      # secrets so a fork without certs still ships unsigned artifacts
+      # without failing the matrix.
+      #
+      # macOS notarisation (Apple): needs APPLE_ID + APPLE_ID_PASSWORD
+      # (app-specific password) + APPLE_TEAM_ID + APPLE_DEVELOPER_ID_CERT
+      # (base64 .p12) + APPLE_DEVELOPER_ID_CERT_PASSWORD. Without those
+      # secrets the step is silently skipped.
+      #
+      # Windows Authenticode (Code-signing): needs WINDOWS_PFX_BASE64 +
+      # WINDOWS_PFX_PASSWORD. Uses `signtool` from the Windows SDK
+      # (pre-installed on github runners).
+      # ────────────────────────────────────────────────────────────────
+      - name: Notarize (macOS Developer ID)
+        if: |
+          startsWith(matrix.target, 'aarch64-apple-darwin') ||
+          startsWith(matrix.target, 'x86_64-apple-darwin')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "${APPLE_ID:-}" || -z "${APPLE_DEVELOPER_ID_CERT:-}" ]]; then
+            echo "Apple signing secrets not present — skipping notarisation."
+            exit 0
+          fi
+          # Import the Developer ID certificate into a temporary keychain.
+          KEYCHAIN_NAME="lamquant-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          echo "$APPLE_DEVELOPER_ID_CERT" | base64 --decode > cert.p12
+          security import cert.p12 -k "$KEYCHAIN_NAME" -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN_NAME" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          # Sign + notarize the rename'd artifact, then staple ticket.
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application: $APPLE_TEAM_ID" \
+            "${{ matrix.name }}"
+          ditto -c -k --keepParent "${{ matrix.name }}" "${{ matrix.name }}.zip"
+          xcrun notarytool submit "${{ matrix.name }}.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          # CLI binaries can't be stapled (only .app / .dmg / .pkg);
+          # notarytool's --wait gate is enough — Gatekeeper consults
+          # the ticket via online lookup.
+          rm -f cert.p12 "${{ matrix.name }}.zip"
+          security delete-keychain "$KEYCHAIN_NAME" || true
+
+      - name: Authenticode sign (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        shell: pwsh
+        run: |
+          if (-not $env:WINDOWS_PFX_BASE64) {
+            Write-Host "Windows code-signing secrets not present — skipping signtool."
+            exit 0
+          }
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          # signtool ships in Windows SDK pre-installed on windows-latest.
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+                       Where-Object { $_.FullName -match "x64" } |
+                       Select-Object -First 1 -ExpandProperty FullName)
+          & $signtool sign /f cert.pfx /p $env:WINDOWS_PFX_PASSWORD `
+            /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+            "${{ matrix.name }}"
+          & $signtool verify /pa "${{ matrix.name }}"
+          Remove-Item cert.pfx -Force
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
