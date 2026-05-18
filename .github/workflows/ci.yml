@@ -61,6 +61,14 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path lamquant-core/Cargo.toml
 
+      # Phase 6 + Phase 7 — confirm the async feature build is healthy
+      # on Linux (tokio + reqwest + notify trio). Skipped on macOS /
+      # Windows for now because the runner's curl / openssl backports
+      # add noise; the lossless build path still gates clippy/fmt above.
+      - name: cargo test (--features async)
+        if: runner.os == 'Linux'
+        run: cargo test --manifest-path lamquant-core/Cargo.toml --features async --lib
+
       - name: Build release binary
         run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin lml
 
