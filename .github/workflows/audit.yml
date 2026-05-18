@@ -1,0 +1,62 @@
+name: Supply-chain audit
+
+# Phase 7 — runs cargo-audit + cargo-deny on every push to main, every
+# PR, and once a day so newly-published RUSTSEC advisories are caught
+# even on quiet branches. Skipped on tag pushes (release.yml handles
+# those).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '17 6 * * *'  # 06:17 UTC daily — off-peak for runner availability
+  workflow_dispatch:
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  cargo-audit:
+    name: cargo-audit (RUSTSEC advisories)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit-cargo-audit
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run advisory scan
+        run: cargo audit --deny warnings --json > audit-report.json || (cat audit-report.json && exit 1)
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-audit-report
+          path: audit-report.json
+
+  cargo-deny:
+    name: cargo-deny (licenses + bans + sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit-cargo-deny
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Run cargo-deny check
+        # `check` runs all four sub-checks: advisories, bans, licenses,
+        # sources. Each loads the policy from `deny.toml` at repo root.
+        run: cargo deny --workspace check

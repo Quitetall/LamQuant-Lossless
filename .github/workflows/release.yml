@@ -311,8 +311,31 @@ jobs:
             lamquant-core.spdx.json
             lamquant-core.cdx.json
 
+  # ──────────────────────────────────────────────────────────────────
+  # reproducible-build-verify — Phase 8 / Item G.
+  # Two clean-room builds at the tag commit must hash byte-identical.
+  # SOURCE_DATE_EPOCH pinned from tag-commit %ct (matches build-binaries).
+  # --remap-path-prefix scrubs runner-local paths from debuginfo.
+  # Failure here blocks the release: a non-reproducible tag is a
+  # supply-chain signal we don't want to ship.
+  # ──────────────────────────────────────────────────────────────────
+  reproducible-build-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: reproducible-verify
+          workspaces: lamquant-core
+      - name: Verify reproducibility
+        run: ./scripts/verify_reproducible_build.sh
+
   create-release:
-    needs: [build-binaries, build-gui, sbom]
+    needs: [build-binaries, build-gui, sbom, reproducible-build-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
