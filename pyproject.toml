@@ -73,7 +73,16 @@ all = [
 # scripts in ai_models/ and firmware/ are run directly (python path/to/
 # script.py) and are not installed. tools/ is included because its
 # visualize script is registered as a [project.scripts] entry point.
+#
+# lamquant_codec moved to reference_implementations/python_codec/
+# 2026-05-18 — it's the Python reference implementation now, not the
+# canonical codec (the Rust `lamquant-core` is). `where = [..., ".",
+# "reference_implementations/python_codec"]` keeps both `tools/` (at
+# the repo root) and `lamquant_codec/` (under
+# reference_implementations/) discoverable. The `include`/`exclude`
+# filters still apply; the only change is where setuptools looks.
 [tool.setuptools.packages.find]
+where = [".", "reference_implementations/python_codec"]
 include = ["lamquant_codec*", "tools*"]
 exclude = ["tests*", "gui*", "docs*", "build*", "ai_models*", "firmware*", "installer*"]
 
