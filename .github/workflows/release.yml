@@ -7,6 +7,17 @@ on:
 permissions:
   contents: write
 
+# Reproducible-build envvars (Phase 2.4). SOURCE_DATE_EPOCH is the
+# de-facto cross-toolchain timestamp pin: rustc, the linker, ar, zip,
+# strip, and softprops/action-gh-release all honour it. We pin it to
+# the commit timestamp of the tag (set per-job, see "Pin SOURCE_DATE_EPOCH"
+# step below) so re-running the same release tag produces byte-identical
+# artifacts. CARGO_TARGET_DIR is fixed for the same reason — relative
+# paths in debuginfo would otherwise vary per runner.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "--remap-path-prefix=/home/runner/work=/__w --remap-path-prefix=${{ github.workspace }}=/__w/lamquant"
+
 jobs:
   build-binaries:
     # Phase D.1: ship both `lml` (codec CLI) and `lamquant` (launcher)
@@ -75,9 +86,24 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need the tag's actual commit object — depth 1 is enough since
+          # the tag itself is checked out, but be explicit so future
+          # SOURCE_DATE_EPOCH computation has the commit timestamp.
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Pin SOURCE_DATE_EPOCH from tag commit
+        shell: bash
+        # Honoured by rustc, rust-lld, GNU ld, BSD ld, lld, ar, strip,
+        # zip, tar, softprops/action-gh-release. Reproducible Builds
+        # spec §3.1. Same tag → same epoch → byte-identical artifact.
+        run: |
+          EPOCH=$(git log -1 --pretty=%ct)
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "Pinned SOURCE_DATE_EPOCH=$EPOCH (commit $(git rev-parse --short HEAD))"
 
       - name: Install cross-compilation tools (aarch64-gnu)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
