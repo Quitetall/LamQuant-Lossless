@@ -96,6 +96,22 @@ struct Args {
     /// Allow other users to access the mount. Default is owner-only.
     #[arg(long)]
     allow_other: bool,
+
+    /// Fall back to the raw stored LML bytes when the codec refuses
+    /// to decode an entry (CRC mismatch, version skew, ...). DEFAULT
+    /// = OFF: a codec rejection surfaces as `EIO` to the kernel so
+    /// the file manager / `cat` consumer sees a hard failure instead
+    /// of a corrupted-looking byte stream.
+    ///
+    /// Pre-v1.1 archives with the historical CRC mismatch on
+    /// `Method::Lml` entries return raw LML wire bytes on
+    /// fallback -- the file contents are not the decoded EDF, just
+    /// the inner LML container. Useful for forensic inspection but
+    /// dangerous as a default because applications that expect
+    /// real EDF input will silently mis-interpret. Set this flag
+    /// only when triaging old archives.
+    #[arg(long)]
+    allow_raw_fallback: bool,
 }
 
 /// File-entry metadata pulled verbatim from the LMA manifest.
@@ -132,10 +148,16 @@ struct LmaFs {
     entries: Vec<EntryHandle>,
     /// inode -> dir or file. ROOT_INO is always a Dir.
     inodes: HashMap<u64, INode>,
+    /// Fall back to raw stored bytes when the codec refuses to
+    /// decode (mirrors the `--allow-raw-fallback` CLI flag). Default
+    /// = false: codec rejections surface as `EIO` to the kernel so
+    /// file managers see a hard failure rather than a corrupted
+    /// byte stream.
+    allow_raw_fallback: bool,
 }
 
 impl LmaFs {
-    fn new(archive_path: PathBuf) -> std::io::Result<Self> {
+    fn new(archive_path: PathBuf, allow_raw_fallback: bool) -> std::io::Result<Self> {
         let manifest = lamquant_core::lma::list_archive(&archive_path).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -241,6 +263,7 @@ impl LmaFs {
             archive_path,
             entries,
             inodes,
+            allow_raw_fallback,
         })
     }
 
@@ -403,37 +426,58 @@ impl Filesystem for LmaFs {
         // byte-identical EDF/BDF source so the file manager sees the
         // original file, not raw LML wire bytes.
         //
-        // Graceful fallback: if the LML codec rejects the entry
-        // (e.g. an older archive packed by a pre-v1.1 encoder whose
-        // CRC scheme the current decoder no longer recognises), drop
-        // back to the raw stored bytes so the user at least sees the
-        // LML wire payload rather than the kernel returning EIO.
-        // We log the decode error so it remains visible in `journalctl`
-        // / stderr — silent fallback would mask a real codec bug.
+        // Codec failure handling (default = strict):
         //
-        // This is not yet streaming — we accept the full-entry
+        //   If the LML codec rejects an entry (CRC mismatch, version
+        //   skew, malformed metadata, ...), we return EIO to the
+        //   kernel. The file manager / `cat` consumer sees a hard
+        //   read failure -- the only honest response, because the
+        //   alternative is presenting bytes that LOOK like the
+        //   requested EDF/BDF but are actually raw LML wire data.
+        //   Applications that consume the FUSE output expecting
+        //   real EDF input would silently mis-interpret.
+        //
+        //   Pre-v1.1 archives have a known CRC mismatch on
+        //   `Method::Lml` entries that prevents decode. If the
+        //   operator wants to inspect those archives at all, they
+        //   pass `--allow-raw-fallback` and accept the trade-off:
+        //   reads succeed but return the raw stored payload, which
+        //   is suitable for forensic inspection only.
+        //
+        // This is not yet streaming -- we accept the full-entry
         // round-trip cost on `read()` so the FS implementation stays
         // trivially auditable. Stream-mode (offset-aware decompression
         // + cache) is a future improvement.
         let bytes = match lamquant_core::lma::read_entry_decoded(&self.archive_path, &entry.path) {
             Ok(b) => b,
             Err(decode_err) => {
-                tracing::warn!(
-                    entry = %entry.path,
-                    err = %decode_err,
-                    "lmafs read: decoded read failed -- falling back to raw payload"
-                );
-                match lamquant_core::lma::read_entry(&self.archive_path, &entry.path) {
-                    Ok(b) => b,
-                    Err(raw_err) => {
-                        tracing::error!(
-                            entry = %entry.path,
-                            err = %raw_err,
-                            "lmafs read: archive read failed (raw fallback also failed)"
-                        );
-                        reply.error(libc::EIO);
-                        return;
+                if self.allow_raw_fallback {
+                    tracing::warn!(
+                        entry = %entry.path,
+                        err = %decode_err,
+                        "lmafs read: decode failed; --allow-raw-fallback returning raw stored bytes"
+                    );
+                    match lamquant_core::lma::read_entry(&self.archive_path, &entry.path) {
+                        Ok(b) => b,
+                        Err(raw_err) => {
+                            tracing::error!(
+                                entry = %entry.path,
+                                err = %raw_err,
+                                "lmafs read: archive read failed (raw fallback also failed)"
+                            );
+                            reply.error(libc::EIO);
+                            return;
+                        }
                     }
+                } else {
+                    tracing::error!(
+                        entry = %entry.path,
+                        err = %decode_err,
+                        "lmafs read: codec rejected entry (EIO). Re-mount with \
+                         --allow-raw-fallback to inspect the raw stored payload."
+                    );
+                    reply.error(libc::EIO);
+                    return;
                 }
             }
         };
@@ -457,7 +501,7 @@ fn main() -> std::io::Result<()> {
         .init();
 
     let args = Args::parse();
-    let fs = LmaFs::new(args.archive.clone())?;
+    let fs = LmaFs::new(args.archive.clone(), args.allow_raw_fallback)?;
     tracing::info!(
         archive = %args.archive.display(),
         mountpoint = %args.mountpoint.display(),
@@ -563,7 +607,12 @@ mod tests {
                 children.sort_by(|a, b| a.1.cmp(&b.1));
             }
         }
-        LmaFs { archive_path: PathBuf::from("/dev/null"), entries, inodes }
+        LmaFs {
+            archive_path: PathBuf::from("/dev/null"),
+            entries,
+            inodes,
+            allow_raw_fallback: false,
+        }
     }
 
     fn root_children(fs: &LmaFs) -> Vec<(String, FileType)> {
