@@ -571,10 +571,10 @@ fn stage_event_to_op_event(line: &str) -> OpEvent {
             // below — change either side and that test fails.
             let ms = v
                 .get("elapsed")
-                .and_then(|e| {
+                .map(|e| {
                     let secs = e.get("secs").and_then(|s| s.as_u64()).unwrap_or(0);
                     let nanos = e.get("nanos").and_then(|n| n.as_u64()).unwrap_or(0);
-                    Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
+                    secs.saturating_mul(1000).saturating_add(nanos / 1_000_000)
                 })
                 .unwrap_or(0);
             OpEvent::FileDone {
