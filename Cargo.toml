@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lamquant-history",
     "crates/lamquant-ops",
+    "crates/lmafs",
     "gui/src-tauri",
     "lamquant-core",
     "lamquant-firmware",
@@ -14,6 +15,7 @@ members = [
 default-members = [
     "crates/lamquant-history",
     "crates/lamquant-ops",
+    "crates/lmafs",
     "gui/src-tauri",
     "lamquant-core",
     "lamquant-weights",

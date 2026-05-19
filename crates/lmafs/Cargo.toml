@@ -1,0 +1,20 @@
+[package]
+name = "lmafs"
+version = "1.1.0"
+edition = "2021"
+authors = ["QuiteTall <briankhanglam@gmail.com>"]
+license = "AGPL-3.0"
+description = "FUSE filesystem that mounts a LamQuant .lma archive as a read-only directory. Lets Dolphin / Nautilus / Thunar / file manager open the archive as if it were a regular dir."
+repository = "https://github.com/Quitetall/LamQuant"
+
+[[bin]]
+name = "lmafs"
+path = "src/main.rs"
+
+[dependencies]
+lamquant-core = { path = "../../lamquant-core", features = ["host"] }
+fuser = "0.14"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
