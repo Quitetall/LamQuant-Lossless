@@ -27,7 +27,7 @@ LamQuant compresses EEG recordings for clinical storage and on-device transmissi
 
 **LML (Lossless)** -- bit-exact EDF/BDF roundtrip. Le Gall 5/3 integer lifting DWT -> LPC(2) -> bias cancellation -> Golomb-Rice entropy coding. ~2.3x compression ratio on clinical EEG. Verified on 76,254 files across 7 datasets with zero failures.
 
-**LMA (Archive)** -- the **default output unit**. One `.lma` archive per recording bundles the `.lml` signal + the original source-format bytes (`.edf` / `.vhdr+.vmrk+.eeg` / `.dcm` / `.set+.fdt` / `.cnt` / `.raw+sidecar`) + every sibling annotation file (TUH `.tse`, `.csv_bi`, `.lbl_bi`, `_summary.txt`, etc.) via the LML → zstd → store cascade. SHA-256 per entry, mtime preserved, byte-exact extract on every format. **No byte ever lost.** Operators who delete originals after encoding recover everything via `lml extract`.
+**LMA (Archive)** -- the **default output unit**. One `.lma` archive per recording bundles the `.lml` signal + the original source-format bytes (`.edf` / `.vhdr+.vmrk+.eeg` / `.dcm` / `.set+.fdt` / `.cnt` / `.raw+sidecar`) + every sibling annotation file (TUH `.tse`, `.csv_bi`, `.lbl_bi`, `_summary.txt`, etc.) via the LML → zstd → store cascade. SHA-256 per entry, mtime preserved, byte-exact extract on every format. **No byte ever lost.** Operators who delete originals after encoding recover everything via `lml extract`. Archives are browseable via FUSE (`lmafs foo.lma /mnt/foo`) or natively in KDE Ark (v1.4 Kerfuffle plugin, no mount step required).
 
 **LMQ (Neural)** -- ternary encoder (W2A16, 2.6M params) + Vocos iSTFT decoder (up to 845M params) + Adaptive SNAC FSQ + rANS entropy coding. Targets 50-100x compression at R > 0.90. Currently training.
 
@@ -274,7 +274,7 @@ python -m ai_models.experiment_runner leaderboard
 |----------|---------|
 | [CLI Reference](docs/CLI_REFERENCE.md) | Every subcommand + every flag + examples (auto-generated from `lml --help`) |
 | [Test Coverage State Map](docs/TEST_COVERAGE_STATE_MAP.md) | Every encoder/decoder/archive/crypto/FUSE/TUI state mapped to its named test |
-| [File-manager Integration](docs/INSTALL_FILE_MANAGER_INTEGRATION.md) | Open `.lma` archives in Dolphin / Nautilus / Thunar via MIME + FUSE mount |
+| [File-manager Integration](docs/INSTALL_FILE_MANAGER_INTEGRATION.md) | Open `.lma` archives in Dolphin / Nautilus / Thunar via MIME + FUSE mount; or in KDE Ark natively via the Kerfuffle plugin (v1.4) |
 | [Feature Inventory](docs/FEATURES.md) | Value-ordered inventory by category: shipped / deferred / left / out-of-scope |
 | [Feature Matrix](docs/CLI_FEATURE_MATRIX.md) | Chronological audit trail (104 rows by phase, with commit refs) |
 | [Problem Statement](docs/PROBLEM.md) | Who LamQuant is for, three user shapes, comparison vs gzip/bzip2/zstd/xz/FLAC |

@@ -1,5 +1,50 @@
 # OpenHuman LamQuant Changelog
 
+## lossless-codec v1.4 (2026-05-19)
+
+### KDE Ark integration (Kerfuffle CliInterface plugin)
+
+- New `installer/ark-plugin/` — C++/Qt6 plugin (`kerfuffle_clilma`) subclassing `Kerfuffle::CliInterface`. Lets Ark open `.lma` archives natively — entries listed with original size, compressed size, method, and SHA-256; extract on demand. Shells out to the existing `lml` binary. Read-only by design (add/delete/move not exposed to protect the lossless archive contract). License: BSD-2-Clause.
+- `installer/install-ark-plugin.sh --user|--system` — distro-agnostic build + install script. Detects missing build deps via pacman/dpkg/rpm probes against `/etc/os-release`. Checks `lml ls --long` compat before installing. Writes a Plasma session env snippet (`~/.config/plasma-workspace/env/lamquant-ark-plugin.sh`) for per-user installs so `QT_PLUGIN_PATH` is set on next login. Records a build sentinel for Ark ABI drift detection across upgrades.
+
+### `lml ls --long` versioned wire format
+
+- New `--long` flag on `lml ls` emits a TAB-separated, machine-readable listing for OS plugin shell-outs. First stdout line is `#lml-ls schema=1` (versioned marker so consumers fail closed on unknown versions). Per-entry columns: `<original_size>\t<compressed_size>\t<method>\t<sha256>\t<path>`. The Kerfuffle plugin validates the schema line before accepting any entry lines.
+
+### Plugin parse hardening
+
+- Strict 5-column TSV check in `clilma.cpp` — malformed lines are rejected, not silently skipped.
+- Path-traversal defense at both consumer (plugin rejects `..`, leading `/`, NUL, CR, LF) and producer (`lml ls --long` strips control bytes before output).
+
+### Installer hardening
+
+- `install-mime.sh`: rewrote `Exec=` line rewrite in pure bash parameter expansion (dropped `sed`); no longer clobbers an existing `xdg-mime default` on re-run.
+- `lma-open`: stale FUSE-mount recovery via `/proc/self/mountinfo` with timeout; `rmdir` failure now bails loudly; dynamic mount-stability poll (replaced fixed `sleep 2`); spawns `lmafs` under `systemd-run --user --scope` so it survives launcher scope teardown; synchronous `xdg-open`.
+
+### lmafs strict-decode default
+
+- `lmafs` now surfaces codec failure as `EIO` instead of silently falling back to raw stored bytes. New `--allow-raw-fallback` flag opts into the legacy behavior for forensic triage of pre-v1.1 archives.
+- Directory tree built from flat manifest paths — nested entries like `chb06/chb06_01.edf` now create proper subdirectory nodes in the mount.
+
+### lma core hardening
+
+- Added `MAX_ENTRY_ORIGINAL_SIZE = 16 GB` cap at all four read sites (`extract_entry`, `verify_archive`, `read_entry`, `read_entry_decoded`). Previously only compressed size was bounded, allowing a zstd-bomb pattern (small compressed → multi-GB decompressed → OOM).
+
+### Two coexisting open paths for .lma
+
+- FUSE path: `xdg-mime default lamquant.desktop application/x-lma` → Dolphin double-click mounts via `lmafs`.
+- Ark path: `xdg-mime default org.kde.ark.desktop application/x-lma` → opens directly in Ark without a FUSE mount.
+- `install-mime.sh` no longer clobbers a user's existing choice on re-run.
+
+### Test totals
+
+- 1271 / 1271 integration tests green
+- 277 / 277 lamquant-core lib tests
+- 7 / 7 lmafs unit tests
+- 20 / 20 lma module tests
+
+---
+
 ## LamQuant v7.7.1 (2026-04-21)
 
 ### Firmware Optimization Session
