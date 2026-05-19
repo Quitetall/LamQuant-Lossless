@@ -61,6 +61,18 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path lamquant-core/Cargo.toml
 
+      # no_std build sanity — `lamquant-core` ships a firmware /
+      # `no_std + alloc` configuration that real users (the Cortex-M
+      # firmware crate) depend on. Without this lane, any new module
+      # that uses `Vec` without explicit `use alloc::vec::Vec;`
+      # compiles cleanly under host (std pulls Vec for free) and
+      # silently breaks firmware. Caught 19 May 2026 -- see commit
+      # `restore no_std build`. Pre-commit hook covers `--features
+      # host` only; this lane is the durable backstop.
+      - name: Build no_std (--no-default-features)
+        if: runner.os == 'Linux'
+        run: cargo build --manifest-path lamquant-core/Cargo.toml --no-default-features --release
+
       # Phase 6 + Phase 7 — confirm the async feature build is healthy
       # on Linux (tokio + reqwest + notify trio). Skipped on macOS /
       # Windows for now because the runner's curl / openssl backports
