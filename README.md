@@ -273,6 +273,7 @@ python -m ai_models.experiment_runner leaderboard
 | Document | Content |
 |----------|---------|
 | [CLI Reference](docs/CLI_REFERENCE.md) | Every subcommand + every flag + examples (auto-generated from `lml --help`) |
+| [File-manager Integration](docs/INSTALL_FILE_MANAGER_INTEGRATION.md) | Open `.lma` archives in Dolphin / Nautilus / Thunar via MIME + FUSE mount |
 | [Feature Inventory](docs/FEATURES.md) | Value-ordered inventory by category: shipped / deferred / left / out-of-scope |
 | [Feature Matrix](docs/CLI_FEATURE_MATRIX.md) | Chronological audit trail (104 rows by phase, with commit refs) |
 | [Problem Statement](docs/PROBLEM.md) | Who LamQuant is for, three user shapes, comparison vs gzip/bzip2/zstd/xz/FLAC |
