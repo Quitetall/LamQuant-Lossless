@@ -272,8 +272,9 @@ python -m ai_models.experiment_runner leaderboard
 
 | Document | Content |
 |----------|---------|
+| [CLI Reference](docs/CLI_REFERENCE.md) | Every subcommand + every flag + examples (auto-generated from `lml --help`) |
 | [Feature Inventory](docs/FEATURES.md) | Value-ordered inventory by category: shipped / deferred / left / out-of-scope |
-| [Feature Matrix](docs/CLI_FEATURE_MATRIX.md) | Chronological audit trail (96 rows by phase, with commit refs) |
+| [Feature Matrix](docs/CLI_FEATURE_MATRIX.md) | Chronological audit trail (104 rows by phase, with commit refs) |
 | [Problem Statement](docs/PROBLEM.md) | Who LamQuant is for, three user shapes, comparison vs gzip/bzip2/zstd/xz/FLAC |
 | [Benchmarks](docs/BENCHMARKS.md) | Published numbers + methodology (canonical machine pin, ±15% jitter, FLAC multi-channel notes) |
 | [LML Format Spec](docs/lml-format-v1.md) | Frozen wire format -- implementable without reference code |
