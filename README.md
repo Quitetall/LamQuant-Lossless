@@ -66,9 +66,9 @@ Want the full CLI tour? See the **[feature catalogue](docs/features/)**.
 ## Demo
 
 <p align="center">
-  <img src="assets/lma-ark-demo.svg" alt="Double-click .lma in Dolphin → opens in KDE Ark with entries and sizes populated" width="900">
+  <img src="assets/lma-ark-demo.gif" alt="Double-click .lma in Dolphin → opens in KDE Ark with entries and sizes populated" width="900">
   <br/>
-  <sub><em>Double-click a `.lma` archive in Dolphin → opens in KDE Ark, entries listed with sizes. v1.4 Kerfuffle plugin, no FUSE mount required. Animated GIF recording lands at <code>assets/lma-ark-demo.gif</code>.</em></sub>
+  <sub><em>Double-click a `.lma` archive in Dolphin → opens in KDE Ark, entries listed with sizes. v1.4 Kerfuffle plugin, no FUSE mount required.</em></sub>
 </p>
 
 ---
