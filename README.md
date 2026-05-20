@@ -3,11 +3,14 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Quitetall/LamQuant/releases/latest"><img src="https://img.shields.io/github/v/release/Quitetall/LamQuant?label=release&color=blue" alt="Latest release"></a>
   <a href="https://github.com/quitetall/lamquant/actions/workflows/ci.yml"><img src="https://github.com/quitetall/lamquant/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/tests-1271%20passing-brightgreen" alt="Tests: 1271 passing">
   <img src="https://img.shields.io/badge/python-3.10%2B-3776ab" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/rust-1.70%2B-dea584" alt="Rust 1.70+">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
   <img src="https://img.shields.io/badge/MCU-RP2350%20Hazard3-red" alt="RP2350">
+  <a href="docs/features/"><img src="https://img.shields.io/badge/docs-feature%20catalogue-blueviolet" alt="Feature catalogue"></a>
 </p>
 
 <p align="center">
@@ -15,23 +18,80 @@
 </p>
 
 <p align="center">
-  <em>EEG storage shrunk ~3× lossless vs zstd, with bit-exact roundtrip + random-access seek tables.</em><br/>
-  <em>For who, when, and why: <a href="docs/PROBLEM.md">docs/PROBLEM.md</a>. For numbers: <a href="docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</em>
+  <em>EEG storage shrunk ~3× lossless vs zstd, with bit-exact roundtrip + random-access seek tables.</em>
 </p>
+
+---
+
+## 30-second quickstart
+
+```bash
+# Install (lossless only, numpy — no GPU needed)
+pip install lamquant-codec
+
+# Encode a recording (lossless, bundles every sibling annotation)
+lml encode recording.edf
+# -> recording.lma         (~3× smaller, sha256-verified per entry)
+
+# Browse the archive
+lml ls --tree recording.lma
+
+# Verify integrity end-to-end
+lml verify recording.lma
+```
+
+Want it in KDE Ark like a `.zip`? See **[OS Integration](docs/features/07-os-integration.md)**.
+Want the full CLI tour? See the **[feature catalogue](docs/features/)**.
+
+---
+
+## Table of contents
+
+- [Why LamQuant?](#why-lamquant)
+- [What is LamQuant?](#what-is-lamquant)
+- [Install](#install)
+- [First 5 minutes](#first-5-minutes)
+- [Lossless Codec (LML)](#lossless-codec-lml)
+- [Neural Codec (LMQ)](#neural-codec-lmq)
+- [Architecture](#architecture)
+- [Quality + Safety](#quality--safety)
+- [Project Structure](#project-structure)
+- [What's New in v1.4](#whats-new-in-v14)
+- [Documentation](#documentation)
+- [Community](#community)
+- [License](#license)
+
+---
+
+## Demo
+
+<p align="center">
+  <img src="assets/lma-ark-demo.gif" alt="Double-click .lma in Dolphin → opens in KDE Ark with entries and sizes populated" width="800">
+  <br/>
+  <sub><em>Double-click a `.lma` archive in Dolphin → opens in KDE Ark, entries listed with sizes. v1.4 Kerfuffle plugin, no FUSE mount required.</em></sub>
+</p>
+
+---
+
+## Why LamQuant?
+
+Hospital EEG storage is dominated by raw EDF/BDF that compresses poorly with general-purpose tools (gzip, zstd) because those tools don't exploit EEG-specific structure — inter-channel correlation, sub-band sparsity, low-amplitude bias drift. A regional hospital with 18 TB of clinical EEG cold-stores at ~$720/yr; the same data through LamQuant lossless lands at ~$200/yr **and** every transfer moves 3.6× less data. Same encoder runs on a 520 KB SRAM RP2350 for on-device telemetry.
+
+Read the full pitch + three concrete user shapes (storage operator / telemetry pipeline / research archive): **[docs/PROBLEM.md](docs/PROBLEM.md)**.
 
 ---
 
 ## What is LamQuant?
 
-LamQuant compresses EEG recordings for clinical storage and on-device transmission. Two codecs, one pipeline:
+Two production codecs + one in training, one pipeline:
 
-**LML (Lossless)** -- bit-exact EDF/BDF roundtrip. Le Gall 5/3 integer lifting DWT -> LPC(2) -> bias cancellation -> Golomb-Rice entropy coding. ~2.3x compression ratio on clinical EEG. Verified on 76,254 files across 7 datasets with zero failures.
+**LML (Lossless)** — bit-exact EDF/BDF roundtrip. Le Gall 5/3 integer lifting DWT → LPC(2) → bias cancellation → Golomb-Rice entropy. ~2.3× compression on clinical EEG. Verified on 76,254 files across 7 datasets with zero failures.
 
-**LMA (Archive)** -- the **default output unit**. One `.lma` archive per recording bundles the `.lml` signal + the original source-format bytes (`.edf` / `.vhdr+.vmrk+.eeg` / `.dcm` / `.set+.fdt` / `.cnt` / `.raw+sidecar`) + every sibling annotation file (TUH `.tse`, `.csv_bi`, `.lbl_bi`, `_summary.txt`, etc.) via the LML → zstd → store cascade. SHA-256 per entry, mtime preserved, byte-exact extract on every format. **No byte ever lost.** Operators who delete originals after encoding recover everything via `lml extract`. Archives are browseable via FUSE (`lmafs foo.lma /mnt/foo`) or natively in KDE Ark (v1.4 Kerfuffle plugin, no mount step required).
+**LMA (Archive)** — **default output unit**. One `.lma` per recording bundles the `.lml` signal + the original source-format bytes (`.edf` / `.vhdr+.vmrk+.eeg` / `.dcm` / `.set+.fdt` / `.cnt` / `.raw+sidecar`) + every sibling annotation file via the LML → zstd → store cascade. SHA-256 per entry, mtime preserved, byte-exact extract on every format. **No byte ever lost.** Operators who delete originals after encoding recover everything via `lml extract`. Archives browsable via FUSE (`lmafs foo.lma /mnt/foo`) or natively in KDE Ark (v1.4 Kerfuffle plugin, no mount step).
 
-**LMQ (Neural)** -- ternary encoder (W2A16, 2.6M params) + Vocos iSTFT decoder (up to 845M params) + Adaptive SNAC FSQ + rANS entropy coding. Targets 50-100x compression at R > 0.90. Currently training.
+**LMQ (Neural)** — ternary encoder (W2A16, 2.6M params) + Vocos iSTFT decoder (4M–845M params) + Adaptive SNAC FSQ + rANS entropy. Targets 50–100× compression at R > 0.90. **Status: training. Blocking ship gate is R > 0.90 on full TUEG validation sweep.**
 
-Bare `.lml` (signal-only, no archive envelope) is available via `--no-bundle` / `--bare-lml`, but prints a loud data-loss warning every invocation that has to be paired with `--i-understand-data-loss` to silence. The encoder will not let you drop sibling files quietly.
+Bare `.lml` (signal-only, no archive envelope) is available via `--no-bundle` / `--bare-lml` but prints a loud data-loss warning every invocation, requiring `--i-understand-data-loss` to silence. The encoder will not let you drop sibling files quietly.
 
 > Not a cleared medical device. FDA 510(k) submission in preparation. See [docs/SAFETY.md](docs/SAFETY.md).
 
@@ -40,13 +100,13 @@ Bare `.lml` (signal-only, no archive envelope) is available via `--no-bundle` / 
 ## Install
 
 ```bash
-pip install lamquant-codec              # lossless codec (numpy only, no GPU needed)
-pip install lamquant-codec[fast]        # + numba JIT (3-4x faster)
+pip install lamquant-codec              # lossless codec (numpy only, no GPU)
+pip install lamquant-codec[fast]        # + numba JIT (3-4× faster)
 pip install lamquant-codec[neural]      # + torch (neural codec + training)
 pip install lamquant-codec[all]         # everything
 ```
 
-Or from source:
+From source:
 
 ```bash
 git clone https://github.com/Quitetall/LamQuant.git && cd LamQuant
@@ -60,9 +120,7 @@ Rust CLI (no dependencies):
 cargo install --path lamquant-core
 ```
 
-`lamquant` is the recommended entrypoint — it auto-routes to the TUI
-(`lamquant --tui`), the desktop GUI (`lamquant --gui` if installed),
-or passes subcommands through to `lml` (`lamquant encode <file>`).
+`lamquant` is the recommended entrypoint — it auto-routes to the TUI (`lamquant --tui`), the desktop GUI (`lamquant --gui` if installed), or passes subcommands through to `lml` (`lamquant encode <file>`).
 
 Desktop GUI (Tauri):
 
@@ -70,63 +128,44 @@ Desktop GUI (Tauri):
 # From source
 cd gui && npm install && npm run tauri build
 
-# Or download the pre-built bundle for your platform from the
-# v1.0+ release page:
+# Or download the pre-built bundle from the v1.0+ release page:
 #   linux:   lamquant-gui_*.AppImage  /  lamquant-gui_*.deb
 #   macos:   lamquant-gui_*.dmg
 #   windows: lamquant-gui_*.msi
 ```
 
-The GUI shares its op-event contract, config, and history with the
-TUI/CLI — same lamquant.toml, same operations.
+GUI shares its op-event contract, config, and history with the TUI/CLI — same `lamquant.toml`, same operations.
 
 ---
 
-## CLI Usage
-
-### Python CLI (`lamquant` / `oh`)
+## First 5 minutes
 
 ```bash
-# Compress a directory of EEG files (lossless, no model needed)
-lamquant compress data/ -o compressed/ --mode lossless -r
+# 1. Encode an EDF + every sibling annotation into one .lma archive
+lml encode recording.edf
+# → recording.lma (one archive, ~3× smaller, every byte preserved)
+#   See: docs/features/01-compression.md
 
-# Neural compression (requires trained checkpoint)
-lamquant compress data/ -o compressed/ --mode neural -c weights/student_subband_gold.ckpt -r
+# 2. Browse the archive (tree view with sizes + sha256 prefixes)
+lml ls --tree recording.lma
+#   See: docs/features/05-browse-inspect.md
 
-# Decompress back to .npy
-lamquant decompress compressed/ -o decoded/ -r
+# 3. Open it like a zip in your file manager
+xdg-mime default org.kde.ark.desktop application/x-lma    # one-time setup
+# Now double-click recording.lma in Dolphin → opens in Ark
+#   See: docs/features/07-os-integration.md
 
-# Validate quality against originals (HTML report)
-lamquant validate compressed/ -r --reference data/ --level C --report-html quality.html
+# 4. Extract back to bit-exact source files
+lml extract recording.lma -o restored/
+diff recording.edf restored/recording.edf    # silent — byte-equal
+#   See: docs/features/02-decompression.md
 
-# Inspect a file's metadata
-lamquant info recording.lml --json
-
-# First-run wizard
-lamquant init
+# 5. Verify integrity end-to-end (SHA-256 per entry + archive-wide)
+lml verify recording.lma --explain
+#   See: docs/features/03-verification.md
 ```
 
-### Rust CLI (`lml`)
-
-```bash
-# Encode a directory of EDF files to LML
-lml encode <dir>
-
-# Bundle into a single .lma archive
-lml archive <dir> -o archive.lma
-
-# Extract archive bit-exactly
-lml extract archive.lma -o <dir>
-
-# Verify archive integrity
-lml verify-archive archive.lma
-
-# List archive contents
-lml list-archive archive.lma
-
-# Benchmark encode/decode speed
-lml bench <file.edf>
-```
+For the full subcommand surface (split, concat, append, encrypt, watch daemon, multi-volume, …) browse the **[feature catalogue](docs/features/)** — 11 buckets sorted by what you want to do.
 
 ---
 
@@ -134,14 +173,14 @@ lml bench <file.edf>
 
 ```
 signal[Nch][2500]
-  -> 3-level Le Gall 5/3 integer lifting DWT
-  -> per-subband LPC prediction (order 2)
-  -> bias cancellation (running mean, ctx=32, floor division)
-  -> Golomb-Rice entropy coding (adaptive k)
-  -> LML1 per-window packets, CRC-32 per window, zstd-9 metadata
+  → 3-level Le Gall 5/3 integer lifting DWT
+  → per-subband LPC prediction (order 2)
+  → bias cancellation (running mean, ctx=32, floor division)
+  → Golomb-Rice entropy coding (adaptive k)
+  → LML1 per-window packets, CRC-32 per window, zstd-9 metadata
 ```
 
-Preserves every byte of the original EDF file: headers, annotations, timestamps, trailing data. EDF, EDF+C, EDF+D, and BDF (24-bit) are all supported.
+Preserves every byte of the original EDF file: headers, annotations, timestamps, trailing data. EDF, EDF+C, EDF+D, and BDF (24-bit) all supported.
 
 ### Performance
 
@@ -152,7 +191,7 @@ Preserves every byte of the original EDF file: headers, annotations, timestamps,
 | Roundtrip verification | 76,254 files, 7 datasets, 0 failures |
 | Wire format | Integer-only, bit-exact on x86/ARM/RISC-V |
 
-### Competitive Analysis
+### Competitive analysis
 
 | Codec | CR | Type |
 |-------|-----|------|
@@ -161,6 +200,8 @@ Preserves every byte of the original EDF file: headers, annotations, timestamps,
 | FLAC | ~2.0 : 1 | Audio lossless |
 | **LML** | **2.3 : 1** | **EEG-specific** |
 | Shannon limit | ~2.4 : 1 | Theoretical |
+
+Methodology + machine-pin + jitter notes: **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
 
 ---
 
@@ -171,11 +212,13 @@ The ternary encoder targets the RP2350 Hazard3 RISC-V MCU (150 MHz, 520 KB SRAM,
 | Component | Params | Precision | Where |
 |-----------|--------|-----------|-------|
 | Encoder (TernaryMobileNetV5) | 2.6M | W2A16 | RP2350 (flash via XIP) |
-| Decoder (Vocos ConvNeXt) | 4M -- 845M | FP32 | Base station GPU |
+| Decoder (Vocos ConvNeXt) | 4M – 845M | FP32 | Base station GPU |
 
 Architecture: depthwise separable convolutions, FocalNet-style gating, ternary weights (XNOR + popcount, ~1.2 cyc/MAC on Hazard3 Zbb). Training uses SOAP optimizer (+0.0135 R over AdamW), WSD infinite LR schedule, and gradient checkpointing for large decoder tiers.
 
-### Training Data
+**Ship gate**: R > 0.90 on full TUEG validation sweep (held-out Siena). Current best on dev split is below threshold; sweep ongoing.
+
+### Training data
 
 - 14,779 hours of clinical EEG
 - 5,320,265 windows (10 s each) across 11,580 patients
@@ -184,22 +227,77 @@ Architecture: depthwise separable convolutions, FocalNet-style gating, ternary w
 
 ---
 
-## Hardening
+## Architecture
 
-LamQuant is developed to FDA-grade reliability standards:
+```
+       Source files               Lossless pipeline             On-disk
+                                                                output
+  ┌─────────────────┐
+  │  recording.edf  │──┐
+  │  recording.tse  │  │       ┌──────────────────┐         ┌────────────┐
+  │  summary.txt    │  ├──────▶│  EDF / BV / CNT  │         │            │
+  │  sibling.csv    │  │       │  / SET / DICOM   │────┐    │ recording. │
+  └─────────────────┘  │       │  / raw+sidecar   │    │    │   lma      │
+                       │       │      reader      │    │    │            │
+                       │       └──────────────────┘    │    │ ┌────────┐ │
+                       │                ▼              ▼    │ │ .lml   │ │
+                       │       ┌──────────────────┐ ┌────┐  │ │ (LML  )│ │
+                       │       │  LML codec       │ │zstd│  │ ├────────┤ │
+                       │       │  DWT→LPC→bias→GR │ │ -9 │  │ │ .edf   │ │
+                       │       └──────────────────┘ └────┘  │ │ (zstd) │ │
+                       │                ▼              ▼    │ ├────────┤ │
+                       │       ┌──────────────────────────┐ │ │ .tse   │ │
+                       └──────▶│  LMA cascade: LML→zstd   │ │ │ (zstd) │ │
+                               │  →store, SHA-256/entry,  │─┤ ├────────┤ │
+                               │  mtime preserved         │ │ │ ...    │ │
+                               └──────────────────────────┘ │ └────────┘ │
+                                                            └────────────┘
+                                                                  │
+                          ┌───────────────────────────────────────┤
+                          ▼                ▼                ▼     ▼
+                   ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐
+                   │ lml extract│  │ lml verify │  │  lmafs FUSE│  │ KDE Ark    │
+                   │ (byte-exact│  │ --explain  │  │  mount     │  │ Kerfuffle  │
+                   │  restore)  │  │            │  │            │  │ plugin     │
+                   └────────────┘  └────────────┘  └────────────┘  └────────────┘
+```
+
+Detailed wire format: **[docs/lml-format-v1.md](docs/lml-format-v1.md)** (frozen, implementable without reference code).
+
+---
+
+## Quality + Safety
+
+LamQuant is developed to FDA-grade reliability standards.
+
+| Lane | Coverage |
+|---|---|
+| Integration tests | **1271 passing**, gated pre-push |
+| Rust unit tests (lamquant-core) | 277 passing |
+| Rust unit tests (lmafs FUSE) | 7 passing |
+| Roundtrip verification | 76,254 EDFs × 7 datasets × 0 failures |
+| Cross-language wire format | Python ↔ Rust, 22 format items verified |
+| Adversarial suite | 18 tests: BDF, boundary values, trailing data, unicode filenames, cross-decoder, negative-mean signals |
+| Fuzz harness | 3 targets (`cargo +nightly fuzz`) |
+| Conformance vectors | 13 publishable test vectors for third-party LML readers |
+
+Hardening invariants:
 
 - Zero `unsafe` code in Rust
-- BOM detection with clear error messages
-- Path traversal protection on archive extraction
-- u16/u32 overflow guards on all wire format fields
-- Manifest decompression bomb guard (256 MB cap)
+- Path-traversal protection on archive extract + plugin list-line parse
+- u16/u32 overflow guards on all wire-format fields
+- Manifest decompression bomb guard (16 MB compressed cap, 256 MB decompressed cap)
+- Per-entry `original_size` cap (16 GB) — refuses zstd-bomb pattern (small compressed → multi-GB decompressed → OOM)
 - Full JSON escaping (backslashes, quotes, control characters)
-- Cross-language wire format verified (Python <-> Rust) on 22 format items
-- Adversarial test suite: 18 tests covering BDF, boundary values, trailing data, unicode filenames, cross-decoder, and negative-mean signals
+
+State map of every encoder/decoder/archive/crypto/FUSE/TUI state mapped to its named test: **[docs/TEST_COVERAGE_STATE_MAP.md](docs/TEST_COVERAGE_STATE_MAP.md)**.
 
 ---
 
 ## Project Structure
+
+<details>
+<summary>Top-of-tree layout (click to expand)</summary>
 
 ```
 lamquant-core/          Rust library + CLI binary
@@ -215,76 +313,94 @@ lamquant-core/          Rust library + CLI binary
 lamquant_codec/         Python codec (numba JIT + pure Python fallback)
   ops/                    DSP primitives (single source of truth)
   lossless.py             LML compress/decompress
-  edf_to_lml.py           EDF -> LML converter + container I/O
+  edf_to_lml.py           EDF → LML converter + container I/O
   lma.py                  LMA archive reader/writer
   batch.py                Batch compress/decompress/validate
 
-ai_models/              Training infrastructure
+crates/
+  lmafs/                  FUSE filesystem (read-only mount of .lma)
+  lamquant-ops/           Op-event runner shared with TUI/GUI
+
+installer/
+  ark-plugin/             KDE Ark Kerfuffle CliInterface plugin (C++/Qt6)
+  install-mime.sh         MIME registration for .lma
+  install-ark-plugin.sh   Build + install the Ark plugin
+  lma-open                Double-click handler (FUSE mount → xdg-open)
+
+ai_models/              Neural codec training
   architectures/          Model definitions (encoder, decoder, SNN, blocks)
   student/                Joint training configs and sweep tooling
   dataset_sim/            Manifest building and preprocessing
   experiment_runner.py    Unified runner (run/ab/sweep/leaderboard)
 
 firmware/               RP2350/ESP32 embedded targets
-installer/              Cross-platform installer
 docs/                   Specifications and design docs
+  features/               11-bucket feature catalogue (NEW v1.4)
 ```
+
+</details>
 
 ---
 
-## Testing
+## What's New in v1.4
 
-```bash
-# Python unit + integration tests
-pytest tests/ -q
+Tag: **[`lossless-codec-v1.4`](https://github.com/Quitetall/LamQuant/releases/tag/lossless-codec-v1.4)** (2026-05-19)
 
-# Rust tests
-cargo test --manifest-path lamquant-core/Cargo.toml
+- **KDE Ark plugin** — Kerfuffle CliInterface plugin lets Ark open `.lma` natively. No FUSE mount step. Entries listed with size + compressed size. ([install guide](docs/INSTALL_FILE_MANAGER_INTEGRATION.md))
+- **`lml ls --long`** — versioned (`#lml-ls schema=1`) TAB-separated wire format for OS plugin shell-outs.
+- **`lmafs` default-strict decode** — codec failure returns `EIO` instead of silently corrupted bytes. Opt back into the old fallback via `--allow-raw-fallback`.
+- **lma core hardening** — refuses zstd-bomb archives via `original_size` cap (16 GB); strict 5-column TSV parse with path-traversal defense at plugin layer.
+- **Installer hardening** — distro-agnostic preflight (pacman/dpkg/rpm), Plasma session env, ABI drift sentinel.
+- **11-bucket feature catalogue** under [`docs/features/`](docs/features/).
 
-# Lossless roundtrip verification (FDA-grade)
-python scripts/verify_roundtrip.py /path/to/edfs/ --recursive --workers 4
-
-# Fuzzing
-cd lamquant-core && cargo +nightly fuzz run decompress
-```
-
----
-
-## Training
-
-```bash
-# Single experiment
-python -m ai_models.experiment_runner run --tier 3 --preset fast
-
-# Named recipe
-python -m ai_models.experiment_runner recipe snac_balanced --tier 3
-
-# Parameter sweep
-python -m ai_models.experiment_runner sweep --tier 3 --grid '{"prd_weight": [0.05, 0.1, 0.2]}'
-
-# Leaderboard
-python -m ai_models.experiment_runner leaderboard
-```
+Full changelog: **[CHANGELOG.md](CHANGELOG.md)**.
 
 ---
 
 ## Documentation
 
+### Get started
+
 | Document | Content |
 |----------|---------|
-| [CLI Reference](docs/CLI_REFERENCE.md) | Every subcommand + every flag + examples (auto-generated from `lml --help`) |
-| [Test Coverage State Map](docs/TEST_COVERAGE_STATE_MAP.md) | Every encoder/decoder/archive/crypto/FUSE/TUI state mapped to its named test |
-| [File-manager Integration](docs/INSTALL_FILE_MANAGER_INTEGRATION.md) | Open `.lma` archives in Dolphin / Nautilus / Thunar via MIME + FUSE mount; or in KDE Ark natively via the Kerfuffle plugin (v1.4) |
-| [Feature Inventory](docs/FEATURES.md) | Value-ordered inventory by category: shipped / deferred / left / out-of-scope |
-| [Feature Matrix](docs/CLI_FEATURE_MATRIX.md) | Chronological audit trail (104 rows by phase, with commit refs) |
-| [Problem Statement](docs/PROBLEM.md) | Who LamQuant is for, three user shapes, comparison vs gzip/bzip2/zstd/xz/FLAC |
-| [Benchmarks](docs/BENCHMARKS.md) | Published numbers + methodology (canonical machine pin, ±15% jitter, FLAC multi-channel notes) |
-| [LML Format Spec](docs/lml-format-v1.md) | Frozen wire format -- implementable without reference code |
-| [Conformance Suite](specs/conformance/README.md) | 13 publishable test vectors for third-party LML readers |
-| [System Spec](docs/SPEC.md) | Full system architecture, memory map, timing |
-| [FAQ + Troubleshooting](docs/FAQ.md) | Common errors, recovery, partial-decode recipes |
-| [Stress Testing](docs/STRESS_TESTING.md) | 1M-file harness + >100 GB fixture recipe |
+| [Feature catalogue](docs/features/) | 11-bucket guide sorted by what you want to do |
+| [Problem statement](docs/PROBLEM.md) | Who LamQuant is for, three user shapes, vs gzip/bzip2/zstd/xz/FLAC |
+| [File-manager integration](docs/INSTALL_FILE_MANAGER_INTEGRATION.md) | KDE Ark plugin + FUSE mount + double-click flow |
+| [FAQ + troubleshooting](docs/FAQ.md) | Common errors, recovery, partial-decode recipes |
+
+### Reference
+
+| Document | Content |
+|----------|---------|
+| [CLI reference](docs/CLI_REFERENCE.md) | Every subcommand + every flag (auto-generated from `lml --help`) |
+| [Feature inventory](docs/FEATURES.md) | Value-ordered inventory: shipped / deferred / out-of-scope |
+| [Feature matrix](docs/CLI_FEATURE_MATRIX.md) | Chronological audit trail by phase, with commit refs |
+| [Benchmarks](docs/BENCHMARKS.md) | Published numbers + methodology + machine-pin + jitter notes |
+
+### Internals
+
+| Document | Content |
+|----------|---------|
+| [System spec](docs/SPEC.md) | Full system architecture, memory map, timing |
+| [Test coverage state map](docs/TEST_COVERAGE_STATE_MAP.md) | Every encoder/decoder/archive/crypto/FUSE/TUI state → named test |
+| [Stress testing](docs/STRESS_TESTING.md) | 1M-file harness + >100 GB fixture recipe |
 | [Safety](docs/SAFETY.md) | Risk analysis, regulatory status |
+
+### Spec (third-party implementers)
+
+| Document | Content |
+|----------|---------|
+| [LML format spec](docs/lml-format-v1.md) | Frozen wire format — implementable without reference code |
+| [Conformance suite](specs/conformance/README.md) | 13 publishable test vectors for third-party LML readers |
+
+---
+
+## Community
+
+- **Contributing**: see [CONTRIBUTING.md](CONTRIBUTING.md). Looking for a first issue? Try the [good-first-issue label on GitHub](https://github.com/Quitetall/LamQuant/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+- **Security**: report vulnerabilities per [SECURITY.md](SECURITY.md) — do NOT open a public issue for security bugs.
+- **Discussion**: open a [GitHub issue](https://github.com/Quitetall/LamQuant/issues) for bugs, feature requests, or questions.
+- **License compliance**: AGPL-3.0 means network use counts as distribution. If you ship a service built on LamQuant, the source has to be available to the people using it.
 
 ---
 
@@ -295,5 +411,5 @@ python -m ai_models.experiment_runner leaderboard
 ---
 
 <p align="center">
-  <sub>OpenHuman Technologies -- open-source brain-computer interfaces for everyone</sub>
+  <sub>OpenHuman Technologies — open-source brain-computer interfaces for everyone</sub>
 </p>
