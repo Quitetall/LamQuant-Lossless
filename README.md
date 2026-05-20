@@ -66,7 +66,9 @@ Want the full CLI tour? See the **[feature catalogue](docs/features/)**.
 ## Demo
 
 <p align="center">
-  <img src="assets/lma-ark-demo.gif" alt="Double-click .lma in Dolphin → opens in KDE Ark with entries and sizes populated" width="900">
+  <video src="assets/lma-ark-demo.mp4" autoplay loop muted playsinline width="900" poster="assets/lma-ark-demo.svg">
+    Your browser does not support inline video. See <a href="assets/lma-ark-demo.mp4">the MP4 demo</a> or <a href="assets/lma-ark-demo.svg">the static SVG mockup</a>.
+  </video>
   <br/>
   <sub><em>Double-click a `.lma` archive in Dolphin → opens in KDE Ark, entries listed with sizes. v1.4 Kerfuffle plugin, no FUSE mount required.</em></sub>
 </p>
