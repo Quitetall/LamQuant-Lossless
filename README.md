@@ -66,9 +66,9 @@ Want the full CLI tour? See the **[feature catalogue](docs/features/)**.
 ## Demo
 
 <p align="center">
-  <img src="assets/lma-ark-demo.gif" alt="Double-click .lma in Dolphin → opens in KDE Ark with entries and sizes populated" width="800">
+  <img src="assets/lma-ark-demo.svg" alt="Double-click .lma in Dolphin → opens in KDE Ark with entries and sizes populated" width="900">
   <br/>
-  <sub><em>Double-click a `.lma` archive in Dolphin → opens in KDE Ark, entries listed with sizes. v1.4 Kerfuffle plugin, no FUSE mount required.</em></sub>
+  <sub><em>Double-click a `.lma` archive in Dolphin → opens in KDE Ark, entries listed with sizes. v1.4 Kerfuffle plugin, no FUSE mount required. Animated GIF recording lands at <code>assets/lma-ark-demo.gif</code>.</em></sub>
 </p>
 
 ---
@@ -83,15 +83,29 @@ Read the full pitch + three concrete user shapes (storage operator / telemetry p
 
 ## What is LamQuant?
 
-Two production codecs + one in training, one pipeline:
+**Two codecs, two extensions, one pipeline.**
 
-**LML (Lossless)** — bit-exact EDF/BDF roundtrip. Le Gall 5/3 integer lifting DWT → LPC(2) → bias cancellation → Golomb-Rice entropy. ~2.3× compression on clinical EEG. Verified on 76,254 files across 7 datasets with zero failures.
+### LML — the lossless codec
 
-**LMA (Archive)** — **default output unit**. One `.lma` per recording bundles the `.lml` signal + the original source-format bytes (`.edf` / `.vhdr+.vmrk+.eeg` / `.dcm` / `.set+.fdt` / `.cnt` / `.raw+sidecar`) + every sibling annotation file via the LML → zstd → store cascade. SHA-256 per entry, mtime preserved, byte-exact extract on every format. **No byte ever lost.** Operators who delete originals after encoding recover everything via `lml extract`. Archives browsable via FUSE (`lmafs foo.lma /mnt/foo`) or natively in KDE Ark (v1.4 Kerfuffle plugin, no mount step).
+LamQuant Lossless. Le Gall 5/3 integer lifting DWT → LPC(2) → bias cancellation → Golomb-Rice entropy. Bit-exact EDF/BDF roundtrip — every header byte, annotation, timestamp, and trailing record preserved. ~2.3× compression on clinical EEG. Verified on 76,254 files across 7 datasets with zero failures.
 
-**LMQ (Neural)** — ternary encoder (W2A16, 2.6M params) + Vocos iSTFT decoder (4M–845M params) + Adaptive SNAC FSQ + rANS entropy. Targets 50–100× compression at R > 0.90. **Status: training. Blocking ship gate is R > 0.90 on full TUEG validation sweep.**
+LML is the **only** lossless codec in the project. The `.lml` and `.lma` extensions below are two ways to *apply* it:
 
-Bare `.lml` (signal-only, no archive envelope) is available via `--no-bundle` / `--bare-lml` but prints a loud data-loss warning every invocation, requiring `--i-understand-data-loss` to silence. The encoder will not let you drop sibling files quietly.
+**`.lml` files** — single-file mode. `lml encode --bare-lml <dir>` walks the directory and turns each EEG file (`.edf` / `.bdf` / `.vhdr` / `.cnt` / `.set` / `.dcm`) into a `.lml`. Sidecars + metadata (`.tse` / `.csv_bi` / `_summary.txt` / etc.) are **copied as-is** alongside, no compression. Directory structure unchanged. Useful when downstream tooling reads `.lml` directly and storage cost of uncompressed sidecars is acceptable. **Prints a loud data-loss warning** unless paired with `--i-understand-data-loss` — if you move the `.lml` away from its sidecar siblings, the metadata is gone.
+
+**`.lma` archives** — **directory-archive mode (default)**. `lml encode <dir>` packs the *entire directory* into one `.lma` per recording. Every file goes through the cascade:
+
+  | If file is… | Stored as |
+  |---|---|
+  | EEG (`.edf` / `.bdf` / `.vhdr` / `.cnt` / `.set` / `.dcm`) | LML (lossless codec) |
+  | Anything else that compresses | zstd-9 |
+  | Already compressed (`.gz` / `.zip` / `.jpg` / `.mp4` / …) | Stored verbatim |
+
+  Result: **one self-contained `.lma` per recording**. SHA-256 per entry, mtime preserved, byte-exact extract on every entry. Directory structure preserved. **No byte ever lost.** Operators who delete originals after encoding recover everything via `lml extract`. Archives browsable via FUSE (`lmafs foo.lma /mnt/foo`) or natively in KDE Ark (v1.4 Kerfuffle plugin, no mount step).
+
+### LMQ — the neural codec (in training)
+
+Separate codec for high-compression-ratio neural reconstruction. Ternary encoder (W2A16, 2.6M params) + Vocos iSTFT decoder (4M–845M params) + Adaptive SNAC FSQ + rANS entropy. Targets 50–100× compression at R > 0.90. **Status: training. Ship gate is R > 0.90 on full TUEG validation sweep.**
 
 > Not a cleared medical device. FDA 510(k) submission in preparation. See [docs/SAFETY.md](docs/SAFETY.md).
 
