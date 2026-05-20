@@ -83,6 +83,18 @@ pub fn op_spec(op_id: &str) -> Option<OpSpec> {
             output_flag: "-o", recursive: true,
             extra: &["--verify", "--cross-validate", "--skip-existing", "--lma"],
         },
+        "encode_lml_siblings" => OpSpec {
+            // Sibling-preserving Lossless mode. Per-EEG-file .lml
+            // outputs + non-EEG siblings COPIED verbatim alongside
+            // (no archive container). Implemented by
+            // `lamquant_core::lma::pack_lml_with_siblings`; the
+            // lml CLI exposes it via `--lml-siblings`. Same safety
+            // posture as --lma (refuses symlinks, hard-errors on
+            // unsafe paths).
+            cmd: "encode", input: true, output: true,
+            output_flag: "-o", recursive: true,
+            extra: &["--verify", "--cross-validate", "--skip-existing", "--lml-siblings"],
+        },
         "decode" | "decode_neural" => OpSpec {
             // --to-edf reconstructs a byte-identical EDF/BDF (header +
             // data records + trailing) from the LML container, instead
@@ -164,11 +176,42 @@ mod tests {
 
     #[test]
     fn encode_dir_includes_recursive() {
-        let spec = op_spec("encode").unwrap();
-        // Use the workspace root as a known-existing directory.
-        let args = spec.build_args(Some("."), Some("/tmp/out"));
-        assert!(args.contains(&"-r".to_string()));
-        assert!(args.contains(&"--verify".to_string()));
+        // The bare "encode" op-id was removed in v1.1 -- TUI flows
+        // route through `encode_lma` (per-EDF archives) and
+        // `encode_lml_siblings` (LML + copied non-EEG files). Both
+        // should fold in `-r` when the input is a directory.
+        for op_id in ["encode_lma", "encode_lml_siblings"] {
+            let spec = op_spec(op_id).unwrap_or_else(|| panic!("missing op_spec: {}", op_id));
+            // Use the workspace root as a known-existing directory.
+            let args = spec.build_args(Some("."), Some("/tmp/out"));
+            assert!(
+                args.contains(&"-r".to_string()),
+                "{} should include -r for directory input",
+                op_id,
+            );
+            assert!(
+                args.contains(&"--verify".to_string()),
+                "{} should include --verify",
+                op_id,
+            );
+        }
+    }
+
+    #[test]
+    fn encode_lml_siblings_passes_through_flag() {
+        let spec = op_spec("encode_lml_siblings").expect("encode_lml_siblings registered");
+        let args = spec.build_args(Some("/tmp/src"), Some("/tmp/out"));
+        // The CLI flag that triggers the lma::pack_lml_with_siblings
+        // path. Without it the cmd_encode happy-path would run and
+        // produce per-EDF .lma archives instead.
+        assert!(
+            args.contains(&"--lml-siblings".to_string()),
+            "encode_lml_siblings argv missing --lml-siblings: {:?}",
+            args,
+        );
+        // Mutually-exclusive flags must NOT be in the same argv.
+        assert!(!args.contains(&"--lma".to_string()));
+        assert!(!args.contains(&"--no-bundle".to_string()));
     }
 
     #[test]
