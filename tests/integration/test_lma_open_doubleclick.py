@@ -102,13 +102,22 @@ def test_lma_open_mounts_and_lists_archive(tmp_path, lml_cli_binary):
     )
     assert r.returncode == 0, r.stderr[:400]
 
-    # Spawn lma-open with xdg-open stubbed to /bin/true so the test
+    # Spawn lma-open with xdg-open stubbed to `exit 0` so the test
     # doesn't try to actually open a GUI file manager.
-    env = {**os.environ, "PATH": f"/usr/bin:/bin:/tmp/lma-open-stub"}
+    #
+    # CRITICAL: stub dir MUST come FIRST in PATH so our stub shadows
+    # the real /usr/bin/xdg-open. The previous order
+    # (`/usr/bin:/bin:/tmp/lma-open-stub`) put the stub last; real
+    # xdg-open won every lookup, KDE opened a Dolphin window per test
+    # run, and the leaked FUSE mount + live `lmafs-<hash>.scope`
+    # outlived the test. Symptom on the dev box: `cargo build` (which
+    # triggers pre-commit which triggers pytest) silently spawned
+    # Dolphin windows for the test's tmp-path mounts.
     stub_dir = Path("/tmp/lma-open-stub")
     stub_dir.mkdir(exist_ok=True)
     (stub_dir / "xdg-open").write_text("#!/bin/sh\nexit 0\n")
     (stub_dir / "xdg-open").chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}:/usr/bin:/bin"}
 
     proc = subprocess.run(
         [str(lma_open), str(lma)],
