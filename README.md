@@ -6,8 +6,8 @@
   <a href="https://github.com/Quitetall/LamQuant/releases/latest"><img src="https://img.shields.io/github/v/release/Quitetall/LamQuant?label=release&color=blue" alt="Latest release"></a>
   <a href="https://github.com/quitetall/lamquant/actions/workflows/ci.yml"><img src="https://github.com/quitetall/lamquant/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/tests-1271%20passing-brightgreen" alt="Tests: 1271 passing">
-  <img src="https://img.shields.io/badge/python-3.10%2B-3776ab" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/rust-1.70%2B-dea584" alt="Rust 1.70+">
+  <img src="https://img.shields.io/badge/rust-1.70%2B-dea584" alt="Rust 1.70+ (production codec)">
+  <img src="https://img.shields.io/badge/python-3.10%2B%20%28training%20only%29-3776ab" alt="Python 3.10+ for training only">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License AGPL-3.0">
   <img src="https://img.shields.io/badge/MCU-RP2350%20Hazard3-red" alt="RP2350">
   <a href="docs/features/"><img src="https://img.shields.io/badge/docs-feature%20catalogue-blueviolet" alt="Feature catalogue"></a>
@@ -25,20 +25,30 @@
 
 ## 30-second quickstart
 
+LamQuant is a **Rust-first** codec. One install, three binaries.
+
 ```bash
-# Install (lossless only, numpy — no GPU needed)
-pip install lamquant-codec
+# Clone + install via cargo (one command, builds lamquant + lml)
+git clone https://github.com/Quitetall/LamQuant.git && cd LamQuant
+cargo install --path lamquant-core --features host
 
-# Encode a recording (lossless, bundles every sibling annotation)
-lml encode recording.edf
-# -> recording.lma         (~3× smaller, sha256-verified per entry)
+# Launch the TUI (file picker, encode, browse, verify)
+lamquant
 
-# Browse the archive
-lml ls --tree recording.lma
-
-# Verify integrity end-to-end
-lml verify recording.lma
+# Or drive it from the shell — same operations, no TUI
+lml encode recording.edf        # → recording.lma (~3× smaller, SHA-256 per entry)
+lml ls --tree recording.lma     # browse contents
+lml verify recording.lma        # end-to-end integrity check
 ```
+
+**The three binaries:**
+
+| Command                | What it does                                                                |
+|------------------------|-----------------------------------------------------------------------------|
+| `lamquant`             | Open the TUI home screen (file picker, op router)                           |
+| `lamquant <op> [args]` | Run a TUI operation from the shell (passthrough to `lml`)                   |
+| `lml [args]`           | Lossless codec — full CLI when args given; open TUI on lossless screen with no args (post-v1.4 wiring) |
+| `lmq [args]`           | Neural codec — planned; binary lands when LMQ training passes ship gate     |
 
 Want it in KDE Ark like a `.zip`? See **[OS Integration](docs/features/07-os-integration.md)**.
 Want the full CLI tour? See the **[feature catalogue](docs/features/)**.
@@ -113,42 +123,47 @@ Separate codec for high-compression-ratio neural reconstruction. Ternary encoder
 
 ## Install
 
-```bash
-pip install lamquant-codec              # lossless codec (numpy only, no GPU)
-pip install lamquant-codec[fast]        # + numba JIT (3-4× faster)
-pip install lamquant-codec[neural]      # + torch (neural codec + training)
-pip install lamquant-codec[all]         # everything
-```
+LamQuant is Rust-first. The headline install is **one cargo command** — no Python environment, no PyPI, no system package manager.
 
-From source:
+### Rust CLI (recommended)
 
 ```bash
 git clone https://github.com/Quitetall/LamQuant.git && cd LamQuant
+cargo install --path lamquant-core --features host
+```
+
+Builds + installs two binaries to `~/.cargo/bin/`:
+
+  - **`lamquant`** — top-level launcher. No args → TUI home. Pass args → CLI passthrough.
+  - **`lml`** — lossless-codec CLI. Full subcommand surface (encode / extract / verify / split / append / …).
+
+A third binary `lmq` (neural codec CLI) lands when the LMQ training run clears its R > 0.90 ship gate. Until then, neural encoding is exercised through `python -m ai_models.experiment_runner` (training-only).
+
+### Desktop GUI (Tauri)
+
+```bash
+cd gui && npm install && npm run tauri build
+```
+
+Or grab the pre-built bundle from the release page:
+
+  - **linux**: `lamquant-gui_*.AppImage` / `lamquant-gui_*.deb`
+  - **macos**: `lamquant-gui_*.dmg`
+  - **windows**: `lamquant-gui_*.msi`
+
+GUI shares the op-event contract, config, and history with the TUI/CLI — same `lamquant.toml`, same operations.
+
+### Python bindings (optional, training-side only)
+
+The Rust crate is the production codec. A Python wrapper lives in `lamquant_codec/` for research workflows that pre-date the Rust port + for the neural-codec training stack. It is **not** the recommended entry point and is currently **not published to PyPI**.
+
+```bash
+# From the cloned repo (PEP 668 systems require a venv):
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
 ```
 
-Rust CLI (no dependencies):
-
-```bash
-# Installs both `lml` (codec CLI) and `lamquant` (top-level launcher)
-cargo install --path lamquant-core
-```
-
-`lamquant` is the recommended entrypoint — it auto-routes to the TUI (`lamquant --tui`), the desktop GUI (`lamquant --gui` if installed), or passes subcommands through to `lml` (`lamquant encode <file>`).
-
-Desktop GUI (Tauri):
-
-```bash
-# From source
-cd gui && npm install && npm run tauri build
-
-# Or download the pre-built bundle from the v1.0+ release page:
-#   linux:   lamquant-gui_*.AppImage  /  lamquant-gui_*.deb
-#   macos:   lamquant-gui_*.dmg
-#   windows: lamquant-gui_*.msi
-```
-
-GUI shares its op-event contract, config, and history with the TUI/CLI — same `lamquant.toml`, same operations.
+Pinned PyPI publishing tracked in [#TODO-pypi](https://github.com/Quitetall/LamQuant/issues) — until then, source-install is the only Python path.
 
 ---
 
