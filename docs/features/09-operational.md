@@ -13,19 +13,21 @@ and the codec runs as a long-lived process.
 
 | Feature | Command / flag | Status | First shipped | Notes |
 |---|---|---|---|---|
-| Directory watch daemon | `lml watch` | shipped | v1.0 (6.4) | Bounded mpsc; drop-oldest WARN; SIGINT stop |
-| systemd unit (watch) | `dist/systemd/lml-watch.service` | shipped | v1.0 (6.5) | `Type=simple`, sandboxed |
-| systemd unit (lmafs auto-mount) | `installer/lmafs.service` | shipped | v1.1 (U) | Per-user template; opt-in |
-| Webhook callbacks | `lml notify` | shipped | v1.0 (6.6) | op_id idempotency key, exp backoff |
-| Prometheus metrics | `lml metrics` | shipped | v1.0 (8.1) | Text-exposition HTTP endpoint |
-| Tracing spans per phase | (automatic) | shipped | v1.0 (8.2) | `info_span!` at encode_one / decode_one_to_raw / etc. |
-| HTTP fetch | `lml fetch` | shipped | v1.0 (6.2) | rustls-tls; refuses non-http(s) |
-| S3 read | `--features s3` | shipped | v1.0 (6.2) | `async_io::fetch_s3` via aws-sdk-s3 |
-| S3 write | `--features s3` | shipped | v1.0 (6.3) | `async_io::put_s3` with optional If-Match |
-| S3 ETag conditional PUT | `--features s3` | shipped | v1.0 (6.7) | Deterministic tiebreak |
-| tokio + async wrappers | `--features async` | shipped | v1.0 (6.1) | `compress_async` / `decompress_async` via `spawn_blocking` |
-| `--continue-on-error` | (batch ops) | shipped | v1.0 | Per-file failure logged, batch continues |
-| `--force` | (most writers) | shipped | v1.0 | Overwrite-or-refuse semantics |
+| Directory watch daemon | `lml watch` (library only) | 🚧 partial | v1.0 lib (6.4) | `async_io::watch_dir` exists in `lamquant-core`; CLI subcommand NOT wired into the `lml` binary today (L3.5 from 2026-05-21 user sim). Library callers can drive it programmatically; shell users hit `error: unrecognized subcommand 'watch'`. |
+| systemd unit (watch) | `dist/systemd/lml-watch.service` | 🚧 partial | v1.0 (6.5) | Unit file ships; depends on `lml watch` binary surface above |
+| systemd unit (lmafs auto-mount) | `installer/lmafs.service` | ✅ shipped | v1.1 (U) | Per-user template; opt-in |
+| Webhook callbacks | `lml notify` (library only) | 🚧 partial | v1.0 lib (6.6) | Library function exists; CLI subcommand not wired |
+| Prometheus metrics | `lml metrics` (library only) | 🚧 partial | v1.0 lib (8.1) | Library function exists; CLI subcommand not wired |
+| Tracing spans per phase | (automatic) | ✅ shipped | v1.0 (8.2) | `info_span!` at encode_one / decode_one_to_raw / etc. |
+| HTTP fetch | `lml fetch` (library only) | 🚧 partial | v1.0 lib (6.2) | Library function exists; CLI subcommand not wired |
+| S3 read | `--features s3` (library only) | 🚧 partial | v1.0 lib (6.2) | `async_io::fetch_s3` via aws-sdk-s3; no CLI subcommand |
+| S3 write | `--features s3` (library only) | 🚧 partial | v1.0 lib (6.3) | `async_io::put_s3` with optional If-Match; no CLI subcommand |
+| S3 ETag conditional PUT | `--features s3` (library only) | 🚧 partial | v1.0 lib (6.7) | Deterministic tiebreak; no CLI subcommand |
+| tokio + async wrappers | `--features async` | ✅ shipped | v1.0 (6.1) | `compress_async` / `decompress_async` via `spawn_blocking` |
+| `--continue-on-error` | (batch ops) | ✅ shipped | v1.0 | Per-file failure logged, batch continues |
+| `--force` | (most writers) | ✅ shipped | v1.0 | Overwrite-or-refuse semantics |
+
+> **Status correction (2026-05-21)**: a power-user audit caught that the `lml watch` / `notify` / `metrics` / `fetch` CLI subcommands are documented as shipped but were never wired into the `lml` binary's clap parser. The library code under `lamquant_core::async_io::*` works; only the CLI surface is missing. Tracked for v1.5 wire-up. Until then, use the library API directly or invoke via the Python wrapper.
 
 All async features require the binary be built with `--features async`.
 Stock release artifacts include it; default `cargo build` does not.

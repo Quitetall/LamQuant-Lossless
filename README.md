@@ -184,17 +184,25 @@ xdg-mime default org.kde.ark.desktop application/x-lma    # one-time setup
 # Now double-click recording.lma in Dolphin → opens in Ark
 #   See: docs/features/07-os-integration.md
 
-# 4. Extract back to bit-exact source files
+# 4. Extract archive contents back to disk
+#    Note: today the archive stores the LML-encoded EEG (recording.lml),
+#    not the original .edf. Extract gives you the encoded form back.
 lml extract recording.lma -o restored/
-diff recording.edf restored/recording.edf    # silent — byte-equal
+ls restored/                                  # → recording.lml + bundled sidecars
+
+# 5. Decode the .lml back to the byte-equal original .edf
+lml decode --to-edf restored/recording.lml -o restored/recording.edf
+diff recording.edf restored/recording.edf     # silent — byte-equal
 #   See: docs/features/02-decompression.md
 
-# 5. Verify integrity end-to-end (SHA-256 per entry + archive-wide)
+# 6. Verify integrity end-to-end (SHA-256 per entry + archive-wide)
 lml verify recording.lma --explain
 #   See: docs/features/03-verification.md
 ```
 
-For the full subcommand surface (split, concat, append, encrypt, watch daemon, multi-volume, …) browse the **[feature catalogue](docs/features/)** — 11 buckets sorted by what you want to do.
+> **Note**: a future encoder refactor will store the entry as `recording.edf` with `Method::Lml` so `lml extract` auto-decodes back to `.edf` in one step. Until then, `extract → decode --to-edf` is the documented two-step path.
+
+For the full subcommand surface (split, concat, append, encrypt, multi-volume, …) browse the **[feature catalogue](docs/features/)** — 11 buckets sorted by what you want to do.
 
 ---
 
