@@ -10,12 +10,66 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
 use crate::sink::OpEventSink;
 use crate::OpEvent;
+
+/// ADR 0022 SD-3: recover from a poisoned Mutex instead of panicking
+/// the supervisor. Every site in this module locks either a `bool`
+/// flag (kill / tailer_stop) or a small struct; the worst-case
+/// post-poison state is a torn boolean, which the caller tolerates
+/// (next iteration sees the value and acts).
+fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// ADR 0022 SD-2: bounded child termination. `Child::kill()` is
+/// SIGKILL on Unix; the supervisor used to call it then block on
+/// `child.wait()` indefinitely. If the child somehow survived
+/// (e.g., zombie reaping race, stuck in D-state syscall), the
+/// supervisor hung. Now: kill, then poll `try_wait()` every 50ms
+/// up to LAMQUANT_KILL_TIMEOUT_SECS (default 5s). If still alive
+/// at deadline, fall through to the original blocking wait but
+/// log a warning so operators see the hang.
+///
+/// SIGTERM-first ladder would be nicer but requires a new dep
+/// (nix or libc). Deferred to a follow-up if any subprocess
+/// shows up that needs a graceful-flush window.
+fn terminate_child(
+    child: &mut Child,
+) -> std::io::Result<std::process::ExitStatus> {
+    // If the child already exited, return its status without
+    // killing.
+    if let Ok(Some(status)) = child.try_wait() {
+        return Ok(status);
+    }
+    let _ = child.kill();
+    let timeout_secs: u64 = std::env::var("LAMQUANT_KILL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    let deadline =
+        std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(e),
+        }
+    }
+    eprintln!(
+        "  WARNING: child PID {} did not exit within {}s of SIGKILL; falling back to blocking wait",
+        child.id(),
+        timeout_secs
+    );
+    child.wait()
+}
 
 /// Returned to the caller when an op is launched. Holds a kill channel.
 #[derive(Debug)]
@@ -28,7 +82,7 @@ pub struct OpHandle {
 impl OpHandle {
     /// Request graceful cancellation. Idempotent — second call is a no-op.
     pub fn kill(&mut self) {
-        let mut guard = self.killed.lock().expect("kill flag poisoned");
+        let mut guard = lock_or_recover(&self.killed);
         if !*guard {
             *guard = true;
             // Best-effort send; supervisor may have already exited.
@@ -38,7 +92,7 @@ impl OpHandle {
 
     /// Whether kill has been requested.
     pub fn was_killed(&self) -> bool {
-        *self.killed.lock().expect("kill flag poisoned")
+        *lock_or_recover(&self.killed)
     }
 }
 
@@ -155,13 +209,18 @@ fn spawn_internal<S: OpEventSink>(
                         ts_ms: OpEvent::now_ms(),
                         message: format!(">> Cancelling (PID {})...", child.id()),
                     });
-                    let _ = child.kill();
-                    break child.wait();
+                    break terminate_child(&mut child);
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
-                    // Caller dropped the handle — they no longer care about
-                    // cancel. Just wait for the child to finish.
+                    // ADR 0022 SD-4: caller dropped the handle. The
+                    // pre-fix loop fell through to a 50ms sleep
+                    // forever; this is fine for the spawn_lml case
+                    // since we still poll child.try_wait() each
+                    // iteration -- the child WILL exit eventually
+                    // and break the loop -- but to be defensive,
+                    // continue without re-checking the disconnected
+                    // channel.
                 }
             }
 
@@ -179,7 +238,7 @@ fn spawn_internal<S: OpEventSink>(
         };
 
         if was_killed {
-            *killed_supervisor.lock().expect("kill flag poisoned") = true;
+            *lock_or_recover(&killed_supervisor) = true;
         }
 
         if let Some(h) = h_out {
@@ -343,7 +402,7 @@ pub fn spawn_blut<S: OpEventSink>(
                         break p;
                     }
                 }
-                if *tailer_stop_signal.lock().expect("tailer stop poisoned") {
+                if *lock_or_recover(&tailer_stop_signal) {
                     return;
                 }
                 if std::time::Instant::now() > deadline {
@@ -379,9 +438,10 @@ pub fn spawn_blut<S: OpEventSink>(
                             ts_ms: OpEvent::now_ms(),
                             message: format!(">> SIGKILL (PID {}, no job_id yet)", child.id()),
                         });
-                        let _ = child.kill();
                     }
-                    break child.wait();
+                    // ADR 0022 SD-2: bounded termination instead of
+                    // unconditional `kill + wait`.
+                    break terminate_child(&mut child);
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {}
@@ -400,9 +460,9 @@ pub fn spawn_blut<S: OpEventSink>(
         };
 
         if was_killed {
-            *killed_supervisor.lock().expect("kill flag poisoned") = true;
+            *lock_or_recover(&killed_supervisor) = true;
         }
-        *tailer_stop.lock().expect("tailer stop poisoned") = true;
+        *lock_or_recover(&tailer_stop) = true;
 
         if let Some(h) = h_out {
             let _ = h.join();
@@ -477,7 +537,7 @@ fn tail_status_jsonl(
     // compile).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let file = loop {
-        if *stop.lock().expect("tailer stop poisoned") {
+        if *lock_or_recover(&stop) {
             return;
         }
         match std::fs::OpenOptions::new().read(true).open(path) {
@@ -525,7 +585,7 @@ fn tail_status_jsonl(
                 sink.emit(ev);
             }
         }
-        if *stop.lock().expect("tailer stop poisoned") {
+        if *lock_or_recover(&stop) {
             // Final drain pass after child exit, then bail.
             if !leftover.trim().is_empty() {
                 let ev = stage_event_to_op_event(&leftover);

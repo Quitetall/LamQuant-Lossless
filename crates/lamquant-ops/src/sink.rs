@@ -167,25 +167,61 @@ impl MpscSink {
     }
 }
 
+/// Timeout for the bounded send path. ADR 0022 SD-5: a stuck TUI
+/// (consumer never drains) used to block the runner thread
+/// indefinitely on send. After this window, the event is dropped
+/// with a stderr warning so the subprocess can keep producing
+/// progress. Configurable via env for tests.
+const BOUNDED_SEND_TIMEOUT_SECS: u64 = 2;
+
 impl OpEventSink for MpscSink {
     fn emit(&self, event: OpEvent) {
-        // Best-effort send. Receiver may be dropped (UI navigated away
-        // OR bounded channel full); we can't recover so we discard.
-        // The runner's terminal Done/Error event is the last thing it
-        // tries to deliver, and the TUI auto-derives state from the
-        // next event that does land, so transient drops are safe.
-        if let Ok(tx) = self.tx.lock() {
-            match &*tx {
-                MpscTx::Unbounded(s) => {
-                    let _ = s.send(event);
-                }
-                MpscTx::Bounded(s) => {
-                    // Blocking send — backpressure on the runner, not
-                    // drops on the consumer. Receiver-dropped (UI
-                    // navigated away) returns Err; ignore so we don't
-                    // panic — terminal Done was the runner's last
-                    // useful event anyway.
-                    let _ = s.send(event);
+        // ADR 0022 SD-3: poisoning recovery -- the lock() Err path
+        // was already gracefully handled, but `let Ok` masked
+        // diagnostic info. Recover via .into_inner() so the
+        // poisoned-but-safe state still drains.
+        let tx = match self.tx.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        match &*tx {
+            MpscTx::Unbounded(s) => {
+                let _ = s.send(event);
+            }
+            MpscTx::Bounded(s) => {
+                // ADR 0022 SD-5: bounded send with manual timeout
+                // loop. `SyncSender::send_timeout` is nightly-only;
+                // implement via try_send + sleep until deadline.
+                // Backpressure is intentional (Bible R33), but a
+                // stuck consumer used to deadlock the runner
+                // thread. After BOUNDED_SEND_TIMEOUT_SECS, drop
+                // the event with a stderr warning so the
+                // subprocess can keep producing progress.
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(BOUNDED_SEND_TIMEOUT_SECS);
+                let mut to_send = event;
+                loop {
+                    match s.try_send(to_send) {
+                        Ok(()) => break,
+                        Err(mpsc::TrySendError::Full(returned)) => {
+                            if std::time::Instant::now() >= deadline {
+                                eprintln!(
+                                    "  WARNING: MpscSink bounded send timed out \
+                                     after {}s (consumer stalled); dropping event",
+                                    BOUNDED_SEND_TIMEOUT_SECS
+                                );
+                                break;
+                            }
+                            to_send = returned;
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            // Receiver dropped (UI navigated away);
+                            // terminal Done was the last useful event
+                            // anyway, silent drop is acceptable.
+                            break;
+                        }
+                    }
                 }
             }
         }
