@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/lamquant-history",
+    "crates/lamquant-lsl",
     "crates/lamquant-ops",
     "crates/lmafs",
     "gui/src-tauri",
@@ -12,6 +13,11 @@ members = [
 # Firmware + weights use a different target (riscv32imac) and the firmware
 # profile. Default `cargo build` from root only touches host crates;
 # weights crate is no_std + alloc-free so it builds cleanly anywhere.
+#
+# lamquant-lsl is intentionally excluded from `default-members` — it
+# depends on the system liblsl (or builds it via build.rs) which may
+# not be present on every dev machine. Build it explicitly via
+# `cargo build -p lamquant-lsl` when LSL integration is needed.
 default-members = [
     "crates/lamquant-history",
     "crates/lamquant-ops",

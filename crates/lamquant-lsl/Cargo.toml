@@ -1,0 +1,56 @@
+[package]
+name = "lamquant-lsl"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Lab Streaming Layer (LSL) integration for LamQuant — replay .lml as LSL outlet, record LSL streams to .lml. World-class first-party integration with the de-facto neuroscience real-time data network."
+license = "AGPL-3.0"
+repository = "https://github.com/openhuman-ai/LamQuant"
+
+[lib]
+name = "lamquant_lsl"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Pull in the `lsl` crate (Rust bindings to the C liblsl). Requires
+# either:
+#   * System liblsl installed (`apt install liblsl`, `brew install
+#     lsl`, or build from https://github.com/sccn/liblsl), OR
+#   * lsl-sys's bundled-source build succeeds (currently brittle on
+#     modern glibc due to a deprecated `PTHREAD_STACK_MIN` macro in
+#     the bundled boost; tracked at
+#     https://github.com/labstreaminglayer/liblsl-rust/issues).
+#
+# Without this feature, the crate compiles cleanly + provides the
+# metadata + stream_id + sample-staging utilities; the actual
+# outlet/inlet are stubbed out with a clear "feature not enabled"
+# error so callers see a useful diagnostic. This lets the crate
+# live in the workspace's default-members without holding up
+# every default `cargo build` on the liblsl install.
+liblsl = ["dep:lsl"]
+# Async wrappers via tokio's spawn_blocking. liblsl itself is sync C;
+# the async layer exists for multi-stream daemons, TUI/GUI event
+# loops, and cancellation via `tokio::select!`. The sync core API is
+# always available + recommended for max real-time pacing accuracy
+# (`tokio::time::sleep` has 1 ms granularity, sync `Instant::now`
+# + spin-yield reaches microseconds).
+async = ["liblsl", "dep:tokio"]
+
+[dependencies]
+# Core codec — decode .lml → samples for outlet, encode samples → .lml
+# for inlet. Pinned to the workspace lamquant-core (host feature for
+# std + EDF reader + LMA container).
+lamquant-core = { path = "../../lamquant-core", default-features = false, features = ["host"] }
+# LSL bindings — only pulled in when the `liblsl` feature is on.
+lsl = { version = "0.1.1", optional = true }
+# SHA-256 for deterministic stream_id generation from file
+# fingerprints. Used regardless of `liblsl` feature.
+sha2 = "0.10"
+# Async runtime — only pulled in when the `async` feature is on.
+tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+# Async test runtime when validating the async wrappers.
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
