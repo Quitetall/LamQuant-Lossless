@@ -66,13 +66,16 @@ def test_default_encode_emits_lma_not_bare_lml(tmp_path, lml_cli_binary):
 
 
 WARNING_SENTINELS = [
-    "WARNING: --no-bundle / --bare-lml is a data-loss footgun.",
-    "Pass `--i-understand-data-loss` to silence this warning.",
+    "ERROR: --no-bundle / --bare-lml refuses to run without",
+    "--i-understand-data-loss",
 ]
 
 
 def test_no_bundle_prints_loud_warning(tmp_path, lml_cli_binary):
-    """`--no-bundle` without the co-flag prints the full warning paragraph."""
+    """`--no-bundle` without the co-flag is a hard refuse (rc=2) with the
+    full ERROR paragraph on stderr. Tier 3 audit (O2): the previous
+    warn-and-proceed shape was silently survivable under `2>/dev/null`.
+    """
     src = tmp_path / "src"
     src.mkdir()
     edf = src / "rec.edf"
@@ -87,7 +90,10 @@ def test_no_bundle_prints_loud_warning(tmp_path, lml_cli_binary):
         text=True,
         timeout=60,
     )
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == 2, (
+        f"--no-bundle without the co-flag must exit 2; got "
+        f"rc={r.returncode}\nstderr:\n{r.stderr[:1200]}"
+    )
     for sentinel in WARNING_SENTINELS:
         assert sentinel in r.stderr, (
             f"missing sentinel {sentinel!r}; stderr:\n{r.stderr[:1200]}"
@@ -95,7 +101,7 @@ def test_no_bundle_prints_loud_warning(tmp_path, lml_cli_binary):
 
 
 def test_bare_lml_alias_also_warns(tmp_path, lml_cli_binary):
-    """`--bare-lml` is an alias for `--no-bundle`; same warning fires."""
+    """`--bare-lml` is an alias for `--no-bundle`; same hard refuse fires."""
     src = tmp_path / "src"
     src.mkdir()
     edf = src / "rec.edf"
@@ -109,7 +115,10 @@ def test_bare_lml_alias_also_warns(tmp_path, lml_cli_binary):
         text=True,
         timeout=60,
     )
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == 2, (
+        f"--bare-lml without the co-flag must exit 2; got "
+        f"rc={r.returncode}\nstderr:\n{r.stderr[:1200]}"
+    )
     for sentinel in WARNING_SENTINELS:
         assert sentinel in r.stderr, (
             f"missing sentinel {sentinel!r}; stderr:\n{r.stderr[:1200]}"

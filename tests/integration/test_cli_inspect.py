@@ -51,7 +51,8 @@ def encoded_lml(tmp_path: Path, tiny_edf: Path, lml_cli_binary: Path) -> Path:
     out_dir.mkdir()
     result = subprocess.run(
         [str(lml_cli_binary), "encode", str(tiny_edf),
-         "-o", str(out_dir), "--no-bundle"],
+         "-o", str(out_dir), "--no-bundle",
+         "--i-understand-data-loss"],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, (

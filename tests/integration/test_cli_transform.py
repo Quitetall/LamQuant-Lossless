@@ -63,7 +63,8 @@ class TestLmlEncode:
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
         r = _run(lml_cli_binary, "encode", str(tiny_edf),
-                 "-o", str(out_dir), "--no-bundle")
+                 "-o", str(out_dir), "--no-bundle",
+                 "--i-understand-data-loss")
         assert r.returncode == 0, f"stderr: {r.stderr[:200]}"
         files = list(out_dir.glob("*.lml"))
         assert len(files) == 1
@@ -73,7 +74,8 @@ class TestLmlEncode:
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
         r = _run(lml_cli_binary, "encode", str(tiny_edf),
-                 "-o", str(out_dir), "--no-bundle")
+                 "-o", str(out_dir), "--no-bundle",
+                 "--i-understand-data-loss")
         assert r.returncode == 0
         produced = next(out_dir.glob("*.lml"))
         assert produced.read_bytes()[:4] == b"LML1"
@@ -92,7 +94,8 @@ class TestLmlDecode:
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
         r = _run(lml_cli_binary, "encode", str(tiny_edf),
-                 "-o", str(out_dir), "--no-bundle")
+                 "-o", str(out_dir), "--no-bundle",
+                 "--i-understand-data-loss")
         assert r.returncode == 0
         lml_file = next(out_dir.glob("*.lml"))
 
@@ -181,7 +184,8 @@ class TestLmlDiff:
         out_dir = tmp_path / "lml"
         out_dir.mkdir()
         r = _run(lml_cli_binary, "encode", str(tiny_edf),
-                 "-o", str(out_dir), "--no-bundle")
+                 "-o", str(out_dir), "--no-bundle",
+                 "--i-understand-data-loss")
         assert r.returncode == 0
         original = next(out_dir.glob("*.lml"))
 

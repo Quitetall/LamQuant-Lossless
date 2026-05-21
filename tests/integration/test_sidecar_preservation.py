@@ -200,7 +200,8 @@ class TestSidecarPreservationNoBundle:
     def test_no_bundle_emits_lml(self, edf_with_sidecars, tmp_path, lml_cli_binary):
         edf_path, _ = edf_with_sidecars
         out_dir = tmp_path / "out_no_bundle"
-        _encode(edf_path, out_dir, lml_cli_binary, "--no-bundle")
+        _encode(edf_path, out_dir, lml_cli_binary,
+                "--no-bundle", "--i-understand-data-loss")
 
         lml_files = list(out_dir.rglob("*.lml"))
         assert len(lml_files) == 1, (
@@ -212,7 +213,8 @@ class TestSidecarPreservationNoBundle:
     ):
         edf_path, originals = edf_with_sidecars
         out_dir = tmp_path / "out_no_bundle"
-        _encode(edf_path, out_dir, lml_cli_binary, "--no-bundle")
+        _encode(edf_path, out_dir, lml_cli_binary,
+                "--no-bundle", "--i-understand-data-loss")
 
         for sidecar_name, expected_bytes in originals.items():
             mirrored = list(out_dir.rglob(sidecar_name))
