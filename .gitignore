@@ -116,5 +116,10 @@ scripts/sync_tuh_all.sh
 scripts/sync_tuh_annotations.sh
 scripts/update_tueg_super.sh
 
-# Graphify rebuild cache (363 MB of intermediate artifacts).
-graphify-out/cache/
+# graphify-out — knowledge-graph tool outputs.
+# All artifacts (graph.json ~190MB, graph.html, GRAPH_REPORT.md,
+# cost.json, manifest.json, .graphify_*) are regenerable via
+# `graphify update .` (AST-only, no API cost). Removed from index
+# 2026-05-21 — keeping them tracked carried 86% of repo size in
+# regenerable output. AI models pull fresh via the graphify CLI.
+graphify-out/
