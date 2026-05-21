@@ -17,7 +17,9 @@ See ADR 0017 (BLUT canonical trainer + LMA-direct).
 from lamquant_codec.training.lma_dataset import (
     LmaL3Dataset,
     LmaSignalDataset,
+    build_lma_entry_index,
     decode_lma_signal,
+    list_lma_entries,
     load_split_stems,
     select_random_windows,
 )
@@ -25,7 +27,9 @@ from lamquant_codec.training.lma_dataset import (
 __all__ = [
     "LmaL3Dataset",
     "LmaSignalDataset",
+    "build_lma_entry_index",
     "decode_lma_signal",
+    "list_lma_entries",
     "load_split_stems",
     "select_random_windows",
 ]

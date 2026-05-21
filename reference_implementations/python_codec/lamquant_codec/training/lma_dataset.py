@@ -111,6 +111,82 @@ def _highpass_sos():
 # this exact pipeline rather than maintaining a parallel copy.
 # ----------------------------------------------------------------------
 
+def list_lma_entries(lma_path: str) -> List[str]:
+    """Return every entry path inside one ``.lma`` archive.
+
+    Uses ``lml ls`` (subprocess). On a 114 K-entry TUEG archive this
+    completes in ~290 ms; on the smaller per-dataset corpora it's
+    sub-10 ms. Called once at ``LmaDataset.__init__`` per LMA to
+    build the stem -> internal-path index.
+    """
+    import subprocess
+    try:
+        res = subprocess.run(
+            ["lml", "ls", str(lma_path)],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "lml binary not on PATH; cannot list LMA entries"
+        ) from e
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"lml ls failed for {lma_path}: rc={e.returncode} {e.stderr[:300]}"
+        ) from e
+    return [ln for ln in res.stdout.splitlines() if ln]
+
+
+def build_lma_entry_index(lma_paths: Sequence[str]) -> dict:
+    """Walk every LMA's entries; return ``{stem: {"lma": <path>,
+    "lml": <internal_path>, "labels": <internal_path>|None,
+    "meta": <internal_path>|None}}``.
+
+    Per-dataset LMAs (Phase M, 2026-05-20) hold many recordings under
+    their original directory tree. Entries look like:
+        ``edf/<NNN>/<subj>/<sess>/<montage>/<stem>.lml`` (deep — TUEG)
+        ``edf/<stem>.lml`` (flat — TUAR/TUAB/TUEV/PhysioNet)
+        ``labels/<stem>_labels.npz``
+        ``meta.json`` (per-dataset, single)
+
+    Stem is the basename minus ``.lml`` or ``_labels.npz`` suffix.
+    Returns a dict keyed by stem. A stem present in multiple LMAs is
+    deterministically resolved to the FIRST LMA seen (caller controls
+    ordering of ``lma_paths``); a warning is logged for collisions so
+    audit can investigate cross-corpus duplicates.
+    """
+    import re
+    out: dict = {}
+    lml_re = re.compile(r"(?:^|/)([A-Za-z0-9_]+_s\d+_t\d+)\.lml$")
+    lbl_re = re.compile(r"(?:^|/)([A-Za-z0-9_]+_s\d+_t\d+)_labels\.npz$")
+    for lp in lma_paths:
+        entries = list_lma_entries(lp)
+        for e in entries:
+            m_lml = lml_re.search(e)
+            if m_lml:
+                stem = m_lml.group(1)
+                if stem in out:
+                    LOG.debug("stem %s already mapped to %s; skipping %s",
+                              stem, out[stem]["lma"], lp)
+                    continue
+                out[stem] = {"lma": str(lp), "lml": e, "labels": None,
+                             "meta": None}
+        # Second pass for labels (LML entry must exist for stem before we
+        # attach labels; orphan labels with no LML are ignored).
+        for e in entries:
+            m_lbl = lbl_re.search(e)
+            if m_lbl:
+                stem = m_lbl.group(1)
+                if stem in out and out[stem]["lma"] == str(lp):
+                    out[stem]["labels"] = e
+        # Per-dataset meta (single per archive) — attach to every stem
+        # from this LMA so callers can find dataset-level metadata.
+        if "meta.json" in entries:
+            for stem, info in out.items():
+                if info["lma"] == str(lp) and info["meta"] is None:
+                    info["meta"] = "meta.json"
+    return out
+
+
 def _validate_stem(stem: str) -> None:
     """Reject stems that could escape ``lma_root`` via path traversal.
 
@@ -126,7 +202,8 @@ def _validate_stem(stem: str) -> None:
         raise ValueError(f"invalid stem leading char: {stem!r}")
 
 
-def decode_lma_signal(lma_path: str, stem: str) -> Optional[np.ndarray]:
+def decode_lma_signal(lma_path: str, stem: str,
+                      lml_entry_name: Optional[str] = None) -> Optional[np.ndarray]:
     """LMA -> fully-preprocessed float32 signal ``[21, T_resampled]``.
 
     Bit-exact with the deprecated ``precompute_l3_fast`` pipeline:
@@ -141,6 +218,18 @@ def decode_lma_signal(lma_path: str, stem: str) -> Optional[np.ndarray]:
     file). Same bit-exact output vs the legacy path, verified by parity
     smoke.
 
+    Args:
+        lma_path: path to the ``.lma`` archive containing the LML.
+        stem: recording stem (e.g. ``aaaaaaaa_s001_t000``). Used for
+            log messages and (when ``lml_entry_name`` is None) to derive
+            the per-stem entry name ``<stem>.lml`` — the historic layout
+            for per-recording archives.
+        lml_entry_name: explicit internal entry path inside the LMA
+            (e.g. ``edf/<NNN>/<subj>/<sess>/<montage>/<stem>.lml``).
+            Required for the per-dataset LMA layout (Phase M, 2026-05-20)
+            where one archive holds many recordings under their original
+            directory tree. When omitted, falls back to ``<stem>.lml``.
+
     Returns ``None`` if the LML cannot be decoded, channels are missing,
     the file is flat (max_abs < 1e-12), or the metadata reports a
     non-positive sample rate. Callers cache the non-None results; ``None``
@@ -152,10 +241,11 @@ def decode_lma_signal(lma_path: str, stem: str) -> Optional[np.ndarray]:
     from math import gcd
 
     lc = _LAZY["lamquant_core"]
+    entry = lml_entry_name if lml_entry_name is not None else f"{stem}.lml"
     try:
-        lml_bytes = lc.lma_read_entry(lma_path, f"{stem}.lml")
+        lml_bytes = lc.lma_read_entry(lma_path, entry)
     except Exception as e:
-        LOG.warning("LMA read failed for %s: %s", stem, e)
+        LOG.warning("LMA read failed for %s (%s): %s", stem, entry, e)
         return None
 
     # Header-only metadata parse (V4 Pro 2026-05-18 review #4): the
