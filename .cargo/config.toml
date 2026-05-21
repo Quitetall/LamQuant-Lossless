@@ -6,3 +6,30 @@
 # them here would emit `-Tmemory.x -Tlink.x` twice on the linker
 # command line, producing "region 'BOOT_LOADER' already defined".
 # Single source of truth lives next to the firmware crate.
+
+# ADR 0024 Phase 1.5 (LSL build): `lsl-sys 0.1.1` bundles a vendored
+# liblsl source tree that includes its own boost copy. That boost
+# copy fails to compile on modern C++ toolchains for two separate
+# reasons:
+#
+#   1. Modern glibc (≥ 2.34) made `PTHREAD_STACK_MIN` a runtime
+#      function call rather than a preprocessor macro, so the
+#      bundled boost::thread's `#if PTHREAD_STACK_MIN > 0` fails to
+#      parse. Patchable via `-DPTHREAD_STACK_MIN=16384` in CXXFLAGS.
+#
+#   2. Modern libstdc++ (C++17/20) tightens template-resolution
+#      rules; the bundled boost::bimaps template hits a
+#      "resolves to '<type error>'" parse failure that's not
+#      fixable with a flag — needs a boost-or-bimaps upgrade.
+#
+# Net: the bundled liblsl build is broken on this toolchain. The
+# fix is to use a system-installed liblsl (`apt install liblsl-dev`,
+# `brew install lsl`, AUR `liblsl` on Arch, or build from source
+# at https://github.com/sccn/liblsl). The lamquant-lsl crate's
+# `build.rs` probes for system liblsl via pkg-config before
+# falling back to the bundled build. Default builds (without the
+# `liblsl` feature) skip this layer entirely.
+#
+# No workspace-wide env vars set here — CXXFLAGS workarounds
+# wouldn't help with the bimap issue, and a workspace-wide flag
+# affects every C++ dep.

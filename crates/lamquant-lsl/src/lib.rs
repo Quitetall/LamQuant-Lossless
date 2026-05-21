@@ -82,8 +82,9 @@ pub mod outlet;
 #[cfg(feature = "async")]
 pub mod outlet_async;
 
-// Phase 3 — Inlet stub for the LSL → .lml direction.
-#[cfg(feature = "liblsl")]
+// Phase 3 — Inlet (LSL → .lml). The offline pieces (SampleBuffer +
+// encode_window) are always-on; the actual liblsl subscription
+// arrives in Phase 4 behind the `liblsl` feature.
 pub mod inlet;
 
 // Phase 2 — Pacer primitive (Outlet uses an inline anchored pacer
