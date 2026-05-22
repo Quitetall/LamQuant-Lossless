@@ -28,6 +28,16 @@ bench = false
 [features]
 default = []
 
+# Cat B optional comparators (2026-05-22) — opt-in evaluation crates
+# for future Hazard3 + basestation work. Each gated behind its own
+# feature so default build stays untouched. Activate via
+# `cargo build --features cat-b-fixed,cat-b-idsp,...`.
+cat-b-fixed = ["dep:fixed"]
+cat-b-microfft = ["dep:microfft"]
+cat-b-idsp = ["dep:idsp"]
+# All-on convenience: pull every Cat B comparator.
+cat-b-all = ["cat-b-fixed", "cat-b-microfft", "cat-b-idsp"]
+
 # Host-side verification mode: enables `cargo test -p lamquant-firmware
 # --features host-verify` to run bit-exact parity tests against C
 # reference output without flashing the device.
@@ -77,6 +87,13 @@ lamquant-ipc-types = { path = "../crates/lamquant-ipc-types" }
 # explicitly so `comms.rs` can call `postcard::take_from_bytes` /
 # `postcard::to_slice` without going through a re-export.
 postcard = { version = "1", default-features = false }
+
+# Cat B comparators — optional, opt-in via feature flags above.
+# Adding the dep makes the lib available for parity tests + future
+# kernel swap-outs WITHOUT affecting the default firmware build.
+fixed     = { version = "1", default-features = false, optional = true }
+microfft  = { version = "0.6", default-features = false, features = ["size-1024"], optional = true }
+idsp      = { version = "0.21", default-features = false, optional = true }
 
 # `libm` removed 2026-05-21 — firmware now pure Q-format. Last
 # uses were `libm::log` in adaptive LPC BIC (replaced with
