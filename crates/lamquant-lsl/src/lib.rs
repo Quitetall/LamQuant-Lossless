@@ -79,12 +79,17 @@ pub mod metadata;
 #[cfg(feature = "liblsl")]
 pub mod outlet;
 
-// `outlet_async.rs` was deleted: liblsl's `lsl::StreamOutlet` is not
-// `Send`, so wrapping in `Arc<Outlet>` for `tokio::task::spawn_blocking`
-// dispatch fails the trait bound. Multi-stream concurrency happens via
-// `tokio::task::spawn_blocking` directly with the sync `Outlet` — each
-// task owns its outlet on its own blocking worker. See
-// `tests/multi_stream_async.rs` for the canonical pattern.
+// `outlet_async.rs` was deleted because `lsl::StreamOutlet` is not
+// `Send`. The `OutletActor` (Phase 6.e) uses the actor pattern
+// instead: a dedicated OS thread owns the non-Send outlet for its
+// lifetime; the async API sits on top via mpsc channels. See
+// `outlet_actor.rs` for the implementation + `tests/outlet_actor.rs`
+// for usage.
+#[cfg(feature = "async")]
+pub mod outlet_actor;
+
+#[cfg(feature = "async")]
+pub use outlet_actor::OutletActor;
 
 // Phase 3 — Inlet (LSL → .lml). The offline pieces (SampleBuffer +
 // encode_window) are always-on; the actual liblsl subscription
