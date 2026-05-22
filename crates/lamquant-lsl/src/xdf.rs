@@ -34,6 +34,7 @@ enum ChunkTag {
     FileHeader = 1,
     StreamHeader = 2,
     Samples = 3,
+    ClockOffset = 4,
     StreamFooter = 6,
 }
 
@@ -161,6 +162,11 @@ pub struct XdfOpts {
     /// First sample's timestamp (LSL epoch seconds). Subsequent
     /// samples are `anchor + i / nominal_srate`. Default 0.0.
     pub timestamp_anchor: f64,
+    /// Per-recording clock-offset observations. Each tuple is
+    /// `(collection_time, offset_value)` in seconds; we emit one
+    /// ClockOffset chunk (tag 4) per pair into the XDF output.
+    /// Default empty — no ClockOffset chunks emitted.
+    pub clock_offsets: Vec<(f64, f64)>,
 }
 
 impl XdfOpts {
@@ -170,6 +176,10 @@ impl XdfOpts {
     }
     pub fn with_timestamp_anchor(mut self, anchor: f64) -> Self {
         self.timestamp_anchor = anchor;
+        self
+    }
+    pub fn with_clock_offsets(mut self, offsets: &[(f64, f64)]) -> Self {
+        self.clock_offsets = offsets.to_vec();
         self
     }
 }
@@ -293,6 +303,17 @@ pub fn write_xdf_from_lml_opts(
     };
     let samples_chunk = build_samples_chunk(stream_id, &samples_i32, timestamps.as_deref());
     write_chunk(&mut out, ChunkTag::Samples, &samples_chunk);
+
+    // ClockOffset chunks (tag 4). One per (collection_time,
+    // offset_value) entry in opts.clock_offsets. Format:
+    //   [stream_id: u32 LE][collection_time: f64 LE][offset: f64 LE]
+    for &(t, off) in &opts.clock_offsets {
+        let mut co_payload = Vec::with_capacity(20);
+        co_payload.extend_from_slice(&stream_id.to_le_bytes());
+        co_payload.extend_from_slice(&t.to_le_bytes());
+        co_payload.extend_from_slice(&off.to_le_bytes());
+        write_chunk(&mut out, ChunkTag::ClockOffset, &co_payload);
+    }
 
     // StreamFooter chunk (tag 6).
     let footer_xml = build_stream_footer_xml(
