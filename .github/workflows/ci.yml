@@ -20,19 +20,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # ``smoke_sh`` removed — GitHub Actions disallows ``shell:``
+        # values that reference ``matrix.*`` at parse time, so the
+        # smoke-test step now hard-codes ``shell: bash`` directly.
+        # macos-13 was retired by GitHub — switched to macos-15-intel
+        # for the x86_64 lane.
         include:
           - os: ubuntu-latest
             lint: true
-            smoke_sh: bash
-          - os: macos-13         # x86_64
+          - os: macos-15-intel   # x86_64 (macos-13 retired by GitHub)
             lint: false
-            smoke_sh: bash
           - os: macos-14         # aarch64 (Apple Silicon)
             lint: false
-            smoke_sh: bash
           - os: windows-latest   # MSVC default
             lint: false
-            smoke_sh: bash       # `bash` ships in default Windows runners (git-bash)
     steps:
       - name: Enable git long-paths (windows)
         if: runner.os == 'Windows'
@@ -84,8 +85,12 @@ jobs:
       - name: Build release binary
         run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin lml
 
+      # ``shell:`` is a top-level workflow key that GitHub validates at
+      # parse time, so it cannot reference ``matrix.*`` (which doesn't
+      # exist until the job expands). Hard-code ``bash`` — both the
+      # POSIX runners and the Windows runner ship git-bash by default.
       - name: Binary smoke test
-        shell: ${{ matrix.smoke_sh }}
+        shell: bash
         run: |
           ls -lh target/release/lml* || dir target\\release\\lml.exe
           if [ "${{ runner.os }}" = "Windows" ]; then
