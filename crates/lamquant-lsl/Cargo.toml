@@ -11,6 +11,26 @@ repository = "https://github.com/openhuman-ai/LamQuant"
 name = "lamquant_lsl"
 path = "src/lib.rs"
 
+# ADR 0024 Phase 4 — CLI binaries live in this crate (not in
+# lamquant-core) to avoid the package-cycle that would form if
+# lamquant-core depended on lamquant-lsl. Install with
+# `cargo install --path crates/lamquant-lsl --features liblsl --bins`.
+
+[[bin]]
+name = "lml-stream"
+path = "src/bin/lml_stream.rs"
+required-features = ["liblsl"]
+
+[[bin]]
+name = "lml-record"
+path = "src/bin/lml_record.rs"
+required-features = ["liblsl"]
+
+[[bin]]
+name = "lml-discover"
+path = "src/bin/lml_discover.rs"
+required-features = ["liblsl"]
+
 [features]
 default = []
 # Pull in the `lsl` crate (Rust bindings to the C liblsl). Requires
