@@ -310,6 +310,13 @@ mod live {
         buffer: SampleBuffer,
         encoded_windows: Vec<Vec<u8>>,
         opts: InletEncodeOpts,
+        /// LSL timestamp of the first sample successfully pulled in
+        /// this session (microsecond float, publisher's local
+        /// clock). `None` until the first pull lands.
+        first_lsl_ts: Option<f64>,
+        /// LSL timestamp of the most recent sample. `last - first`
+        /// is the recording duration in seconds.
+        last_lsl_ts: Option<f64>,
     }
 
     impl RecordSession {
@@ -322,7 +329,23 @@ mod live {
                 buffer,
                 encoded_windows: Vec::new(),
                 opts,
+                first_lsl_ts: None,
+                last_lsl_ts: None,
             })
+        }
+
+        /// LSL timestamp of the first sample (publisher's local
+        /// clock). Use this as the anchor when writing the .lml
+        /// container's `startdate` / start_unix_seconds metadata
+        /// so a replay reproduces the original timing.
+        pub fn first_lsl_timestamp(&self) -> Option<f64> {
+            self.first_lsl_ts
+        }
+
+        /// LSL timestamp of the most recent sample. `last - first`
+        /// gives the effective recording duration.
+        pub fn last_lsl_timestamp(&self) -> Option<f64> {
+            self.last_lsl_ts
         }
 
         /// Capture up to `max_samples` from the network, blocking
@@ -347,7 +370,7 @@ mod live {
         ) -> Result<usize, LslIntegrationError> {
             let mut windows = 0usize;
             for _ in 0..max_samples {
-                let (sample, _ts) = self.inlet.pull_sample(per_sample_timeout_sec)?;
+                let (sample, ts) = self.inlet.pull_sample(per_sample_timeout_sec)?;
                 // liblsl signals timeout by returning an empty
                 // sample vec (not an `Err`). Treat that as "no
                 // sample available within the timeout" + drain
@@ -357,6 +380,10 @@ mod live {
                 if sample.is_empty() {
                     break;
                 }
+                if self.first_lsl_ts.is_none() {
+                    self.first_lsl_ts = Some(ts);
+                }
+                self.last_lsl_ts = Some(ts);
                 self.buffer
                     .push_sample(&sample)
                     .map_err(|e| LslIntegrationError::Other(e.to_string()))?;
