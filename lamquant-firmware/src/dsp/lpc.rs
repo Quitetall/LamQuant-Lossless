@@ -357,6 +357,17 @@ fn ilog2_q24(x: i64) -> i64 {
 ///   `32   * ln(2) = 22.18070977791825` → `372_212_758` (Q24)
 ///
 /// Computation in i128 to safely span `n*log_ratio*c1` ~ 2^64.
+///
+/// **Energy clamp**: when `e` exceeds `i64::MAX` (~9.2e18, i.e. an
+/// autocorrelation bigger than any plausible 256-sample EEG residual
+/// at Q56 — would require sample energies > 1e9 per sample sustained
+/// across the window), `ilog2_q24` saturates at `log2(i64::MAX)`
+/// instead of computing the true log. The order chosen at that
+/// extreme may be biased low by ~1 binade vs the f64 path. Lossless
+/// is preserved (the chosen order is what the decoder reconstructs
+/// against) — only the CR on that single pathological window may
+/// fall ~1 % below optimum. Real EEG never produces such values.
+/// (lamu review nit on 88b7868.)
 #[inline]
 fn bic_cost_q48(e: i128, n: i64, order_k: usize) -> i128 {
     if e <= 0 {

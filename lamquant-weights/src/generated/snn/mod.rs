@@ -1,8 +1,8 @@
 // **GENERATED — DO NOT EDIT.**
 //
-// Source:    /mnt/4tb/LamQuant/weights/snn/mamba_snn_best.pt
+// Source:    weights/snn/mamba_snn_best.pt
 // SHA-256:   34e008106a9b908b4d344f15e253d40a0fd19d206ef0a42a66c81f5f68be3e71
-// Generated: 2026-05-22T03:29:10+00:00
+// Generated: 2026-05-22T15:37:53+00:00
 //
 //! Mamba bidirectional SNN — activity classifier weight tables.
 

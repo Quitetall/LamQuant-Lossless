@@ -151,10 +151,18 @@ struct ActBuf {
 
 impl ActBuf {
     fn new(channels: usize, t: usize) -> Self {
+        // Caller passes compile-time-known dims (`N_INPUT_CHANNELS`,
+        // `WIDTH`, `T_IN`, etc.) — overflow is impossible on any
+        // supported target. `checked_mul + expect` makes that
+        // invariant explicit instead of silently saturating into a
+        // catastrophic giant allocation if a future refactor wires
+        // runtime dimensions through. (lamu review fix on 88b7868.)
+        let len = channels.checked_mul(t)
+            .expect("ActBuf dims must fit in usize");
         Self {
             channels,
             t,
-            data: vec![0i16; channels.saturating_mul(t)],
+            data: vec![0i16; len],
         }
     }
 

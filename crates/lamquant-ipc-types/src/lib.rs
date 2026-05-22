@@ -28,9 +28,27 @@ pub const MAX_PAYLOAD: usize = 240;
 /// changes (envelope reshape, COBS swap, length-prefix change).
 pub const ENVELOPE_VERSION: u8 = 1;
 
-/// Message discriminator. Add new variants at the end to preserve
-/// postcard's lexical-order varint encoding — never reorder existing
-/// variants without bumping `ENVELOPE_VERSION`.
+/// Message discriminator.
+///
+/// **Forward-compatibility policy** — postcard's default `Deserialize`
+/// for an enum rejects unknown discriminants with `Err`. That means
+/// adding a new `MsgKind` variant **does** require a sender/receiver
+/// rebuild; the wire is NOT forward-compatible by default. Two
+/// canonical update paths:
+///
+/// 1. **Coordinated bump** — bump `ENVELOPE_VERSION`, ship both ends
+///    together. Decoders MAY accept lower-version envelopes via
+///    back-compat shims; they MUST reject higher-version envelopes.
+///    Use this for any new variant or any payload-shape change.
+/// 2. **`Log` fallback** — send the new event as a `Log` payload
+///    (free-form bytes). Old receivers still parse the envelope; the
+///    payload bytes are forwarded to the operator without
+///    interpretation. Use this only for transient observability
+///    additions, not control-plane traffic.
+///
+/// Variant order MUST NOT change without an `ENVELOPE_VERSION` bump —
+/// postcard encodes the discriminator as a varint over the declaration
+/// order. (lamu review fix on 88b7868.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "defmt-format", derive(defmt::Format))]
 #[repr(u8)]
@@ -71,6 +89,17 @@ pub struct PostcardEnvelope {
     pub payload: HVec<u8, MAX_PAYLOAD>,
 }
 
+/// Errors that `PostcardEnvelope` constructors can produce. Distinct
+/// from postcard's own ser/de errors — those bubble up untouched at
+/// the wire layer. (lamu review fix on 88b7868.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt-format", derive(defmt::Format))]
+pub enum EnvelopeError {
+    /// Caller passed more than `MAX_PAYLOAD` bytes. Chunk over
+    /// multiple envelopes or compress before send.
+    PayloadTooLarge { len: usize, max: usize },
+}
+
 impl PostcardEnvelope {
     /// Build an envelope with an empty payload (Ping / Pong style).
     pub fn empty(seq: u16, kind: MsgKind) -> Self {
@@ -83,10 +112,17 @@ impl PostcardEnvelope {
     }
 
     /// Build an envelope from caller-provided payload bytes. Returns
-    /// `Err(())` if `bytes.len() > MAX_PAYLOAD` — caller must chunk.
-    pub fn with_payload(seq: u16, kind: MsgKind, bytes: &[u8]) -> Result<Self, ()> {
+    /// `Err(EnvelopeError::PayloadTooLarge)` if `bytes.len() > MAX_PAYLOAD`
+    /// — caller must chunk or compress.
+    pub fn with_payload(seq: u16, kind: MsgKind, bytes: &[u8])
+        -> Result<Self, EnvelopeError>
+    {
         let mut payload: HVec<u8, MAX_PAYLOAD> = HVec::new();
-        payload.extend_from_slice(bytes).map_err(|_| ())?;
+        payload.extend_from_slice(bytes)
+            .map_err(|_| EnvelopeError::PayloadTooLarge {
+                len: bytes.len(),
+                max: MAX_PAYLOAD,
+            })?;
         Ok(Self {
             version: ENVELOPE_VERSION,
             seq,
@@ -127,6 +163,14 @@ mod tests {
     #[test]
     fn over_max_payload_rejected() {
         let big = vec![0u8; MAX_PAYLOAD + 1];
-        assert!(PostcardEnvelope::with_payload(0, MsgKind::Status, &big).is_err());
+        let err = PostcardEnvelope::with_payload(0, MsgKind::Status, &big)
+            .expect_err("oversize must reject");
+        assert_eq!(
+            err,
+            EnvelopeError::PayloadTooLarge {
+                len: MAX_PAYLOAD + 1,
+                max: MAX_PAYLOAD,
+            }
+        );
     }
 }

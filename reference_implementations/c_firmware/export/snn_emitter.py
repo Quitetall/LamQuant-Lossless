@@ -343,7 +343,18 @@ def emit_snn_crate(snn_ckpt: Path, generated_dir: Path) -> tuple[list[bytes], li
 
     sha256 = hashlib.sha256(snn_ckpt.read_bytes()).hexdigest()
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    header = _HEADER.format(ckpt_path=str(snn_ckpt), sha256=sha256, timestamp=timestamp)
+    # Emit a path relative to repo root when possible so the generated
+    # `.rs` files are byte-identical across dev machines (no
+    # /home/<user>/ leak). Fall back to basename when the checkpoint
+    # lives outside the repo tree. SHA-256 below is the load-bearing
+    # identifier — the path string is operator convenience only.
+    # (lamu review fix on 88b7868.)
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        ckpt_display = str(snn_ckpt.resolve().relative_to(repo_root))
+    except ValueError:
+        ckpt_display = snn_ckpt.name
+    header = _HEADER.format(ckpt_path=ckpt_display, sha256=sha256, timestamp=timestamp)
 
     snn_dir = generated_dir / "snn"
     snn_dir.mkdir(parents=True, exist_ok=True)
@@ -458,7 +469,7 @@ def emit_snn_crate(snn_ckpt: Path, generated_dir: Path) -> tuple[list[bytes], li
 
     # snn/mod.rs declaring submodules
     mod_lines = ["// **GENERATED — DO NOT EDIT.**", "//"]
-    mod_lines.append(f"// Source:    {snn_ckpt}")
+    mod_lines.append(f"// Source:    {ckpt_display}")
     mod_lines.append(f"// SHA-256:   {sha256}")
     mod_lines.append(f"// Generated: {timestamp}")
     mod_lines.append("//")
