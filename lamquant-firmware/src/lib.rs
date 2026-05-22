@@ -39,6 +39,11 @@ pub mod scheduler;
 #[cfg(target_arch = "riscv32")]
 pub mod transport;
 
+// Cat A7 step 2 (2026-05-22): versioned MCU↔host envelope, host-
+// testable. Wraps `lamquant-ipc-types` with a per-MCU sequence
+// counter + ergonomic encode/decode helpers.
+pub mod comms;
+
 // Boot-time integrity check + power state coordination + RISC-V CSR
 // stack guard. RISC-V-only because they reference CSR instructions or
 // hardware registers.

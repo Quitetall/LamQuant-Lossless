@@ -68,6 +68,16 @@ embedded-alloc = "0.6"
 # `malloc`. Default-features off keeps no_std-clean.
 heapless = { version = "0.8", default-features = false }
 
+# Versioned MCU↔host IPC envelope (Cat A7 step 2 — 2026-05-22).
+# `comms.rs` uses `PostcardEnvelope` + `MsgKind` for every cross-link
+# message. Optional defmt-format gives on-MCU pretty-print without
+# pulling payload bytes into the format string.
+lamquant-ipc-types = { path = "../crates/lamquant-ipc-types" }
+# postcard pulled in transitively via lamquant-ipc-types but declared
+# explicitly so `comms.rs` can call `postcard::take_from_bytes` /
+# `postcard::to_slice` without going through a re-export.
+postcard = { version = "1", default-features = false }
+
 # `libm` removed 2026-05-21 — firmware now pure Q-format. Last
 # uses were `libm::log` in adaptive LPC BIC (replaced with
 # `ilog2_q24` + Q48 integer cost) and SNN init `exp_f32` Padé

@@ -39,7 +39,12 @@ mod embedded {
     use lamquant_firmware::safety::SafetyState;
     use lamquant_firmware::scheduler::{CodecMode, OutputMode, PipelineScheduler};
     use lamquant_firmware::{integrity, neural, power, stack_guard};
-    use panic_halt as _;
+    // Cat A5 step 2 (2026-05-22): panic_probe routes panic message
+    // bytes through defmt-RTT so the host probe-rs console can decode
+    // them off-MCU. `panic-halt` retained as a fallback dep for
+    // probe-less smoke flashes; opt in with `--features panic-halt`
+    // later if needed.
+    use panic_probe as _;
     use rp235x_hal as hal;
     use rp235x_hal::pac;
 

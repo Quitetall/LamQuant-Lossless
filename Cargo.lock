@@ -4337,10 +4337,12 @@ dependencies = [
  "fugit",
  "heapless",
  "lamquant-core",
+ "lamquant-ipc-types",
  "lamquant-weights",
  "nb 1.1.0",
  "panic-halt",
  "panic-probe",
+ "postcard",
  "riscv 0.12.1",
  "rp235x-hal",
 ]
