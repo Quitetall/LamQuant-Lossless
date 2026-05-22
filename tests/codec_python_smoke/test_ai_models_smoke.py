@@ -36,15 +36,17 @@ def test_module_has_public_surface(mod_name: str) -> None:
     assert public, f"{mod_name} appears empty"
 
 
-def test_run_diagnostics_exposes_main_or_run() -> None:
-    """run_diagnostics is a CLI tool — must expose a ``main`` or
-    ``run`` entry point. Don't pin which, the contract is "callable
-    entry exists"."""
+def test_run_diagnostics_exposes_metric_functions() -> None:
+    """run_diagnostics is a metric-collection script — pins that at
+    least one ``metric_*`` callable exists. The exact set of metrics
+    drifts as new diagnostics land, so the contract is "has metrics",
+    not a specific name list."""
     mod = importlib.import_module("ai_models.student.run_diagnostics")
-    entries = [n for n in ("main", "run") if hasattr(mod, n)
+    metrics = [n for n in dir(mod)
+               if n.startswith("metric_")
                and callable(getattr(mod, n))]
-    assert entries, (
-        "run_diagnostics exposes no main/run entry point"
+    assert metrics, (
+        "run_diagnostics exposes no metric_* functions"
     )
 
 

@@ -42,6 +42,65 @@ def test_data_dir():
         yield Path(tmpdir)
 
 
+# ============================================================
+# Real-EDF fixtures (no synthetic data — user direction 2026-05-21).
+# Skips when corpus absent (CI without reference_software/ mounted).
+# ============================================================
+
+
+@pytest.fixture(scope="session")
+def real_test_edf():
+    """Path to a real small EDF (pyedflib test_generator). Skips if absent."""
+    from tests.fixtures import require_real_test_edf
+    return require_real_test_edf()
+
+
+@pytest.fixture(scope="session")
+def real_tuh_edfs():
+    """List of real TUH EDFs from the NEDC eval split. Skips if absent."""
+    from tests.fixtures import require_real_tuh_edfs
+    return require_real_tuh_edfs(min_count=1)
+
+
+@pytest.fixture
+def real_q31_from_edf(tmp_path, real_test_edf):
+    """tmp_path NPZ derived from a real EDF via the production preprocess."""
+    from tests.fixtures import edf_to_q31_npz
+    npz = tmp_path / "real.npz"
+    return edf_to_q31_npz(real_test_edf, npz)
+
+
+# ============================================================
+# Real-EDF fixtures (no synthetic data — user direction 2026-05-21).
+# Skips when corpus absent (CI without reference_software/ mounted).
+# ============================================================
+
+
+@pytest.fixture(scope="session")
+def real_test_edf():
+    """Path to a real small EDF (pyedflib test_generator). Skips if absent."""
+    from tests.fixtures import require_real_test_edf
+    return require_real_test_edf()
+
+
+@pytest.fixture(scope="session")
+def real_tuh_edfs():
+    """List of real TUH EDFs from the NEDC eval split. Skips if absent."""
+    from tests.fixtures import require_real_tuh_edfs
+    return require_real_tuh_edfs(min_count=1)
+
+
+@pytest.fixture
+def real_q31_from_edf(tmp_path, real_test_edf):
+    """tmp_path NPZ derived from a real EDF via the production preprocess.
+
+    Returns the NPZ Path. Function-scoped because tmp_path is.
+    """
+    from tests.fixtures import edf_to_q31_npz
+    npz = tmp_path / "real.npz"
+    return edf_to_q31_npz(real_test_edf, npz)
+
+
 @pytest.fixture(scope="session")
 def root_dir():
     """Return root project directory."""

@@ -130,6 +130,8 @@ doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
 source = ["ai_models", "firmware", "lamquant_codec"]
 omit = [
     "tests/benchmarks/*",
+    # ad-hoc admin tools that scan the on-disk corpus; no production
+    # consumer + can't run in CI without the full TUEG mount
     "ai_models/dataset_sim/audit_dataset.py",
     "ai_models/dataset_sim/generate_validation_split.py",
     "ai_models/dataset_sim/validate_cross_dataset.py",
@@ -139,6 +141,38 @@ omit = [
     "ai_models/oracle/*",
     "ai_models/student/train_student_subband.py",
     "ai_models/student/harden_artifacts.py",
+    # GUI scope per feedback_frontend_only_scope (2026-05-10): TUI
+    # workflows integrate into GUI ribbon panels; the Python cockpit
+    # is the reference contract + not the edit target. Coverage of
+    # the 1127-LOC TUI script provides no test signal worth chasing.
+    "ai_models/training_cockpit.py",
+    # Interactive prompt-toolkit loops — the menu/eagle/readout flow
+    # needs a real TTY + keystroke driver. Pure helpers under these
+    # files ARE tested; the interactive event-loop bodies are not
+    # reachable from pytest and would inflate the surface that
+    # pretends to be tested.
+    "reference_implementations/python_codec/lamquant_codec/cli/syscheck.py",
+    "reference_implementations/python_codec/lamquant_codec/cli/menu.py",
+    "reference_implementations/python_codec/lamquant_codec/cli/eagle.py",
+    "reference_implementations/python_codec/lamquant_codec/cli/readout.py",
+    # Cockpit shim — re-exports from legacy/python_cockpit/ which is
+    # itself the retired Python cockpit (ADR 0017). Coverage of the
+    # shim adds no test signal beyond the import smoke we already
+    # have in tests/codec_python_smoke/.
+    "reference_implementations/python_codec/lamquant_codec/cli/cockpit.py",
+    # Experimental / research-track modules. Not on the production
+    # path. Smoke-imports cover the load surface; deeper testing waits
+    # until they graduate to production.
+    "reference_implementations/python_codec/lamquant_codec/experimental/*",
+    # Legacy shim (preserved-but-not-edited). Re-exports the retired
+    # lossless implementation for backward-compat readers; the modern
+    # path lives in lamquant_codec.lossless.
+    "reference_implementations/python_codec/lamquant_codec/legacy/*",
+    # Setup helper run once at install time. Not on the codec path.
+    "reference_implementations/python_codec/lamquant_codec/setup_cmd.py",
+    # Per-test files inside source packages — those are tests, not
+    # production code. Coverage of these files is not meaningful.
+    "ai_models/snn/tests/*",
 ]
 
 [tool.coverage.report]
