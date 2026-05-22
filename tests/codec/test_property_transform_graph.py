@@ -35,8 +35,16 @@ _PARAM_KEY = st.text(
 )
 _PARAM_VAL = st.integers(min_value=-(2**30), max_value=2**30 - 1)
 _PARAMS = st.dictionaries(_PARAM_KEY, _PARAM_VAL, min_size=0, max_size=4)
-_OP = st.builds(lambda op_id, params: tg.Op(op_id, **params),
-                st.sampled_from(_OP_IDS), _PARAMS)
+# Filter out a generated `op_id` key in `params` — passing it via
+# **params while also providing the positional arg raises TypeError
+# (Python keyword/positional collision). Hypothesis WILL produce
+# `op_id` as a dict key with the current 1-8 char ASCII alphabet.
+_OP = st.builds(
+    lambda op_id, params: tg.Op(
+        op_id, **{k: v for k, v in params.items() if k != "op_id"}
+    ),
+    st.sampled_from(_OP_IDS), _PARAMS,
+)
 _GRAPH = st.lists(_OP, min_size=0, max_size=12).map(tg.TransformGraph)
 
 _HYPO = settings(

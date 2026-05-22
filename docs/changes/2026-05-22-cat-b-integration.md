@@ -11,7 +11,7 @@ documented under "Deferred — no comparison surface."
 
 | Crate | Where | Feature flag | Smoke result | A/B vs original |
 |---|---|---|---|---|
-| `constriction 0.4` | `lamquant-core` | `experimental_arithmetic` | 6/6 pass | **Original wins.** rANS overhead > Golomb-Rice per user direction; constriction-backed coder kept opt-in for differential testing only. Don't promote to default. |
+| `constriction 0.4` | `lamquant-core` | `experimental_arithmetic` | 6/6 pass | **Original wins (empirical, 2026-05-22).** Bench `cat_b_entropy_encode_1250_residuals` on synthetic LPC residual (1250 i64): golomb-rice **864 bytes / 2.43 GiB/s**, constriction rANS **848 bytes / 381 MiB/s**. rANS is −1.9% CR but **6.5× slower**. Keep opt-in. |
 | `pulp 0.21` | `lamquant-core` dev-dep | always (dev) | 1/1 pass (`pulp_dispatch_sum_smoke`) | Untested at codec hot path. Lifting kernel is already 800 MiB/s scalar; pulp dispatch is the right SIMD primitive when we rewrite a real kernel. Bookmark. |
 | `realfft 3` | `lamquant-core` dev-dep | always (dev) | 1/1 pass (`realfft_roundtrip_8_point`) | No in-tree real-valued FFT today. Use when fullband spectrogram lands. |
 | `fixed 1` | `lamquant-firmware` | `cat-b-fixed` | 1/1 pass (`fixed_q15_add_mul_smoke`) | Hand-rolled raw `i32` Q-format is faster + simpler. Use `fixed` only for new code where the type-safety wins outweigh the wrapper cost. |
@@ -74,8 +74,37 @@ cargo test --features "host experimental_arithmetic" -p lamquant-core --lib arit
   comparators, not yet replacing any in-tree kernel.
 - `pulp`, `realfft` are dev-deps only — never enter a release binary.
 
+## Empirical bench commands + results (2026-05-22)
+
+```
+cargo bench --features "host experimental_arithmetic" \
+  -p lamquant-core --bench cat_b_compare
+```
+
+Output on `onyx-maurader-BrianBigPC`:
+
+```
+[cat_b_compare] residual_len=1250, input_bytes=10000,
+    golomb_rice_bytes_out=864 (5.53 bits/sym)
+[cat_b_compare] constriction_rANS_bytes_out=848 (5.43 bits/sym),
+    CR_delta_vs_golomb=-1.9%
+
+cat_b_entropy_encode_1250_residuals/golomb_rice
+    thrpt: [2.34 GiB/s, 2.43 GiB/s, 2.51 GiB/s]
+cat_b_entropy_encode_1250_residuals/constriction_rans
+    thrpt: [371 MiB/s, 381 MiB/s, 390 MiB/s]
+```
+
+**Verdict:** golomb-rice wins for our use case. rANS pays 6.5× wall-time
+for 1.9% CR. The implementation-overhead-vs-amortization breakpoint
+sits well beyond our 1250-residual blocks; constriction would only
+pay back at much larger blocks where the table costs amortize. Keep
+constriction behind `experimental_arithmetic` for differential
+testing — DO NOT promote to default.
+
 Next perf experiments (deferred — separate sessions):
 - pulp on lifting kernel (current 800 MiB/s; target +30%)
-- idsp biquad parity bench vs hand-rolled
-- constriction differential test at small block sizes (verify FP error
-  vs the in-tree Golomb path under degenerate inputs)
+- idsp biquad parity bench vs hand-rolled (firmware bench harness
+  needs criterion dev-dep first)
+- constriction differential test at much larger block sizes (16k+
+  residuals) to find the actual rate/throughput crossover
