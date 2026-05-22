@@ -92,8 +92,13 @@ pub struct PostcardEnvelope {
 /// Errors that `PostcardEnvelope` constructors can produce. Distinct
 /// from postcard's own ser/de errors — those bubble up untouched at
 /// the wire layer. (lamu review fix on 88b7868.)
+///
+/// `#[non_exhaustive]` so adding variants (`BadFormat`,
+/// `VersionMismatch`, etc.) later does not break exhaustive matches
+/// in downstream callers. (lamu review nit on 44b1026.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt-format", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum EnvelopeError {
     /// Caller passed more than `MAX_PAYLOAD` bytes. Chunk over
     /// multiple envelopes or compress before send.
