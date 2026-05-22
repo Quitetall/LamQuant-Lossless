@@ -222,6 +222,135 @@ pub fn write_xdf_from_lml(
     write_xdf_from_lml_opts(lml_path, xdf_path, XdfOpts::default())
 }
 
+/// Write multiple `.lml` archives into one `.xdf` file as
+/// independent LSL-shaped streams. ADR 0024 Phase 6.d.
+///
+/// Each input gets its own stream_id (derived from the LML's
+/// `signal_sha256`) + its own StreamHeader / Samples / optional
+/// ClockOffset / StreamFooter chunk sequence. The single
+/// FileHeader chunk at the top of the file envelopes everything.
+///
+/// `opts` applies to every stream — caller chooses the same
+/// timestamp / clock-offset policy across all inputs. If
+/// per-stream divergence is needed (different opts per input),
+/// that's future work.
+pub fn write_xdf_multistream(
+    lml_paths: &[std::path::PathBuf],
+    xdf_path: &std::path::Path,
+    opts: XdfOpts,
+) -> Result<(), LslIntegrationError> {
+    if lml_paths.is_empty() {
+        return Err(LslIntegrationError::Other(
+            "write_xdf_multistream: need at least one input .lml".into(),
+        ));
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(4096);
+    out.extend_from_slice(b"XDF:");
+    // FileHeader (one for the file).
+    let header_xml = build_file_header_xml();
+    write_chunk(&mut out, ChunkTag::FileHeader, header_xml.as_bytes());
+
+    for lml_path in lml_paths {
+        // Decode + derive stream metadata.
+        let (signal_i64, _meta) = lamquant_core::container::read_file(lml_path)
+            .map_err(LslIntegrationError::LmlDecode)?;
+        let n_ch = signal_i64.len();
+        let n_samples = signal_i64.first().map(|c| c.len()).unwrap_or(0);
+
+        let source_id = crate::stream_id::stream_id_from_lml(lml_path)?;
+        let spec = stream_spec_from_lml(lml_path, None, Some("EEG"), &source_id)?;
+        let stream_id = stream_id_to_u32(&source_id);
+
+        // StreamHeader for this stream.
+        let stream_header_xml = build_stream_header_xml(
+            &spec.name,
+            &spec.stream_type,
+            spec.channel_count,
+            spec.nominal_srate,
+            spec.channel_format,
+            &spec.source_id,
+            &spec.channel_labels,
+            &spec.channel_unit,
+        );
+        let mut sh_payload = Vec::with_capacity(4 + stream_header_xml.len());
+        sh_payload.extend_from_slice(&stream_id.to_le_bytes());
+        sh_payload.extend_from_slice(stream_header_xml.as_bytes());
+        write_chunk(&mut out, ChunkTag::StreamHeader, &sh_payload);
+
+        // Samples for this stream.
+        let samples_i32: Vec<Vec<i32>> = (0..n_samples)
+            .map(|t| {
+                (0..n_ch)
+                    .map(|ch| {
+                        signal_i64[ch]
+                            .get(t)
+                            .copied()
+                            .unwrap_or(0)
+                            .clamp(i32::MIN as i64, i32::MAX as i64)
+                            as i32
+                    })
+                    .collect()
+            })
+            .collect();
+        let timestamps: Option<Vec<f64>> = if opts.per_sample_timestamps {
+            let step = if spec.nominal_srate > 0.0 {
+                1.0 / spec.nominal_srate
+            } else {
+                0.0
+            };
+            Some(
+                (0..samples_i32.len())
+                    .map(|i| opts.timestamp_anchor + i as f64 * step)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let samples_chunk = build_samples_chunk(stream_id, &samples_i32, timestamps.as_deref());
+        write_chunk(&mut out, ChunkTag::Samples, &samples_chunk);
+
+        // ClockOffset chunks for this stream.
+        for &(t, off) in &opts.clock_offsets {
+            let mut co = Vec::with_capacity(20);
+            co.extend_from_slice(&stream_id.to_le_bytes());
+            co.extend_from_slice(&t.to_le_bytes());
+            co.extend_from_slice(&off.to_le_bytes());
+            write_chunk(&mut out, ChunkTag::ClockOffset, &co);
+        }
+
+        // StreamFooter for this stream.
+        let footer_xml = build_stream_footer_xml(
+            n_samples as u64,
+            opts.timestamp_anchor,
+            opts.timestamp_anchor
+                + if spec.nominal_srate > 0.0 {
+                    n_samples as f64 / spec.nominal_srate
+                } else {
+                    0.0
+                },
+        );
+        let mut sf = Vec::with_capacity(4 + footer_xml.len());
+        sf.extend_from_slice(&stream_id.to_le_bytes());
+        sf.extend_from_slice(footer_xml.as_bytes());
+        write_chunk(&mut out, ChunkTag::StreamFooter, &sf);
+    }
+
+    // Atomic write.
+    let parent = xdf_path.parent().unwrap_or(std::path::Path::new("."));
+    let tmp_path = parent.join(format!(
+        ".{}.tmp.xdf",
+        xdf_path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(&out)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, xdf_path)?;
+    Ok(())
+}
+
 /// Write a `.xdf` file from a `.lml` source. Single-stream;
 /// reads the LML container's signal + metadata, transposes to
 /// per-sample channel rows, writes XDF chunks. `opts` controls
