@@ -11,7 +11,7 @@ documented under "Deferred — no comparison surface."
 
 | Crate | Where | Feature flag | Smoke result | A/B vs original |
 |---|---|---|---|---|
-| `constriction 0.4` | `lamquant-core` | `experimental_arithmetic` | 6/6 pass | **Original wins (empirical, 2026-05-22).** Bench `cat_b_entropy_encode_1250_residuals` on synthetic LPC residual (1250 i64): golomb-rice **864 bytes / 2.43 GiB/s**, constriction rANS **848 bytes / 381 MiB/s**. rANS is −1.9% CR but **6.5× slower**. Keep opt-in. |
+| `constriction 0.4` | `lamquant-core` | `experimental_arithmetic` | 6/6 pass | **Original wins on REAL data (empirical, 2026-05-22).** Real CHB-MIT `chb01_01` ch0 post-LPC residual: golomb-rice **1251 bytes / 2.35 GiB/s**, constriction rANS **1260 bytes / 403 MiB/s** — constriction is **+0.7% bigger AND 5.8× slower**. Synthetic ±15 bench (favourable to rANS) showed −1.9% CR / 6.5× slower; real data exposes that the static Laplace prior misfits actual EEG residual heavy tails. Keep opt-in only. |
 | `pulp 0.21` | `lamquant-core` dev-dep | always (dev) | 1/1 pass (`pulp_dispatch_sum_smoke`) | Untested at codec hot path. Lifting kernel is already 800 MiB/s scalar; pulp dispatch is the right SIMD primitive when we rewrite a real kernel. Bookmark. |
 | `realfft 3` | `lamquant-core` dev-dep | always (dev) | 1/1 pass (`realfft_roundtrip_8_point`) | No in-tree real-valued FFT today. Use when fullband spectrogram lands. |
 | `fixed 1` | `lamquant-firmware` | `cat-b-fixed` | 1/1 pass (`fixed_q15_add_mul_smoke`) | Hand-rolled raw `i32` Q-format is faster + simpler. Use `fixed` only for new code where the type-safety wins outweigh the wrapper cost. |
@@ -81,26 +81,42 @@ cargo bench --features "host experimental_arithmetic" \
   -p lamquant-core --bench cat_b_compare
 ```
 
+Two harnesses live in `lamquant-core/benches/cat_b_compare.rs`:
+
+1. **Synthetic** (`cat_b_entropy_encode_1250_residuals`) — xorshift
+   ±15 i64 stream, mimics a perfectly-decorrelated LPC residual.
+2. **Real CHB-MIT** (`cat_b_entropy_encode_chbmit_real`) — loads
+   `chb01/chb01_01.edf` from `/mnt/4tb/data/Archive/edf/physionet/
+   chbmit/` (with fallback to `/mnt/4tb/data/Archive/lma/physionet/
+   chbmit.lma`), runs `lpc::analyze(channel0[..1250], order=8)`,
+   feeds the resulting residual stream to both encoders.
+
 Output on `onyx-maurader-BrianBigPC`:
 
-```
-[cat_b_compare] residual_len=1250, input_bytes=10000,
-    golomb_rice_bytes_out=864 (5.53 bits/sym)
-[cat_b_compare] constriction_rANS_bytes_out=848 (5.43 bits/sym),
-    CR_delta_vs_golomb=-1.9%
+### Synthetic ±15 (favourable to rANS — matches its Laplace prior)
 
-cat_b_entropy_encode_1250_residuals/golomb_rice
-    thrpt: [2.34 GiB/s, 2.43 GiB/s, 2.51 GiB/s]
-cat_b_entropy_encode_1250_residuals/constriction_rans
-    thrpt: [371 MiB/s, 381 MiB/s, 390 MiB/s]
+```
+golomb_rice       bytes=864  (5.53 bits/sym)   thrpt=2.43 GiB/s
+constriction_rans bytes=848  (5.43 bits/sym)   thrpt=381 MiB/s
+                  (-1.9%)                       (6.5x slower)
 ```
 
-**Verdict:** golomb-rice wins for our use case. rANS pays 6.5× wall-time
-for 1.9% CR. The implementation-overhead-vs-amortization breakpoint
-sits well beyond our 1250-residual blocks; constriction would only
-pay back at much larger blocks where the table costs amortize. Keep
-constriction behind `experimental_arithmetic` for differential
-testing — DO NOT promote to default.
+### Real CHB-MIT chb01_01 channel 0 (post-LPC residual)
+
+```
+golomb_rice       bytes=1251 (8.01 bits/sym)   thrpt=2.35 GiB/s
+constriction_rans bytes=1260 (8.06 bits/sym)   thrpt=403 MiB/s
+                  (+0.7% BIGGER)                (5.8x slower)
+```
+
+**Verdict (real data):** Constriction loses on **both** axes. The
+prior synthetic A/B was an unrealistic best-case for rANS — the
+xorshift ±15 distribution matches constriction's static Laplace
+model. Real CHB-MIT EEG residuals are heavier-tailed; golomb-rice's
+per-block parameter adaptation handles them with smaller output AND
+much higher throughput. Keep constriction behind
+`experimental_arithmetic` for differential testing only — DO NOT
+promote to default.
 
 Next perf experiments (deferred — separate sessions):
 - pulp on lifting kernel (current 800 MiB/s; target +30%)
