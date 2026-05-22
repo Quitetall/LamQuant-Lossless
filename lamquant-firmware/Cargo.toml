@@ -92,7 +92,7 @@ postcard = { version = "1", default-features = false }
 # Adding the dep makes the lib available for parity tests + future
 # kernel swap-outs WITHOUT affecting the default firmware build.
 fixed     = { version = "1", default-features = false, optional = true }
-microfft  = { version = "0.6", default-features = false, features = ["size-1024"], optional = true }
+microfft  = { version = "0.6", default-features = false, features = ["size-8"], optional = true }
 idsp      = { version = "0.21", default-features = false, optional = true }
 
 # `libm` removed 2026-05-21 — firmware now pure Q-format. Last

@@ -4,8 +4,11 @@
 //! `--features cat-b-{fixed,microfft,idsp,all}`. PASS = API surface
 //! works; perf comparison happens in benches once a kernel-swap
 //! candidate lands.
-
-#![cfg(feature = "cat-b-all")]
+//!
+//! Per-test `#[cfg(feature = "...")]` gates control compilation so
+//! each comparator can be smoke-tested in isolation
+//! (`cargo test --features cat-b-fixed --test cat_b_smoke`) without
+//! pulling the others. (lamu review fix on 2a8d047.)
 
 /// `fixed` — Q-format types. Smoke: Q15 add + multiply round-trip
 /// through the lib's `I1F15` (signed 1.15) and `I16F16` (signed 16.16)
@@ -36,12 +39,16 @@ fn fixed_q15_add_mul_smoke() {
 fn microfft_8_point_dc_smoke() {
     use microfft::real::rfft_8;
     let mut samples: [f32; 8] = [1.0; 8]; // DC = 1.0 everywhere
+    let n = samples.len() as f32;
     let spectrum = rfft_8(&mut samples);
     // DC bin should be N (un-normalised), rest near zero.
-    assert!((spectrum[0].re - 8.0).abs() < 1e-4, "bin 0 = {}", spectrum[0].re);
+    assert!((spectrum[0].re - n).abs() < 1e-4, "bin 0 = {}", spectrum[0].re);
+    // Pure DC → all non-DC bins should be effectively zero. Tightened
+    // from 1e-4 to 1e-10 to catch wrong-input-alignment regressions.
+    // (lamu review nit on 2a8d047.)
     for (i, bin) in spectrum[1..].iter().enumerate() {
         let mag2 = bin.re * bin.re + bin.im * bin.im;
-        assert!(mag2 < 1e-4,
+        assert!(mag2 < 1e-10,
                 "bin {} should be ~0, got |X|^2 = {}", i + 1, mag2);
     }
 }
