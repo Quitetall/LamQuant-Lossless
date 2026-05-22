@@ -16,7 +16,7 @@ documented under "Deferred — no comparison surface."
 | `realfft 3` | `lamquant-core` dev-dep | always (dev) | 1/1 pass (`realfft_roundtrip_8_point`) | No in-tree real-valued FFT today. Use when fullband spectrogram lands. |
 | `fixed 1` | `lamquant-firmware` | `cat-b-fixed` | 1/1 pass (`fixed_q15_add_mul_smoke`) | Hand-rolled raw `i32` Q-format is faster + simpler. Use `fixed` only for new code where the type-safety wins outweigh the wrapper cost. |
 | `microfft 0.6` (size-1024) | `lamquant-firmware` | `cat-b-microfft` | 1/1 pass (`microfft_8_point_dc_smoke`) | Hazard3 has no on-MCU FFT today. When spectrogram-on-device lands, microfft is the right choice. |
-| `idsp 0.21` | `lamquant-firmware` | `cat-b-idsp` | 1/1 pass (`idsp_cossin_smoke`, ~2.3e-5 err) | Hand-rolled biquad already beats C on RP2350 (memory entry "Rust DSP perf — RESOLVED"). idsp is the alternative if we ever need `cossin` / `unwrap` / `Lowpass<>` plumbing. |
+| `idsp 0.21` | `lamquant-firmware` (smoke) + `lamquant-core` (bench) | `cat-b-idsp` + dev-dep | 1/1 pass + biquad A/B | **idsp wins Q-format by ~30%** (empirical 2026-05-22, see "Empirical bench" section below). f32 tied (2.11 vs 2.09 GiB/s); Q30 i32 idsp 1.74 GiB/s vs hand-rolled 1.34 GiB/s. firmware swap is a real perf opportunity post-ship. Wire-format-locked biquad coeffs gate the actual replacement. |
 
 ## Skipped — no FPU / no trigger met
 
@@ -118,9 +118,36 @@ much higher throughput. Keep constriction behind
 `experimental_arithmetic` for differential testing only — DO NOT
 promote to default.
 
+### idsp biquad A/B (2026-05-22 — bench `cat_b_biquad_df1_*`)
+
+```
+cat_b_biquad_df1_f32_1024_samples
+  handrolled_df1_f32        2.11 GiB/s
+  idsp_directform1_f32      2.09 GiB/s     (tie, ±1% noise)
+
+cat_b_biquad_df1_q30_i32_1024_samples
+  handrolled_df1_q30_i32    1.34 GiB/s
+  idsp_directform1_q30_i32  1.74 GiB/s     (+30% — idsp wins)
+```
+
+**Verdict (firmware-realistic Q-format):** idsp's `Biquad<Q<i32, i64,
+30>>` + `DirectForm1Wide` is ~30% faster than a clean hand-rolled
+DF1 i32 path with the same `i64` accumulator + Q30 round-then-shift.
+The win likely comes from idsp's tighter MULH/MULL instruction
+scheduling (verified on x86_64; effect on RP2350 Hazard3 RV32IMAC
+unknown until benched on-MCU).
+
+NOT swapped into firmware yet — `HpFilterBank::run` is on the
+wire-format-locked path (biquad coefficients are part of the
+encoder/decoder contract). Any swap needs (a) a Hazard3-target
+bench to confirm the +30% transfers, (b) coefficient-format
+audit so the swap stays bit-equivalent, and (c) a full
+conformance roundtrip pass. Treat as a tracked post-ship perf
+opportunity, not a blocker.
+
 Next perf experiments (deferred — separate sessions):
 - pulp on lifting kernel (current 800 MiB/s; target +30%)
-- idsp biquad parity bench vs hand-rolled (firmware bench harness
-  needs criterion dev-dep first)
+- idsp Q30 i32 bench on Hazard3 RV32IMAC target to confirm the
+  +30% generalises off x86_64
 - constriction differential test at much larger block sizes (16k+
   residuals) to find the actual rate/throughput crossover
