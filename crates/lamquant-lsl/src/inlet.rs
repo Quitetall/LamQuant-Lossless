@@ -225,15 +225,26 @@ mod live {
         /// when the caller has already discovered + filtered the
         /// streams (e.g. via `lsl::resolve_byprop` with a richer
         /// predicate, or a UI source picker).
+        ///
+        /// After opening the inlet, this re-fetches the full
+        /// StreamInfo via `inlet.info()` — `resolve_bypred`'s
+        /// discovery beacon may not carry the publisher's
+        /// channel_format, but the post-connect info does. Without
+        /// this re-fetch our channel_format dispatch routes to the
+        /// wrong arm.
         pub fn from_info(info: lsl::StreamInfo) -> Result<Self, LslIntegrationError> {
-            let n_channels = info.channel_count() as usize;
-            let nominal_srate = info.nominal_srate();
-            let channel_format = info.channel_format();
             let inner = lsl::StreamInlet::new(
                 &info, /* max_buflen = */ 360, /* max_chunklen = */ 0,
                 /* recover = */ true,
             )
             .map_err(LslIntegrationError::Lsl)?;
+            // Re-fetch full info from the publisher.
+            let full = inner
+                .info(lsl::FOREVER)
+                .map_err(LslIntegrationError::Lsl)?;
+            let n_channels = full.channel_count() as usize;
+            let nominal_srate = full.nominal_srate();
+            let channel_format = full.channel_format();
             Ok(Self {
                 inner,
                 n_channels,
@@ -314,14 +325,38 @@ mod live {
             })
         }
 
-        /// Capture up to `max_samples` from the network. Returns
-        /// the number of windows successfully encoded + flushed
-        /// during this call. Trailing partial window is left in
-        /// the buffer for the next call or `finish`.
+        /// Capture up to `max_samples` from the network, blocking
+        /// forever per `pull_sample`. Use [`Self::capture_timeout`]
+        /// for bounded-wait variants. Returns the number of
+        /// windows successfully encoded + flushed during this call.
         pub fn capture(&mut self, max_samples: usize) -> Result<usize, LslIntegrationError> {
+            self.capture_timeout(max_samples, lsl::FOREVER)
+        }
+
+        /// Capture up to `max_samples` with a per-sample timeout
+        /// (seconds; `0.0` = immediate non-blocking poll;
+        /// `lsl::FOREVER` = block indefinitely). Stops early
+        /// when a `pull_sample` times out (e.g. the publisher
+        /// disconnected mid-record) and returns the windows
+        /// encoded so far. Use this in interactive UIs / event
+        /// loops where blocking forever is unacceptable.
+        pub fn capture_timeout(
+            &mut self,
+            max_samples: usize,
+            per_sample_timeout_sec: f64,
+        ) -> Result<usize, LslIntegrationError> {
             let mut windows = 0usize;
             for _ in 0..max_samples {
-                let (sample, _ts) = self.inlet.pull_sample(lsl::FOREVER)?;
+                let (sample, _ts) = self.inlet.pull_sample(per_sample_timeout_sec)?;
+                // liblsl signals timeout by returning an empty
+                // sample vec (not an `Err`). Treat that as "no
+                // sample available within the timeout" + drain
+                // the buffer + bail. Caller can resume by calling
+                // capture_timeout again when more samples may
+                // arrive.
+                if sample.is_empty() {
+                    break;
+                }
                 self.buffer
                     .push_sample(&sample)
                     .map_err(|e| LslIntegrationError::Other(e.to_string()))?;
