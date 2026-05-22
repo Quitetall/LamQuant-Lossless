@@ -40,12 +40,14 @@ fn session_timestamps_track_with_pulls() {
         )
         .unwrap();
         let outlet = lsl::StreamOutlet::new(&info, 0, 360).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(400));
         for i in 0..6i32 {
             outlet.push_sample(&vec![i, i * 2]).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Hold the outlet for an extra 3 s so the inlet finishes
+        // its capture_timeout loop before the stream tears down.
+        std::thread::sleep(std::time::Duration::from_secs(3));
     });
 
     let inlet = Inlet::resolve_by_name(&unique, 5.0).expect("resolve");
@@ -56,7 +58,9 @@ fn session_timestamps_track_with_pulls() {
     assert_eq!(session.first_lsl_timestamp(), None);
     assert_eq!(session.last_lsl_timestamp(), None);
 
-    let captured = session.capture_timeout(6, 1.0).expect("capture");
+    // Generous 2 s per-sample timeout so the test doesn't race
+    // against publisher startup or LSL discovery latency.
+    let captured = session.capture_timeout(6, 2.0).expect("capture");
     assert!(captured >= 1, "expected at least 1 window; got {}", captured);
 
     let first = session.first_lsl_timestamp().expect("first_ts set");
