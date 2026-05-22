@@ -43,7 +43,12 @@ async = ["liblsl", "dep:tokio"]
 # std + EDF reader + LMA container).
 lamquant-core = { path = "../../lamquant-core", default-features = false, features = ["host"] }
 # LSL bindings — only pulled in when the `liblsl` feature is on.
-lsl = { version = "0.1.1", optional = true }
+# Pinned at the liblsl-rust master rev (instead of crates.io 0.1.1)
+# so the build picks up the more recent lsl-sys build script that
+# is more tolerant of modern C++ toolchains + may detect system
+# liblsl via pkg-config. Falls back to vendored build only if
+# system liblsl isn't found.
+lsl = { git = "https://github.com/labstreaminglayer/liblsl-rust", optional = true }
 # SHA-256 for deterministic stream_id generation from file
 # fingerprints. Used regardless of `liblsl` feature.
 sha2 = "0.10"

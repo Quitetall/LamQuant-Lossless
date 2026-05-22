@@ -31,7 +31,7 @@ pub fn stream_info_from_lml(
 ) -> Result<StreamInfo, LslIntegrationError> {
     let source_id = crate::stream_id::stream_id_from_lml(lml_path)?;
     let spec = stream_spec_from_lml(lml_path, name, Some("EEG"), &source_id)?;
-    let info = StreamInfo::new(
+    let mut info = StreamInfo::new(
         &spec.name,
         &spec.stream_type,
         spec.channel_count,
@@ -40,15 +40,15 @@ pub fn stream_info_from_lml(
         &spec.source_id,
     )
     .map_err(LslIntegrationError::Lsl)?;
-    let desc = info.desc();
-    let channels = desc.append_child("channels");
+    let mut desc = info.desc();
+    let mut channels = desc.append_child("channels");
     for (i, label) in spec.channel_labels.iter().enumerate() {
         let display = if label.is_empty() {
             format!("ch{}", i)
         } else {
             label.clone()
         };
-        let ch = channels.append_child("channel");
+        let mut ch = channels.append_child("channel");
         ch.append_child_value("label", &display);
         ch.append_child_value("unit", &spec.channel_unit);
         ch.append_child_value("type", "EEG");
