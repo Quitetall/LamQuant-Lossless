@@ -149,6 +149,31 @@ fn build_stream_footer_xml(sample_count: u64, first_ts: f64, last_ts: f64) -> St
     )
 }
 
+/// XDF writer options. Backwards-compatible — `Default` matches
+/// the Phase 6.a writer's behaviour (no per-sample timestamps).
+#[derive(Debug, Clone, Default)]
+pub struct XdfOpts {
+    /// If true, emit per-sample timestamps in Samples chunks
+    /// (flag byte = 1, followed by `f64 LE` timestamp per sample).
+    /// If false (default), emit flag = 0 — readers infer timing
+    /// from `nominal_srate`.
+    pub per_sample_timestamps: bool,
+    /// First sample's timestamp (LSL epoch seconds). Subsequent
+    /// samples are `anchor + i / nominal_srate`. Default 0.0.
+    pub timestamp_anchor: f64,
+}
+
+impl XdfOpts {
+    pub fn with_timestamps(mut self, on: bool) -> Self {
+        self.per_sample_timestamps = on;
+        self
+    }
+    pub fn with_timestamp_anchor(mut self, anchor: f64) -> Self {
+        self.timestamp_anchor = anchor;
+        self
+    }
+}
+
 /// Build a Samples chunk payload. XDF Samples chunks have the
 /// format:
 ///   [stream_id: u32 LE][num_samples: variable][per-sample data]
@@ -158,18 +183,20 @@ fn build_stream_footer_xml(sample_count: u64, first_ts: f64, last_ts: f64) -> St
 fn build_samples_chunk(
     stream_id: u32,
     samples: &[Vec<i32>],
+    timestamps: Option<&[f64]>,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + samples.len() * 8);
+    let mut out = Vec::with_capacity(4 + samples.len() * 16);
     out.extend_from_slice(&stream_id.to_le_bytes());
-    // num_samples: write as variable-length per spec. For chunks
-    // ≤ 255 use 1-byte form; same encoding as length_prefix.
     write_length_prefix(&mut out, samples.len() as u64);
-    // We don't emit per-sample timestamps in Phase 6 — the
-    // StreamHeader's nominal_srate is sufficient for reconstruction.
-    // The flag byte = 0 means "no timestamp", which XDF readers
-    // interpret as "spaced at 1/nominal_srate".
-    for sample in samples {
-        out.push(0u8); // no timestamp
+    for (i, sample) in samples.iter().enumerate() {
+        if let Some(ts) = timestamps {
+            // flag = 1 → next 8 bytes are the f64 LE timestamp.
+            out.push(1u8);
+            let t = ts.get(i).copied().unwrap_or(0.0);
+            out.extend_from_slice(&t.to_le_bytes());
+        } else {
+            out.push(0u8);
+        }
         for &v in sample {
             out.extend_from_slice(&v.to_le_bytes());
         }
@@ -177,12 +204,22 @@ fn build_samples_chunk(
     out
 }
 
-/// Write a `.xdf` file from a `.lml` source. Single-stream;
-/// reads the LML container's signal + metadata, transposes to
-/// per-sample channel rows, writes XDF chunks.
+/// Convenience: write XDF with default options.
 pub fn write_xdf_from_lml(
     lml_path: &std::path::Path,
     xdf_path: &std::path::Path,
+) -> Result<(), LslIntegrationError> {
+    write_xdf_from_lml_opts(lml_path, xdf_path, XdfOpts::default())
+}
+
+/// Write a `.xdf` file from a `.lml` source. Single-stream;
+/// reads the LML container's signal + metadata, transposes to
+/// per-sample channel rows, writes XDF chunks. `opts` controls
+/// per-sample timestamp emission (Phase 6.b).
+pub fn write_xdf_from_lml_opts(
+    lml_path: &std::path::Path,
+    xdf_path: &std::path::Path,
+    opts: XdfOpts,
 ) -> Result<(), LslIntegrationError> {
     // Load the codec-decoded signal + container metadata.
     let (signal_i64, _meta) =
@@ -240,7 +277,21 @@ pub fn write_xdf_from_lml(
     // Samples chunk (tag 3). For Phase 6 emit one big Samples
     // chunk; large recordings should chunk into ~1-second slices
     // (future work).
-    let samples_chunk = build_samples_chunk(stream_id, &samples_i32);
+    let timestamps: Option<Vec<f64>> = if opts.per_sample_timestamps {
+        let step = if spec.nominal_srate > 0.0 {
+            1.0 / spec.nominal_srate
+        } else {
+            0.0
+        };
+        Some(
+            (0..samples_i32.len())
+                .map(|i| opts.timestamp_anchor + i as f64 * step)
+                .collect(),
+        )
+    } else {
+        None
+    };
+    let samples_chunk = build_samples_chunk(stream_id, &samples_i32, timestamps.as_deref());
     write_chunk(&mut out, ChunkTag::Samples, &samples_chunk);
 
     // StreamFooter chunk (tag 6).
