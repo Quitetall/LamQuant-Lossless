@@ -95,6 +95,10 @@ pub mod inlet;
 // for Phase 1; this module gets the full implementation later).
 pub mod pacing;
 
+// Phase 6 — XDF export (pure Rust, no liblsl dep). Writes a .xdf
+// file from a .lml so LabRecorder / OpenViBE / pyxdf can replay.
+pub mod xdf;
+
 mod error;
 
 pub use error::LslIntegrationError;
