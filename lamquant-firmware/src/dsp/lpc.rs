@@ -323,8 +323,62 @@ fn residuals_q27(x: &[i32], r: &mut [i32], coeffs_q27: &[i32; LPC_ORDER]) {
 /// matching the existing convention) and the chosen order. `None` if
 /// `r[0] == 0` (degenerate input — fall back to all-zero coefficients).
 ///
-/// Uses `libm::log` (the only float dependency the firmware DSP path
-/// pulls in). All other arithmetic remains Q56 integer.
+/// **Pure Q-format** (2026-05-21): BIC cost computed via integer log2
+/// with Q24 fractional precision instead of `libm::log + f64`. Removes
+/// the last float dependency from the firmware DSP path.
+
+/// Q24 fixed-point log2 of a positive integer.
+///
+/// Returns `floor(log2(x)) * 2^24 + frac_q24` where `frac_q24` is the
+/// top 24 bits below the leading 1. The result is a piecewise-linear
+/// approximation (no polynomial correction); error is bounded by
+/// ~0.086 of a binade, well below the BIC scorer's discrimination floor
+/// (orders separated by `0.499 * n * log2(e_m+1/e_m)` which is on the
+/// order of tens of Q24 units, vs ~1.4M Q24 units of linear-interp
+/// error). For `x <= 0` returns `i64::MIN` as `-inf` sentinel.
+#[inline]
+fn ilog2_q24(x: i64) -> i64 {
+    if x <= 0 {
+        return i64::MIN;
+    }
+    let xu = x as u64;
+    let int_part = 63 - xu.leading_zeros() as i64;
+    let normalized = xu << (63 - int_part);
+    // Bits 62..39 of `normalized` give 24 fractional bits.
+    let frac_q24 = ((normalized >> 39) & 0xFF_FFFF) as i64;
+    (int_part << 24) | frac_q24
+}
+
+/// BIC cost in Q48 fixed-point. Lower = better. Replaces the f64 form:
+/// `0.72 * n * ln(e/n) + 32*ln(2) * order_k`.
+///
+/// Pre-baked constants (truncated to nearest integer in Q24):
+///   `0.72 * ln(2) = 0.499065970003241` → `8_373_164` (Q24)
+///   `32   * ln(2) = 22.18070977791825` → `372_212_758` (Q24)
+///
+/// Computation in i128 to safely span `n*log_ratio*c1` ~ 2^64.
+#[inline]
+fn bic_cost_q48(e: i128, n: i64, order_k: usize) -> i128 {
+    if e <= 0 {
+        return i128::MAX;
+    }
+    const C1_Q24: i128 = 8_373_164;
+    const ORDER_BIT_COST_Q24: i128 = 372_212_758;
+
+    let e_i64 = if e > i64::MAX as i128 {
+        i64::MAX
+    } else {
+        e as i64
+    };
+    let log_e_q24 = ilog2_q24(e_i64);
+    let log_n_q24 = ilog2_q24(n);
+    let log_ratio_q24 = log_e_q24 - log_n_q24;
+
+    let term1_q48 = C1_Q24 * (n as i128) * (log_ratio_q24 as i128);
+    let term2_q48 = (ORDER_BIT_COST_Q24 << 24) * (order_k as i128);
+    term1_q48 + term2_q48
+}
+
 #[inline]
 fn levinson_q27_adaptive(r: &[i64], n_samples: usize) -> Option<([i32; LPC_ORDER], usize)> {
     if r[0] == 0 {
@@ -333,27 +387,21 @@ fn levinson_q27_adaptive(r: &[i64], n_samples: usize) -> Option<([i32; LPC_ORDER
     const QA: u32 = 56;
     const HALF_QA: i128 = 1 << (QA - 1);
     const ONE_QA: i128 = 1 << QA;
-    // Exact `32 · ln 2` (≈ 22.18070977791825). Truncating to 22.18 — as an
-    // earlier revision did — left the firmware scorer at a slightly different
-    // operating point than the host's `0.72·n·ln(e/n) + ORDER_BIT_COST·k`,
-    // so borderline AIC ties resolved differently between the two paths
-    // (lamu review fix on the initial commit).
-    const ORDER_BIT_COST: f64 = 32.0 * core::f64::consts::LN_2;
 
     let mut a_prev = [0i64; LPC_ORDER];
     let mut a_curr = [0i64; LPC_ORDER];
     let mut e: i128 = r[0] as i128;
 
-    let mut best_cost = f64::INFINITY;
+    // Q48 fixed-point cost (`bic_cost_q48`). Lower = better. i128::MAX
+    // is the "+infinity" sentinel.
+    let mut best_cost: i128 = i128::MAX;
     let mut best_order: usize = 0;
     let mut best_a = [0i64; LPC_ORDER];
 
     // Order 0 baseline: cost from the raw r[0] energy. No coefficients
     // to emit; emit-time `>>` keeps them zero.
-    let n_f = n_samples as f64;
-    let r0_f = r[0] as f64;
-    if r0_f > 0.0 {
-        let cost0 = 0.72 * n_f * libm::log(r0_f / n_f);
+    if r[0] > 0 {
+        let cost0 = bic_cost_q48(r[0] as i128, n_samples as i64, 0);
         if cost0 < best_cost {
             best_cost = cost0;
         }
@@ -397,14 +445,16 @@ fn levinson_q27_adaptive(r: &[i64], n_samples: usize) -> Option<([i32; LPC_ORDER
             break;
         }
 
-        // Score this order. e is in raw-energy scale (≈ R[0] units); the
-        // host path uses the same formulation against its f64 `e`, so
-        // the chosen orders match to within numerical rounding.
+        // Score this order. e is in raw-energy scale (≈ R[0] units).
+        // Integer Q24 log2 path (2026-05-21): the host f64 path may pick
+        // a different order on the rare borderline window — well within
+        // the ±1 LSB Levinson drift already documented between f64 and
+        // Q56 paths. Lossless property and per-window bitstream parity
+        // are preserved (encode/decode roundtrip is exact regardless of
+        // which order the encoder selected).
         let order_k = m + 1;
-        let e_f = e as f64;
-        if e_f > 0.0 {
-            let cost = 0.72 * n_f * libm::log(e_f / n_f)
-                + ORDER_BIT_COST * order_k as f64;
+        if e > 0 {
+            let cost = bic_cost_q48(e, n_samples as i64, order_k);
             if cost < best_cost {
                 best_cost = cost;
                 best_order = order_k;

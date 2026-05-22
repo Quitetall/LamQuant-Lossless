@@ -134,29 +134,38 @@ fn fold_groupnorm_relu(acc_q31: i32, norm_w_q7: i8, norm_b_q15: i16) -> i16 {
 
 // ─── Activation buffers ─────────────────────────────────────────────
 //
-// Two ping-pong activation buffers, plus a small scratch gather for the
-// inner conv. Allocated on the heap (alloc::vec) so host tests don't
-// bake giant static muts. Production firmware will swap these for
-// section-pinned `static mut` buffers in SRAM6/7 when scheduler integrates.
+// Single flat `alloc::Vec<i16>` of length `channels * t`, row-major
+// (ch-major). Was `Vec<Vec<i16>>` which malloc'd N+1 times per
+// `ActBuf::new`; the focal pipeline allocates 8 buffers per `forward()`
+// → ~626 mallocs/window. Flat layout drops that to **8** mallocs
+// (one per ActBuf), with identical numerical semantics. Cat A6 step 1
+// (2026-05-21) — production firmware will swap these for section-
+// pinned `static mut` buffers in SRAM6/7 once scheduler integrates.
 
 struct ActBuf {
-    /// `data[ch][t]` — int16 activations.
-    data: Vec<Vec<i16>>,
+    channels: usize,
+    t: usize,
+    /// Row-major: `data[ch * t + t_idx]`.
+    data: Vec<i16>,
 }
 
 impl ActBuf {
     fn new(channels: usize, t: usize) -> Self {
         Self {
-            data: vec![vec![0i16; t]; channels],
+            channels,
+            t,
+            data: vec![0i16; channels.saturating_mul(t)],
         }
     }
 
+    #[inline]
     fn get(&self, ch: usize, t: usize) -> i16 {
-        self.data[ch][t]
+        self.data[ch * self.t + t]
     }
 
+    #[inline]
     fn set(&mut self, ch: usize, t: usize, v: i16) {
-        self.data[ch][t] = v;
+        self.data[ch * self.t + t] = v;
     }
 }
 
@@ -286,7 +295,7 @@ pub fn forward(l3: &[[i16; T_IN]; N_INPUT_CHANNELS], out_latent: &mut [[i16; T_L
     let mut act_in = ActBuf::new(N_INPUT_CHANNELS, T_IN);
     for ch in 0..N_INPUT_CHANNELS {
         for t in 0..T_IN {
-            act_in.data[ch][t] = l3[ch][t];
+            act_in.set(ch, t, l3[ch][t]);
         }
     }
 

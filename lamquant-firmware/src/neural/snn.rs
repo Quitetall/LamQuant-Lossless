@@ -165,56 +165,12 @@ pub fn init() {
     SENSITIVITY.store(SnnSensitivity::Medium as u8, Ordering::Relaxed);
 }
 
-/// Convert generated A_LOG i16 table (linear scale s_log) into |A| Q10.
-///
-/// Real value chain:
-///   A_log_real = A_LOG[i] * A_LOG_SCALE       (f32)
-///   |A|_real   = exp(A_log_real)              (always positive)
-///   |A|_q10    = clamp_i16(round(|A| * 1024))
-/// Round-to-nearest-i16 without libm. `f32::round` lives in `std`,
-/// not in `core::f32`, so we inline it for the no_std target.
-#[inline]
-fn round_f32_to_i16(x: f32) -> i16 {
-    let r = if x >= 0.0 { x + 0.5 } else { x - 0.5 };
-    if r >= i16::MAX as f32 { i16::MAX }
-    else if r <= i16::MIN as f32 { i16::MIN }
-    else { r as i16 }
-}
-
-fn build_a_abs_q10(
-    a_log: &[i16; D_INNER * D_STATE], a_log_scale: f32,
-    out: &mut [[i16; D_STATE]; D_INNER],
-) {
-    for d in 0..D_INNER {
-        for n in 0..D_STATE {
-            let alog_real = (a_log[d * D_STATE + n] as f32) * a_log_scale;
-            // Padé exp approximant (no libm dep). Init-only path
-            // — embedded build runs this ~1280 times at boot.
-            let a_real = exp_f32(alog_real);
-            out[d][n] = round_f32_to_i16(a_real * 1024.0);
-        }
-    }
-}
-
-fn build_d_q15(d_table: &[i8; D_INNER], d_scale: f32, out: &mut [i16; D_INNER]) {
-    for d in 0..D_INNER {
-        let real = (d_table[d] as f32) * d_scale;
-        out[d] = round_f32_to_i16(real * 32768.0);
-    }
-}
-
-/// Polynomial exp(x) for x ∈ [-4, +4]. f32 emulation suffices for the
-/// init-time A_log conversion (one-shot, not the hot path).
-fn exp_f32(x: f32) -> f32 {
-    // Pade approximant of exp(x) good to ~1e-4 on [-4, +4]:
-    //   exp(x) ≈ (1 + x/2 + x²/9 + x³/72) / (1 - x/2 + x²/9 - x³/72)
-    let xc = if x > 4.0 { 4.0 } else if x < -4.0 { -4.0 } else { x };
-    let x2 = xc * xc;
-    let x3 = x2 * xc;
-    let num = 1.0 + xc * 0.5 + x2 / 9.0 + x3 / 72.0;
-    let den = 1.0 - xc * 0.5 + x2 / 9.0 - x3 / 72.0;
-    num / den
-}
+// Pure Q-format (2026-05-21): `round_f32_to_i16`, `build_a_abs_q10`,
+// `build_d_q15`, and `exp_f32` were deleted. Their work moved to
+// `tools/regen_snn_weights.py` (codegen-time bake). The A_ABS_Q10 +
+// D_Q15 tables now live in `lamquant-weights/src/generated/snn/*.rs`
+// as `pub static`; the firmware reads them by reference. No f32, no
+// libm, no boot-time Padé math.
 
 pub fn set_sensitivity(level: SnnSensitivity) {
     SENSITIVITY.store(level as u8, Ordering::Relaxed);
@@ -233,8 +189,8 @@ pub fn inference(l3: &[[i16; T_INPUT]; INPUT_CH]) {
 
     // Stage 1 — spatial_mix: Linear(21 → 40) per timestep.
     // We process timestep-at-a-time to fit the linear_i8_i16 vector signature.
-    let w_scale_q15 = scale_to_q15(spatial_mix::SPATIAL_MIX_WEIGHT_SCALE);
-    let b_scale_q15 = scale_to_q15(spatial_mix::SPATIAL_MIX_BIAS_SCALE);
+    let w_scale_q15 = spatial_mix::SPATIAL_MIX_WEIGHT_SCALE_Q15;
+    let b_scale_q15 = spatial_mix::SPATIAL_MIX_BIAS_SCALE_Q15;
     let mut col_in:  [i16; INPUT_CH] = [0; INPUT_CH];
     let mut col_out: [i16; D_MODEL]  = [0; D_MODEL];
     for t in 0..T_INPUT {
@@ -254,8 +210,8 @@ pub fn inference(l3: &[[i16; T_INPUT]; INPUT_CH]) {
     // After layer 1: state.x_buf holds the final per-timestep activations.
 
     // Stage 4 — readout: Linear(40 → 8) per timestep, then threshold.
-    let rw_scale = scale_to_q15(readout::READOUT_WEIGHT_SCALE);
-    let rb_scale = scale_to_q15(readout::READOUT_BIAS_SCALE);
+    let rw_scale = readout::READOUT_WEIGHT_SCALE_Q15;
+    let rb_scale = readout::READOUT_BIAS_SCALE_Q15;
     let mut activity_sum = 0u32;
     let mut col_d:      [i16; D_MODEL]    = [0; D_MODEL];
     let mut col_logits: [i16; READOUT_DIM] = [0; READOUT_DIM];
@@ -292,8 +248,8 @@ pub fn inference(l3: &[[i16; T_INPUT]; INPUT_CH]) {
 enum Dir { L0Fwd, L0Bwd, L1Fwd, L1Bwd }
 
 fn apply_bidir_block_0(state: &mut SnnState) {
-    let gw = scale_to_q15(layer0_norm::NORM_WEIGHT_SCALE);
-    let gb = scale_to_q15(layer0_norm::NORM_BIAS_SCALE);
+    let gw = layer0_norm::NORM_WEIGHT_SCALE_Q15;
+    let gb = layer0_norm::NORM_BIAS_SCALE_Q15;
     layer_norm_q15(
         &state.x_buf,
         &layer0_norm::NORM_WEIGHT, gw,
@@ -310,8 +266,8 @@ fn apply_bidir_block_0(state: &mut SnnState) {
 }
 
 fn apply_bidir_block_1(state: &mut SnnState) {
-    let gw = scale_to_q15(layer1_norm::NORM_WEIGHT_SCALE);
-    let gb = scale_to_q15(layer1_norm::NORM_BIAS_SCALE);
+    let gw = layer1_norm::NORM_WEIGHT_SCALE_Q15;
+    let gb = layer1_norm::NORM_BIAS_SCALE_Q15;
     layer_norm_q15(
         &state.x_buf,
         &layer1_norm::NORM_WEIGHT, gw,
@@ -349,80 +305,71 @@ fn accumulate_half_into_x(state: &mut SnnState) {
 /// the mutable fields. To achieve that, we copy the small Q10/Q15
 /// tables onto the stack first.
 fn run_direction(state: &mut SnnState, dir: Dir, reverse: bool) {
-    // Build the per-direction |A| Q10 + D Q15 tables on the stack
-    // here (~3 KB). Saves 10 KB BSS vs storing four copies in
-    // SnnState. Padé exp is cheap relative to the SSM math.
-    let mut a_abs:  [[i16; D_STATE]; D_INNER] = [[0; D_STATE]; D_INNER];
-    let mut d_skip: [i16; D_INNER]            = [0; D_INNER];
-    let (a_log, a_log_scale, d_table, d_scale) = match dir {
-        Dir::L0Fwd => (&layer0_fwd::A_LOG, layer0_fwd::A_LOG_SCALE,
-                       &layer0_fwd::D,     layer0_fwd::D_SCALE),
-        Dir::L0Bwd => (&layer0_bwd::A_LOG, layer0_bwd::A_LOG_SCALE,
-                       &layer0_bwd::D,     layer0_bwd::D_SCALE),
-        Dir::L1Fwd => (&layer1_fwd::A_LOG, layer1_fwd::A_LOG_SCALE,
-                       &layer1_fwd::D,     layer1_fwd::D_SCALE),
-        Dir::L1Bwd => (&layer1_bwd::A_LOG, layer1_bwd::A_LOG_SCALE,
-                       &layer1_bwd::D,     layer1_bwd::D_SCALE),
-    };
-    build_a_abs_q10(a_log, a_log_scale, &mut a_abs);
-    build_d_q15(d_table, d_scale, &mut d_skip);
-
+    // Pure-Q (2026-05-21): per-direction `A_ABS_Q10` and `D_Q15` tables
+    // are now pre-baked at codegen (`tools/regen_snn_weights.py` ->
+    // `lamquant-weights/src/generated/snn/*.rs`). Firmware reads
+    // references directly — no on-MCU exp/round arithmetic, no stack
+    // scratch for the tables.
     let weights = match dir {
         Dir::L0Fwd => SsmBlockWeights {
             in_proj_w: &layer0_fwd::IN_PROJ_W,
-            in_proj_w_scale_q15: scale_to_q15(layer0_fwd::IN_PROJ_W_SCALE),
+            in_proj_w_scale_q15: layer0_fwd::IN_PROJ_W_SCALE_Q15,
             conv1d_w: &layer0_fwd::CONV1D_W,
-            conv1d_w_scale_q15: scale_to_q15(layer0_fwd::CONV1D_W_SCALE),
+            conv1d_w_scale_q15: layer0_fwd::CONV1D_W_SCALE_Q15,
             conv1d_b: &layer0_fwd::CONV1D_B,
-            conv1d_b_scale_q15: scale_to_q15(layer0_fwd::CONV1D_B_SCALE),
+            conv1d_b_scale_q15: layer0_fwd::CONV1D_B_SCALE_Q15,
             x_proj_w: &layer0_fwd::X_PROJ_W,
-            x_proj_w_scale_q15: scale_to_q15(layer0_fwd::X_PROJ_W_SCALE),
-            a_abs_q10: &a_abs, d_skip_q15: &d_skip,
-            dt_bias_q15: dt_bias_q15(layer0_fwd::DT_BIAS[0], layer0_fwd::DT_BIAS_SCALE),
+            x_proj_w_scale_q15: layer0_fwd::X_PROJ_W_SCALE_Q15,
+            a_abs_q10: &layer0_fwd::A_ABS_Q10,
+            d_skip_q15: &layer0_fwd::D_Q15,
+            dt_bias_q15: layer0_fwd::DT_BIAS_Q15,
             out_proj_w: &layer0_fwd::OUT_PROJ_W,
-            out_proj_w_scale_q15: scale_to_q15(layer0_fwd::OUT_PROJ_W_SCALE),
+            out_proj_w_scale_q15: layer0_fwd::OUT_PROJ_W_SCALE_Q15,
         },
         Dir::L0Bwd => SsmBlockWeights {
             in_proj_w: &layer0_bwd::IN_PROJ_W,
-            in_proj_w_scale_q15: scale_to_q15(layer0_bwd::IN_PROJ_W_SCALE),
+            in_proj_w_scale_q15: layer0_bwd::IN_PROJ_W_SCALE_Q15,
             conv1d_w: &layer0_bwd::CONV1D_W,
-            conv1d_w_scale_q15: scale_to_q15(layer0_bwd::CONV1D_W_SCALE),
+            conv1d_w_scale_q15: layer0_bwd::CONV1D_W_SCALE_Q15,
             conv1d_b: &layer0_bwd::CONV1D_B,
-            conv1d_b_scale_q15: scale_to_q15(layer0_bwd::CONV1D_B_SCALE),
+            conv1d_b_scale_q15: layer0_bwd::CONV1D_B_SCALE_Q15,
             x_proj_w: &layer0_bwd::X_PROJ_W,
-            x_proj_w_scale_q15: scale_to_q15(layer0_bwd::X_PROJ_W_SCALE),
-            a_abs_q10: &a_abs, d_skip_q15: &d_skip,
-            dt_bias_q15: dt_bias_q15(layer0_bwd::DT_BIAS[0], layer0_bwd::DT_BIAS_SCALE),
+            x_proj_w_scale_q15: layer0_bwd::X_PROJ_W_SCALE_Q15,
+            a_abs_q10: &layer0_bwd::A_ABS_Q10,
+            d_skip_q15: &layer0_bwd::D_Q15,
+            dt_bias_q15: layer0_bwd::DT_BIAS_Q15,
             out_proj_w: &layer0_bwd::OUT_PROJ_W,
-            out_proj_w_scale_q15: scale_to_q15(layer0_bwd::OUT_PROJ_W_SCALE),
+            out_proj_w_scale_q15: layer0_bwd::OUT_PROJ_W_SCALE_Q15,
         },
         Dir::L1Fwd => SsmBlockWeights {
             in_proj_w: &layer1_fwd::IN_PROJ_W,
-            in_proj_w_scale_q15: scale_to_q15(layer1_fwd::IN_PROJ_W_SCALE),
+            in_proj_w_scale_q15: layer1_fwd::IN_PROJ_W_SCALE_Q15,
             conv1d_w: &layer1_fwd::CONV1D_W,
-            conv1d_w_scale_q15: scale_to_q15(layer1_fwd::CONV1D_W_SCALE),
+            conv1d_w_scale_q15: layer1_fwd::CONV1D_W_SCALE_Q15,
             conv1d_b: &layer1_fwd::CONV1D_B,
-            conv1d_b_scale_q15: scale_to_q15(layer1_fwd::CONV1D_B_SCALE),
+            conv1d_b_scale_q15: layer1_fwd::CONV1D_B_SCALE_Q15,
             x_proj_w: &layer1_fwd::X_PROJ_W,
-            x_proj_w_scale_q15: scale_to_q15(layer1_fwd::X_PROJ_W_SCALE),
-            a_abs_q10: &a_abs, d_skip_q15: &d_skip,
-            dt_bias_q15: dt_bias_q15(layer1_fwd::DT_BIAS[0], layer1_fwd::DT_BIAS_SCALE),
+            x_proj_w_scale_q15: layer1_fwd::X_PROJ_W_SCALE_Q15,
+            a_abs_q10: &layer1_fwd::A_ABS_Q10,
+            d_skip_q15: &layer1_fwd::D_Q15,
+            dt_bias_q15: layer1_fwd::DT_BIAS_Q15,
             out_proj_w: &layer1_fwd::OUT_PROJ_W,
-            out_proj_w_scale_q15: scale_to_q15(layer1_fwd::OUT_PROJ_W_SCALE),
+            out_proj_w_scale_q15: layer1_fwd::OUT_PROJ_W_SCALE_Q15,
         },
         Dir::L1Bwd => SsmBlockWeights {
             in_proj_w: &layer1_bwd::IN_PROJ_W,
-            in_proj_w_scale_q15: scale_to_q15(layer1_bwd::IN_PROJ_W_SCALE),
+            in_proj_w_scale_q15: layer1_bwd::IN_PROJ_W_SCALE_Q15,
             conv1d_w: &layer1_bwd::CONV1D_W,
-            conv1d_w_scale_q15: scale_to_q15(layer1_bwd::CONV1D_W_SCALE),
+            conv1d_w_scale_q15: layer1_bwd::CONV1D_W_SCALE_Q15,
             conv1d_b: &layer1_bwd::CONV1D_B,
-            conv1d_b_scale_q15: scale_to_q15(layer1_bwd::CONV1D_B_SCALE),
+            conv1d_b_scale_q15: layer1_bwd::CONV1D_B_SCALE_Q15,
             x_proj_w: &layer1_bwd::X_PROJ_W,
-            x_proj_w_scale_q15: scale_to_q15(layer1_bwd::X_PROJ_W_SCALE),
-            a_abs_q10: &a_abs, d_skip_q15: &d_skip,
-            dt_bias_q15: dt_bias_q15(layer1_bwd::DT_BIAS[0], layer1_bwd::DT_BIAS_SCALE),
+            x_proj_w_scale_q15: layer1_bwd::X_PROJ_W_SCALE_Q15,
+            a_abs_q10: &layer1_bwd::A_ABS_Q10,
+            d_skip_q15: &layer1_bwd::D_Q15,
+            dt_bias_q15: layer1_bwd::DT_BIAS_Q15,
             out_proj_w: &layer1_bwd::OUT_PROJ_W,
-            out_proj_w_scale_q15: scale_to_q15(layer1_bwd::OUT_PROJ_W_SCALE),
+            out_proj_w_scale_q15: layer1_bwd::OUT_PROJ_W_SCALE_Q15,
         },
     };
 
@@ -438,32 +385,10 @@ fn run_direction(state: &mut SnnState, dir: Dir, reverse: bool) {
     );
 }
 
-#[inline]
-fn dt_bias_q15(dt_bias_i8: i8, scale: f32) -> i32 {
-    // dt_bias[0] real = dt_bias_i8 * scale. Q15 = round(real * 2^15).
-    // Round-to-nearest avoids ±1 LSB drift versus the truncation
-    // semantics of `as i32`. (V4 Pro Finding 1 of 4e03bbae review.)
-    let real = (dt_bias_i8 as f32) * scale;
-    let raw = real * 32768.0;
-    let rounded = if raw >= 0.0 { raw + 0.5 } else { raw - 0.5 };
-    if rounded >= i32::MAX as f32 { i32::MAX }
-    else if rounded <= i32::MIN as f32 { i32::MIN }
-    else { rounded as i32 }
-}
-
-/// Convert an f32 scale factor into Q15. Saturating clamp.
-///
-/// Uses `>=` / `<=` for the bounds because `i32::MAX as f32` rounds
-/// up to 2_147_483_648.0 (one ULP past i32::MAX); a strict `>` would
-/// admit that exact float into the `as i32` cast, which is UB in Rust
-/// for out-of-range floats. (V4 Pro Finding 1 of 7ce5a488 review.)
-#[inline]
-fn scale_to_q15(s: f32) -> i32 {
-    let v = s * 32768.0;
-    if v >= i32::MAX as f32 { i32::MAX }
-    else if v <= i32::MIN as f32 { i32::MIN }
-    else { v as i32 }
-}
+// Pure Q-format (2026-05-21): `dt_bias_q15`, `scale_to_q15` deleted.
+// All scale conversions now happen in `tools/regen_snn_weights.py`;
+// the firmware reads the pre-baked `*_SCALE_Q15: i32` and
+// `DT_BIAS_Q15: i32` constants directly from `lamquant-weights`.
 
 pub fn activity_sum() -> u32 {
     unsafe { STATE.activity_sum }

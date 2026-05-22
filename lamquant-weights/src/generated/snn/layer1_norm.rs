@@ -1,8 +1,8 @@
 // **GENERATED — DO NOT EDIT.**
 //
-// Source:    weights/snn/mamba_snn_best.pt
-// SHA-256:   1d92fedec6ffa2c95d5acd4d7bf1166a987d1cc8b98d475d6e438cfd467dbf7e
-// Generated: 2026-05-05T18:06:02+00:00
+// Source:    /mnt/4tb/LamQuant/weights/snn/mamba_snn_best.pt
+// SHA-256:   34e008106a9b908b4d344f15e253d40a0fd19d206ef0a42a66c81f5f68be3e71
+// Generated: 2026-05-22T03:29:10+00:00
 //
 // Regenerate via:
 //   python firmware/export_firmware.py --target rust --snn-checkpoint <path>
@@ -13,20 +13,20 @@
 /// norm weight, shape=(40,)
 pub const NORM_WEIGHT_LEN: usize = 40;
 pub static NORM_WEIGHT: [i8; 40] = [
-    109, 105, 88, 104, 122, 94, 118, 84, 76, 102, 62, 71, 99, 103, 111, 101, 
-     76, 101, 114, 101, 109, 92, 111, 118, 92, 116, 89, 127, 77, 76, 72, 99, 
-     80, 77, 96, 85, 116, 94, 107, 91,
+    -82, -43, -48, 3, -114, 109, -19, 69, -109, -25, -72, 36, -3, -1, 18, -60, 
+     41, 21, -33, 60, -90, 35, -114, -107, 58, 104, -56, -45, -82, -17, 46, 4, 
+     -49, -35, 38, 22, -127, -87, 41, -102,
 ];
 
-/// Dequantize: f32 = q8 * SCALE
-pub const NORM_WEIGHT_SCALE: f32 = 1.139676102e-02;
+/// Dequantize: real = q8 * (Q15 / 32768) (Q15, pre-baked from f32=1.288335154e-03)
+pub const NORM_WEIGHT_SCALE_Q15: i32 = 42;
 
 /// norm bias, shape=(40,)
 pub const NORM_BIAS_LEN: usize = 40;
 pub static NORM_BIAS: [i8; 40] = [
-    55, 6, 8, -55, 16, -26, -15, -30, -9, -27, -46, 32, 70, 12, 43, 43, 
-     -46, 15, -8, -127, 5, 37, -7, -105, -25, -5, -60, 35, -17, -44, -64, -13, 
-     31, 13, 1, -93, -25, 5, -28, -6,
+    16, 42, -63, -49, 8, 65, 17, -11, -16, 25, 119, -3, -25, -105, -13, -54, 
+     15, 127, -10, 1, 21, 33, -28, -17, -35, -24, -45, -118, -59, 2, -64, 25, 
+     77, 97, -59, 55, 1, -8, -14, 53,
 ];
 
-pub const NORM_BIAS_SCALE: f32 = 6.643170916e-03;
+pub const NORM_BIAS_SCALE_Q15: i32 = 35;

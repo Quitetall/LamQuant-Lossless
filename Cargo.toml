@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/lamquant-history",
+    "crates/lamquant-ipc-types",
     "crates/lamquant-lsl",
     "crates/lamquant-ops",
     "crates/lmafs",
@@ -20,6 +21,7 @@ members = [
 # `cargo build -p lamquant-lsl` when LSL integration is needed.
 default-members = [
     "crates/lamquant-history",
+    "crates/lamquant-ipc-types",
     "crates/lamquant-ops",
     "crates/lmafs",
     "gui/src-tauri",

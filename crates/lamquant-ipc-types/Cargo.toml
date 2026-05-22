@@ -1,0 +1,25 @@
+[package]
+name = "lamquant-ipc-types"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Shared MCU↔host IPC envelope + message kinds (Cat A7)."
+publish = false
+
+[dependencies]
+# `no_std` postcard for bin serialization; `derive` activated only
+# when the consumer asks for it (blut / gui side) so the firmware
+# build stays alloc-free.
+postcard = { version = "1", default-features = false, features = ["use-defmt"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+heapless = { version = "0.8", default-features = false, features = ["serde"] }
+defmt = { version = "0.3", optional = true }
+
+[features]
+default = []
+# Pull `defmt::Format` impls on the envelope + MsgKind so on-MCU
+# logging can render them without their byte-blob payloads.
+defmt-format = ["defmt", "postcard/use-defmt", "heapless/defmt-03"]
+# Stub for the host-side (allows Serialize/Deserialize through serde_json
+# bridge in blut / tauri without dragging in the firmware deps).
+host = []
