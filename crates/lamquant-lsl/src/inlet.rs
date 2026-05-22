@@ -172,12 +172,182 @@ pub fn encode_window(
     lamquant_core::lml::compress_with_mode(window, opts.noise_bits, opts.lpc_mode)
 }
 
-// ─── liblsl-gated inlet (Phase 4 lands the actual subscription) ───
-//
-// The bare LSL subscription path needs the `lsl` crate, which is
-// only pulled in with the `liblsl` Cargo feature. The full Inlet
-// type goes here in Phase 4 when the CLI subcommand (`lml record`)
-// becomes the natural caller.
+// ─── Live LSL inlet (`liblsl` feature) ────────────────────────────
+
+#[cfg(feature = "liblsl")]
+pub use live::{Inlet, RecordSession};
+
+#[cfg(feature = "liblsl")]
+mod live {
+    use super::*;
+    use crate::error::LslIntegrationError;
+    use lsl::Pullable;
+
+    /// Live LSL inlet wrapping `lsl::StreamInlet`.
+    ///
+    /// Resolves a stream by name (or predicate string), pulls
+    /// samples in a tight loop, and stages them through
+    /// `SampleBuffer` ready for codec flushes. The actual
+    /// `.lml`-writing record loop lives in `RecordSession` so the
+    /// inlet itself stays focused on the LSL → samples translation.
+    pub struct Inlet {
+        inner: lsl::StreamInlet,
+        n_channels: usize,
+        nominal_srate: f64,
+        channel_format: lsl::ChannelFormat,
+    }
+
+    impl Inlet {
+        /// Resolve a stream by name + open an inlet. Blocks up to
+        /// `timeout_sec` for the stream to appear on the network;
+        /// pass `lsl::FOREVER` to wait indefinitely. Picks the first
+        /// matching stream when multiple advertise the same name —
+        /// callers needing finer control should use
+        /// [`Self::from_info`] with a hand-built `StreamInfo`
+        /// from `lsl::resolve_byprop`.
+        pub fn resolve_by_name(
+            name: &str,
+            timeout_sec: f64,
+        ) -> Result<Self, LslIntegrationError> {
+            let predicate = format!("name='{}'", name);
+            let streams = lsl::resolve_bypred(&predicate, 1, timeout_sec)
+                .map_err(LslIntegrationError::Lsl)?;
+            let info = streams.into_iter().next().ok_or_else(|| {
+                LslIntegrationError::Other(format!(
+                    "no LSL stream matched name='{}' within {} s",
+                    name, timeout_sec
+                ))
+            })?;
+            Self::from_info(info)
+        }
+
+        /// Open an inlet against a pre-resolved StreamInfo. Use
+        /// when the caller has already discovered + filtered the
+        /// streams (e.g. via `lsl::resolve_byprop` with a richer
+        /// predicate, or a UI source picker).
+        pub fn from_info(info: lsl::StreamInfo) -> Result<Self, LslIntegrationError> {
+            let n_channels = info.channel_count() as usize;
+            let nominal_srate = info.nominal_srate();
+            let channel_format = info.channel_format();
+            let inner = lsl::StreamInlet::new(
+                &info, /* max_buflen = */ 360, /* max_chunklen = */ 0,
+                /* recover = */ true,
+            )
+            .map_err(LslIntegrationError::Lsl)?;
+            Ok(Self {
+                inner,
+                n_channels,
+                nominal_srate,
+                channel_format,
+            })
+        }
+
+        /// Pull one sample (all channels) with the given timeout
+        /// (`lsl::FOREVER` to block). Returns the i32-cast samples
+        /// + the LSL timestamp (microseconds since LSL epoch).
+        /// Non-int32 streams are cast through f64 then truncated to
+        /// i32 — lossless for cf_int8/int16/int32, lossy for
+        /// cf_float32/double64 (a future codec mode could preserve
+        /// floats once the lossless side handles them).
+        pub fn pull_sample(&self, timeout_sec: f64) -> Result<(Vec<i32>, f64), LslIntegrationError> {
+            match self.channel_format {
+                lsl::ChannelFormat::Int8 | lsl::ChannelFormat::Int16
+                | lsl::ChannelFormat::Int32 => {
+                    let (sample, ts): (Vec<i32>, f64) = self
+                        .inner
+                        .pull_sample(timeout_sec)
+                        .map_err(LslIntegrationError::Lsl)?;
+                    Ok((sample, ts))
+                }
+                lsl::ChannelFormat::Int64 => {
+                    let (sample, ts): (Vec<i64>, f64) = self
+                        .inner
+                        .pull_sample(timeout_sec)
+                        .map_err(LslIntegrationError::Lsl)?;
+                    let casted = sample
+                        .into_iter()
+                        .map(|v| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+                        .collect();
+                    Ok((casted, ts))
+                }
+                lsl::ChannelFormat::Float32 | lsl::ChannelFormat::Double64
+                | lsl::ChannelFormat::String | lsl::ChannelFormat::Undefined => {
+                    Err(LslIntegrationError::Other(format!(
+                        "channel_format {:?} not yet supported by the lossless inlet",
+                        self.channel_format
+                    )))
+                }
+            }
+        }
+
+        /// Channel count reported by the source.
+        pub fn channel_count(&self) -> usize {
+            self.n_channels
+        }
+
+        /// Sample rate reported by the source.
+        pub fn nominal_srate(&self) -> f64 {
+            self.nominal_srate
+        }
+    }
+
+    /// Live recording session: subscribes to an LSL stream + flushes
+    /// codec-window-sized chunks of samples into a `.lml` container
+    /// on disk. Building block for the upcoming `lml record` CLI.
+    pub struct RecordSession {
+        inlet: Inlet,
+        buffer: SampleBuffer,
+        encoded_windows: Vec<Vec<u8>>,
+        opts: InletEncodeOpts,
+    }
+
+    impl RecordSession {
+        pub fn new(inlet: Inlet, window_size: usize, opts: InletEncodeOpts) -> Result<Self, LslIntegrationError> {
+            let n_ch = inlet.channel_count();
+            let buffer = SampleBuffer::new(n_ch, window_size)
+                .map_err(|e| LslIntegrationError::Other(e.to_string()))?;
+            Ok(Self {
+                inlet,
+                buffer,
+                encoded_windows: Vec::new(),
+                opts,
+            })
+        }
+
+        /// Capture up to `max_samples` from the network. Returns
+        /// the number of windows successfully encoded + flushed
+        /// during this call. Trailing partial window is left in
+        /// the buffer for the next call or `finish`.
+        pub fn capture(&mut self, max_samples: usize) -> Result<usize, LslIntegrationError> {
+            let mut windows = 0usize;
+            for _ in 0..max_samples {
+                let (sample, _ts) = self.inlet.pull_sample(lsl::FOREVER)?;
+                self.buffer
+                    .push_sample(&sample)
+                    .map_err(|e| LslIntegrationError::Other(e.to_string()))?;
+                if let Some(window) = self.buffer.flush_if_ready() {
+                    let bytes = encode_window(&window, self.opts)
+                        .map_err(LslIntegrationError::LmlDecode)?;
+                    self.encoded_windows.push(bytes);
+                    windows += 1;
+                }
+            }
+            Ok(windows)
+        }
+
+        /// Drain the trailing partial window (padded with zeros)
+        /// and return all encoded window bytes. After this, the
+        /// session is empty + can't be reused.
+        pub fn finish(mut self) -> Result<Vec<Vec<u8>>, LslIntegrationError> {
+            if let Some((window, _actual)) = self.buffer.drain_padded() {
+                let bytes = encode_window(&window, self.opts)
+                    .map_err(LslIntegrationError::LmlDecode)?;
+                self.encoded_windows.push(bytes);
+            }
+            Ok(self.encoded_windows)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
