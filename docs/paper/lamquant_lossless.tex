@@ -59,11 +59,12 @@ it achieves 2.28:1, establishing the first published lossless
 compression benchmark on the largest open clinical EEG corpus by total
 bytes in existence. Bit-exact reconstruction was verified across
 84{,}600 encode/decode operations (72{,}131 unique recordings)
-spanning the seven TUH EEG corpora and CHB-MIT with zero failures;
-the per-operation count exceeds the unique recording count because
-the labelled TUH subsets (TUSZ, TUAR, TUAB, TUSL, TUEV, TUEP)
-re-list TUEG recordings under their respective label montages and
-the codec was run independently against each sub-corpus. The codec is released
+spanning twelve clinical and research EEG datasets with zero
+failures; the per-operation count exceeds the unique recording
+count because the labelled TUH subsets (TUSZ, TUAR, TUAB, TUSL,
+TUEV, TUEP) re-list TUEG recordings under their respective
+label montages and the codec was run independently against each
+sub-corpus. The codec is released
 open-source as the archival compression layer of the OH-EEG wireless
 EEG platform.
 \end{abstract}
@@ -136,8 +137,11 @@ improvement over the prior state of the art. On TUEG v2.0.1 (1.76\,TB,
 it achieves 2.28:1, establishing the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Across 84{,}600 encode/decode operations on
-72{,}131 unique recordings spanning seven TUH EEG datasets and
-CHB-MIT, bit-exact reconstruction was verified in every case.
+72{,}131 unique recordings spanning twelve clinical and research
+EEG datasets (the seven TUH corpora, CHB-MIT, PhysioNet Siena
+Scalp EEG, Sleep-EDF, CAP Sleep, EEG Motor Movement/Imagery, and
+OpenNeuro ds004100), bit-exact reconstruction was verified in
+every case.
 
 The remainder of this paper is organized as follows:
 Section~\ref{sec:background} reviews prior work and establishes
@@ -421,6 +425,50 @@ read. This zero-trust fidelity standard is motivated by clinical
 deployment requirements: audit trails, medicolegal admissibility, and
 FDA archival compliance depend on byte-identical reconstruction of
 the complete recording, not merely the signal samples.
+
+\subsection{Algebraic Structure: A Commutative Monoid}
+\label{sec:monoid}
+The LML wire format described above forms a \emph{commutative
+monoid} under window concatenation. The empty bitstream is the
+identity element; the binary operation is window concatenation;
+and the LMLFOOT1 footer ensures that the window set is
+self-describing (each window carries its own CRC-32, per-channel
+LPC metadata, and timestamp in the LPC meta block). The structure
+is associative by definition of byte concatenation, and
+commutative because window order in the bitstream does not affect
+decoded signal content: at decode time the footer index reassembles
+windows by timestamp. Three deployment-relevant properties follow:
+\begin{itemize}
+\item \textbf{Embarrassingly parallel encoding.} Each window is
+  encoded independently; the per-window bitstreams concatenate
+  without inter-window synchronisation. The host-side encoder
+  backend scales linearly with core count, and the firmware-side
+  encoder produces a per-window unit that the basestation may
+  ingest at its own pace.
+\item \textbf{Append-without-re-encode.} Adding a new recording
+  to an existing LMA archive requires concatenating the new
+  window set and updating the footer index in place; prior content
+  is never re-encoded. This is load-bearing for continuous
+  acquisition where archives grow per-session over years.
+\item \textbf{Order-independent decode and local fault containment.}
+  Because each window self-validates via CRC-32 and self-locates via
+  timestamp, the decoder may process windows out-of-order or in
+  parallel. A corrupt window invalidates only itself, not the
+  surrounding stream; the decoder skips it and continues. This
+  pairs naturally with the failure-mode analysis discussed in
+  Section~\ref{sec:discussion}.
+\end{itemize}
+The byte-equality conformance gate
+(\texttt{lamquant-core/tests/byte\_equal\_backends.rs}) verifies
+that this algebraic structure is preserved across x86, ARM, and
+RISC-V backends: any optimisation that breaks bit-level identity
+on a per-window basis is therefore a wire-format change requiring
+a golden-table refresh, not a quiet performance tweak. The
+algebra also makes the codec amenable to distributed encoding
+across multiple hosts and to streaming acquisition without
+end-of-stream signalling, which together cover the two
+deployment patterns (offline archival, real-time wireless) the
+codec is built to serve.
 
 
 % ---------------------------------------------------------------
