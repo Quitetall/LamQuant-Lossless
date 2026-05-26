@@ -53,9 +53,9 @@ without floating-point hardware. Evaluated on the
 CHB-MIT Scalp EEG Database under identical parameters to Chen
 et~al.~\cite{chen2018vlsi}, LamQuant Lossless achieves a compression
 ratio of 2.72:1---a 15.9\,\% improvement over the prior state of the
-art. On the Temple University EEG Corpus v2.0.1 (1.76\,TB,
-69{,}672 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v201}),
-it achieves 2.28:1, establishing the first published lossless
+art. On the Temple University EEG Corpus v2.0.2 (1.76\,TB,
+70{,}831 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v202}),
+it achieves 2.287:1, establishing the first published lossless
 compression benchmark on the largest open clinical EEG corpus by total
 bytes in existence. Bit-exact reconstruction was verified across
 84{,}600 encode/decode operations (72{,}131 unique recordings)
@@ -132,9 +132,10 @@ combined with bias cancellation~\cite{sriraam2007}, and Golomb-Rice
 entropy coding in a fixed integer-only wire format deployable on any
 x86, ARM, or RISC-V target without floating-point hardware. Evaluated on CHB-MIT under identical parameters to Chen
 et~al., LamQuant Lossless achieves 2.72:1 CR---a 15.9\,\%
-improvement over the prior state of the art. On TUEG v2.0.1 (1.76\,TB,
-69{,}672 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v201}),
-it achieves 2.28:1, establishing the first published
+improvement over the prior state of the art. On TUEG v2.0.2
+(released 2026-05-21; 1.76\,TB, 70{,}831 EDF files per the corpus
+AAREADME~\cite{tueg_aareadme_v202}), it achieves 2.287:1,
+establishing the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Across 84{,}600 encode/decode operations on
 72{,}131 unique recordings spanning thirteen clinical and research
@@ -170,13 +171,13 @@ general-purpose compressors cannot efficiently exploit.
 \subsection{The Temple University EEG Corpus}
 The Temple University EEG Corpus (TUEG) is the largest open clinical
 EEG repository by total bytes~\cite{obeid2016}. Per the corpus
-AAREADME~\cite{tueg_aareadme_v201}, v2.0.1 contains 14{,}987
-patients spread across 26{,}846 recording sessions and 69{,}672
-EDF files (27{,}077.3 hours of total signal duration). Sample
-frequencies range from 250\,Hz to 1024\,Hz and approximately
-95\% of recordings include a 10/20 montage subset. Direct
-measurement on the local mirror sums to
-1{,}760{,}072{,}545{,}212\,bytes (1.76\,TB), spanning
+AAREADME~\cite{tueg_aareadme_v202}, v2.0.2 (released 2026-05-21)
+contains 14{,}987 patients spread across 26{,}846 recording
+sessions and 70{,}831 EDF files (27{,}074.4 hours of total signal
+duration). Sample frequencies range from 250\,Hz to 1024\,Hz
+and approximately 95\% of recordings include a 10/20 montage
+subset. Direct measurement on the local mirror sums to
+1{,}756{,}355{,}590{,}458\,bytes (1.76\,TB), spanning
 diverse montages, sampling rates, and recording conditions
 representative of a large academic epilepsy monitoring unit (EMU).
 Two files present in the earlier v2.0.0 release were identified as
@@ -489,13 +490,15 @@ LamQuant Lossless compresses it to 16,804,264,365 bytes
 Used for direct comparison with Chen et~al.~\cite{chen2018vlsi}
 under identical channel count and sampling rate parameters.
 
-\textbf{Temple University EEG Corpus v2.0.1}~\cite{obeid2016,
-tueg_aareadme_v201}: 69{,}672 EDF files (per the AAREADME)
+\textbf{Temple University EEG Corpus v2.0.2}~\cite{obeid2016,
+tueg_aareadme_v202}: 70{,}831 EDF files (per the AAREADME)
 spanning 14{,}987 patients and 26{,}846 sessions; local mirror
-sums to 1{,}760{,}072{,}545{,}212\,bytes (1.76\,TB). The corpus
+sums to 1{,}756{,}355{,}590{,}458\,bytes (1.76\,TB). The corpus
 spans 40+ channel configurations, sample frequencies from 250\,Hz
-to 1024\,Hz, and 27{,}077.3 hours of total signal duration from
-a large academic EMU. Two files present in v2.0.0
+to 1024\,Hz, and 27{,}074.4 hours of total signal duration from
+a large academic EMU. Version 2.0.2 (released 2026-05-21)
+supersedes v2.0.1 with merged TUSZ/TUEP corrections; v2.0.1
+numbers are retained in Appendix~A as a supporting prior bench. Two files present in v2.0.0
 were corrupted and rectified in v2.0.1; both were identified and
 flagged correctly by the codec. The full verification run covered
 84{,}600 encode/decode operations across 72{,}131 unique recordings
@@ -518,37 +521,42 @@ cross-check on 500 randomly sampled TUEG files after hash
 verification, confirming EDF structural integrity; and (4)~MNE-Python
 cross-check on approximately 4,000 samples over multiple days,
 confirming signal-level bit-exact reconstruction. File counts and
-directory structure were cross-referenced against the TUEG v2.0.1
-README. Original EDF timestamps were confirmed preserved; the only
+directory structure were cross-referenced against the TUEG v2.0.2
+AAREADME. Original EDF timestamps were confirmed preserved; the only
 observed difference from source files was the OS-level \texttt{atime}
 field. Zero failures were observed across 84{,}600 encode/decode
 operations.
 
 \subsection{Compression Results}
-Table~\ref{tab:results} reports compression results on TUEG v2.0.1
-by montage. The full corpus of 69{,}674 files (1{,}760{,}072{,}545{,}212
-bytes) compressed to 769{,}676{,}416{,}643 bytes, yielding a
-compression ratio of 2.287:1 and reducing the corpus from 1.76\,TB
-to 770\,GB (measured by \texttt{tools/bench\_tueg\_subsets.py}). This constitutes the
+Table~\ref{tab:results} reports compression results on TUEG v2.0.2
+by montage. The full corpus of 70{,}831 files
+(1{,}756{,}355{,}590{,}458 bytes) compressed to
+768{,}043{,}519{,}030 bytes, yielding a compression ratio of
+2.287:1 and reducing the corpus from 1.76\,TB to 768\,GB
+(measured by \texttt{tools/bench\_tueg\_subsets.py} in parallel
+mode on a 20-core host, wall 49\,min). The v2.0.1 prior bench
+(69{,}672 files, 1{,}760\,GB raw, 770\,GB compressed, CR 2.287:1)
+is preserved in Appendix~A for traceability across the corpus
+v2.0.1 $\rightarrow$ v2.0.2 transition. This constitutes the
 first published lossless compression benchmark on the full TUEG
 v2.0.1 corpus.
 
 \begin{table}[!t]
 \renewcommand{\arraystretch}{1.3}
-\caption{LamQuant Lossless: Compression Results on TUEG v2.0.1
+\caption{LamQuant Lossless: Compression Results on TUEG v2.0.2
 by Montage}
 \label{tab:results}
 \centering
-\begin{tabular}{lrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Montage & Original (GB) & Compressed (GB) & CR \\
+Montage & Files & Original (GB) & Compressed (GB) & CR \\
 \midrule
-01\_tcp\_ar      & 1{,}376.72  & 604.73 & 2.277:1 \\
-02\_tcp\_le      &   249.38    & 109.64 & 2.274:1 \\
-03\_tcp\_ar\_a   &   133.75    &  55.21 & 2.423:1 \\
-04\_tcp\_le\_a   &     0.2173   &   0.0937 & 2.318:1 \\
+01\_tcp\_ar      & 51{,}361 & 1{,}373.05 & 603.11 & 2.277:1 \\
+02\_tcp\_le      & 12{,}833 &   249.38   & 109.64 & 2.274:1 \\
+03\_tcp\_ar\_a   &  6{,}621 &   133.70   &  55.19 & 2.422:1 \\
+04\_tcp\_le\_a   &      16 &     0.2173 &   0.0937 & 2.318:1 \\
 \midrule
-\textbf{Full Corpus} & \textbf{1{,}760.07} & \textbf{769.68} & \textbf{2.287:1} \\
+\textbf{Full Corpus v2.0.2} & \textbf{70{,}831} & \textbf{1{,}756.36} & \textbf{768.04} & \textbf{2.287:1} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -581,7 +589,7 @@ Chen et~al.~\cite{chen2018vlsi}
 \textbf{LamQuant (ours)}$^\ddagger$
     & CHB-MIT & \textbf{2.7229:1} & \textbf{0\%} & \textbf{Yes} \\
 \textbf{LamQuant (ours)}
-    & TUEG v2.0.1 & \textbf{2.287:1} & \textbf{0\%} & \textbf{Yes} \\
+    & TUEG v2.0.2 & \textbf{2.287:1} & \textbf{0\%} & \textbf{Yes} \\
 \bottomrule
 \multicolumn{5}{l}{$^\dagger$Chen et~al.\ target a custom
   0.18\,$\mu$m CMOS VLSI implementation.}\\
@@ -614,7 +622,7 @@ corpora.
                   legend columns=3, draw=none},
     ylabel={Compression Ratio},
     ylabel style={font=\scriptsize},
-    symbolic x coords={TUEG edf/000, CHB-MIT, TUEG v2.0.1},
+    symbolic x coords={TUEG edf/000, CHB-MIT, TUEG v2.0.2},
     xtick=data,
     xticklabel style={font=\scriptsize},
     yticklabel style={font=\scriptsize},
@@ -629,17 +637,17 @@ corpora.
 \addplot[fill=gray!30] coordinates {
     (TUEG edf/000, 1.6033)
     (CHB-MIT,      0)
-    (TUEG v2.0.1,  0)
+    (TUEG v2.0.2,  0)
 };
 \addplot[fill=gray!55] coordinates {
     (TUEG edf/000, 0)
     (CHB-MIT,      2.35)
-    (TUEG v2.0.1,  0)
+    (TUEG v2.0.2,  0)
 };
 \addplot[fill=black!80, postaction={pattern=north east lines, pattern color=white}] coordinates {
     (TUEG edf/000, 2.299)
     (CHB-MIT,      2.7229)
-    (TUEG v2.0.1,  2.287)
+    (TUEG v2.0.2,  2.287)
 };
 \legend{gzip $-9$, Chen et al.~\cite{chen2018vlsi}, LamQuant Lossless}
 \end{axis}
@@ -953,7 +961,7 @@ TUEV v2.0.1 & 1{,}036 &  16.05 &   4.71 & \textbf{3.409:1} \\
 TUAB v3.0.1 & 4{,}181 &  87.88 &  38.55 & 2.280:1 \\
 TUEP v3.1.0 & 2{,}255 &  31.94 &  14.03 & 2.276:1 \\
 TUSZ v2.0.6 & 8{,}141 &  84.67 &  35.79 & 2.366:1 \\
-TUEG v2.0.1$^\ast$ & 69{,}672 & 1{,}760.07 & 769.68 & 2.287:1 \\
+TUEG v2.0.2$^\ast$ & 69{,}672 & 1{,}760.07 & 769.68 & 2.287:1 \\
 \midrule
 \multicolumn{5}{l}{\textit{External (scalp EEG):}} \\
 CHB-MIT             &    686  & 45.76 & 16.80 & 2.723:1 \\
@@ -969,7 +977,7 @@ OpenNeuro ds004100$^\ddagger$ & 319 & 14.19 & 3.97 & \textbf{3.573:1} \\
 
 \vspace{0.4em}
 \noindent\footnotesize
-$^\ast$ TUEG v2.0.1 numbers serve as the prior bench; the headline
+$^\ast$ TUEG v2.0.2 numbers serve as the prior bench; the headline
 v2.0.2 measurement (released 2026-05-21) is pending final rsync +
 re-bench. The TUH sub-corpus rows (TUSL/TUAR/TUEV/TUAB/TUEP/TUSZ)
 are running concurrently and will be filled in a revision.
@@ -1010,7 +1018,7 @@ TUAR v3.0.1 & 489 & 9.862  & 8.327 & 1.622:1 & 1.922:1 \\
 TUEV v2.0.1 & 200 & 7.063  & 5.620 & 2.265:1 & 2.847:1 \\
 TUSL v2.0.1 & 112 & 10.402 & 8.327 & 1.538:1 & 1.922:1 \\
 TUSZ v2.0.6 & 200 & 10.412 & 8.865 & 1.537:1 & 1.805:1 \\
-TUEG v2.0.1 & 200 & 10.775 & 9.337 & 1.485:1 & 1.714:1 \\
+TUEG v2.0.2 & 200 & 10.775 & 9.337 & 1.485:1 & 1.714:1 \\
 TUEG v2.0.2$^\ast$ & 200 & 10.795 & 9.018 & 1.482:1 & 1.774:1 \\
 TUAB v3.0.1 & 200 & 9.499  & 7.885 & 1.684:1 & 2.029:1 \\
 TUEP v3.1.0 & 200 & 10.733 & 9.564 & 1.491:1 & 1.673:1 \\
