@@ -54,27 +54,21 @@
   doi     = {10.1006/acha.1996.0015},
 }
 
-% UNVERIFIED — could not locate this exact paper in IEEE Xplore /
-% Google Scholar (queried 2026-05-26). Cited claim in §II.E
-% (bias cancellation as lightweight predictor alternative) may
-% need a different reference. Leaving entry as written until the
-% paper is confirmed or replaced.
-% TODO: verify with paper.
-@inproceedings{sriram2006,
-  author    = {Sriram, P. and Krishnamohan, K. P. and Devasahayam,
-               S. R.},
-  title     = {{EEG} Data Compression Using {LPC} and Bias
-               Cancellation},
-  booktitle = {Proc.\ IEEE Engineering in Medicine and Biology Society
-               (EMBC)},
-  year      = {2006},
-  pages     = {1--4},
-  note      = {Citation unverified --- pending author confirmation.},
-}
+% RESOLVED 2026-05-26: the previous `sriram2006` entry (P. Sriram
+% et al., "EEG Data Compression Using LPC and Bias Cancellation",
+% EMBC 2006) could not be located in IEEE Xplore or any other
+% database. The "bias cancellation" methodology cited at the three
+% original use sites is actually published in PMID 18779073
+% (Sriraam + Eswaran, "An Adaptive Error Modeling Scheme for the
+% Lossless Compression of EEG Signals", IEEE TITB 12(5):587-594,
+% 2008), already represented as `sriraam2007` below. All three
+% `\cite{sriram2006}` sites in the .tex have been retargeted to
+% `sriraam2007`, and the phantom entry was removed.
 
 % NOTE: cite key reads `sriraam2007` for historical reasons; actual
 % publication year is 2008 (see year field). All `\cite{sriraam2007}`
-% sites in the .tex resolve to this entry.
+% sites in the .tex resolve to this entry. The paper introduces the
+% context-based bias-cancellation scheme cited at §II.E and §III.B.
 @article{sriraam2007,
   author  = {Sriraam, N. and Eswaran, C.},
   title   = {An Adaptive Error Modeling Scheme for the Lossless
@@ -86,6 +80,21 @@
   number  = {5},
   pages   = {587--594},
   doi     = {10.1109/TITB.2007.907981},
+}
+
+% Cited at §II.E for the integer-wavelet + neural-network +
+% LZ-arithmetic CR=2.99 result on a small single-session dataset.
+@article{sriraam2012,
+  author  = {Sriraam, N.},
+  title   = {A High-Performance Lossless Compression Scheme for
+             {EEG} Signals Using Wavelet Transform and Neural
+             Network Predictors},
+  journal = {International Journal of Telemedicine and
+             Applications},
+  year    = {2012},
+  volume  = {2012},
+  pages   = {302581},
+  doi     = {10.1155/2012/302581},
 }
 
 @phdthesis{shoeb2009,
