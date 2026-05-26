@@ -784,12 +784,68 @@ CHB-MIT     & 45.76        & 16.80          & 2.7229:1 \\
 \end{tabular}
 \end{table}
 
+\subsection*{Per-Corpus Shannon Entropy and Compression Ceilings}
+
+Table~\ref{tab:per-corpus-entropy} reports empirical Shannon
+entropies for each corpus, computed by
+\texttt{tools/bench\_shannon\_entropy.py} on a random sample (seed
+\texttt{0x4C414D51}) of up to 200 EDFs per corpus, contributing
+every sample of every channel to a single global histogram per
+corpus. $H_0(X)$ is the zero-order entropy of the raw 16-bit
+digital sample stream; $H_0(\Delta X)$ is the zero-order entropy
+of the first-order difference (LPC-1 residual). The corresponding
+CR ceilings are $16/H$.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.3}
+\caption{Per-Corpus Shannon Entropy on TUH + CHB-MIT
+($n \approx 16.8 \times 10^9$ samples)}
+\label{tab:per-corpus-entropy}
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Corpus & Files & $H_0(X)$ & $H_0(\Delta X)$ & CR$_{\text{raw}}$ ceil & CR$_{\Delta}$ ceil \\
+\midrule
+TUAR v3.0.1 & 489 & 9.862  & 8.327 & 1.622:1 & 1.922:1 \\
+TUEV v2.0.1 & 200 & 7.063  & 5.620 & 2.265:1 & 2.847:1 \\
+TUSL v2.0.1 & 112 & 10.402 & 8.327 & 1.538:1 & 1.922:1 \\
+TUSZ v2.0.6 & 200 & 10.412 & 8.865 & 1.537:1 & 1.805:1 \\
+TUEG v2.0.1 & 200 & 10.775 & 9.337 & 1.485:1 & 1.714:1 \\
+TUAB v3.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUEP v3.1.0 & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+\midrule
+\multicolumn{6}{l}{\textit{External:}} \\
+CHB-MIT     & 200 & 8.387  & 6.724 & 1.908:1 & 2.379:1 \\
+\midrule
+\textbf{Weighted aggregate} & --- & \textbf{9.244} & \textbf{7.656} &
+\textbf{1.731:1} & \textbf{2.090:1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two observations follow. First, $H_0(\Delta X)$ is consistently
+1--3\,bits/sample lower than $H_0(X)$, confirming substantial
+sample-to-sample correlation that any first-order predictor can
+exploit. Second, even the $\text{CR}_{\Delta}$ ceiling (the best a
+zero-order entropy coder can do over LPC-1 residuals) sits below
+LamQuant's measured 2.287:1 on TUEG and 2.7229:1 on CHB-MIT,
+which means LamQuant's four-band lifting DWT plus per-subband
+adaptive LPC of order up to~8 captures higher-order structure
+beyond what first-order prediction reaches. The unusually low
+entropies on TUEV ($H_0 = 7.06$, alphabet 15{,}416 of 65{,}536
+possible 16-bit codes) reflect the narrower dynamic range of
+event-classification recordings relative to open-ended
+EMU data. TUAB and TUEP are pending an integrity-driven
+re-rsync from the TUH server; their entropies will be added in
+a revision.
+
 The codec's per-window structure makes any subset of the corpus
 trivially re-bench-able. Reproducer scripts are released alongside
 the codec source at
 \url{https://github.com/openhumantech/lamquant} (\texttt{tools/
 bench\_chbmit.py}, \texttt{tools/bench\_gzip\_baseline.sh},
-\texttt{tools/bench\_tueg\_subsets.py}).
+\texttt{tools/bench\_tueg\_subsets.py},
+\texttt{tools/bench\_shannon\_entropy.py}).
 
 
 % ---------------------------------------------------------------
