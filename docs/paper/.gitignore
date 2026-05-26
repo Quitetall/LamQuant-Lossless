@@ -1,0 +1,13 @@
+# LaTeX build intermediates — paper sources only checked in.
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.fdb_latexmk
+*.fls
+*.pdf
