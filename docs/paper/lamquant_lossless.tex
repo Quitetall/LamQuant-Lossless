@@ -59,7 +59,7 @@ it achieves 2.28:1, establishing the first published lossless
 compression benchmark on the largest open clinical EEG corpus by total
 bytes in existence. Bit-exact reconstruction was verified across
 84{,}600 encode/decode operations (72{,}131 unique recordings)
-spanning twelve clinical and research EEG datasets with zero
+spanning thirteen clinical and research EEG datasets with zero
 failures; the per-operation count exceeds the unique recording
 count because the labelled TUH subsets (TUSZ, TUAR, TUAB, TUSL,
 TUEV, TUEP) re-list TUEG recordings under their respective
@@ -137,7 +137,7 @@ improvement over the prior state of the art. On TUEG v2.0.1 (1.76\,TB,
 it achieves 2.28:1, establishing the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Across 84{,}600 encode/decode operations on
-72{,}131 unique recordings spanning twelve clinical and research
+72{,}131 unique recordings spanning thirteen clinical and research
 EEG datasets (the seven TUH corpora, CHB-MIT, PhysioNet Siena
 Scalp EEG, Sleep-EDF, CAP Sleep, EEG Motor Movement/Imagery, and
 OpenNeuro ds004100), bit-exact reconstruction was verified in
@@ -823,7 +823,7 @@ its coefficients from the local signal within each window via the
 Levinson-Durbin recursion. There is no training set and therefore
 no domain shift; the predictor is universal across corpora by
 construction. The 84{,}600-operation verification run reported in
-Section~\ref{sec:results} spans twelve heterogeneous EEG datasets
+Section~\ref{sec:results} spans thirteen heterogeneous EEG datasets
 with zero per-file CR pathology attributable to corpus mismatch.
 
 \emph{Microcontroller deployability.} The encoder must execute in
@@ -873,7 +873,7 @@ on the Temple University EEG Corpus v2.0.1, the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Bit-exact reconstruction was verified across
 84{,}600 encode/decode operations on 72{,}131 unique recordings
-spanning twelve clinical and research EEG datasets with zero failures. The codec is
+spanning thirteen clinical and research EEG datasets with zero failures. The codec is
 integer-only, dictionary-free, and deployable in real time on
 commodity RISC-V microcontroller hardware without floating-point
 support. It is released open-source as the archival compression layer
