@@ -95,9 +95,11 @@ forensic fidelity.
 General-purpose compressors such as gzip and zstd exploit byte-level
 string repetition and are not designed for the statistical structure
 of EEG signals. Applied to the Temple University EEG Corpus (TUEG)
-v2.0.1, gzip achieves a compression ratio of 1.61:1---a baseline
-established by direct measurement on the corpus production
-server~\cite{obeid2016}. Signal-aware approaches based on predictive
+v2.0.1, gzip achieves a compression ratio of 1.6033:1---a baseline
+established by direct measurement on the corpus production server
+(\texttt{tools/bench\_gzip\_baseline.sh} over 453 EDFs of TUEG
+edf/000, 6.01\,GB $\rightarrow$ 3.75\,GB at gzip level 9, wall
+271\,s)~\cite{obeid2016}. Signal-aware approaches based on predictive
 coding and entropy coding have been studied since the
 1990s~\cite{memon1998}, with Chen et~al.\ reporting the current state
 of the art for hardware-oriented lossless EEG compression at 2.35:1
@@ -166,9 +168,11 @@ Huffman)~\cite{ziv1977} and zstd target byte-level repetition and
 dictionary-based string matching. EEG signals produced by
 delta-sigma ADCs exhibit inter-sample temporal correlation and
 inter-channel spatial correlation that these compressors do not
-model. Applied to TUEG edf/000, gzip achieves 1.61:1 CR, confirmed
-by direct measurement. LamQuant Lossless achieves 2.26:1 on the same
-subset---40\,\% above the gzip baseline---by exploiting signal
+model. Applied to TUEG edf/000, gzip $-9$ achieves 1.6033:1 CR,
+confirmed by direct measurement (453 files, 6.01\,GB raw, 3.75\,GB
+compressed, 271\,s wall on the corpus production server). LamQuant
+Lossless achieves 2.26:1 on the same subset---41\,\% above the gzip
+baseline---by exploiting signal
 structure through predictive coding and signal-matched entropy coding.
 
 \subsection{Shannon Entropy Bound for Clinical EEG}
@@ -466,8 +470,8 @@ exceeds it by 12.9\,\%.
 \toprule
 Method & Dataset & CR & PRD & MCU \\
 \midrule
-gzip~\cite{ziv1977}
-    & TUEG edf/000 & 1.61:1 & 0\% & No \\
+gzip $-9$~\cite{ziv1977}
+    & TUEG edf/000 & 1.6033:1 & 0\% & No \\
 Chen et~al.~\cite{chen2018vlsi}
     & CHB-MIT & 2.35:1 & 0\% & Yes$^\dagger$ \\
 \textbf{LamQuant (ours)}$^\ddagger$
@@ -519,7 +523,7 @@ corpora.
     minor grid style={line width=0.1pt, draw=gray!15},
 ]
 \addplot[fill=gray!30] coordinates {
-    (TUEG edf/000, 1.61)
+    (TUEG edf/000, 1.6033)
     (CHB-MIT,      0)
     (TUEG v2.0.1,  0)
 };
