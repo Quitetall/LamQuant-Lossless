@@ -425,27 +425,29 @@ field. Zero failures were observed across 76,254 files.
 
 \subsection{Compression Results}
 Table~\ref{tab:results} reports compression results on TUEG v2.0.1
-by subset. The full corpus of 1,760,232,756,956 bytes compressed to
-769,574,555,019 bytes, yielding a compression ratio of 2.28:1 and
-reducing the corpus from 1.76\,TB to 769\,GB. This constitutes the
+by montage. The full corpus of 69{,}674 files (1{,}760{,}072{,}545{,}212
+bytes) compressed to 769{,}676{,}416{,}643 bytes, yielding a
+compression ratio of 2.287:1 and reducing the corpus from 1.76\,TB
+to 770\,GB (measured by \texttt{tools/bench\_tueg\_subsets.py}). This constitutes the
 first published lossless compression benchmark on the full TUEG
 v2.0.1 corpus.
 
 \begin{table}[!t]
 \renewcommand{\arraystretch}{1.3}
-\caption{LamQuant Lossless: Compression Results on TUEG v2.0.1}
+\caption{LamQuant Lossless: Compression Results on TUEG v2.0.1
+by Montage}
 \label{tab:results}
 \centering
 \begin{tabular}{lrrr}
 \toprule
-Subset & Original (GB) & Compressed (GB) & CR \\
+Montage & Original (GB) & Compressed (GB) & CR \\
 \midrule
-Seizure      & \textit{TODO} & \textit{TODO} & \textit{TODO} \\
-Interictal   & \textit{TODO} & \textit{TODO} & \textit{TODO} \\
-Artifact     & \textit{TODO} & \textit{TODO} & \textit{TODO} \\
-Other        & \textit{TODO} & \textit{TODO} & \textit{TODO} \\
+01\_tcp\_ar      & 1{,}376.72  & 604.73 & 2.277:1 \\
+02\_tcp\_le      &   249.38    & 109.64 & 2.274:1 \\
+03\_tcp\_ar\_a   &   133.75    &  55.21 & 2.423:1 \\
+04\_tcp\_le\_a   &     0.217   &   0.094 & 2.318:1 \\
 \midrule
-\textbf{Full Corpus} & \textbf{1,760} & \textbf{769} & \textbf{2.28:1} \\
+\textbf{Full Corpus} & \textbf{1{,}760.07} & \textbf{769.68} & \textbf{2.287:1} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -478,7 +480,7 @@ Chen et~al.~\cite{chen2018vlsi}
 \textbf{LamQuant (ours)}$^\ddagger$
     & CHB-MIT & \textbf{2.7229:1} & \textbf{0\%} & \textbf{Yes} \\
 \textbf{LamQuant (ours)}
-    & TUEG v2.0.1 & \textbf{2.28:1} & \textbf{0\%} & \textbf{Yes} \\
+    & TUEG v2.0.1 & \textbf{2.287:1} & \textbf{0\%} & \textbf{Yes} \\
 \bottomrule
 \multicolumn{5}{l}{$^\dagger$Chen et~al.\ target a custom
   0.18\,$\mu$m CMOS VLSI implementation.}\\
@@ -536,7 +538,7 @@ corpora.
 \addplot[fill=black!80, postaction={pattern=north east lines, pattern color=white}] coordinates {
     (TUEG edf/000, 2.26)
     (CHB-MIT,      2.7229)
-    (TUEG v2.0.1,  2.28)
+    (TUEG v2.0.1,  2.287)
 };
 \legend{gzip $-9$, Chen et al.~\cite{chen2018vlsi}, LamQuant Lossless}
 \end{axis}
@@ -748,7 +750,7 @@ TUEV v2.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
 TUAB v3.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
 TUEP v3.1.0 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
 TUSZ v2.0.6 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUEG v2.0.1 & 1{,}760     & 769            & 2.28:1 \\
+TUEG v2.0.1 & 1{,}760.07   & 769.68         & 2.287:1 \\
 \midrule
 \multicolumn{4}{l}{\textit{External:}} \\
 CHB-MIT     & 45.76        & 16.80          & 2.7229:1 \\
