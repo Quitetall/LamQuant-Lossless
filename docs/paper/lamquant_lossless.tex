@@ -176,19 +176,40 @@ baseline---by exploiting signal
 structure through predictive coding and signal-matched entropy coding.
 
 \subsection{Shannon Entropy Bound for Clinical EEG}
-The theoretical compression limit for a lossless codec is set by the
-Shannon entropy of the source. For 16-bit samples at 250\,Hz, the
-per-sample entropy of clinical EEG---dominated by broadband noise,
-artifacts, and diverse montage configurations---approaches
-14--15\,bits/sample on a clinically diverse corpus such as TUEG,
-yielding a theoretical compression ceiling of approximately
-2.3--2.5:1. Claims of lossless compression ratios exceeding 3:1 on
-comparable signal classes should therefore be treated with caution;
-such results typically arise from evaluation on curated, low-noise,
-single-session laboratory datasets not representative of clinical
-recording conditions. The result of 2.28:1 on TUEG is consistent
-with the near-theoretical limit for this signal class and reflects
-honest benchmarking on a clinically realistic corpus.
+The compression ceiling for a lossless codec is set by the Shannon
+entropy of the residuals it actually encodes. Empirical entropies
+measured on a 200-file random sample of TUEG~v2.0.1
+(\texttt{tools/bench\_shannon\_entropy.py}, 2.45\,$\times$\,10$^9$
+samples) are:
+
+\begin{itemize}
+\item \textbf{$H_0(X)$ = 10.77\,bits/sample} on raw 16-bit
+  digital samples~$\Rightarrow$ a memory-less entropy coder cannot
+  exceed $16/10.77 \approx 1.49{:}1$ CR.
+\item \textbf{$H_0(\Delta X)$ = 9.34\,bits/sample} on the
+  first-order difference $X[t]-X[t-1]$ (a fixed-coefficient LPC-1
+  predictor)~$\Rightarrow$ a memory-less entropy coder over LPC-1
+  residuals cannot exceed $16/9.34 \approx 1.71{:}1$ CR.
+\end{itemize}
+
+Both ceilings sit well below the 2.287:1 measured for LamQuant
+Lossless on the same corpus. This is consistent: LamQuant operates
+on residuals from a four-band Le~Gall 5/3 lifting wavelet transform
+followed by per-subband adaptive LPC of order up to~8 (with an
+optional order-16 mode), then encodes with Golomb-Rice. The
+effective per-sample entropy of those residuals is therefore
+$\leq 16/2.287 \approx 7.00$\,bits/sample, i.e. LPC-1 and the
+zero-order alphabet are both substantially looser bounds than
+the higher-order context LamQuant actually exploits.
+
+By contrast, lossless compression ratios reported in excess of
+$\sim$3:1 on comparable EEG signal classes
+\cite{sriraam2012,memon1998} typically arise from evaluation on
+curated, low-noise, single-session laboratory datasets, where
+$H_0(X)$ and $H_0(\Delta X)$ are substantially lower than on a
+clinically diverse corpus. The 2.287:1 result on TUEG reflects
+honest benchmarking on a clinically realistic mixture and beats
+both first-order Shannon ceilings on that mixture.
 
 \subsection{Prior Work in Lossless EEG Compression}
 Early signal-aware approaches applied predictive coding with
@@ -445,7 +466,7 @@ Montage & Original (GB) & Compressed (GB) & CR \\
 01\_tcp\_ar      & 1{,}376.72  & 604.73 & 2.277:1 \\
 02\_tcp\_le      &   249.38    & 109.64 & 2.274:1 \\
 03\_tcp\_ar\_a   &   133.75    &  55.21 & 2.423:1 \\
-04\_tcp\_le\_a   &     0.217   &   0.094 & 2.318:1 \\
+04\_tcp\_le\_a   &     0.2173   &   0.0937 & 2.318:1 \\
 \midrule
 \textbf{Full Corpus} & \textbf{1{,}760.07} & \textbf{769.68} & \textbf{2.287:1} \\
 \bottomrule
@@ -643,14 +664,19 @@ regardless of which host architecture the encoder ran on.
 \section{Discussion}
 \label{sec:discussion}
 
-The 2.28:1 result on TUEG is consistent with the Shannon entropy
-bound for 16-bit clinical EEG on a clinically diverse corpus
-(Section~\ref{sec:background}). Artifact-heavy recordings and diverse
-montage configurations suppress achievable compression ratio relative
-to curated laboratory datasets; this is the correct behavior of an
-honest benchmark, not a limitation of the codec. The result on TUEG
-should be interpreted as a conservative lower bound on achievable CR
-for clean ambulatory recordings.
+The 2.287:1 result on TUEG sits above both measured Shannon
+ceilings (memory-less $H_0 \approx 10.77$\,bits/sample and LPC-1
+$H_0(\Delta X) \approx 9.34$\,bits/sample;
+Section~\ref{sec:background}). This implies an effective residual
+entropy of $\leq 7.0$\,bits/sample after the LamQuant pipeline,
+i.e. the four-band lifting wavelet plus per-subband adaptive LPC
+of order up to~8 captures considerably more inter-sample structure
+than a first-order predictor. Artifact-heavy recordings and diverse
+montage configurations suppress CR relative to curated laboratory
+datasets; this is the correct behavior of an honest benchmark, not
+a limitation of the codec. The result on TUEG should be interpreted
+as a conservative lower bound on achievable CR for clean ambulatory
+recordings.
 
 Clinical deployment of a lossless EEG codec imposes requirements
 beyond signal content fidelity. Medicolegal admissibility, FDA
