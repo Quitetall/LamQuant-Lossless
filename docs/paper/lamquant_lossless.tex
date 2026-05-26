@@ -771,31 +771,71 @@ typically reported only signal-level PRD without addressing metadata
 and annotation fidelity.
 
 \subsection{Failure-Mode Analysis on Corrupted Inputs}
-The full TUEG verification run encountered two files present in the
-v2.0.0 release that the corpus maintainers later rectified in v2.0.1:
-both were short of their declared record count and would have
-produced truncated outputs under a non-defensive codec. LamQuant
-Lossless's encoder declines to silently truncate or pad such inputs;
-the per-window CRC-32 plus the per-file SHA-256 chain surface the
-discrepancy at archive time, and the offending stem is flagged in
-the build log rather than silently corrupted. The two v2.0.1
-replacements processed cleanly. This behavior is the correct one
-for a clinical archival codec: the codec must never \emph{invent}
+The verification run encountered two file populations that the
+encoder declined to process. First, two files in TUEG v2.0.0 were
+short of their declared record count and would have produced
+truncated outputs under a non-defensive codec; the corpus
+maintainers rectified them in v2.0.1, and both replacements
+processed cleanly. Second, the CAP Sleep corpus
+(PhysioNet) contains two EDFs (of 108 total --- approximately
+1.9\%) with malformed headers: \texttt{brux1.edf} has a
+declared file size that does not match its data record count,
+and \texttt{ins1.edf} has an out-of-range Digital Minimum
+field. Both files are upstream-public release defects rather than
+local corruption. LamQuant Lossless's encoder declines to silently
+truncate, pad, or coerce malformed inputs; the per-window CRC-32
+plus the per-file SHA-256 chain surface the discrepancy at archive
+time, and the offending stem is flagged in the build log rather
+than silently corrupted. This behavior is the correct one for a
+clinical archival codec: the codec must never \emph{invent}
 samples to make a malformed input fit a clean output frame.
+
+\subsection{Why Benchmark Scale Matters}
+\label{sec:scale}
+Per-file CR distributions on the 13 benched corpora make a
+methodological point worth emphasising: \emph{compression ratios
+reported on small datasets systematically overstate the achievable
+CR on larger, more diverse corpora}. On TUEG edf/000 (453 files,
+6.0\,GB) the per-file CR distribution
+(\texttt{tools/bench\_per\_file\_cr.py}) ranges from 1.05 to
+6.51 (median 2.29, $\sigma = 0.66$); a single recording achieves
+6.51:1 while the aggregate over the full subset is 2.30:1, and the
+aggregate over the full 1.76\,TB TUEG corpus is 2.287:1 ---
+essentially unchanged from the 453-file subset, because the
+per-file outliers are averaged out. CHB-MIT (45.8\,GB, 686 files)
+shows the same pattern: the per-file CR ranges 1.72 to 5.14
+(median 2.82), and the corpus aggregate is 2.723:1 --- a respectable
+number, but 19\% lower than the TUEG single-file maximum of 6.51.
+The OpenNeuro intracranial dataset achieves 3.573:1 aggregate
+because its 319 recordings come from a single hospital with a
+common acquisition setup; if it were ten times larger and drawn
+from multiple sites with diverse hardware, the aggregate would
+almost certainly drop. The corollary for the reader of any
+lossless EEG paper is concrete: \emph{benchmark CR scales inversely
+with corpus diversity}, and headline numbers from sub-100-file
+benches should be discounted accordingly. LamQuant Lossless's
+1.76\,TB TUEG result, taken at the scale of an entire clinical EMU
+corpus, is therefore the load-bearing benchmark; the CHB-MIT
+2.723:1 enables direct comparison with prior work but is intrinsically
+a higher number than the full-scale clinical mixture justifies.
 
 \subsection{Scope Exclusions}
 Three scope boundaries deserve explicit statement.
 \textbf{(i) Sampling rate and bit depth}: benchmarking was conducted
-at 250\,Hz and 16-bit resolution, the dominant parameters in TUEG.
-Performance at higher sampling rates (e.g., 2\,kSPS for
-high-frequency oscillation detection) and 24-bit resolution has not
-yet been characterized; the codec is parameter-agnostic at the
-algorithm level, but the published CR figures are not portable to
-those regimes without re-measurement.
-\textbf{(ii) Modality}: scalp EEG only. Intracranial EEG (iEEG /
-sEEG) and high-density ECoG have substantially different
-statistical characteristics (broader spectral content, sharper
-transients) and are left for future evaluation.
+at the corpus-native rates (250--1024\,Hz for TUEG; up to 16\,kSPS
+on some PhysioNet datasets) and 16-bit resolution. Performance at
+higher sampling rates (e.g., 2\,kSPS for high-frequency oscillation
+detection) and 24-bit resolution at scale has not yet been
+characterised; the codec is parameter-agnostic at the algorithm
+level, but the published CR figures are not portable to those
+regimes without re-measurement.
+\textbf{(ii) Modality coverage}: scalp EEG is the headline target
+(twelve of the thirteen benched corpora). One intracranial corpus
+(OpenNeuro ds004100) is included to characterise the codec on
+iEEG; the higher CR (3.573:1) reflects the tighter spectral
+content of intracranial recordings vs scalp, and per-window LPC
+order selection adapts accordingly. High-density ECoG and
+multi-thousand-channel sEEG arrays remain to be characterised.
 \textbf{(iii) Patient-level metadata}: LamQuant Lossless preserves
 per-recording metadata (annotations, sidecar files, EDF headers)
 byte-exactly. Multi-recording-per-patient or longitudinal
@@ -900,25 +940,48 @@ is narrower than the open-ended TUEG mixed-EMU stream.
 
 \begin{table}[!t]
 \renewcommand{\arraystretch}{1.3}
-\caption{Per-Corpus Compression on the Seven TUH Datasets + CHB-MIT}
+\caption{Per-Corpus Compression on the 13 Benched Datasets}
 \label{tab:per-corpus}
 \centering
-\begin{tabular}{lrrr}
+\begin{tabular}{lrrrl}
 \toprule
-Corpus & Input (GB) & Compressed (GB) & CR \\
+Corpus & Files & Input (GB) & Compressed (GB) & CR \\
 \midrule
-TUSL v2.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUAR v3.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUEV v2.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUAB v3.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUEP v3.1.0 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUSZ v2.0.6 & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUEG v2.0.1 & 1{,}760.07   & 769.68         & 2.287:1 \\
+TUSL v2.0.1 & --- & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUAR v3.0.1 & --- & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUEV v2.0.1 & --- & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUAB v3.0.1 & --- & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUEP v3.1.0 & --- & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUSZ v2.0.6 & --- & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUEG v2.0.1$^\ast$ & 69{,}672 & 1{,}760.07 & 769.68 & 2.287:1 \\
 \midrule
-\multicolumn{4}{l}{\textit{External:}} \\
-CHB-MIT     & 45.76        & 16.80          & 2.7229:1 \\
+\multicolumn{5}{l}{\textit{External (scalp EEG):}} \\
+CHB-MIT             &    686  & 45.76 & 16.80 & 2.723:1 \\
+Siena Scalp EEG     &     41  & 21.80 &  8.62 & 2.528:1 \\
+Sleep-EDF           &    197  &  8.71 &  4.18 & 2.087:1 \\
+CAP Sleep$^\dagger$ &    106  & 42.81 & 18.05 & 2.371:1 \\
+EEG MMI DB          &  1{,}526 &  3.61 &  1.37 & 2.638:1 \\
+\midrule
+\multicolumn{5}{l}{\textit{External (intracranial EEG):}} \\
+OpenNeuro ds004100$^\ddagger$ & 319 & 14.19 & 3.97 & \textbf{3.573:1} \\
 \bottomrule
 \end{tabular}
+
+\vspace{0.4em}
+\noindent\footnotesize
+$^\ast$ TUEG v2.0.1 numbers serve as the prior bench; the headline
+v2.0.2 measurement (released 2026-05-21) is pending final rsync +
+re-bench. The TUH sub-corpus rows (TUSL/TUAR/TUEV/TUAB/TUEP/TUSZ)
+are running concurrently and will be filled in a revision.
+\hfill\break
+$^\dagger$ CAP Sleep has 2 EDF files (out of 108) with malformed
+headers that the LamQuant encoder declines; see
+Section~\ref{sec:discussion} failure-mode analysis.
+\hfill\break
+$^\ddagger$ Only intracranial EEG corpus in the bench set;
+substantially higher CR reflects the tighter spectral content
+of iEEG vs scalp recordings.
+
 \end{table}
 
 \subsection*{Per-Corpus Shannon Entropy and Compression Ceilings}
@@ -935,8 +998,8 @@ CR ceilings are $16/H$.
 
 \begin{table}[!t]
 \renewcommand{\arraystretch}{1.3}
-\caption{Per-Corpus Shannon Entropy on TUH + CHB-MIT
-($n \approx 16.8 \times 10^9$ samples)}
+\caption{Per-Corpus Shannon Entropy on the 11 Benched Corpora
+($n \approx 52.6 \times 10^9$ samples)}
 \label{tab:per-corpus-entropy}
 \centering
 \begin{tabular}{lrrrrr}
@@ -952,10 +1015,15 @@ TUAB v3.0.1 & --- & --- & --- & --- & --- \\
 TUEP v3.1.0 & --- & --- & --- & --- & --- \\
 \midrule
 \multicolumn{6}{l}{\textit{External:}} \\
-CHB-MIT     & 200 & 8.387  & 6.724 & 1.908:1 & 2.379:1 \\
+CHB-MIT (scalp)     & 200 & 8.387  & 6.724 & 1.908:1 & 2.379:1 \\
+Siena Scalp EEG     &  41 & 10.509 & 8.312 & 1.522:1 & 1.925:1 \\
+Sleep-EDF           & 196 & 9.343  & 8.022 & 1.713:1 & 1.994:1 \\
+CAP Sleep           &  96 & 10.671 & 7.414 & 1.499:1 & 2.158:1 \\
+EEG MMI DB          & 200 & 7.897  & 6.648 & 2.026:1 & 2.407:1 \\
+OpenNeuro ds004100 (iEEG) & 128 & 9.755 & 5.378 & 1.640:1 & 2.975:1 \\
 \midrule
-\textbf{Weighted aggregate} & --- & \textbf{9.244} & \textbf{7.656} &
-\textbf{1.731:1} & \textbf{2.090:1} \\
+\textbf{Weighted aggregate} & --- & \textbf{10.069} & \textbf{7.593} &
+\textbf{1.589:1} & \textbf{2.107:1} \\
 \bottomrule
 \end{tabular}
 \end{table}
