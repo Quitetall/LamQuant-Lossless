@@ -48,7 +48,7 @@ use lamquant_weights::generated::snn::{
 };
 
 use crate::neural::ssm_block::{
-    self, D_CONV, D_INNER, D_MODEL, D_STATE, T_SEQ,
+    self, D_INNER, D_MODEL, D_STATE, T_SEQ,
     SsmBlockWeights, SsmHiddenState, SsmScratch,
 };
 use crate::neural::layer_norm::layer_norm_q15;
@@ -182,7 +182,9 @@ pub fn get_sensitivity() -> SnnSensitivity {
 
 /// One 10-second window of L3 approximation → activity_map.
 pub fn inference(l3: &[[i16; T_INPUT]; INPUT_CH]) {
-    let state = unsafe { &mut STATE };
+    // Rust 2024 — `&mut STATIC_MUT` is an error; take a raw pointer first
+    // then dereference unsafely. Same semantics, no static_mut_refs lint.
+    let state = unsafe { &mut *core::ptr::addr_of_mut!(STATE) };
     if !state.initialized { return; }
 
     let threshold_q15 = get_sensitivity().threshold_q15();
@@ -407,7 +409,10 @@ pub fn get_activity(group: usize, t_latent: usize) -> ActivityLevel {
 }
 
 pub fn get_activity_map() -> &'static [[u8; T_LATENT]; READOUT_DIM] {
-    unsafe { &STATE.activity_map }
+    // Rust 2024 — take a raw const pointer to the static-mut subfield
+    // first, then deref. Same lifetime semantics as the prior
+    // `unsafe { &STATE.activity_map }`; no static_mut_refs lint.
+    unsafe { &*core::ptr::addr_of!(STATE.activity_map) }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────

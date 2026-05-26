@@ -33,8 +33,6 @@ use lamquant_weights::generated::focal::{
     bneck_g, bneck_v, dw_gate, focal1_conv, focal2, focal3, premix,
 };
 
-use crate::neural::ternary_mac;
-
 // ─── Layer shapes (mirror generated const generics) ─────────────────
 
 const WIDTH: usize = 128;          // focal block width
