@@ -53,8 +53,9 @@ without floating-point hardware. Evaluated on the
 CHB-MIT Scalp EEG Database under identical parameters to Chen
 et~al.~\cite{chen2018vlsi}, LamQuant Lossless achieves a compression
 ratio of 2.72:1---a 15.9\,\% improvement over the prior state of the
-art. On the Temple University EEG Corpus v2.0.1 (1.76\,TB, 69,730
-files), it achieves 2.28:1, establishing the first published lossless
+art. On the Temple University EEG Corpus v2.0.1 (1.76\,TB,
+69{,}672 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v201}),
+it achieves 2.28:1, establishing the first published lossless
 compression benchmark on the largest open clinical EEG corpus by total
 bytes in existence. Bit-exact reconstruction was verified across 76,254 files
 spanning the seven TUH EEG corpora and CHB-MIT with zero failures. The codec is released
@@ -80,12 +81,18 @@ wireless EEG, clinical archival
 \section{Introduction}
 \label{sec:introduction}
 
-\IEEEPARstart{W}{ireless} EEG acquisition imposes a fundamental
-bandwidth constraint: a 32-channel system sampling at 250\,Hz with
-16-bit resolution generates 3.84\,Mbps of raw data, while clinical
-systems operating at 16\,kSPS with 24-bit resolution exceed
-12\,Mbps---far beyond the practical throughput ceiling of Bluetooth
-Low Energy~5.x ($\approx$1.4\,Mbps). Lossless compression is
+\IEEEPARstart{W}{ireless} EEG acquisition imposes a bandwidth
+constraint that grows quickly with channel count, sample rate,
+and bit depth. A 32-channel ambulatory system at 1024\,Hz
+(the upper end of the TUEG sample-rate range~\cite{tueg_aareadme_v201})
+with 24-bit resolution generates $32 \times 1024 \times 24 =
+786$\,kbps. A 256-channel high-density research system at
+1\,kSPS with 24-bit resolution generates $256 \times 1024 \times
+24 \approx 6.3$\,Mbps, and a clinical intracranial system at
+16\,kSPS with 24-bit resolution over 32 channels generates
+$32 \times 16000 \times 24 \approx 12$\,Mbps---both far beyond
+the practical $\approx$1.4\,Mbps throughput ceiling of
+Bluetooth Low Energy~5.x. Lossless compression is
 therefore a prerequisite for any ambulatory or wireless clinical EEG
 platform. For archival and medicolegal purposes the compression must
 satisfy PRD\,=\,0\%: every sample must be recovered bit-exactly, and
@@ -120,7 +127,8 @@ entropy coding in a fixed integer-only wire format deployable on any
 x86, ARM, or RISC-V target without floating-point hardware. Evaluated on CHB-MIT under identical parameters to Chen
 et~al., LamQuant Lossless achieves 2.72:1 CR---a 15.9\,\%
 improvement over the prior state of the art. On TUEG v2.0.1 (1.76\,TB,
-69,730 files), it achieves 2.28:1, establishing the first published
+69{,}672 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v201}),
+it achieves 2.28:1, establishing the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Across 76,254 files spanning seven EEG
 datasets, bit-exact reconstruction was verified in every case.
@@ -151,8 +159,14 @@ general-purpose compressors cannot efficiently exploit.
 
 \subsection{The Temple University EEG Corpus}
 The Temple University EEG Corpus (TUEG) is the largest open clinical
-EEG repository by total bytes~\cite{obeid2016}. Version 2.0.1 contains 69,730 valid
-EDF files totalling 1,760,232,756,956 bytes (1.76\,TB), spanning
+EEG repository by total bytes~\cite{obeid2016}. Per the corpus
+AAREADME~\cite{tueg_aareadme_v201}, v2.0.1 contains 14{,}987
+patients spread across 26{,}846 recording sessions and 69{,}672
+EDF files (27{,}077.3 hours of total signal duration). Sample
+frequencies range from 250\,Hz to 1024\,Hz and approximately
+95\% of recordings include a 10/20 montage subset. Direct
+measurement on the local mirror sums to
+1{,}760{,}072{,}545{,}212\,bytes (1.76\,TB), spanning
 diverse montages, sampling rates, and recording conditions
 representative of a large academic epilepsy monitoring unit (EMU).
 Two files present in the earlier v2.0.0 release were identified as
@@ -420,10 +434,13 @@ LamQuant Lossless compresses it to 16,804,264,365 bytes
 Used for direct comparison with Chen et~al.~\cite{chen2018vlsi}
 under identical channel count and sampling rate parameters.
 
-\textbf{Temple University EEG Corpus v2.0.1}~\cite{obeid2016}:
-69,730 EDF files totalling 1,760,232,756,956 bytes (1.76\,TB),
-spanning diverse montages, sampling rates, and clinical recording
-conditions from a large academic EMU. Two files present in v2.0.0
+\textbf{Temple University EEG Corpus v2.0.1}~\cite{obeid2016,
+tueg_aareadme_v201}: 69{,}672 EDF files (per the AAREADME)
+spanning 14{,}987 patients and 26{,}846 sessions; local mirror
+sums to 1{,}760{,}072{,}545{,}212\,bytes (1.76\,TB). The corpus
+spans 40+ channel configurations, sample frequencies from 250\,Hz
+to 1024\,Hz, and 27{,}077.3 hours of total signal duration from
+a large academic EMU. Two files present in v2.0.0
 were corrupted and rectified in v2.0.1; both were identified and
 flagged correctly by the codec. The full verification run covered
 76,254 files spanning all seven TUH EEG corpora (TUEG, TUSZ, TUAB,
@@ -811,8 +828,8 @@ TUEV v2.0.1 & 200 & 7.063  & 5.620 & 2.265:1 & 2.847:1 \\
 TUSL v2.0.1 & 112 & 10.402 & 8.327 & 1.538:1 & 1.922:1 \\
 TUSZ v2.0.6 & 200 & 10.412 & 8.865 & 1.537:1 & 1.805:1 \\
 TUEG v2.0.1 & 200 & 10.775 & 9.337 & 1.485:1 & 1.714:1 \\
-TUAB v3.0.1 & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
-TUEP v3.1.0 & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} & \textit{TBD} \\
+TUAB v3.0.1 & --- & --- & --- & --- & --- \\
+TUEP v3.1.0 & --- & --- & --- & --- & --- \\
 \midrule
 \multicolumn{6}{l}{\textit{External:}} \\
 CHB-MIT     & 200 & 8.387  & 6.724 & 1.908:1 & 2.379:1 \\
