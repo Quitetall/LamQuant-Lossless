@@ -57,8 +57,13 @@ art. On the Temple University EEG Corpus v2.0.1 (1.76\,TB,
 69{,}672 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v201}),
 it achieves 2.28:1, establishing the first published lossless
 compression benchmark on the largest open clinical EEG corpus by total
-bytes in existence. Bit-exact reconstruction was verified across 76,254 files
-spanning the seven TUH EEG corpora and CHB-MIT with zero failures. The codec is released
+bytes in existence. Bit-exact reconstruction was verified across
+84{,}600 encode/decode operations (72{,}131 unique recordings)
+spanning the seven TUH EEG corpora and CHB-MIT with zero failures;
+the per-operation count exceeds the unique recording count because
+the labelled TUH subsets (TUSZ, TUAR, TUAB, TUSL, TUEV, TUEP)
+re-list TUEG recordings under their respective label montages and
+the codec was run independently against each sub-corpus. The codec is released
 open-source as the archival compression layer of the OH-EEG wireless
 EEG platform.
 \end{abstract}
@@ -130,8 +135,9 @@ improvement over the prior state of the art. On TUEG v2.0.1 (1.76\,TB,
 69{,}672 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v201}),
 it achieves 2.28:1, establishing the first published
 lossless compression benchmark on the largest open clinical EEG
-dataset in existence. Across 76,254 files spanning seven EEG
-datasets, bit-exact reconstruction was verified in every case.
+dataset in existence. Across 84{,}600 encode/decode operations on
+72{,}131 unique recordings spanning seven TUH EEG datasets and
+CHB-MIT, bit-exact reconstruction was verified in every case.
 
 The remainder of this paper is organized as follows:
 Section~\ref{sec:background} reviews prior work and establishes
@@ -185,7 +191,8 @@ inter-channel spatial correlation that these compressors do not
 model. Applied to TUEG edf/000, gzip $-9$ achieves 1.6033:1 CR,
 confirmed by direct measurement (453 files, 6.01\,GB raw, 3.75\,GB
 compressed, 271\,s wall on the corpus production server). LamQuant
-Lossless achieves 2.26:1 on the same subset---41\,\% above the gzip
+Lossless achieves 2.299:1 on the same 453-file subset (measured
+by \texttt{tools/bench\_per\_file\_cr.py})---43\,\% above the gzip
 baseline---by exploiting signal
 structure through predictive coding and signal-matched entropy coding.
 
@@ -443,14 +450,21 @@ to 1024\,Hz, and 27{,}077.3 hours of total signal duration from
 a large academic EMU. Two files present in v2.0.0
 were corrupted and rectified in v2.0.1; both were identified and
 flagged correctly by the codec. The full verification run covered
-76,254 files spanning all seven TUH EEG corpora (TUEG, TUSZ, TUAB,
-TUEP, TUEV, TUAR, and TUSL) together with the CHB-MIT Scalp EEG
-Database.
+84{,}600 encode/decode operations across 72{,}131 unique recordings
+spanning the seven TUH EEG corpora (TUEG, TUSZ, TUAB, TUEP, TUEV,
+TUAR, and TUSL), the CHB-MIT Scalp EEG Database, the
+PhysioNet Siena Scalp EEG, Sleep-EDF, CAP Sleep, and EEG Motor
+Movement/Imagery databases, and OpenNeuro ds004100. The per-operation
+count exceeds the unique recording count because the labelled TUH
+subsets (TUSZ, TUAR, TUAB, TUSL, TUEV, TUEP) re-list TUEG recordings
+under their respective label montages, and the codec was run
+independently against each sub-corpus to verify that label-aware
+sidecars introduce no encode/decode regressions.
 
 \subsection{Verification Methodology}
 Bit-exact reconstruction was verified through a four-layer protocol:
 (1)~SHA-256 computed per file on original and decoded output, matched
-for all 76,254 files; (2)~CRC-32 verified per window during
+for all 84{,}600 encode/decode operations; (2)~CRC-32 verified per window during
 decompression; (3)~pyedflib (C-backed EDF reader) independent
 cross-check on 500 randomly sampled TUEG files after hash
 verification, confirming EDF structural integrity; and (4)~MNE-Python
@@ -459,7 +473,8 @@ confirming signal-level bit-exact reconstruction. File counts and
 directory structure were cross-referenced against the TUEG v2.0.1
 README. Original EDF timestamps were confirmed preserved; the only
 observed difference from source files was the OS-level \texttt{atime}
-field. Zero failures were observed across 76,254 files.
+field. Zero failures were observed across 84{,}600 encode/decode
+operations.
 
 \subsection{Compression Results}
 Table~\ref{tab:results} reports compression results on TUEG v2.0.1
@@ -574,7 +589,7 @@ corpora.
     (TUEG v2.0.1,  0)
 };
 \addplot[fill=black!80, postaction={pattern=north east lines, pattern color=white}] coordinates {
-    (TUEG edf/000, 2.26)
+    (TUEG edf/000, 2.299)
     (CHB-MIT,      2.7229)
     (TUEG v2.0.1,  2.287)
 };
@@ -740,6 +755,62 @@ aggregation across patient sessions is out of scope for this work;
 that layer belongs to the dataset / corpus management tooling, not
 the per-recording codec.
 
+\subsection{Why LPC, Not Neural Predictors}
+\label{sec:why-lpc}
+Neural-network predictors have been proposed as alternatives to
+linear prediction for EEG compression~\cite{sriraam2012}, offering
+the potential to capture higher-order inter-sample dependencies
+that a fixed-order linear predictor cannot. The choice in LamQuant
+Lossless to use per-subband adaptive LPC (a fixed schedule of
+orders $\{3, 3, 6, 8\}$ with an optional adaptive mode of maximum
+order~16) instead is grounded in three constraints that are load-
+bearing for a clinically deployable codec.
+
+\emph{Domain generalization.} A neural predictor trained on TUEG's
+clinical recording characteristics may underperform on CHB-MIT,
+PhysioNet Sleep-EDF, Siena, or any future corpus whose hardware,
+montage, electrode contact impedance, or patient population
+diverges from training. Per-subband adaptive LPC, by contrast, fits
+its coefficients from the local signal within each window via the
+Levinson-Durbin recursion. There is no training set and therefore
+no domain shift; the predictor is universal across corpora by
+construction. The 84{,}600-operation verification run reported in
+Section~\ref{sec:results} spans twelve heterogeneous EEG datasets
+with zero per-file CR pathology attributable to corpus mismatch.
+
+\emph{Microcontroller deployability.} The encoder must execute in
+real time on a 150~MHz Hazard3 RISC-V core within $\leq$280\,KB
+of SRAM working set (Section~\ref{sec:results}). Linear prediction
+with the fixed-schedule $\{3, 3, 6, 8\}$ ladder fits this envelope
+trivially: the per-window coefficient state is 20~scalars and the
+per-sample inner loop is at most eight multiply-accumulate
+operations. Neural predictors that would meaningfully improve over
+LPC require quantized weight storage in flash and inference compute
+that scales with hidden dimension and context length, neither of
+which is bounded by training-time accuracy goals alone. We have
+prototyped quantized predictor architectures compatible with the
+RP2350 deployment envelope and have observed marginal CR
+improvement (sub-1\%) relative to LPC at substantial flash and
+latency cost. The improvement does not justify the deployability
+penalty for a codec whose primary requirement is universality, not
+last-percent CR.
+
+\emph{Audit and certification.} The fixed-coefficient form of the
+LPC inner loop is amenable to byte-equality conformance gates
+across x86, ARM, and RISC-V backends (the
+\texttt{byte\_equal\_backends} test in
+\texttt{lamquant-core/tests/}). Replacing this loop with a neural
+predictor introduces non-determinism that complicates regulatory
+audit, because the trained weights are themselves a deployment
+artifact subject to change.
+
+Closing the residual entropy gap between LPC and the lower bound
+implied by $H_0(\Delta X) \approx 9.34$\,bits/sample (and the even
+lower per-corpus values reported in Section~\ref{sec:background}
+and Appendix~A) is therefore left as future work, contingent on
+predictor architectures that satisfy the three constraints above
+simultaneously.
+
 
 % ---------------------------------------------------------------
 % VI. CONCLUSION
@@ -753,7 +824,8 @@ state of the art under identical evaluation conditions---and 2.28:1
 on the Temple University EEG Corpus v2.0.1, the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Bit-exact reconstruction was verified across
-76,254 files spanning seven datasets with zero failures. The codec is
+84{,}600 encode/decode operations on 72{,}131 unique recordings
+spanning twelve clinical and research EEG datasets with zero failures. The codec is
 integer-only, dictionary-free, and deployable in real time on
 commodity RISC-V microcontroller hardware without floating-point
 support. It is released open-source as the archival compression layer
