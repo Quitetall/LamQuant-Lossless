@@ -672,7 +672,9 @@ extracted from their published VLSI characterisation.
 
 \begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
-\caption{Encode Throughput and Working-Memory Footprint}
+\caption{Encode Throughput and Working-Memory Footprint
+(RP2350 row is an estimate, \emph{not yet measured on
+silicon}; see \S\ref{sec:results}.D)}
 \label{tab:speed-mem}
 \centering
 \begin{tabular}{lrrl}
@@ -680,14 +682,34 @@ extracted from their published VLSI characterisation.
 Method & Throughput & Memory (KB) & Target \\
 \midrule
 Chen et~al.~\cite{chen2018vlsi} & \textit{cited} & \textit{cited} & 0.18\,$\mu$m ASIC \\
-LamQuant (host scalar) & 137\,MiB/s & 280 & Ryzen-class x86 \\
-LamQuant (RP2350 est.)$^\flat$ & $\approx$\,1.1\,Msa/s & 280 & Hazard3 150\,MHz \\
+LamQuant (host scalar, \emph{measured}) & 137\,MiB/s & 280 & Ryzen-class x86 \\
+LamQuant (RP2350, \emph{estimated})$^\flat$ & $\approx$\,1.1\,Msa/s & 280 & Hazard3 150\,MHz \\
 \bottomrule
-\multicolumn{4}{l}{\scriptsize $^\flat$ Estimated via host scalar throughput $\times$ clock/IPC scaling factor. See \S\ref{sec:results}.D for methodology.}\\
+\multicolumn{4}{l}{\scriptsize $^\flat$ \textbf{Estimated, not measured}: derived from the
+host-side firmware-backend bench scaled by clock-ratio + IPC model. On-silicon RP2350
+deployment is in progress; final wall-clock numbers will be reported in a revision.
+See \S\ref{sec:results}.D for methodology.}\\
 \end{tabular}
 \end{table*}
 
 \subsection{Embedded Deployment on RP2350}
+\noindent\fbox{\parbox{\columnwidth}{\footnotesize
+\textbf{Status — RP2350 deployment in progress.} The numbers in
+this subsection (encode latency, working-memory footprint, the
+``LamQuant (RP2350 est.)'' row in
+Table~\ref{tab:speed-mem}) are \emph{estimates} derived from
+host-side firmware-backend bench numbers scaled by a clock-ratio
+$+$ IPC model. They have \emph{not} yet been measured on RP2350
+silicon. The encoder runs byte-identically on x86, ARM, and
+RISC-V backends today (verified by the
+\texttt{byte\_equal\_backends} conformance gate); the only thing
+in flight is wall-clock measurement on the physical
+microcontroller. Final on-hardware numbers will be reported in
+the next revision.
+}}
+
+\vspace{0.4em}
+
 The LML encoder targets the RP2350 microcontroller (dual Hazard3
 RISC-V cores, 150\,MHz, 64\,KB SRAM banks). The Hazard3 Zbb
 bit-manipulation extension provides hardware \texttt{cpop}
