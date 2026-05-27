@@ -676,25 +676,22 @@ on RP2350 byte-for-byte) and SRAM footprint from per-stage buffer
 analysis (\S\ref{sec:results}.D). Chen et al.\ numbers are
 extracted from their published VLSI characterisation.
 
-\begin{table}[!t]
+\begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
 \caption{Encode Throughput and Working-Memory Footprint}
 \label{tab:speed-mem}
 \centering
 \begin{tabular}{lrrl}
 \toprule
-Method & Throughput (Msa/s) & Memory (KB) & Target \\
+Method & Throughput & Memory (KB) & Target \\
 \midrule
 Chen et~al.~\cite{chen2018vlsi} & \textit{cited} & \textit{cited} & 0.18\,$\mu$m ASIC \\
 LamQuant (host scalar) & 137\,MiB/s & 280 & Ryzen-class x86 \\
 LamQuant (RP2350 est.)$^\flat$ & $\approx$\,1.1\,Msa/s & 280 & Hazard3 150\,MHz \\
 \bottomrule
-\multicolumn{4}{l}{\scriptsize $^\flat$ Estimated via host scalar
-throughput $\times$ clock/IPC scaling factor.}\\
-\multicolumn{4}{l}{\scriptsize See \S\ref{sec:results}.D for
-methodology.}
+\multicolumn{4}{l}{\scriptsize $^\flat$ Estimated via host scalar throughput $\times$ clock/IPC scaling factor. See \S\ref{sec:results}.D for methodology.}\\
 \end{tabular}
-\end{table}
+\end{table*}
 
 \subsection{Embedded Deployment on RP2350}
 The LML encoder targets the RP2350 microcontroller (dual Hazard3
@@ -830,71 +827,97 @@ corpus, is therefore the load-bearing benchmark; the CHB-MIT
 2.723:1 enables direct comparison with prior work but is intrinsically
 a higher number than the full-scale clinical mixture justifies.
 
-\begin{figure}[!t]
+\begin{figure*}[!t]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
     boxplot/draw direction=y,
-    width=\columnwidth,
-    height=5.5cm,
+    width=0.95\textwidth,
+    height=7cm,
     ymin=0.8, ymax=7.5,
     ylabel={Per-file CR (LamQuant Lossless)},
+    ylabel style={font=\small},
     xtick={1,2,3,4,5,6},
     xticklabels={
-        {\rotatebox{30}{TUEG sample}},
-        {\rotatebox{30}{CHB-MIT}},
-        {\rotatebox{30}{TUEV}},
-        {\rotatebox{30}{Sleep-EDF}},
-        {\rotatebox{30}{EEG MMI}},
-        {\rotatebox{30}{ds004100\,(iEEG)}},
+        {TUEG sample},
+        {CHB-MIT},
+        {TUEV},
+        {Sleep-EDF},
+        {EEG MMI},
+        {ds004100 (iEEG)},
     },
-    xticklabel style={font=\footnotesize, yshift=-2mm},
-    yticklabel style={font=\footnotesize},
-    grid=major,
-    major grid style={line width=0.2pt, draw=gray!30},
+    xticklabel style={font=\small},
+    yticklabel style={font=\small},
+    ytick={1,2,3,4,5,6,7},
+    minor y tick num=1,
+    grid=both,
+    major grid style={line width=0.25pt, draw=gray!40},
+    minor grid style={line width=0.1pt, draw=gray!20},
     cycle list={{black}},
+    boxplot/box extend=0.5,
+    boxplot/whisker extend=0.35,
 ]
+% Whiskers use p5 / p95 (statistically robust); min/max marked as
+% outliers via custom coordinates below. Each addplot below also
+% pins the aggregate CR as a thick dashed line via "median" trick
+% — but to keep clarity we just annotate the aggregate above each box.
 \addplot+[boxplot prepared={
-    lower whisker=1.127, lower quartile=2.113, median=2.274,
-    upper quartile=2.493, upper whisker=6.915,
-}, fill=gray!30] coordinates {};
+    lower whisker=1.870, lower quartile=2.113, median=2.274,
+    upper quartile=2.493, upper whisker=2.891,
+}, fill=gray!30, draw=black, line width=0.5pt] coordinates {};
 \addplot+[boxplot prepared={
-    lower whisker=1.723, lower quartile=2.487, median=2.820,
-    upper quartile=3.244, upper whisker=5.139,
-}, fill=gray!30] coordinates {};
+    lower whisker=2.156, lower quartile=2.487, median=2.820,
+    upper quartile=3.244, upper whisker=3.918,
+}, fill=gray!30, draw=black, line width=0.5pt] coordinates {};
 \addplot+[boxplot prepared={
-    lower whisker=1.190, lower quartile=3.188, median=3.500,
-    upper quartile=3.798, upper whisker=5.375,
-}, fill=gray!30] coordinates {};
+    lower whisker=2.540, lower quartile=3.188, median=3.500,
+    upper quartile=3.798, upper whisker=4.282,
+}, fill=gray!30, draw=black, line width=0.5pt] coordinates {};
 \addplot+[boxplot prepared={
-    lower whisker=1.360, lower quartile=1.961, median=2.032,
-    upper quartile=2.209, upper whisker=3.434,
-}, fill=gray!30] coordinates {};
+    lower whisker=1.877, lower quartile=1.961, median=2.032,
+    upper quartile=2.209, upper whisker=3.046,
+}, fill=gray!30, draw=black, line width=0.5pt] coordinates {};
 \addplot+[boxplot prepared={
-    lower whisker=1.923, lower quartile=2.391, median=2.559,
-    upper quartile=2.904, upper whisker=4.255,
-}, fill=gray!30] coordinates {};
+    lower whisker=2.211, lower quartile=2.391, median=2.559,
+    upper quartile=2.904, upper whisker=3.627,
+}, fill=gray!30, draw=black, line width=0.5pt] coordinates {};
 \addplot+[boxplot prepared={
-    lower whisker=2.312, lower quartile=3.177, median=3.577,
-    upper quartile=3.945, upper whisker=5.120,
-}, fill=black!70] coordinates {};
+    lower whisker=2.648, lower quartile=3.177, median=3.577,
+    upper quartile=3.945, upper whisker=4.379,
+}, fill=black!75, draw=black, line width=0.5pt] coordinates {};
+% Min/max outlier markers (filled circles)
+\addplot[only marks, mark=*, mark size=1.2pt, black] coordinates {
+    (1, 1.127) (1, 6.915)
+    (2, 1.723) (2, 5.139)
+    (3, 1.190) (3, 5.375)
+    (4, 1.360) (4, 3.434)
+    (5, 1.923) (5, 4.255)
+    (6, 2.312) (6, 5.120)
+};
+% Aggregate CR markers (diamond), one per corpus
+\addplot[only marks, mark=diamond*, mark size=3pt,
+         fill=white, draw=black, line width=0.8pt] coordinates {
+    (1, 2.259) (2, 2.723) (3, 3.409)
+    (4, 2.087) (5, 2.638) (6, 3.573)
+};
 \end{axis}
 \end{tikzpicture}
 \caption{Per-file CR distribution across six representative
-corpora ($n = 200$ TUEG sample, 686 CHB-MIT, 1{,}036 TUEV, 197
-Sleep-EDF, 1{,}526 EEG MMI DB, 319 OpenNeuro ds004100 iEEG; total
-3{,}964 files). Boxes show interquartile range with median bar;
-whiskers extend to per-file min and max. Single-file outliers
-reach 6.9:1 on TUEG (low-noise resting recordings), while the
-TUEG corpus aggregate sits at 2.287:1 ---
-the codec's compression ratio narrows toward the corpus mean as
-the sample broadens. iEEG (filled black) consistently outperforms
-scalp due to tighter spectral content and higher recording SNR.
-TUEV's elevated median (3.5:1) reflects its narrower dynamic
-range (alphabet 15{,}416 of 65{,}536 possible 16-bit codes; see
+corpora (3{,}964 files total: 200 TUEG sample, 686 CHB-MIT,
+1{,}036 TUEV, 197 Sleep-EDF, 1{,}526 EEG MMI DB, 319 OpenNeuro
+ds004100 iEEG). Box = IQR (p25--p75) with median bar; whiskers =
+p5--p95 (statistically robust); filled circles = per-file extremes
+(min, max); open diamonds = aggregate CR (sum-raw / sum-compressed)
+per corpus. iEEG (filled black box) sits highest by aggregate
+(3.573:1) and by p25 (3.18). TUEG aggregate (2.259, leftmost
+diamond) drops below the CHB-MIT aggregate (2.723) despite TUEG
+having a single-file maximum of 6.92 --- the aggregate narrows
+toward the corpus mean as the sample broadens. TUEV's elevated
+median (3.5:1) reflects its narrower dynamic range (alphabet
+15{,}416 of 65{,}536 possible 16-bit codes; see
 Table~\ref{tab:per-corpus-entropy}).}
 \label{fig:per-file-cr}
-\end{figure}
+\end{figure*}
 
 \subsection{Scope Exclusions}
 Three scope boundaries deserve explicit statement.
@@ -1076,7 +1099,7 @@ corpora compress better because their content (clinical artifact
 recordings, brief seizure clips, well-controlled task experiments)
 is narrower than the open-ended TUEG mixed-EMU stream.
 
-\begin{table}[!t]
+\begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
 \caption{Per-Corpus Compression on the 13 Benched Datasets}
 \label{tab:per-corpus}
@@ -1120,7 +1143,7 @@ $^\ddagger$ Only intracranial EEG corpus in the bench set;
 substantially higher CR reflects the tighter spectral content
 of iEEG vs scalp recordings.
 
-\end{table}
+\end{table*}
 
 \subsection*{Per-Corpus Shannon Entropy and Compression Ceilings}
 
@@ -1134,7 +1157,7 @@ digital sample stream; $H_0(\Delta X)$ is the zero-order entropy
 of the first-order difference (LPC-1 residual). The corresponding
 CR ceilings are $16/H$.
 
-\begin{table}[!t]
+\begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
 \caption{Per-Corpus Shannon Entropy on the 13 Benched Corpora
 ($n \approx 56.3 \times 10^9$ samples)}
@@ -1148,8 +1171,8 @@ TUAR v3.0.1 & 489 & 9.862  & 8.327 & 1.622:1 & 1.922:1 \\
 TUEV v2.0.1 & 200 & 7.063  & 5.620 & 2.265:1 & 2.847:1 \\
 TUSL v2.0.1 & 112 & 10.402 & 8.327 & 1.538:1 & 1.922:1 \\
 TUSZ v2.0.6 & 200 & 10.412 & 8.865 & 1.537:1 & 1.805:1 \\
-TUEG v2.0.2 & 200 & 10.775 & 9.337 & 1.485:1 & 1.714:1 \\
-TUEG v2.0.2$^\ast$ & 200 & 10.795 & 9.018 & 1.482:1 & 1.774:1 \\
+\textbf{TUEG v2.0.2} & \textbf{200} & \textbf{10.795} & \textbf{9.018} & \textbf{1.482:1} & \textbf{1.774:1} \\
+TUEG v2.0.1$^\ast$ & 200 & 10.775 & 9.337 & 1.485:1 & 1.714:1 \\
 TUAB v3.0.1 & 200 & 9.499  & 7.885 & 1.684:1 & 2.029:1 \\
 TUEP v3.1.0 & 200 & 10.733 & 9.564 & 1.491:1 & 1.673:1 \\
 \midrule
@@ -1168,11 +1191,10 @@ OpenNeuro ds004100 (iEEG) & 128 & 9.755 & 5.378 & 1.640:1 & 2.975:1 \\
 
 \vspace{0.4em}
 \noindent\footnotesize
-$^\ast$ TUEG v2.0.2 (released 2026-05-21) supersedes v2.0.1 as the
-headline TUEG measurement. v2.0.1 row is retained for traceability
-of the prior bench; the aggregate excludes v2.0.2 to avoid
-double-counting TUEG.
-\end{table}
+$^\ast$ TUEG v2.0.1 row retained for traceability of the prior
+bench across the v2.0.1 $\rightarrow$ v2.0.2 corpus transition;
+the aggregate uses v2.0.1 only to avoid double-counting TUEG.
+\end{table*}
 
 Two observations follow. First, $H_0(\Delta X)$ is consistently
 1--3\,bits/sample lower than $H_0(X)$, confirming substantial
