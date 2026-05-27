@@ -118,9 +118,9 @@ string repetition and are not designed for the statistical structure
 of EEG signals. Applied to the Temple University EEG Corpus (TUEG)
 v2.0.1, gzip achieves a compression ratio of 1.6033:1---a baseline
 established by direct measurement on the corpus production server
-(\texttt{tools/bench\_gzip\_baseline.sh} over 453 EDFs of TUEG
-edf/000, 6.01\,GB $\rightarrow$ 3.75\,GB at gzip level 9, wall
-271\,s; this work). Signal-aware approaches based on predictive
+(\texttt{tools/bench\_gzip\_baseline.sh} over 456 EDFs of TUEG v2.0.2
+edf/000, 6.02\,GB $\rightarrow$ 3.75\,GB at gzip level 9, wall
+274\,s; this work). Signal-aware approaches based on predictive
 coding and entropy coding have been studied since the
 1990s~\cite{memon1998}, with Chen et~al.\ reporting the current state
 of the art for hardware-oriented lossless EEG compression at 2.35:1
@@ -202,17 +202,19 @@ dictionary-based string matching. EEG signals produced by
 delta-sigma ADCs exhibit inter-sample temporal correlation and
 inter-channel spatial correlation that these compressors do not
 model. Applied to TUEG edf/000, gzip $-9$ achieves 1.6033:1 CR,
-confirmed by direct measurement (453 files, 6.01\,GB raw, 3.75\,GB
-compressed, 271\,s wall on the corpus production server). LamQuant
+confirmed by direct measurement (456 files, 6.02\,GB raw, 3.75\,GB
+compressed, 274\,s wall on the corpus production server). LamQuant
 Lossless achieves 2.299:1 on the same 456-file subset (measured
 by \texttt{tools/bench\_per\_file\_cr.py})---43\,\% above the gzip
 baseline---by exploiting signal
 structure through predictive coding and signal-matched entropy coding.
 
-A more competitive comparator is FLAC, the de-facto lossless audio
-codec, whose architecture (per-frame fixed or windowed LPC up to
-order 12 at \texttt{-7}, order 32 at \texttt{-8}, followed by
-partitioned Rice coding) is structurally similar to LamQuant's.
+A more competitive comparator is FLAC (version 1.5.0 used in this
+work; the most recent stable release at submission), the de-facto
+lossless audio codec, whose architecture (per-frame fixed or
+windowed LPC up to order 12 at \texttt{-7}, order 32 at
+\texttt{-8}, followed by partitioned Rice coding) is structurally
+similar to LamQuant's.
 A fair per-channel FLAC bench (each EDF channel encoded as a
 separate \texttt{flac --bps=16 --channels=1} stream so FLAC's
 stereo-decorrelation tooling does not penalise the multi-channel
@@ -792,15 +794,19 @@ baseline is bench-script reproducible on any EDF subtree
 \end{figure}
 
 \subsection{Throughput and Memory Footprint}
-Table~\ref{tab:speed-mem} compares LamQuant Lossless and the
-Chen et~al.~\cite{chen2018vlsi} VLSI design along the two axes
-that matter for a deployed wearable codec: encode throughput
-(samples/sec aggregated across all channels) and on-die /
-on-chip working memory. LamQuant numbers are measured: throughput
-on host x86 with the scalar firmware backend (the path that runs
-on RP2350 byte-for-byte) and SRAM footprint from per-stage buffer
-analysis (\S\ref{sec:results}.D). Chen et al.\ numbers are
-extracted from their published VLSI characterisation.
+Table~\ref{tab:speed-mem} reports LamQuant Lossless throughput and
+working-memory footprint along the two axes that matter for a
+deployed wearable codec: encode/decode throughput (in samples or
+MiB per second aggregated across all channels) and on-chip
+working memory. Throughput is measured on host x86 with the
+scalar firmware backend (the path that runs on RP2350
+byte-for-byte) and SRAM footprint from per-stage buffer analysis
+(\S\ref{sec:results}.D). Chen et~al.~\cite{chen2018vlsi} report
+only an ASIC gate count and a clock-cycle figure derived from a
+0.18\,$\mu$m CMOS implementation, which is not directly
+comparable to a software MCU encode rate; we therefore omit them
+from this table and confine the Chen et~al.\ CR comparison to
+Table~\ref{tab:comparison}.
 
 \begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
@@ -817,11 +823,14 @@ LamQuant (host scalar, \emph{measured}) & 137\,MiB/s & 280 & Ryzen-class x86 \\
 LamQuant (host scalar decoder, \emph{measured}) & 180\,MiB/s & 280 & Ryzen-class x86 \\
 LamQuant (RP2350 encoder, \emph{estimated})$^\flat$ & $\approx$\,1.1\,Msa/s & 280 & Hazard3 150\,MHz \\
 \bottomrule
-\multicolumn{4}{l}{\scriptsize $^\flat$ \textbf{Estimated, not measured}: derived from the
-host-side firmware-backend bench scaled by clock-ratio + IPC model. On-silicon RP2350
-deployment is in progress; final wall-clock numbers will be reported in a revision.
-See \S\ref{sec:results}.D for methodology.}\\
 \end{tabular}
+
+\vspace{0.4em}
+\noindent\parbox{0.95\textwidth}{\scriptsize $^\flat$ \textbf{Estimated,
+not measured}: derived from the host-side firmware-backend bench
+scaled by clock-ratio + IPC model. On-silicon RP2350 deployment is
+in progress; final wall-clock numbers will be reported in a
+revision. See \S\ref{sec:results}.D for methodology.}
 \end{table*}
 
 \subsection{Embedded Deployment on RP2350}
@@ -950,7 +959,7 @@ samples to make a malformed input fit a clean output frame.
 \label{sec:poor-compression}
 Distinct from input-corruption failures, the codec also has
 \emph{recording-type} failure modes worth documenting. The lowest
-per-file CR observed in the full TUEG\,edf/000 benchmark (453
+per-file CR observed in the full TUEG\,edf/000 benchmark (456
 files) was 1.05:1 on \texttt{aaaaaacz/s007\_2015/01\_tcp\_ar/
 aaaaaacz\_s007\_t006.edf} (4.5\,MB raw); the same subject's
 session 7 contributes three of the five worst-CR files in the
@@ -980,13 +989,13 @@ the average applies to every individual recording.
 Per-file CR distributions on the 13 benched corpora make a
 methodological point worth emphasising: \emph{compression ratios
 reported on small datasets systematically overstate the achievable
-CR on larger, more diverse corpora}. On TUEG edf/000 (453 files,
+CR on larger, more diverse corpora}. On TUEG edf/000 (456 files,
 6.0\,GB) the per-file CR distribution
 (\texttt{tools/bench\_per\_file\_cr.py}) ranges from 1.05 to
 6.51 (median 2.29, $\sigma = 0.66$); a single recording achieves
 6.51:1 while the aggregate over the full subset is 2.30:1, and the
 aggregate over the full 1.76\,TB TUEG corpus is 2.287:1 ---
-essentially unchanged from the 453-file subset, because the
+essentially unchanged from the 456-file subset, because the
 per-file outliers are averaged out. CHB-MIT (45.8\,GB, 686 files)
 shows the same pattern: the per-file CR ranges 1.72 to 5.14
 (median 2.82), and the corpus aggregate is 2.723:1 --- a respectable
@@ -1080,19 +1089,22 @@ a higher number than the full-scale clinical mixture justifies.
 \end{axis}
 \end{tikzpicture}
 \caption{Per-file CR distribution across six representative
-corpora (3{,}964 files total: 200 TUEG sample, 686 CHB-MIT,
-1{,}036 TUEV, 197 Sleep-EDF, 1{,}526 EEG MMI DB, 319 OpenNeuro
-ds004100 iEEG). Box = IQR (p25--p75) with median bar; whiskers =
-p5--p95 (statistically robust); filled circles = per-file extremes
-(min, max); open diamonds = aggregate CR (sum-raw / sum-compressed)
-per corpus. iEEG (filled black box) sits highest by aggregate
-(3.573:1) and by p25 (3.18). TUEG aggregate (2.259, leftmost
-diamond) drops below the CHB-MIT aggregate (2.723) despite TUEG
-having a single-file maximum of 6.92 --- the aggregate narrows
-toward the corpus mean as the sample broadens. TUEV's elevated
-median (3.5:1) reflects its narrower dynamic range (alphabet
-15{,}416 of 65{,}536 possible 16-bit codes; see
-Table~\ref{tab:per-corpus-entropy}).}
+corpora (3{,}964 files total: \textbf{200-file random TUEG
+sample}, 686 CHB-MIT, 1{,}036 TUEV, 197 Sleep-EDF, 1{,}526 EEG
+MMI DB, 319 OpenNeuro ds004100 iEEG). Box = IQR (p25--p75) with
+median bar; whiskers = p5--p95 (statistically robust); filled
+circles = per-file extremes (min, max); open diamonds = aggregate
+CR (sum-raw / sum-compressed) per corpus. \emph{The TUEG diamond
+shows the 200-file sample aggregate (2.259); the full-corpus
+TUEG v2.0.2 aggregate over all 70{,}831 files is 2.287:1, reported
+in Table~\ref{tab:results} as the headline TUEG number. The
+200-file sample reaches a per-file maximum of 6.92:1 on a
+low-noise resting recording; the full edf/000 subset (456 files)
+has a maximum of 6.51:1, also reflected in Section~\ref{sec:scale}.}
+iEEG (filled black box) sits highest by aggregate
+(3.573:1) and by p25 (3.18). TUEV's elevated median (3.5:1)
+reflects its narrower dynamic range (alphabet 15{,}416 of 65{,}536
+possible 16-bit codes; see Table~\ref{tab:per-corpus-entropy}).}
 \label{fig:per-file-cr}
 \end{figure*}
 
