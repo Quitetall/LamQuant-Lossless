@@ -16,17 +16,24 @@ test = true
 doctest = false
 bench = false
 
-# Bare-metal binary — only built for the embedded target.
-# On host (cargo test), bin compilation is suppressed via cfg in main.rs.
+# Bare-metal binary — only built for the embedded target with the
+# `firmware-bin` feature enabled. Downstream library consumers (e.g.
+# `tools/hazard3_bench` which links the codec into a Hazard3 testbench
+# without RP2350 peripherals) opt out via `default-features = false`
+# so the rp235x-hal critical-section impl is not pulled in.
 [[bin]]
 name = "lamquant-firmware"
 path = "src/main.rs"
 test = false
 doctest = false
 bench = false
+required-features = ["firmware-bin"]
 
 [features]
-default = []
+default = ["firmware-bin"]
+# Enables the bare-metal binary entry point + pulls in rp235x-hal +
+# its critical-section impl. Library-only consumers must disable this.
+firmware-bin = ["dep:rp235x-hal"]
 
 # Cat B optional comparators (2026-05-22) — opt-in evaluation crates
 # for future Hazard3 + basestation work. Each gated behind its own
@@ -104,22 +111,26 @@ idsp      = { version = "0.21", default-features = false, optional = true }
 # Bare-metal-only deps. Cargo target-specific dependency tables apply
 # automatically when --target matches.
 [target.riscv32imac-unknown-none-elf.dependencies]
-rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
+# Behind the `firmware-bin` feature so bench/sim consumers don't pull
+# the RP2350-specific critical-section impl (which would conflict with
+# their own single-hart impl). See [features.firmware-bin] above.
+rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"], optional = true }
 riscv = "0.12"
 critical-section = "1.2"
 embedded-hal = "1.0"
 embedded-hal-nb = "1.0"
 fugit = "0.3"
 nb = "1.1"
-# Cat A5 (2026-05-21): firmware logging via defmt over RTT, panic
-# handler routed through defmt so probe-rs flash console can decode
-# format strings off-MCU (big flash savings vs panic-halt). All three
-# deps are bare-metal-target-only so host tests still use std panic.
+# Cat A5 (2026-05-21): firmware logging via defmt over RTT for the
+# off-MCU probe-rs console. Bare-metal-target-only so host tests
+# still use std panic.
 defmt = "0.3"
 defmt-rtt = "0.4"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
-# `panic-halt` retained as the fallback panic handler when defmt
-# isn't wanted — selected via Cargo feature. Default = panic-probe.
+# `panic-probe` is Cortex-M-only upstream (compile_error! on every
+# non-thumb target). The Hazard3 RISC-V build uses `panic-halt`
+# unconditionally. When/if the Cortex-M33 backend lands as a second
+# firmware target, re-add panic-probe under a thumbv8m.* target
+# table — do NOT put it in the riscv32imac table.
 panic-halt = "1.0"
 
 # Host-side test dev deps.

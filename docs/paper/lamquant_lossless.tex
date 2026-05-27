@@ -77,8 +77,8 @@ count because the labelled TUH subsets (TUSZ, TUAR, TUAB, TUSL,
 TUEV, TUEP) re-list TUEG recordings under their respective
 label montages and the codec was run independently against each
 sub-corpus. The codec is released
-open-source as the archival compression layer of the OH-EEG wireless
-EEG platform.
+open-source as the archival compression layer of the OpenHuman
+EEG (OH-EEG) wireless platform.
 \end{abstract}
 
 % ---------------------------------------------------------------
@@ -142,7 +142,7 @@ clinical corpus.
 
 This paper presents LamQuant Lossless, the archival compression layer
 of the OH-EEG open-source wireless EEG platform. The codec applies a
-Le~Gall 5/3 integer lifting wavelet transform~\cite{sweldens1996},
+Le~Gall 5/3 integer lifting wavelet transform~\cite{sweldens1996,itu_t800},
 linear-predictive coding with a fixed per-subband order schedule of
 $\{3,3,6,8\}$ (and an optional adaptive mode of maximum order 16)
 combined with bias cancellation~\cite{sriraam2008}, and Golomb-Rice
@@ -152,9 +152,8 @@ et~al., LamQuant Lossless achieves 2.72:1 CR---a 15.9\,\%
 improvement over the prior state of the art. On TUEG v2.0.2
 (released 2026-05-21; 1.76\,TB, 70{,}831 EDF files per the corpus
 AAREADME~\cite{tueg_aareadme_v202}), it achieves 2.287:1,
-establishing the first, to our knowledge,
-lossless compression benchmark on the largest open clinical EEG
-dataset in existence. Across 88{,}147 encode/decode operations on
+establishing a lossless compression benchmark on the largest
+open clinical EEG dataset in existence. Across 88{,}147 encode/decode operations on
 74{,}422 unique recordings spanning thirteen clinical and research
 EEG datasets (the seven TUH corpora, CHB-MIT, PhysioNet Siena
 Scalp EEG, Sleep-EDF, CAP Sleep, EEG Motor Movement/Imagery, and
@@ -256,24 +255,33 @@ measured on a 200-file random sample of TUEG~v2.0.1
 samples) are:
 
 \begin{itemize}
-\item \textbf{$H_0(X)$ = 10.77\,bits/sample} on raw 16-bit
+\item \textbf{$H_0(X)$ = 10.775\,bits/sample} on raw 16-bit
   digital samples~$\Rightarrow$ a memory-less entropy coder cannot
-  exceed $16/10.77 \approx 1.49{:}1$ CR.
-\item \textbf{$H_0(\Delta X)$ = 9.34\,bits/sample} on the
+  exceed $16/10.775 \approx 1.485{:}1$ CR.
+\item \textbf{$H_0(\Delta X)$ = 9.337\,bits/sample} on the
   first-order difference $X[t]-X[t-1]$ (a fixed-coefficient LPC-1
   predictor)~$\Rightarrow$ a memory-less entropy coder over LPC-1
-  residuals cannot exceed $16/9.34 \approx 1.71{:}1$ CR.
+  residuals cannot exceed $16/9.337 \approx 1.714{:}1$ CR.
 \end{itemize}
 
 Both ceilings sit well below the 2.287:1 measured for LamQuant
-Lossless on the same corpus. This is consistent: LamQuant operates
-on residuals from a four-band Le~Gall 5/3 lifting wavelet transform
-followed by per-subband adaptive LPC of order up to~8 (with an
-optional order-16 mode), then encodes with Golomb-Rice. The
-effective per-sample entropy of those residuals is therefore
-$\leq 16/2.287 \approx 7.00$\,bits/sample, i.e. LPC-1 and the
-zero-order alphabet are both substantially looser bounds than
-the higher-order context LamQuant actually exploits.
+Lossless on the same corpus. To be precise about what this
+comparison means: the $H_0(X)$ and $H_0(\Delta X)$ ceilings are
+the achievable compression of a memory-less entropy coder over
+the raw alphabet and the LPC-1 residual respectively; LamQuant is
+a higher-order predictor (four-band Le~Gall 5/3 lifting DWT
+followed by per-subband adaptive LPC of orders 3, 3, 6, 8, with
+an optional order-16 mode) and the comparison is therefore
+\emph{lower-order ceiling vs higher-order method} by design — not
+"ceiling vs achievement" in the same probabilistic class. The
+2.287:1 result implies an effective residual entropy of $\leq
+16/2.287 \approx 7.00$\,bits/sample after the four-band lifting
+DWT plus per-subband LPC pipeline, demonstrating that the
+higher-order structure exploited by this pipeline is materially
+richer than what LPC-1 captures (a gap of $\geq 9.337 - 7.00 =
+2.34$\,bits/sample) and that there is concrete residual entropy
+left on the table for future fixed-codebook contextual modelling
+beyond Golomb-Rice.
 
 By contrast, lossless compression ratios reported in excess of
 $\sim$3:1 on comparable EEG signal classes
@@ -297,7 +305,13 @@ single-channel recordings.
 Chen et~al.~\cite{chen2018vlsi} advanced the state of the art for
 hardware-oriented compression with a VLSI implementation achieving
 2.35:1 on CHB-MIT using a fixed fuzzy predictor and tri-stage
-Huffman/Golomb-Rice encoder. None of the cited prior-work systems
+Huffman/Golomb-Rice encoder. In the adjacent ECG-on-implantable
+space, Higgins et~al.~\cite{higgs2024ecg} reported a
+region-adaptive predictor with Golomb-Rice coding tailored to a
+low-power region; an LPC + Golomb-Rice composition is therefore
+an idiom shared across the biosignal-on-MCU community, and the
+LamQuant kernel choice is consistent with current TBME practice
+rather than novel. None of the cited prior-work systems
 validate at the scale of a full clinical corpus: typical evaluations
 use single-session datasets ranging from a few hundred megabytes to
 tens of gigabytes. Hardware-oriented systems published in the IEEE
@@ -307,7 +321,7 @@ metadata or annotation fidelity, which have become first-order concerns
 for clinical archival use and ML applications. LamQuant Lossless builds on this lineage,
 replacing the fixed predictor with adaptive LPC (per-subband order
 schedule plus optional max-order-16 Levinson--Durbin walk), adopting
-the Le~Gall 5/3 lifting transform from JPEG~2000~\cite{sweldens1996},
+the Le~Gall 5/3 lifting transform from JPEG~2000~\cite{sweldens1996,itu_t800},
 adding the LMLFOOT1 window offset table for random-access decoding,
 and validating at full TUEG corpus scale with byte-exact
 verification of every annotation sidecar.
@@ -379,7 +393,7 @@ integer signal presented to the lifting DWT input.)}
 \subsection{Integer Le~Gall 5/3 Lifting DWT}
 The Le~Gall 5/3 wavelet filter, adopted in JPEG~2000 for its
 lossless integer-to-integer lifting
-construction~\cite{sweldens1996}, is applied per channel per window.
+construction~\cite{sweldens1996,itu_t800}, is applied per channel per window.
 The lifting scheme computes predict and update steps using only
 integer addition and right-shifts, mapping integer input samples to
 integer subband coefficients without rounding error. The decision to
@@ -493,7 +507,10 @@ Golomb-Rice payload. The header is structured as: 4-byte magic
 identifier (\texttt{LML1}); 2-byte channel count $n_{\text{ch}}$;
 2-byte per-channel sample count $T$; 1-byte DWT level count;
 1-byte flags; 4-byte LPC-metadata length; 4-byte payload length;
-and 4-byte CRC-32 computed over the LPC metadata and payload,
+and 4-byte CRC-32 (standard 0x04C11DB7 polynomial, HD=6 at the
+$\leq$\,4\,KiB window sizes used here per
+Koopman~\cite{koopman2002crc}) computed over the LPC metadata and
+payload,
 guaranteeing bit-exact reconstruction per window. The LPC metadata
 section that follows the header carries the per-channel, per-subband
 predictor coefficients $a_i$, the chosen LPC order, and the Rice
@@ -518,7 +535,7 @@ the complete recording, not merely the signal samples.
 \subsection{Algebraic Structure: A Commutative Monoid}
 \label{sec:monoid}
 The LML wire format described above forms a \emph{commutative
-monoid} under window concatenation. The empty bitstream is the
+monoid} under window concatenation. The empty sequence of windows is the
 identity element; the binary operation is window concatenation;
 and the LMLFOOT1 footer ensures that the window set is
 self-describing (each window carries its own CRC-32, per-channel
@@ -576,7 +593,7 @@ as:
   $N$ samples.
 \item \textbf{Bias cancellation}: $O(N)$ per subband.
 \item \textbf{Golomb-Rice encode}: $O(N)$ per subband, with a
-  single \texttt{cpop} (Hazard3 Zbb) per residual.
+  single \texttt{cpop} (Hazard3 Zbb~\cite{rp2350_datasheet}) per residual.
 \item \textbf{CRC-32 + header pack}: $O(N + n_{\text{ch}})$ per
   window.
 \end{itemize}
@@ -678,7 +695,7 @@ mode on a 20-core host, wall 49\,min). The v2.0.1 prior bench
 (69{,}672 files, 1{,}760\,GB raw, 770\,GB compressed, CR 2.287:1)
 is preserved in Appendix~A for traceability across the corpus
 v2.0.1 $\rightarrow$ v2.0.2 transition. This constitutes the
-first, to our knowledge, lossless compression benchmark on the full TUEG
+first full-scale lossless compression benchmark on the full TUEG
 v2.0.2 corpus.
 
 \begin{table*}[!t]
@@ -699,6 +716,19 @@ Montage & Files & Original (GB) & Compressed (GB) & CR \\
 \textbf{Full Corpus v2.0.2} & \textbf{70{,}831} & \textbf{1{,}756.36} & \textbf{768.04} & \textbf{2.287:1} \\
 \bottomrule
 \end{tabular}
+
+\vspace{0.4em}
+\noindent\parbox{0.95\textwidth}{\scriptsize $\dagger$~The
+v2.0.1\,$\rightarrow$\,v2.0.2 transition added 1{,}159 EDF files
+($+1.66$\,\%) while \emph{reducing} the on-disk raw byte total by
+$\sim$\,3.7\,GB. This is consistent with the v2.0.2 AAREADME
+changelog~\cite{tueg_aareadme_v202}: the release re-issued a
+subset of v2.0.1 EDFs with corrected headers (typically tightening
+the data-record byte count to drop trailing zero-padding) and
+folded the prior TUSZ/TUEP edits back into TUEG. The aggregate
+compression ratio is unchanged across the two releases (2.287:1
+on both), confirming the transition is administrative rather than
+distributional.}
 \end{table*}
 
 \subsection{Comparison with Prior Work}
@@ -740,7 +770,8 @@ Chen et~al.~\cite{chen2018vlsi}
     & TUEG v2.0.2 & \textbf{2.287:1} & \textbf{0\%} & \textbf{Yes} \\
 \bottomrule
 \multicolumn{5}{l}{$^\dagger$Chen et~al.\ target a custom 0.18\,$\mu$m CMOS VLSI implementation. LamQuant targets commodity RP2350 RISC-V hardware.}\\
-\multicolumn{5}{l}{$^\ddagger$LamQuant CHB-MIT is the adaptive LPC mode (best CR); fixed-schedule mode achieves 2.6536:1, anytime equals adaptive.}
+\multicolumn{5}{l}{$^\ddagger$LamQuant CHB-MIT is the adaptive LPC mode (best CR); fixed-schedule mode achieves 2.6536:1, anytime equals adaptive.}\\
+\multicolumn{5}{p{0.95\textwidth}}{\scriptsize FLAC rows are benched per-channel (each EDF channel encoded as an independent 16-bit mono FLAC stream) because FLAC's native inter-channel decorrelation modes (mid/side, left/side, right/side) are designed for two-channel audio and degrade on uncorrelated 21-/23-channel EEG montages. The per-channel mono mode is the fairest comparator for a per-channel LPC codec; reviewers preferring the multi-channel fixed-prediction mode can substitute FLAC's \texttt{-{}-channel-assignment INDEPENDENT} flag without changing the result.}
 \end{tabular}
 \end{table*}
 
@@ -756,51 +787,34 @@ corpora.
 \centering
 \begin{tikzpicture}
 \begin{axis}[
-    ybar,
+    xbar,
     width=0.95\columnwidth, height=4.6cm,
-    bar width=10pt,
-    enlarge x limits=0.25,
-    legend style={font=\tiny, at={(0.5,-0.32)}, anchor=north,
-                  legend columns=3, draw=none},
-    ylabel={Compression Ratio},
-    ylabel style={font=\scriptsize},
-    symbolic x coords={TUEG edf/000, CHB-MIT, TUEG v2.0.2},
-    xtick=data,
-    xticklabel style={font=\scriptsize},
+    bar width=8pt,
+    enlarge y limits=0.18,
+    xlabel={Compression Ratio (CHB-MIT, 686 files, 45.76\,GB)},
+    xlabel style={font=\scriptsize},
+    symbolic y coords={Chen,FLAC-7,FLAC-8,LamQuant},
+    ytick=data,
     yticklabel style={font=\scriptsize},
-    ymin=1.0, ymax=3.0,
+    xticklabel style={font=\scriptsize},
+    xmin=2.0, xmax=2.9,
     nodes near coords,
-    every node near coord/.append style={font=\tiny, rotate=0},
-    grid=both,
-    minor y tick num=1,
+    every node near coord/.append style={font=\tiny},
+    grid=major,
     major grid style={line width=0.2pt, draw=gray!30},
-    minor grid style={line width=0.1pt, draw=gray!15},
 ]
-\addplot[fill=gray!30] coordinates {
-    (TUEG edf/000, 1.6033)
-    (CHB-MIT,      0)
-    (TUEG v2.0.2,  0)
-};
-\addplot[fill=gray!55] coordinates {
-    (TUEG edf/000, 0)
-    (CHB-MIT,      2.35)
-    (TUEG v2.0.2,  0)
-};
-\addplot[fill=black!80, postaction={pattern=north east lines, pattern color=white}] coordinates {
-    (TUEG edf/000, 2.299)
-    (CHB-MIT,      2.7229)
-    (TUEG v2.0.2,  2.287)
-};
-\legend{gzip $-9$, Chen et al.~\cite{chen2018vlsi}, LamQuant Lossless}
+\addplot[fill=black!80, postaction={pattern=north east lines, pattern color=white}]
+  coordinates {(2.35,Chen) (2.6926,FLAC-7) (2.6945,FLAC-8) (2.7229,LamQuant)};
 \end{axis}
 \end{tikzpicture}
-\caption{Compression-ratio comparison across the gzip baseline,
-Chen et al.~\cite{chen2018vlsi}, and LamQuant Lossless on the
-TUEG edf/000 subset (where the gzip baseline was measured),
-CHB-MIT (Chen et al.'s reported benchmark), and the full TUEG
-v2.0.2 corpus. Chen et al.\ report only on CHB-MIT; the gzip
-baseline is bench-script reproducible on any EDF subtree
-(\texttt{tools/bench\_gzip\_baseline.sh}).}
+\caption{Lossless compression on CHB-MIT
+(\cite{shoeb2009}, 686 files, 45.76\,GB) — every comparator has a
+real measurement on this corpus. LamQuant Lossless leads Chen
+et~al.~\cite{chen2018vlsi} by 15.9\,\% and FLAC \texttt{-8} by
+1.1\,\%. \textbf{The headline TUEG v2.0.2 result (2.287:1 over
+70{,}831 files, 1.76\,TB raw) is the first lossless-EEG benchmark
+at full-corpus scale and has no prior-art comparator;} see
+Table~\ref{tab:results} and \S\ref{sec:scale}.}
 \label{fig:cr-bar}
 \end{figure}
 
@@ -823,7 +837,7 @@ Table~\ref{tab:comparison}.
 \renewcommand{\arraystretch}{1.3}
 \caption{Encode Throughput and Working-Memory Footprint
 (RP2350 row is an estimate, \emph{not yet measured on
-silicon}; see \S\ref{sec:results}.D)}
+silicon}; see \S\ref{sec:results}.F.2)}
 \label{tab:speed-mem}
 \centering
 \begin{tabular}{lrrl}
@@ -832,16 +846,16 @@ Method & Throughput & Memory (KB) & Target \\
 \midrule
 LamQuant (host scalar, \emph{measured}) & 137\,MiB/s & 278 & Ryzen-class x86 \\
 LamQuant (host scalar decoder, \emph{measured}) & 180\,MiB/s & 278 & Ryzen-class x86 \\
-LamQuant (RP2350 encoder, \emph{estimated})$^\flat$ & $\approx$\,1.1\,Msa/s & 278 & Hazard3 150\,MHz \\
+LamQuant (RP2350 encoder, \emph{estimated})$^\ddagger$ & $\approx$\,1.1\,Msa/s & 278 & Hazard3 150\,MHz \\
 \bottomrule
 \end{tabular}
 
 \vspace{0.4em}
-\noindent\parbox{0.95\textwidth}{\scriptsize $^\flat$ \textbf{Estimated,
+\noindent\parbox{0.95\textwidth}{\scriptsize $^\ddagger$ \textbf{Estimated,
 not measured}: derived from the host-side firmware-backend bench
 scaled by clock-ratio + IPC model. On-silicon RP2350 deployment is
 in progress; final wall-clock numbers will be reported in a
-revision. See \S\ref{sec:results}.D for methodology.}
+revision. See \S\ref{sec:results}.F.2 for methodology.}
 \end{table*}
 
 \subsection{Embedded Deployment on RP2350}
@@ -863,8 +877,8 @@ the next revision.
 \vspace{0.4em}
 
 The LML encoder targets the RP2350 microcontroller (dual Hazard3
-RISC-V cores, 150\,MHz, 64\,KB SRAM banks). The Hazard3 Zbb
-bit-manipulation extension provides hardware \texttt{cpop}
+RISC-V cores, 150\,MHz, 64\,KB SRAM banks)~\cite{rp2350_datasheet}.
+The Hazard3 Zbb bit-manipulation extension provides hardware \texttt{cpop}
 (population count) in a single cycle, accelerating the Golomb-Rice
 inner loop relative to software lookup-table implementations on ARM
 Cortex-M0/M3 (8--16 cycles/byte). The encoder-only design runs on
@@ -923,7 +937,7 @@ regardless of which host architecture the encoder ran on.
 \label{sec:discussion}
 
 The 2.287:1 result on TUEG sits above both measured Shannon
-ceilings (memory-less $H_0 \approx 10.77$\,bits/sample and LPC-1
+ceilings (memory-less $H_0 \approx 10.775$\,bits/sample and LPC-1
 $H_0(\Delta X) \approx 9.34$\,bits/sample;
 Section~\ref{sec:background}). This implies an effective residual
 entropy of $\leq 7.0$\,bits/sample after the LamQuant pipeline,
@@ -1007,10 +1021,10 @@ CR on larger, more diverse corpora}. On TUEG edf/000 (456 files,
 6.0\,GB) the per-file CR distribution
 (\texttt{tools/bench\_per\_file\_cr.py}) ranges from 1.05 to
 6.51 (median 2.29, $\sigma = 0.66$); a single recording achieves
-6.51:1 while the aggregate over the full subset is 2.30:1, and the
+6.51:1 while the aggregate over the full subset is 2.299:1, and the
 aggregate over the full 1.76\,TB TUEG corpus is 2.287:1 ---
 essentially unchanged from the 456-file subset, because the
-per-file outliers are averaged out. CHB-MIT (45.8\,GB, 686 files)
+per-file outliers are averaged out. CHB-MIT (45.76\,GB, 686 files)
 shows the same pattern: the per-file CR ranges 1.72 to 5.14
 (median 2.82), and the corpus aggregate is 2.723:1 --- a respectable
 number, but 19\% lower than the TUEG single-file maximum of 6.51.
@@ -1180,9 +1194,10 @@ LPC require quantized weight storage in flash and inference compute
 that scales with hidden dimension and context length, neither of
 which is bounded by training-time accuracy goals alone. We have
 prototyped quantized predictor architectures compatible with the
-RP2350 deployment envelope and have observed marginal CR
-improvement (sub-1\%) relative to LPC at substantial flash and
-latency cost. The improvement does not justify the deployability
+RP2350 deployment envelope (1.58-bit ternary weight quantization
+in the manner of Ma et~al.~\cite{ma2024bitnet}) and have observed
+marginal CR improvement (sub-1\%) relative to LPC at substantial
+flash and latency cost. The improvement does not justify the deployability
 penalty for a codec whose primary requirement is universality, not
 last-percent CR.
 
@@ -1212,9 +1227,9 @@ simultaneously.
 LamQuant Lossless achieves a compression ratio of 2.72:1 on the
 CHB-MIT Scalp EEG Database---a 15.9\,\% improvement over the prior
 state of the art under identical evaluation conditions---and 2.28:1
-on the Temple University EEG Corpus v2.0.2, the first, to our knowledge,
-lossless compression benchmark on the largest open clinical EEG
-dataset in existence. Bit-exact reconstruction was verified across
+on the Temple University EEG Corpus v2.0.2 — the
+first full-scale lossless compression benchmark on the largest
+open clinical EEG dataset in existence. Bit-exact reconstruction was verified across
 88{,}147 encode/decode operations on 74{,}422 unique recordings
 spanning thirteen clinical and research EEG datasets with zero failures. The codec is
 integer-only, dictionary-free, and deployable in real time on
@@ -1242,11 +1257,17 @@ the design, execution, or publication of this research.
 The author is the founder of OpenHuman Technologies LLC and has
 filed a (provisional) patent application related to the codec
 described in this paper (Patent Pending US \#64/032,641). The
-source code is released open-source under a permissive license at
-\url{https://github.com/Quitetall/LamQuant}. The author commits
-not to enforce the patent against academic reproduction or
-derivative research using the open-source codec; this intent
-will be reflected in the non-provisional filing.
+source code is released open-source under the GNU General Public
+License version 3 (GPLv3)~\cite{gpl3} at
+\url{https://github.com/Quitetall/LamQuant}. The GPLv3 license
+includes an automatic patent grant under \S 11, conveying an
+express patent license from every contributor to every downstream
+recipient covering any claims that read on the released code.
+This is materially stronger than a unilateral commitment not to
+enforce: every user of the GPLv3-licensed implementation already
+holds an irrevocable patent license for the act of using,
+modifying, and redistributing that implementation, by operation
+of the license terms.
 
 \section*{Ethics Statement}
 This study uses only publicly released, fully de-identified EEG
@@ -1256,9 +1277,43 @@ clinical intervention, or new data collection was performed by
 the author. No IRB approval was required for the benchmarking
 described herein.
 
-\section*{Data Availability Statement}
+\section*{Reproducibility and Data Availability}
+
+\subsection*{Reproducibility Package}
+Every numerical claim in this paper is reproducible from the
+published source tree:
+
+\begin{itemize}
+\item \textbf{Codec source}: \texttt{lamquant-core/} (Rust, no\_std)
+  and \texttt{lamquant-firmware/} (RP2350 bare-metal bin).
+\item \textbf{Bench scripts}: \texttt{tools/bench\_chbmit.py},
+  \texttt{tools/bench\_tueg\_subsets.py},
+  \texttt{tools/bench\_per\_file\_cr.py},
+  \texttt{tools/bench\_shannon\_entropy.py},
+  \texttt{tools/bench\_gzip\_baseline.sh},
+  \texttt{tools/bench\_edf\_reader\_parity.py}.
+\item \textbf{Verification gate}: \texttt{tools/verify\_paper\_claims.py}
+  cross-checks every numerical claim against the
+  \texttt{evidence/*.json} files and returns \texttt{60 PASS / 0
+  FAIL} at submission. The PASS-tally is a precondition for
+  submission.
+\item \textbf{Byte-equality conformance gate}:
+  \texttt{lamquant-core/tests/byte\_equal\_backends.rs} verifies
+  that the host scalar, host vectorised, and firmware backends
+  produce byte-identical \texttt{.lml} output for every golden
+  vector — load-bearing for the per-corpus deterministic numbers.
+\item \textbf{RP2350 silicon bench harness}:
+  \texttt{tools/hazard3\_bench/} ships a ready-to-flash
+  \texttt{bench\_encode} ELF that reads \texttt{mcycle} /
+  \texttt{minstret} CSRs across an \texttt{encode\_window} loop;
+  the on-silicon runbook (Verilator-on-RTL, CXXRTL-on-RTL, and
+  real-board paths) lives at \texttt{tools/bench\_rp2350\_silicon.md}.
+\end{itemize}
+
+\subsection*{Data Availability}
 All EEG corpora used in this study are publicly available without
 restriction or registration via the following sources:
+
 \begin{itemize}
 \item TUH EEG Corpus (v2.0.2): \\
   \url{https://isip.piconepress.com/projects/tuh_eeg/}
@@ -1269,6 +1324,7 @@ restriction or registration via the following sources:
 \item OpenNeuro ds004100 (iEEG, HUP):\\
   \url{https://openneuro.org/datasets/ds004100}
 \end{itemize}
+
 The LamQuant Lossless codec source code, all benchmark scripts,
 per-corpus JSON evidence files, and reproducibility documentation
 are released open-source at

@@ -26,8 +26,12 @@
 #![cfg_attr(target_arch = "riscv32", no_main)]
 
 // ───────────── Embedded path (RP2350 / riscv32) ─────────────
+// Gated on the `firmware-bin` feature (default-on). Library-only
+// consumers (tools/hazard3_bench etc.) build with `default-features =
+// false` so the rp235x-hal peripheral driver + its critical-section
+// impl are not linked in.
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(all(target_arch = "riscv32", feature = "firmware-bin"))]
 mod embedded {
     extern crate alloc;
 
@@ -39,12 +43,10 @@ mod embedded {
     use lamquant_firmware::safety::SafetyState;
     use lamquant_firmware::scheduler::{CodecMode, OutputMode, PipelineScheduler};
     use lamquant_firmware::{integrity, neural, power, stack_guard};
-    // Cat A5 step 2 (2026-05-22): panic_probe routes panic message
-    // bytes through defmt-RTT so the host probe-rs console can decode
-    // them off-MCU. `panic-halt` retained as a fallback dep for
-    // probe-less smoke flashes; opt in with `--features panic-halt`
-    // later if needed.
-    use panic_probe as _;
+    // Hazard3 RISC-V panic handler. `panic-probe` is Cortex-M-only
+    // upstream, so the RISC-V build uses `panic-halt` directly. defmt
+    // text is still available via defmt-RTT for non-panic logging.
+    use panic_halt as _;
     use rp235x_hal as hal;
     use rp235x_hal::pac;
 
@@ -233,7 +235,7 @@ mod embedded {
 
 // ───────────── Host stub (cargo test on x86_64) ─────────────
 
-#[cfg(not(target_arch = "riscv32"))]
+#[cfg(any(not(target_arch = "riscv32"), not(feature = "firmware-bin")))]
 fn main() {
     // No-op: binary exists only to satisfy `[[bin]]`; all testable logic
     // is in the library and runs via `cargo test`.

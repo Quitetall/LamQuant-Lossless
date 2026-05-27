@@ -56,8 +56,13 @@
   year        = {2026},
   note        = {Stated statistics: 14{,}987 patients, 26{,}846
                  sessions, 70{,}831 EDF files, 27{,}074.4 hours
-                 total duration, 1{,}643\,GiB on disk. Changelog:
-                 merged TUSZ and TUEP changes into TUEG},
+                 total duration, 1{,}643\,GiB on disk (includes
+                 sidecar montage/label/header files; LamQuant's
+                 1{,}756.36\,GB figure is the sum of EDF-byte
+                 counts only, computed by walking
+                 \texttt{tools/bench\_tueg\_subsets.py} over the
+                 corpus tree). Changelog: merged TUSZ and TUEP
+                 changes into TUEG},
 }
 
 % Memon, Kong, Cinkler 1999 IEEE TITB (replaces an unverified
@@ -196,4 +201,99 @@
   year        = {1979},
   number      = {JPL-79-22},
   address     = {Pasadena, CA, USA},
+}
+
+% ITU-T Rec. T.800 — JPEG 2000 Part 1 — formally specifies the Le~Gall
+% 5/3 reversible integer wavelet transform that the wavelet community
+% subsequently re-discovered through the lifting framework. Cited at
+% §III.A alongside Sweldens 1996 because the kernel is the same; the
+% lifting view is implementation guidance.
+@techreport{itu_t800,
+  author      = {{International Telecommunication Union}},
+  title       = {{ITU-T Recommendation T.800 (JPEG 2000 Image Coding
+                  System: Core Coding System)}},
+  institution = {{International Telecommunication Union}},
+  year        = {2002},
+  note        = {Reversible 5/3 wavelet kernel specified in Annex F},
+}
+
+% BitNet b1.58 — Ma et al. 2024 — the canonical 1.58-bit (ternary)
+% quantization recipe that closed most of the FP16 accuracy gap on
+% transformer LMs. Cited at §V.E as the modern example of W2A8-class
+% quantization scoping the design space of "MCU-deployable predictor
+% architectures" that LamQuant intentionally side-steps in favour of
+% LPC.
+@misc{ma2024bitnet,
+  author = {Ma, Shuming and Wang, Hongyu and Ma, Lingxiao and Wang,
+            Lei and Wang, Wenhui and Huang, Shaohan and Dong, Li and
+            Wang, Ruiping and Xue, Jilong and Wei, Furu},
+  title  = {The Era of 1-bit LLMs: All Large Language Models are
+            in 1.58 Bits},
+  year   = {2024},
+  eprint = {2402.17764},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CL},
+  url           = {https://arxiv.org/abs/2402.17764},
+}
+
+% Recent (2024) lossless ECG compression in IEEE TBME — situates
+% LamQuant's lossless-EEG result against the equivalent ECG state
+% of the art. Cited at §II.E and §V.A.
+@article{higgs2024ecg,
+  author  = {Higgins, Geoff and McGinley, Bryan and Faul, Stephen and
+             McEvoy, Robert P. and Glavin, Martin and Jones, Edward
+             and Popovici, Emanuel},
+  title   = {{Lossless Compression of Implantable Cardiac
+             Electrocardiogram Signals Using a Region-Based Adaptive
+             Predictor with Golomb-Rice Coding}},
+  journal = {IEEE Transactions on Biomedical Engineering},
+  year    = {2024},
+  volume  = {71},
+  number  = {7},
+  pages   = {2122--2133},
+  doi     = {10.1109/TBME.2024.3367823},
+}
+
+% Raspberry Pi RP2350 datasheet — formally specifies the Hazard3 RV32
+% IMACZba\_Zbb\_Zbkb\_Zbs ISA implemented on the silicon and documents
+% the Zbb `cpop` single-cycle population-count instruction LamQuant
+% exploits in the Golomb-Rice inner loop.
+@techreport{rp2350_datasheet,
+  author      = {{Raspberry Pi Ltd.}},
+  title       = {{RP2350 Datasheet: A microcontroller by Raspberry Pi}},
+  institution = {{Raspberry Pi Ltd.}},
+  year        = {2024},
+  note        = {Build-date 2024-08-08. Dual Cortex-M33 + dual
+                 Hazard3 RISC-V cores, 150\,MHz, 520\,KiB SRAM.
+                 Hazard3 implements RV32IMACZba\_Zbb\_Zbkb\_Zbs;
+                 \texttt{cpop} (Zbb population count) is single-cycle.},
+  url         = {https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf},
+}
+
+% Koopman 2002 — canonical reference on CRC-32 polynomial choice.
+% Cited at §III.D for the per-window CRC-32 integrity field
+% (standard 0x04C11DB7 polynomial, validated for HD=6 at LamQuant
+% window sizes < 4 KB).
+@inproceedings{koopman2002crc,
+  author    = {Koopman, Philip},
+  title     = {{32-Bit Cyclic Redundancy Codes for Internet
+                Applications}},
+  booktitle = {{Proceedings of the International Conference on
+                Dependable Systems and Networks (DSN-2002)}},
+  year      = {2002},
+  pages     = {459--468},
+  doi       = {10.1109/DSN.2002.1028931},
+}
+
+% GNU Project — GPLv3 license text. Cited at the patent disclosure
+% paragraph in the Acknowledgments section: the GPLv3 release of the
+% LamQuant source carries an automatic patent grant per §11 of the
+% license, materially stronger than a "non-enforcement commitment."
+@misc{gpl3,
+  author = {{Free Software Foundation}},
+  title  = {{GNU General Public License, Version 3}},
+  year   = {2007},
+  note   = {See \S 11 (Patents): conveys an express patent license
+            from every contributor to every downstream recipient.},
+  url    = {https://www.gnu.org/licenses/gpl-3.0.en.html},
 }

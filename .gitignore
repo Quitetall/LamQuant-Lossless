@@ -123,3 +123,9 @@ scripts/update_tueg_super.sh
 # 2026-05-21 — keeping them tracked carried 86% of repo size in
 # regenerable output. AI models pull fresh via the graphify CLI.
 graphify-out/
+
+# external/ — third-party reference repos cloned on demand for
+# benching (currently Wren6991/Hazard3 RTL for the RP2350 silicon
+# bench harness in tools/hazard3_bench). Each subdir is pulled by
+# the runbook in tools/bench_rp2350_silicon.md.
+external/

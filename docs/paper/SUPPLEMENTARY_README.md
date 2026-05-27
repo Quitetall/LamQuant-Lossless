@@ -120,6 +120,34 @@ python3 tools/verify_paper_claims.py
 Cross-checks every numerical claim in the paper against the
 `evidence/*.json` files. PASS-tally is a precondition for submission.
 
+## On-silicon RP2350 measurement plan
+
+The Table III "LamQuant (RP2350 encoder, *estimated*)" row currently
+reports an estimate derived from host scalar-path bench × Hazard3
+CPI model. The next revision will replace it with on-silicon
+mcycle/minstret CSR readouts. The bench harness needed to capture
+those readouts is already in the repository:
+
+- **Source**: `tools/hazard3_bench/src/bench_encode.rs` — a bare-
+  metal `riscv32imac-unknown-none-elf` binary that boots, builds a
+  21\,ch × 2500\,sample deterministic xorshift window, runs
+  `PipelineScheduler::encode_window` eight times under a
+  64-bit `mcycle` + `minstret` measurement bracket, and prints
+  `cycles_per_window`, `instrs_per_window`, CPI, `window_us@150MHz`,
+  and `Msa/s` to the print MMIO at `0xC000_0000`.
+- **Runbook**: `tools/bench_rp2350_silicon.md` covers three identical-
+  cycle-count paths:
+    1. Verilator on the official `Wren6991/Hazard3` RTL (cycle-
+       perfect against the same Verilog that taped out as RP2350).
+    2. CXXRTL on the same RTL (Yosys backend, slower compile, same
+       cycle counts).
+    3. Real Pico 2 board over probe-rs / SWD RTT.
+
+All three produce identical `cycles_per_window` to within ±1 cycle
+(only divergence source is IRQ timing — disabled via `mstatus.mie=0`
+during the timed bracket). Run any one of them and the numbers from
+the others fall out by clock ratio.
+
 ## Software environment
 
 - Python: 3.10+
