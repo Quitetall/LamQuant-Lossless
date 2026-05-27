@@ -131,7 +131,7 @@ of the OH-EEG open-source wireless EEG platform. The codec applies a
 Le~Gall 5/3 integer lifting wavelet transform~\cite{sweldens1996},
 linear-predictive coding with a fixed per-subband order schedule of
 $\{3,3,6,8\}$ (and an optional adaptive mode of maximum order 16)
-combined with bias cancellation~\cite{sriraam2007}, and Golomb-Rice
+combined with bias cancellation~\cite{sriraam2008}, and Golomb-Rice
 entropy coding in a fixed integer-only wire format deployable on any
 x86, ARM, or RISC-V target without floating-point hardware. Evaluated on CHB-MIT under identical parameters to Chen
 et~al., LamQuant Lossless achieves 2.72:1 CR---a 15.9\,\%
@@ -246,7 +246,7 @@ dictionary or context-based entropy coders~\cite{memon1998}.
 Subsequent work explored integer wavelet transforms combined with
 neural network predictors and Lempel-Ziv arithmetic
 encoding~\cite{sriraam2012}, achieving CR\,=\,2.99:1 on a small
-single-session dataset. Sriraam and Eswaran~\cite{sriraam2007}
+single-session dataset. Sriraam and Eswaran~\cite{sriraam2008}
 proposed context-based bias cancellation as a lightweight alternative
 to neural predictors, demonstrating competitive performance on
 single-channel recordings.
@@ -370,7 +370,7 @@ of each band while keeping coefficient overhead small. An optional
 Adaptive mode walks the Levinson--Durbin recursion up to a ceiling
 of $P_{\max}=16$ and selects the AIC-optimal order per window.
 
-Bias cancellation following~\cite{sriraam2007} removes the DC offset
+Bias cancellation following~\cite{sriraam2008} removes the DC offset
 from the residual distribution prior to entropy coding. This
 lightweight step empirically outperforms more complex neural
 predictors on 250\,Hz 16-bit clinical EEG while adding negligible
