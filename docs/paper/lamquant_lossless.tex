@@ -1,6 +1,10 @@
 \documentclass[journal]{IEEEtran}
 
 % *** PACKAGES ***
+% newtxtext gives Times with full shape coverage (incl. TS1/sc
+% and OT1/scit that stock IEEEtran Times omits, silencing the
+% font-shape-undefined warnings).
+\usepackage{newtxtext}
 \usepackage{amsmath}
 \usepackage{booktabs}
 \usepackage{graphicx}
