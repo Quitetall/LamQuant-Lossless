@@ -10,6 +10,11 @@
 \usepackage{graphicx}
 \usepackage{cite}
 \usepackage{url}
+% hyperref must come AFTER IEEEtran's own packages but BEFORE
+% any custom defs; hidelinks suppresses the default colored
+% boxes around links. Fixes \url{} truncation when URLs break
+% across lines (links now stay glued together end-to-end).
+\usepackage[hidelinks,breaklinks=true]{hyperref}
 \usepackage{tikz}
 \usetikzlibrary{positioning,arrows.meta,shapes.geometric,calc,patterns}
 \usepackage{pgfplots}
