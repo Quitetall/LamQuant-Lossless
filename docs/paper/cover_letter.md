@@ -28,7 +28,7 @@ The work bridges biomedical signal processing, embedded systems implementation, 
 
 ## Open science
 
-All source code, bench scripts, per-corpus JSON evidence, and reproducibility documentation are released open-source at https://github.com/openhumantech/lamquant (`docs/paper/` and `tools/`). Every numerical claim in the paper can be reproduced by running the listed scripts against a local mirror of the publicly available corpora.
+All source code, bench scripts, per-corpus JSON evidence, and reproducibility documentation are released open-source at https://github.com/Quitetall/LamQuant (`docs/paper/` and `tools/`). Every numerical claim in the paper can be reproduced by running the listed scripts against a local mirror of the publicly available corpora.
 
 ## Novelty
 

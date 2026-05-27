@@ -128,7 +128,7 @@ Cross-checks every numerical claim in the paper against the
 - numpy: 1.24+
 - rsync: 3.x
 - LamQuant Lossless: built via `cargo build --release --bin lml`
-  from <https://github.com/openhumantech/lamquant> at commit `34349e8`
+  from <https://github.com/Quitetall/LamQuant> at commit `34349e8`
   or later.
 
 ## License + Patent
