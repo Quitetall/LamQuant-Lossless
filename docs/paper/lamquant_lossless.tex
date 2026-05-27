@@ -28,6 +28,7 @@ Designed for Microcontroller Deployment}
 \author{Brian~Lam%
 \thanks{B. Lam is the founder of OpenHuman Technologies LLC,
 Florida, USA. E-mail: briankhanglam@usf.edu.
+ORCID: 0009-0001-5463-2324.
 Patent Pending US \#64/032,641.
 Manuscript received May 26, 2026.}}
 
@@ -984,7 +985,7 @@ simultaneously.
 LamQuant Lossless achieves a compression ratio of 2.72:1 on the
 CHB-MIT Scalp EEG Database---a 15.9\,\% improvement over the prior
 state of the art under identical evaluation conditions---and 2.28:1
-on the Temple University EEG Corpus v2.0.1, the first published
+on the Temple University EEG Corpus v2.0.2, the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Bit-exact reconstruction was verified across
 88{,}147 encode/decode operations on 74{,}422 unique recordings
@@ -993,6 +994,67 @@ integer-only, dictionary-free, and deployable in real time on
 commodity RISC-V microcontroller hardware without floating-point
 support. It is released open-source as the archival compression layer
 of the OH-EEG wireless EEG platform.
+
+
+% ---------------------------------------------------------------
+% ACKNOWLEDGMENTS / STATEMENTS
+% ---------------------------------------------------------------
+\section*{Acknowledgments}
+The author thanks the Neural Engineering Data Consortium at Temple
+University for releasing the TUH EEG Corpus, and the PhysioNet
+project for hosting the CHB-MIT Scalp EEG Database, Siena Scalp
+EEG, Sleep-EDF, CAP Sleep, and EEG Motor Movement/Imagery
+databases used as comparators in this work.
+
+\section*{Funding}
+This work was self-funded by OpenHuman Technologies LLC, Florida,
+USA. No external grants or external sponsorship contributed to
+the design, execution, or publication of this research.
+
+\section*{Conflict of Interest}
+The author is the founder of OpenHuman Technologies LLC and has
+filed a patent application related to the codec described in this
+paper (Patent Pending US \#64/032,641). The source code is
+released open-source under a permissive license at
+\url{https://github.com/openhumantech/lamquant}; the patent
+covers commercial implementation rights, not academic
+reproducibility or derivative research.
+
+\section*{Ethics Statement}
+This study uses only publicly released, fully de-identified EEG
+corpora that were approved for open distribution by their
+originating institutions. No human-subject experimentation,
+clinical intervention, or new data collection was performed by
+the author. No IRB approval was required for the benchmarking
+described herein.
+
+\section*{Data Availability Statement}
+All EEG corpora used in this study are publicly available without
+restriction or registration via the following sources:
+\begin{itemize}
+\item TUH EEG Corpus (v2.0.2): \\
+  \url{https://isip.piconepress.com/projects/tuh_eeg/}
+\item CHB-MIT Scalp EEG Database: \\
+  \url{https://physionet.org/content/chbmit/1.0.0/}
+\item PhysioNet Siena Scalp EEG, Sleep-EDF, CAP Sleep, EEG MMI DB:\\
+  \url{https://physionet.org/}
+\item OpenNeuro ds004100 (iEEG, HUP):\\
+  \url{https://openneuro.org/datasets/ds004100}
+\end{itemize}
+The LamQuant Lossless codec source code, all benchmark scripts,
+per-corpus JSON evidence files, and reproducibility documentation
+are released open-source at
+\url{https://github.com/openhumantech/lamquant} under the
+\texttt{docs/paper/} and \texttt{tools/} directories. All numbers
+reported in this paper can be reproduced from these scripts on a
+local mirror of the listed corpora.
+
+\section*{Author Contributions (CRediT)}
+\textbf{Brian Lam}: Conceptualization, Methodology, Software,
+Validation, Formal analysis, Investigation, Resources, Data
+Curation, Writing -- Original Draft, Writing -- Review \& Editing,
+Visualization, Supervision, Project administration, Funding
+acquisition.
 
 
 % ---------------------------------------------------------------
