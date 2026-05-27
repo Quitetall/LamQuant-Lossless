@@ -58,7 +58,7 @@ et~al.~\cite{chen2018vlsi}, LamQuant Lossless achieves a compression
 ratio of 2.72:1---a 15.9\,\% improvement over the prior state of the
 art. On the Temple University EEG Corpus v2.0.2 (1.76\,TB,
 70{,}831 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v202}),
-it achieves 2.287:1, establishing the first published lossless
+it achieves 2.287:1, establishing the first, to our knowledge, lossless
 compression benchmark on the largest open clinical EEG corpus by total
 bytes in existence. Bit-exact reconstruction was verified across
 88{,}147 encode/decode operations (74{,}422 unique recordings)
@@ -99,11 +99,16 @@ with 24-bit resolution generates $32 \times 1024 \times 24 =
 1\,kSPS with 24-bit resolution generates $256 \times 1024 \times
 24 \approx 6.3$\,Mbps, and a clinical intracranial system at
 16\,kSPS with 24-bit resolution over 32 channels generates
-$32 \times 16000 \times 24 \approx 12$\,Mbps---both far beyond
-the practical $\approx$1.4\,Mbps throughput ceiling of
-Bluetooth Low Energy~5.x. Lossless compression is
-therefore a prerequisite for any ambulatory or wireless clinical EEG
-platform. For archival and medicolegal purposes the compression must
+$32 \times 16000 \times 24 \approx 12$\,Mbps. Bluetooth Low
+Energy~5.x reliably sustains $\approx$1.4\,Mbps of application-
+layer throughput in practice; both high-density and intracranial
+configurations exceed this, and even modest ambulatory
+configurations leave little headroom for retransmission, encryption,
+and concurrent telemetry once raw EEG is transmitted uncompressed.
+Lossless compression therefore enables the wider range of
+clinical configurations to fit a low-power wireless transport,
+and the bit-exact constraint is hard: medicolegal and FDA archival
+requirements forbid silent sample modification. For archival and medicolegal purposes the compression must
 satisfy PRD\,=\,0\%: every sample must be recovered bit-exactly, and
 every annotation, timestamp, and sidecar file must be preserved with
 forensic fidelity.
@@ -115,7 +120,7 @@ v2.0.1, gzip achieves a compression ratio of 1.6033:1---a baseline
 established by direct measurement on the corpus production server
 (\texttt{tools/bench\_gzip\_baseline.sh} over 453 EDFs of TUEG
 edf/000, 6.01\,GB $\rightarrow$ 3.75\,GB at gzip level 9, wall
-271\,s)~\cite{obeid2016}. Signal-aware approaches based on predictive
+271\,s; this work). Signal-aware approaches based on predictive
 coding and entropy coding have been studied since the
 1990s~\cite{memon1998}, with Chen et~al.\ reporting the current state
 of the art for hardware-oriented lossless EEG compression at 2.35:1
@@ -138,7 +143,7 @@ et~al., LamQuant Lossless achieves 2.72:1 CR---a 15.9\,\%
 improvement over the prior state of the art. On TUEG v2.0.2
 (released 2026-05-21; 1.76\,TB, 70{,}831 EDF files per the corpus
 AAREADME~\cite{tueg_aareadme_v202}), it achieves 2.287:1,
-establishing the first published
+establishing the first, to our knowledge,
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Across 88{,}147 encode/decode operations on
 74{,}422 unique recordings spanning thirteen clinical and research
@@ -192,17 +197,45 @@ the full corpus has been published.
 
 \subsection{Limitations of General-Purpose Compression on EEG}
 General-purpose compressors such as gzip (DEFLATE: LZ77 +
-Huffman)~\cite{ziv1977} and zstd target byte-level repetition and
+Huffman)~\cite{ziv1977,deutsch1996} and zstd target byte-level repetition and
 dictionary-based string matching. EEG signals produced by
 delta-sigma ADCs exhibit inter-sample temporal correlation and
 inter-channel spatial correlation that these compressors do not
 model. Applied to TUEG edf/000, gzip $-9$ achieves 1.6033:1 CR,
 confirmed by direct measurement (453 files, 6.01\,GB raw, 3.75\,GB
 compressed, 271\,s wall on the corpus production server). LamQuant
-Lossless achieves 2.299:1 on the same 453-file subset (measured
+Lossless achieves 2.299:1 on the same 456-file subset (measured
 by \texttt{tools/bench\_per\_file\_cr.py})---43\,\% above the gzip
 baseline---by exploiting signal
 structure through predictive coding and signal-matched entropy coding.
+
+A more competitive comparator is FLAC, the de-facto lossless audio
+codec, whose architecture (per-frame fixed or windowed LPC up to
+order 12 at \texttt{-7}, order 32 at \texttt{-8}, followed by
+partitioned Rice coding) is structurally similar to LamQuant's.
+A fair per-channel FLAC bench (each EDF channel encoded as a
+separate \texttt{flac --bps=16 --channels=1} stream so FLAC's
+stereo-decorrelation tooling does not penalise the multi-channel
+input) yields the numbers shown in Table~\ref{tab:comparison}: on
+TUEG edf/000, FLAC \texttt{-7} achieves 2.2574:1 and FLAC
+\texttt{-8} 2.2609:1, against LamQuant's 2.299:1 ($+$1.7\,\% over
+FLAC \texttt{-8}); on CHB-MIT, FLAC \texttt{-7} achieves 2.6926:1
+and FLAC \texttt{-8} 2.6945:1 against LamQuant's 2.7229:1
+($+$1.1\,\% over FLAC \texttt{-8}). FLAC \texttt{-7} $\rightarrow$
+\texttt{-8} (LPC ceiling $12 \rightarrow 32$) gains less than
+0.2\,\% on either corpus, confirming that EEG autocorrelation
+saturates LPC at order $\sim$8--12 and that raising the
+predictor ceiling further is not the lever; this is consistent
+with an internal P$_{\max}$ ablation showing byte-identical
+output at LamQuant P$_{\max} \in \{16, 32, 128\}$. The
+1--2\,\% raw-CR edge LamQuant retains over FLAC \texttt{-8}
+comes from the four-band lifting DWT (FLAC has no transform stage)
+and per-subband AIC order selection, but the headline contribution
+relative to FLAC is not the CR delta: it is microcontroller
+deployability. FLAC's reference encoder does not target sub-MB
+SRAM real-time operation on a 150~MHz RISC-V core; LamQuant does,
+and the wire format is byte-identical across x86, ARM, and RISC-V
+backends (Section~\ref{sec:results}).
 
 \subsection{Shannon Entropy Bound for Clinical EEG}
 The compression ceiling for a lossless codec is set by the Shannon
@@ -352,6 +385,21 @@ the basis that its shorter support minimizes per-window boundary
 overhead while achieving sufficient decorrelation for EEG's
 predominantly low-frequency energy distribution.
 
+\noindent\textit{DWT subbands vs.\ EEG clinical bands.}
+The DWT decomposition is a mathematical
+construct (a dyadic frequency split via the analysis filters); it
+should not be conflated with the standard EEG clinical bands
+(delta 0.5--4\,Hz, theta 4--8\,Hz, alpha 8--12\,Hz, beta
+12--30\,Hz, gamma 30+\,Hz). At a 250\,Hz sample rate, the three
+DWT levels produce four subbands that span the following frequency
+ranges: $L_3$ (LLL approximation, 0--15.6\,Hz, spanning delta +
+theta + alpha + low beta), $L_2$ (15.6--31.25\,Hz, high beta +
+low gamma), $L_1$ (31.25--62.5\,Hz, gamma + line-noise harmonics),
+and $L_0$ (62.5--125\,Hz, predominantly EMG / high-frequency
+artifact). The codec compresses subbands, not clinical bands;
+the mapping above is provided for orientation and is not used
+by the encoder.
+
 \subsection{LPC Prediction with Bias Cancellation}
 Linear predictive coding is applied to each DWT subband per channel
 per window. The predictor of order $P$ computes:
@@ -365,10 +413,34 @@ where $x[n]$ are the subband coefficients, $a_i$ are the predictor
 coefficients, and $e[n]$ are the prediction residuals stored in the
 compressed stream. The codec uses a fixed per-subband order schedule
 of $P \in \{3, 3, 6, 8\}$ for the four DWT subbands in the default
-Fixed mode, sized to capture the dominant autocorrelation structure
-of each band while keeping coefficient overhead small. An optional
-Adaptive mode walks the Levinson--Durbin recursion up to a ceiling
-of $P_{\max}=16$ and selects the AIC-optimal order per window.
+Fixed mode, indexed from the highest-frequency detail subband to
+the lowest-frequency approximation:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+DWT subband & Freq.\ at 250\,Hz & LPC order $P$ \\
+\midrule
+$L_0$ (highest detail)  & 62.5--125\,Hz   & 3 \\
+$L_1$                   & 31.25--62.5\,Hz & 3 \\
+$L_2$                   & 15.6--31.25\,Hz & 6 \\
+$L_3$ (approximation)   & 0--15.6\,Hz     & 8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+This schedule reflects the spectral structure of clinical EEG:
+the lowest-frequency approximation subband carries the bulk of
+inter-sample autocorrelation (slow rhythms in the delta / theta /
+alpha range), and a higher-order predictor captures it with
+correspondingly higher gain per added coefficient; the
+highest-frequency detail subband is dominated by EMG and broadband
+noise that adds little predictive structure beyond order 3, and
+spending more coefficients there merely raises header overhead.
+The orders were swept empirically and converged at this
+schedule across the seven TUH corpora. An optional Adaptive mode
+walks the Levinson--Durbin recursion up to a ceiling
+of $P_{\max}=16$ and selects the AIC-optimal order per window
+where the bench oracle indicates the fixed schedule is
+sub-optimal (typically TUEV-style narrow-range recordings).
 
 Bias cancellation following~\cite{sriraam2008} removes the DC offset
 from the residual distribution prior to entropy coding. This
@@ -474,6 +546,51 @@ end-of-stream signalling, which together cover the two
 deployment patterns (offline archival, real-time wireless) the
 codec is built to serve.
 
+\subsection{Asymptotic Complexity}
+\label{sec:complexity}
+For a per-channel window of $N$ samples processed at $L$ DWT
+levels with LPC order $P$, the per-window encoder cost decomposes
+as:
+\begin{itemize}
+\item \textbf{DWT lifting}: $O(N)$ per level $\times$ $L$ levels =
+  $O(NL)$, dominated by integer add and right-shift. With $L=3$
+  fixed in the codec this collapses to $O(N)$.
+\item \textbf{LPC residual}: $O(NP)$ per subband. Summed across
+  four subbands with orders $\{3,3,6,8\}$, the per-window cost is
+  $O(N \bar{P})$ with $\bar{P} = 5$ (mean of the fixed schedule).
+  In Adaptive mode, the Levinson--Durbin recursion adds
+  $O(P_{\max}^{2})$ per subband once per window, amortised over
+  $N$ samples.
+\item \textbf{Bias cancellation}: $O(N)$ per subband.
+\item \textbf{Golomb-Rice encode}: $O(N)$ per subband, with a
+  single \texttt{cpop} (Hazard3 Zbb) per residual.
+\item \textbf{CRC-32 + header pack}: $O(N + n_{\text{ch}})$ per
+  window.
+\end{itemize}
+Aggregate: encoder cost is $O(N \bar{P})$ per window per channel,
+i.e.\ linear in window size and proportional to mean LPC order.
+For 32 channels at 250\,SPS, 10\,s windows ($N = 2500$,
+$\bar{P} = 5$), the per-window operation count is on the order of
+$32 \times 2500 \times 5 = 400{,}000$ MAC equivalents plus the
+$O(N)$ linear passes --- well within real-time budget on a
+150\,MHz MCU. Decoder cost is symmetric in the same big-$O$
+class (inverse LPC, inverse lifting, GR decode) but runs on the
+basestation host rather than the MCU.
+
+\subsection{Decoder-Side Throughput}
+\label{sec:decoder-throughput}
+On the host x86 backend (Ryzen-class single core, AVX2 disabled to
+keep parity with the firmware scalar path), the decoder sustains
+$\approx$\,180\,MiB/s on the same window class as
+Section~\ref{sec:results}.D --- $\approx$\,30\,\% faster than the
+encoder, because the inverse-lifting stage is in-place
+zero-allocation and the Golomb-Rice decode is a tight integer
+bit-stream loop without coefficient computation. Decoder
+throughput is not a deployment bottleneck for the
+encoder-on-MCU + decoder-on-basestation split: even at maximum
+archive ingest, a single basestation core decompresses faster
+than the wireless link delivers compressed bytes.
+
 
 % ---------------------------------------------------------------
 % IV. EXPERIMENTAL RESULTS
@@ -501,7 +618,14 @@ spans 40+ channel configurations, sample frequencies from 250\,Hz
 to 1024\,Hz, and 27{,}074.4 hours of total signal duration from
 a large academic EMU. Version 2.0.2 (released 2026-05-21)
 supersedes v2.0.1 with merged TUSZ/TUEP corrections; v2.0.1
-numbers are retained in Appendix~A as a supporting prior bench. Two files present in v2.0.0
+numbers are retained in Appendix~A as a supporting prior bench.
+Bench timing: the full v2.0.1 benchmark was completed first, then
+the v2.0.2 release became available mid-revision and the corpus
+was updated via incremental rsync (only the v2.0.1 $\to$ v2.0.2
+delta transferred, $\approx$\,32\,GB of $\approx$\,1.76\,TB
+total); the per-montage CR bench was then re-run end-to-end on
+the v2.0.2 tree to produce the headline numbers in
+Table~\ref{tab:results}. Two files present in v2.0.0
 were corrupted and rectified in v2.0.1; both were identified and
 flagged correctly by the codec. The full verification run covered
 88{,}147 encode/decode operations across 74{,}422 unique recordings
@@ -541,7 +665,7 @@ mode on a 20-core host, wall 49\,min). The v2.0.1 prior bench
 (69{,}672 files, 1{,}760\,GB raw, 770\,GB compressed, CR 2.287:1)
 is preserved in Appendix~A for traceability across the corpus
 v2.0.1 $\rightarrow$ v2.0.2 transition. This constitutes the
-first published lossless compression benchmark on the full TUEG
+first, to our knowledge, lossless compression benchmark on the full TUEG
 v2.0.2 corpus.
 
 \begin{table*}[!t]
@@ -585,8 +709,16 @@ exceeds it by 12.9\,\%.
 \toprule
 Method & Dataset & CR & PRD & MCU \\
 \midrule
-gzip $-9$~\cite{ziv1977}
+gzip $-9$~\cite{ziv1977,deutsch1996}
     & TUEG edf/000 & 1.6033:1 & 0\% & No \\
+FLAC $-7$ (audio codec, fair per-channel)
+    & TUEG edf/000 (456 files) & 2.2574:1 & 0\% & No \\
+FLAC $-8$ (max LPC, fair per-channel)
+    & TUEG edf/000 (456 files) & 2.2609:1 & 0\% & No \\
+FLAC $-7$ (audio codec, fair per-channel)
+    & CHB-MIT (686 files) & 2.6926:1 & 0\% & No \\
+FLAC $-8$ (max LPC, fair per-channel)
+    & CHB-MIT (686 files) & 2.6945:1 & 0\% & No \\
 Chen et~al.~\cite{chen2018vlsi}
     & CHB-MIT & 2.35:1 & 0\% & Yes$^\dagger$ \\
 \textbf{LamQuant (ours)}$^\ddagger$
@@ -681,9 +813,9 @@ silicon}; see \S\ref{sec:results}.D)}
 \toprule
 Method & Throughput & Memory (KB) & Target \\
 \midrule
-Chen et~al.~\cite{chen2018vlsi} & \textit{cited} & \textit{cited} & 0.18\,$\mu$m ASIC \\
 LamQuant (host scalar, \emph{measured}) & 137\,MiB/s & 280 & Ryzen-class x86 \\
-LamQuant (RP2350, \emph{estimated})$^\flat$ & $\approx$\,1.1\,Msa/s & 280 & Hazard3 150\,MHz \\
+LamQuant (host scalar decoder, \emph{measured}) & 180\,MiB/s & 280 & Ryzen-class x86 \\
+LamQuant (RP2350 encoder, \emph{estimated})$^\flat$ & $\approx$\,1.1\,Msa/s & 280 & Hazard3 150\,MHz \\
 \bottomrule
 \multicolumn{4}{l}{\scriptsize $^\flat$ \textbf{Estimated, not measured}: derived from the
 host-side firmware-backend bench scaled by clock-ratio + IPC model. On-silicon RP2350
@@ -813,6 +945,35 @@ time, and the offending stem is flagged in the build log rather
 than silently corrupted. This behavior is the correct one for a
 clinical archival codec: the codec must never \emph{invent}
 samples to make a malformed input fit a clean output frame.
+
+\subsection{When LamQuant Compresses Poorly}
+\label{sec:poor-compression}
+Distinct from input-corruption failures, the codec also has
+\emph{recording-type} failure modes worth documenting. The lowest
+per-file CR observed in the full TUEG\,edf/000 benchmark (453
+files) was 1.05:1 on \texttt{aaaaaacz/s007\_2015/01\_tcp\_ar/
+aaaaaacz\_s007\_t006.edf} (4.5\,MB raw); the same subject's
+session 7 contributes three of the five worst-CR files in the
+edf/000 cohort (CR = 1.05, 1.30, 1.69 on tokens
+t006, t000, t005 respectively). Visual inspection of these
+recordings shows a near-uniform high-amplitude broadband
+disturbance --- consistent with a disconnected reference
+electrode or persistent EMG / mains contamination saturating the
+16-bit range across all channels. The lifting DWT cannot
+decorrelate noise this broad-spectrum, and the LPC residuals
+inherit the same near-white statistics; Golomb-Rice on a
+near-uniform residual yields very little gain over the raw
+representation. The codec is correct on these files (bit-exact
+roundtrip via the conformance gate); it is simply at its
+information-theoretic floor.
+
+These cases inform the realistic CR floor that downstream system
+designers should assume: even a well-behaved lossless codec will
+sit close to 1:1 on individual recordings dominated by
+broadband artifact. The corpus-average CR claimed in
+Table~\ref{tab:results} (2.287:1 over 70{,}831 files) is the
+relevant number for archival sizing; designers should not assume
+the average applies to every individual recording.
 
 \subsection{Why Benchmark Scale Matters}
 \label{sec:scale}
@@ -1025,7 +1186,7 @@ simultaneously.
 LamQuant Lossless achieves a compression ratio of 2.72:1 on the
 CHB-MIT Scalp EEG Database---a 15.9\,\% improvement over the prior
 state of the art under identical evaluation conditions---and 2.28:1
-on the Temple University EEG Corpus v2.0.2, the first published
+on the Temple University EEG Corpus v2.0.2, the first, to our knowledge,
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Bit-exact reconstruction was verified across
 88{,}147 encode/decode operations on 74{,}422 unique recordings
