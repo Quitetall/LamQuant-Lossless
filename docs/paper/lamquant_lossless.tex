@@ -268,7 +268,7 @@ the higher-order context LamQuant actually exploits.
 
 By contrast, lossless compression ratios reported in excess of
 $\sim$3:1 on comparable EEG signal classes
-\cite{sriraam2012,memon1998} typically arise from evaluation on
+\cite{sriraam2012} typically arise from evaluation on
 curated, low-noise, single-session laboratory datasets, where
 $H_0(X)$ and $H_0(\Delta X)$ are substantially lower than on a
 clinically diverse corpus. The 2.287:1 result on TUEG reflects
@@ -330,16 +330,14 @@ required at any stage.
     arr/.style={-{Stealth}, thick},
 ]
 \node[sig] (in)  {EDF$_{\text{in}}$\\21 ch $\times$ $T$ i16};
-\node[box, right=of in]   (bq)  {biquad\\HP $i32$};
-\node[box, right=of bq]   (dwt) {lifting\\5/3 DWT};
+\node[box, right=of in]   (dwt) {lifting\\5/3 DWT};
 \node[box, right=of dwt]  (lpc) {LPC\\predict};
 \node[box, below=of lpc]  (bias){bias\\cancel};
 \node[box, left=of bias]  (gr)  {Golomb-\\Rice};
 \node[box, left=of gr]    (lml) {LML\\packet};
 \node[sig, left=of lml]   (out) {.lml\\out};
 
-\draw[arr] (in)  -- (bq);
-\draw[arr] (bq)  -- (dwt);
+\draw[arr] (in)  -- (dwt);
 \draw[arr] (dwt) -- (lpc);
 \draw[arr] (lpc) -- (bias);
 \draw[arr] (bias) -- (gr);
@@ -347,21 +345,25 @@ required at any stage.
 \draw[arr] (lml) -- (out);
 
 % Side annotations
-\node[font=\tiny, above=0.5mm of bq]  {Stage~1};
-\node[font=\tiny, above=0.5mm of dwt] {Stage~2};
-\node[font=\tiny, above=0.5mm of lpc] {Stage~3a};
-\node[font=\tiny, below=0.5mm of bias]{Stage~3b};
-\node[font=\tiny, below=0.5mm of gr]  {Stage~4};
-\node[font=\tiny, below=0.5mm of lml] {Stage~5};
+\node[font=\tiny, above=0.5mm of dwt] {Stage~1};
+\node[font=\tiny, above=0.5mm of lpc] {Stage~2a};
+\node[font=\tiny, below=0.5mm of bias]{Stage~2b};
+\node[font=\tiny, below=0.5mm of gr]  {Stage~3};
+\node[font=\tiny, below=0.5mm of lml] {Stage~4};
 \end{tikzpicture}
 \caption{LamQuant Lossless encoding pipeline. All stages operate
-on integer samples; the biquad HP, three-level Le~Gall 5/3 lifting
-DWT, per-subband LPC with bias cancellation, and Golomb-Rice
-coder run sequentially on each 10-second window. Per-window
-metadata (LPC coefficients + Rice parameter $k$) is packed into
-the LML header alongside the GR payload. The dashed boxes mark
-the file-level boundaries; everything between them is integer-only
-arithmetic suitable for floating-point-free MCU deployment.}
+on integer samples; the three-level Le~Gall 5/3 lifting DWT,
+per-subband LPC with bias cancellation, and Golomb-Rice coder run
+sequentially on each 10-second window. Per-window metadata (LPC
+coefficients + Rice parameter $k$) is packed into the LML header
+alongside the GR payload. The dashed boxes mark the file-level
+boundaries; everything between them is integer-only arithmetic
+suitable for floating-point-free MCU deployment. (The OH-EEG
+firmware optionally applies a biquad high-pass filter as a
+\emph{pre-processing} stage before lossless encoding; that filter
+is lossy by nature and \emph{not part of the LamQuant Lossless
+codec}---the lossless guarantee in this paper applies to the
+integer signal presented to the lifting DWT input.)}
 \label{fig:pipeline}
 \end{figure}
 
@@ -819,9 +821,9 @@ silicon}; see \S\ref{sec:results}.D)}
 \toprule
 Method & Throughput & Memory (KB) & Target \\
 \midrule
-LamQuant (host scalar, \emph{measured}) & 137\,MiB/s & 280 & Ryzen-class x86 \\
-LamQuant (host scalar decoder, \emph{measured}) & 180\,MiB/s & 280 & Ryzen-class x86 \\
-LamQuant (RP2350 encoder, \emph{estimated})$^\flat$ & $\approx$\,1.1\,Msa/s & 280 & Hazard3 150\,MHz \\
+LamQuant (host scalar, \emph{measured}) & 137\,MiB/s & 278 & Ryzen-class x86 \\
+LamQuant (host scalar decoder, \emph{measured}) & 180\,MiB/s & 278 & Ryzen-class x86 \\
+LamQuant (RP2350 encoder, \emph{estimated})$^\flat$ & $\approx$\,1.1\,Msa/s & 278 & Hazard3 150\,MHz \\
 \bottomrule
 \end{tabular}
 
@@ -880,12 +882,14 @@ by the simple clock+IPC scaling factor.
 The encoder working set on a 21-channel window is dominated by the
 LPC residual buffer (21\,$\times$\,2500\,$\times$\,4\,B
 = 205\,KB i32 residuals), the bias-cancellation context
-(21\,$\times$\,256\,$\times$\,4\,B = 21\,KB), the biquad
-delay-line state (21\,$\times$\,72\,B $\approx$\,1.5\,KB), and a
-variable-size Golomb-Rice output buffer (bounded by residual size,
-typically 20--50\,KB). The lifting DWT operates in-place on the
-input buffer and adds no scratch beyond the working window. Total
-encoder working memory is approximately 280\,KB, fitting comfortably
+(21\,$\times$\,256\,$\times$\,4\,B = 21\,KB), and a variable-size
+Golomb-Rice output buffer (bounded by residual size, typically
+20--50\,KB). The lifting DWT operates in-place on the input buffer
+and adds no scratch beyond the working window. Total encoder
+working memory is approximately 278\,KB (rounded down from
+278.5\,KB; the firmware-level optional biquad high-pass
+preprocessing adds a further 1.5\,KB of delay-line state but is
+not part of the lossless codec proper). All numbers fit comfortably
 in the RP2350's 520\,KB on-chip SRAM with headroom for safety state,
 USB / BLE transport buffers, and the basestation-bound activity-map
 output of the on-MCU neural front-end.
@@ -936,6 +940,7 @@ typically reported only signal-level PRD without addressing metadata
 and annotation fidelity.
 
 \subsection{Failure-Mode Analysis on Corrupted Inputs}
+\label{sec:failure-mode}
 The verification run encountered two file populations that the
 encoder declined to process. First, two files in TUEG v2.0.0 were
 short of their declared record count and would have produced
@@ -1156,7 +1161,7 @@ Section~\ref{sec:results} spans thirteen heterogeneous EEG datasets
 with zero per-file CR pathology attributable to corpus mismatch.
 
 \emph{Microcontroller deployability.} The encoder must execute in
-real time on a 150~MHz Hazard3 RISC-V core within $\leq$280\,KB
+real time on a 150~MHz Hazard3 RISC-V core within $\leq$278\,KB
 of SRAM working set (Section~\ref{sec:results}). Linear prediction
 with the fixed-schedule $\{3, 3, 6, 8\}$ ladder fits this envelope
 trivially: the per-window coefficient state is 20~scalars and the
@@ -1226,12 +1231,13 @@ the design, execution, or publication of this research.
 
 \section*{Conflict of Interest}
 The author is the founder of OpenHuman Technologies LLC and has
-filed a patent application related to the codec described in this
-paper (Patent Pending US \#64/032,641). The source code is
-released open-source under a permissive license at
-\url{https://github.com/Quitetall/LamQuant}; the patent
-covers commercial implementation rights, not academic
-reproducibility or derivative research.
+filed a (provisional) patent application related to the codec
+described in this paper (Patent Pending US \#64/032,641). The
+source code is released open-source under a permissive license at
+\url{https://github.com/Quitetall/LamQuant}. The author commits
+not to enforce the patent against academic reproduction or
+derivative research using the open-source codec; this intent
+will be reflected in the non-provisional filing.
 
 \section*{Ethics Statement}
 This study uses only publicly released, fully de-identified EEG
@@ -1326,7 +1332,7 @@ headline measurement.
 \hfill\break
 $^\dagger$ CAP Sleep has 2 EDF files (out of 108) with malformed
 headers that the LamQuant encoder declines; see
-Section~\ref{sec:discussion} failure-mode analysis.
+Section~\ref{sec:failure-mode}.
 \hfill\break
 $^\ddagger$ Only intracranial EEG corpus in the bench set;
 substantially higher CR reflects the tighter spectral content
