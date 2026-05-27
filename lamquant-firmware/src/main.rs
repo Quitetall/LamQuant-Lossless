@@ -235,7 +235,7 @@ mod embedded {
 
 // ───────────── Host stub (cargo test on x86_64) ─────────────
 
-#[cfg(any(not(target_arch = "riscv32"), not(feature = "firmware-bin")))]
+#[cfg(not(all(target_arch = "riscv32", feature = "firmware-bin")))]
 fn main() {
     // No-op: binary exists only to satisfy `[[bin]]`; all testable logic
     // is in the library and runs via `cargo test`.
