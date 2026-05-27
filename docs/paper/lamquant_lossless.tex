@@ -125,7 +125,7 @@ forensic fidelity.
 General-purpose compressors such as gzip and zstd exploit byte-level
 string repetition and are not designed for the statistical structure
 of EEG signals. Applied to the Temple University EEG Corpus (TUEG)
-v2.0.1, gzip achieves a compression ratio of 1.6033:1---a baseline
+v2.0.1, gzip achieves a compression ratio of 1.6033:1. This baseline is
 established by direct measurement on the corpus production server
 (\texttt{tools/bench\_gzip\_baseline.sh} over 456 EDFs of TUEG v2.0.2
 edf/000, 6.02\,GB $\rightarrow$ 3.75\,GB at gzip level 9, wall
@@ -303,8 +303,8 @@ use single-session datasets ranging from a few hundred megabytes to
 tens of gigabytes. Hardware-oriented systems published in the IEEE
 TBioCAS / JSSC line~\cite{chen2018vlsi} report compression numbers
 measured on the same restricted CHB-MIT subset and do not address
-metadata or annotation fidelity, which become first-order concerns
-for clinical archival use. LamQuant Lossless builds on this lineage,
+metadata or annotation fidelity, which have become first-order concerns
+for clinical archival use and ML applications. LamQuant Lossless builds on this lineage,
 replacing the fixed predictor with adaptive LPC (per-subband order
 schedule plus optional max-order-16 Levinson--Durbin walk), adopting
 the Le~Gall 5/3 lifting transform from JPEG~2000~\cite{sweldens1996},
@@ -479,7 +479,7 @@ requiring no external dictionary. This design eliminates dictionary
 overhead entirely. rANS and arithmetic coding approaches were
 evaluated and found not to recover their implementation overhead at
 the window sizes and entropy levels characteristic of 250\,Hz 16-bit
-clinical EEG---consistent with the theoretical result that GR
+clinical EEG. This is consistent with the theoretical result that GR
 achieves near-optimal coding efficiency for geometric sources with
 lower per-symbol overhead than asymmetric numeral systems at short
 block lengths. Windows are fully self-contained: no inter-window
