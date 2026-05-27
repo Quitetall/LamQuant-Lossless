@@ -10,6 +10,7 @@
 \usetikzlibrary{positioning,arrows.meta,shapes.geometric,calc,patterns}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.18}
+\usepgfplotslibrary{statistics}
 
 \hyphenation{op-tical net-works semi-conduc-tor}
 
@@ -58,7 +59,7 @@ art. On the Temple University EEG Corpus v2.0.2 (1.76\,TB,
 it achieves 2.287:1, establishing the first published lossless
 compression benchmark on the largest open clinical EEG corpus by total
 bytes in existence. Bit-exact reconstruction was verified across
-84{,}600 encode/decode operations (72{,}131 unique recordings)
+88{,}147 encode/decode operations (74{,}422 unique recordings)
 spanning thirteen clinical and research EEG datasets with zero
 failures; the per-operation count exceeds the unique recording
 count because the labelled TUH subsets (TUSZ, TUAR, TUAB, TUSL,
@@ -137,8 +138,8 @@ improvement over the prior state of the art. On TUEG v2.0.2
 AAREADME~\cite{tueg_aareadme_v202}), it achieves 2.287:1,
 establishing the first published
 lossless compression benchmark on the largest open clinical EEG
-dataset in existence. Across 84{,}600 encode/decode operations on
-72{,}131 unique recordings spanning thirteen clinical and research
+dataset in existence. Across 88{,}147 encode/decode operations on
+74{,}422 unique recordings spanning thirteen clinical and research
 EEG datasets (the seven TUH corpora, CHB-MIT, PhysioNet Siena
 Scalp EEG, Sleep-EDF, CAP Sleep, EEG Motor Movement/Imagery, and
 OpenNeuro ds004100), bit-exact reconstruction was verified in
@@ -501,7 +502,7 @@ supersedes v2.0.1 with merged TUSZ/TUEP corrections; v2.0.1
 numbers are retained in Appendix~A as a supporting prior bench. Two files present in v2.0.0
 were corrupted and rectified in v2.0.1; both were identified and
 flagged correctly by the codec. The full verification run covered
-84{,}600 encode/decode operations across 72{,}131 unique recordings
+88{,}147 encode/decode operations across 74{,}422 unique recordings
 spanning the seven TUH EEG corpora (TUEG, TUSZ, TUAB, TUEP, TUEV,
 TUAR, and TUSL), the CHB-MIT Scalp EEG Database, the
 PhysioNet Siena Scalp EEG, Sleep-EDF, CAP Sleep, and EEG Motor
@@ -515,7 +516,7 @@ sidecars introduce no encode/decode regressions.
 \subsection{Verification Methodology}
 Bit-exact reconstruction was verified through a four-layer protocol:
 (1)~SHA-256 computed per file on original and decoded output, matched
-for all 84{,}600 encode/decode operations; (2)~CRC-32 verified per window during
+for all 88{,}147 encode/decode operations; (2)~CRC-32 verified per window during
 decompression; (3)~pyedflib (C-backed EDF reader) independent
 cross-check on 500 randomly sampled TUEG files after hash
 verification, confirming EDF structural integrity; and (4)~MNE-Python
@@ -524,7 +525,7 @@ confirming signal-level bit-exact reconstruction. File counts and
 directory structure were cross-referenced against the TUEG v2.0.2
 AAREADME. Original EDF timestamps were confirmed preserved; the only
 observed difference from source files was the OS-level \texttt{atime}
-field. Zero failures were observed across 84{,}600 encode/decode
+field. Zero failures were observed across 88{,}147 encode/decode
 operations.
 
 \subsection{Compression Results}
@@ -827,6 +828,72 @@ corpus, is therefore the load-bearing benchmark; the CHB-MIT
 2.723:1 enables direct comparison with prior work but is intrinsically
 a higher number than the full-scale clinical mixture justifies.
 
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    boxplot/draw direction=y,
+    width=\columnwidth,
+    height=5.5cm,
+    ymin=0.8, ymax=7.5,
+    ylabel={Per-file CR (LamQuant Lossless)},
+    xtick={1,2,3,4,5,6},
+    xticklabels={
+        {\rotatebox{30}{TUEG sample}},
+        {\rotatebox{30}{CHB-MIT}},
+        {\rotatebox{30}{TUEV}},
+        {\rotatebox{30}{Sleep-EDF}},
+        {\rotatebox{30}{EEG MMI}},
+        {\rotatebox{30}{ds004100\,(iEEG)}},
+    },
+    xticklabel style={font=\footnotesize, yshift=-2mm},
+    yticklabel style={font=\footnotesize},
+    grid=major,
+    major grid style={line width=0.2pt, draw=gray!30},
+    cycle list={{black}},
+]
+\addplot+[boxplot prepared={
+    lower whisker=1.127, lower quartile=2.113, median=2.274,
+    upper quartile=2.493, upper whisker=6.915,
+}, fill=gray!30] coordinates {};
+\addplot+[boxplot prepared={
+    lower whisker=1.723, lower quartile=2.487, median=2.820,
+    upper quartile=3.244, upper whisker=5.139,
+}, fill=gray!30] coordinates {};
+\addplot+[boxplot prepared={
+    lower whisker=1.190, lower quartile=3.188, median=3.500,
+    upper quartile=3.798, upper whisker=5.375,
+}, fill=gray!30] coordinates {};
+\addplot+[boxplot prepared={
+    lower whisker=1.360, lower quartile=1.961, median=2.032,
+    upper quartile=2.209, upper whisker=3.434,
+}, fill=gray!30] coordinates {};
+\addplot+[boxplot prepared={
+    lower whisker=1.923, lower quartile=2.391, median=2.559,
+    upper quartile=2.904, upper whisker=4.255,
+}, fill=gray!30] coordinates {};
+\addplot+[boxplot prepared={
+    lower whisker=2.312, lower quartile=3.177, median=3.577,
+    upper quartile=3.945, upper whisker=5.120,
+}, fill=black!70] coordinates {};
+\end{axis}
+\end{tikzpicture}
+\caption{Per-file CR distribution across six representative
+corpora ($n = 200$ TUEG sample, 686 CHB-MIT, 1{,}036 TUEV, 197
+Sleep-EDF, 1{,}526 EEG MMI DB, 319 OpenNeuro ds004100 iEEG; total
+3{,}964 files). Boxes show interquartile range with median bar;
+whiskers extend to per-file min and max. Single-file outliers
+reach 6.9:1 on TUEG (low-noise resting recordings), while the
+TUEG corpus aggregate sits at 2.287:1 ---
+the codec's compression ratio narrows toward the corpus mean as
+the sample broadens. iEEG (filled black) consistently outperforms
+scalp due to tighter spectral content and higher recording SNR.
+TUEV's elevated median (3.5:1) reflects its narrower dynamic
+range (alphabet 15{,}416 of 65{,}536 possible 16-bit codes; see
+Table~\ref{tab:per-corpus-entropy}).}
+\label{fig:per-file-cr}
+\end{figure}
+
 \subsection{Scope Exclusions}
 Three scope boundaries deserve explicit statement.
 \textbf{(i) Sampling rate and bit depth}: benchmarking was conducted
@@ -870,7 +937,7 @@ diverges from training. Per-subband adaptive LPC, by contrast, fits
 its coefficients from the local signal within each window via the
 Levinson-Durbin recursion. There is no training set and therefore
 no domain shift; the predictor is universal across corpora by
-construction. The 84{,}600-operation verification run reported in
+construction. The 88{,}147-operation verification run reported in
 Section~\ref{sec:results} spans thirteen heterogeneous EEG datasets
 with zero per-file CR pathology attributable to corpus mismatch.
 
@@ -920,7 +987,7 @@ state of the art under identical evaluation conditions---and 2.28:1
 on the Temple University EEG Corpus v2.0.1, the first published
 lossless compression benchmark on the largest open clinical EEG
 dataset in existence. Bit-exact reconstruction was verified across
-84{,}600 encode/decode operations on 72{,}131 unique recordings
+88{,}147 encode/decode operations on 74{,}422 unique recordings
 spanning thirteen clinical and research EEG datasets with zero failures. The codec is
 integer-only, dictionary-free, and deployable in real time on
 commodity RISC-V microcontroller hardware without floating-point
