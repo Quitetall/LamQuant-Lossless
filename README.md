@@ -1,6 +1,11 @@
 # LamQuant Lossless
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20436114.svg)](https://doi.org/10.5281/zenodo.20436114)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 Bit-exact lossless EEG compression codec. Real-time, integer-only, deployable on x86 / ARM / RISC-V without floating-point hardware. Paper subject of *IEEE Transactions on Biomedical Circuits and Systems* (2026 submission).
+
+**Cite:** archived at Zenodo — [`10.5281/zenodo.20436114`](https://doi.org/10.5281/zenodo.20436114) (see [`CITATION.cff`](CITATION.cff)).
 
 **Headline numbers (paper, full evidence in [Eagle](https://github.com/Quitetall/Eagle)):**
 - TUEG v2.0.2 (1.76 TB, 70,831 EDF files): **2.287:1** compression ratio

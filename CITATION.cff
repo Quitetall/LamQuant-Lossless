@@ -9,7 +9,12 @@ authors:
     affiliation: "OpenHuman Technologies LLC, Florida, USA"
     email: briankhanglam@usf.edu
 license: GPL-3.0-or-later
+doi: 10.5281/zenodo.20436114
 repository-code: "https://github.com/Quitetall/LamQuant-Lossless"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.20436114
+    description: "Zenodo archive of the LamQuant Lossless source + reproducibility package"
 keywords:
   - EEG compression
   - lossless coding
