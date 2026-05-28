@@ -11,6 +11,8 @@ IEEE Transactions on Biomedical Circuits and Systems
 
 Dear Editor,
 
+**This paper presents the first lossless EEG compression benchmark at the scale of the full Temple University EEG Corpus (1.76 TB, 70,831 files) and demonstrates state-of-the-art microcontroller-deployable compression on commodity RISC-V hardware (RP2350 Hazard3, 119× real-time, RTL-measured).**
+
 I am pleased to submit the enclosed manuscript, *LamQuant Lossless: State-of-the-Art Lossless EEG Compression Designed for Microcontroller Deployment*, for consideration as a regular paper in IEEE Transactions on Biomedical Circuits and Systems.
 
 ## Why TBioCAS

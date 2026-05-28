@@ -55,30 +55,22 @@ Lossless compression of clinical electroencephalography (EEG) is a
 prerequisite for wireless transmission and long-term archival, yet
 existing approaches either fail to exploit EEG signal structure or
 are not deployable on microcontroller hardware. We present LamQuant
-Lossless, a lossless EEG codec based on an integer Le~Gall 5/3
-lifting discrete wavelet transform, an adaptive linear-predictive
-coder (per-subband fixed schedule of orders 3, 3, 6, 8 with an
-optional adaptive mode of maximum order 16), bias cancellation, and
-Golomb-Rice entropy coding, implemented in an integer-only wire
-format that runs byte-identically on x86, ARM, and RISC-V targets
-without floating-point hardware. Evaluated on the
-CHB-MIT Scalp EEG Database under identical parameters to Chen
-et~al.~\cite{chen2018vlsi}, LamQuant Lossless achieves a compression
-ratio of 2.72:1---a 15.9\,\% improvement over the prior state of the
-art. On the Temple University EEG Corpus v2.0.2 (1.76\,TB,
-70{,}831 EDF files per the corpus AAREADME~\cite{tueg_aareadme_v202}),
-it achieves 2.287:1, establishing the first, to our knowledge, lossless
-compression benchmark on the largest open clinical EEG corpus by total
-bytes in existence. Bit-exact reconstruction was verified across
-88{,}147 encode/decode operations (74{,}422 unique recordings)
-spanning thirteen clinical and research EEG datasets with zero
-failures; the per-operation count exceeds the unique recording
-count because the labelled TUH subsets (TUSZ, TUAR, TUAB, TUSL,
-TUEV, TUEP) re-list TUEG recordings under their respective
-label montages and the codec was run independently against each
-sub-corpus. The codec is released
-open-source as the archival compression layer of the OpenHuman
-EEG (OH-EEG) wireless platform.
+Lossless, an integer-only EEG codec combining a Le~Gall 5/3 lifting
+discrete wavelet transform, per-subband adaptive linear prediction
+(orders 3, 3, 6, 8 with an optional max-order-16 mode), bias
+cancellation, and Golomb-Rice entropy coding, in a wire format
+that runs byte-identically on x86, ARM, and RISC-V without
+floating-point hardware. On the CHB-MIT Scalp EEG Database under
+parameters identical to Chen et~al.~\cite{chen2018vlsi}, LamQuant
+Lossless achieves 2.72:1---a 15.9\,\% improvement over the prior
+state of the art. On the Temple University EEG Corpus v2.0.2
+(1.76\,TB, 70{,}831 EDF files per the corpus
+AAREADME~\cite{tueg_aareadme_v202}), it achieves 2.287:1,
+establishing the first, to our knowledge, lossless compression
+benchmark on the largest open clinical EEG corpus by total bytes
+in existence. Bit-exact reconstruction was verified across
+88{,}147 encode/decode operations across thirteen clinical and
+research EEG datasets with zero failures.
 \end{abstract}
 
 % ---------------------------------------------------------------
@@ -122,23 +114,22 @@ satisfy PRD\,=\,0\%: every sample must be recovered bit-exactly, and
 every annotation, timestamp, and sidecar file must be preserved with
 forensic fidelity.
 
-General-purpose compressors such as gzip and zstd exploit byte-level
-string repetition and are not designed for the statistical structure
-of EEG signals. Applied to the Temple University EEG Corpus (TUEG)
-v2.0.1, gzip achieves a compression ratio of 1.6033:1. This baseline is
-established by direct measurement on the corpus production server
-(\texttt{tools/bench\_gzip\_baseline.sh} over 456 EDFs of TUEG v2.0.2
-edf/000, 6.02\,GB $\rightarrow$ 3.75\,GB at gzip level 9, wall
-274\,s; this work). Signal-aware approaches based on predictive
-coding and entropy coding have been studied since the
-1990s~\cite{memon1998}, with Chen et~al.\ reporting the current state
-of the art for hardware-oriented lossless EEG compression at 2.35:1
-on the CHB-MIT Scalp EEG Database using a fixed fuzzy predictor and
-tri-stage Huffman/Golomb-Rice encoder implemented in 0.18\,$\mu$m
-CMOS~\cite{chen2018vlsi}. No prior work has simultaneously achieved
-state-of-the-art compression ratio, microcontroller deployability on
-commodity RISC-V hardware, and validation at the scale of a full
-clinical corpus.
+General-purpose compressors such as gzip and zstd exploit
+byte-level string repetition and ignore the statistical structure
+of EEG signals. On TUEG v2.0.1, gzip~$-9$ achieves 1.6033:1
+(measured directly on the corpus production server via
+\texttt{tools/bench\_gzip\_baseline.sh}, 6.02\,GB $\rightarrow$
+3.75\,GB over 456 EDFs of TUEG v2.0.2 edf/000, 274\,s wall).
+Signal-aware approaches based on predictive coding and entropy
+coding have been studied since the 1990s~\cite{memon1998}. The
+current state of the art for hardware-oriented lossless EEG
+compression is Chen et~al.~\cite{chen2018vlsi} at 2.35:1 on the
+CHB-MIT Scalp EEG Database, using a fixed fuzzy predictor and
+tri-stage Huffman/Golomb-Rice encoder implemented in
+0.18\,$\mu$m CMOS. No prior work has simultaneously achieved
+state-of-the-art compression ratio, microcontroller deployability
+on commodity RISC-V hardware, and validation at the scale of a
+full clinical corpus.
 
 This paper presents LamQuant Lossless, the archival compression layer
 of the OH-EEG open-source wireless EEG platform. The codec applies a
@@ -147,18 +138,18 @@ linear-predictive coding with a fixed per-subband order schedule of
 $\{3,3,6,8\}$ (and an optional adaptive mode of maximum order 16)
 combined with bias cancellation~\cite{sriraam2008}, and Golomb-Rice
 entropy coding in a fixed integer-only wire format deployable on any
-x86, ARM, or RISC-V target without floating-point hardware. Evaluated on CHB-MIT under identical parameters to Chen
-et~al., LamQuant Lossless achieves 2.72:1 CR---a 15.9\,\%
-improvement over the prior state of the art. On TUEG v2.0.2
-(released 2026-05-21; 1.76\,TB, 70{,}831 EDF files per the corpus
-AAREADME~\cite{tueg_aareadme_v202}), it achieves 2.287:1,
-establishing a lossless compression benchmark on the largest
-open clinical EEG dataset in existence. Across 88{,}147 encode/decode operations on
-74{,}422 unique recordings spanning thirteen clinical and research
-EEG datasets (the seven TUH corpora, CHB-MIT, PhysioNet Siena
-Scalp EEG, Sleep-EDF, CAP Sleep, EEG Motor Movement/Imagery, and
-OpenNeuro ds004100), bit-exact reconstruction was verified in
-every case.
+x86, ARM, or RISC-V target without floating-point hardware. Evaluated on CHB-MIT under identical parameters to Chen et~al.,
+LamQuant Lossless achieves 2.72:1 CR---a 15.9\,\% improvement
+over the prior state of the art. On TUEG v2.0.2 (released
+2026-05-21; 1.76\,TB, 70{,}831 EDF files per the corpus
+AAREADME~\cite{tueg_aareadme_v202}), it achieves 2.287:1. This
+establishes a lossless compression benchmark on the largest open
+clinical EEG dataset in existence. Bit-exact reconstruction was
+verified across 88{,}147 encode/decode operations on 74{,}422
+unique recordings spanning thirteen clinical and research EEG
+datasets (the seven TUH corpora, CHB-MIT, PhysioNet Siena Scalp
+EEG, Sleep-EDF, CAP Sleep, EEG Motor Movement/Imagery, and
+OpenNeuro ds004100), with zero failures.
 
 The remainder of this paper is organized as follows:
 Section~\ref{sec:background} reviews prior work and establishes
@@ -311,7 +302,17 @@ region-adaptive predictor with Golomb-Rice coding tailored to a
 low-power region; an LPC + Golomb-Rice composition is therefore
 an idiom shared across the biosignal-on-MCU community, and the
 LamQuant kernel choice is consistent with current TBME practice
-rather than novel. None of the cited prior-work systems
+rather than novel. Recent low-power-wireless work by
+Cuevas-L{\'o}pez et~al.~\cite{cuevas2022wireless} achieves
+$\sim$\,1.5:1 lossless compression of in-vivo neural
+electrophysiology on FPGA (delta + Huffman, $\leq$\,3\,mW); at
+the bandwidth extreme, He et~al.~\cite{he2024nct} reported a
+TBioCAS event-based neural compressive telemetry IC delivering
+$>$\,11.4{$\times$} lossless reduction on high-bandwidth
+intracortical BCI data at 1\,$\mu$W/channel by exploiting
+inter-channel spike-event sparsity---a regime structurally
+distinct from scalp clinical EEG where adjacent samples are
+broadband-correlated rather than sparse-event. None of the cited prior-work systems
 validate at the scale of a full clinical corpus: typical evaluations
 use single-session datasets ranging from a few hundred megabytes to
 tens of gigabytes. Hardware-oriented systems published in the IEEE
@@ -535,15 +536,15 @@ the complete recording, not merely the signal samples.
 \subsection{Algebraic Structure: A Commutative Monoid}
 \label{sec:monoid}
 The LML wire format described above forms a \emph{commutative
-monoid} under window concatenation. The empty sequence of windows is the
-identity element; the binary operation is window concatenation;
-and the LMLFOOT1 footer ensures that the window set is
-self-describing (each window carries its own CRC-32, per-channel
-LPC metadata, and timestamp in the LPC meta block). The structure
-is associative by definition of byte concatenation, and
-commutative because window order in the bitstream does not affect
-decoded signal content: at decode time the footer index reassembles
-windows by timestamp. Three deployment-relevant properties follow:
+monoid} under window concatenation. The identity element is the
+empty sequence of windows. The binary operation is window
+concatenation. The LMLFOOT1 footer makes the window set
+self-describing: each window carries its own CRC-32, per-channel
+LPC metadata, and timestamp in the LPC meta block. Associativity
+follows from byte concatenation. Commutativity follows because
+window order in the bitstream does not affect decoded signal
+content---the footer index reassembles windows by timestamp at
+decode time. Three deployment-relevant properties follow:
 \begin{itemize}
 \item \textbf{Embarrassingly parallel encoding.} Each window is
   encoded independently; the per-window bitstreams concatenate
