@@ -11,7 +11,7 @@ IEEE Transactions on Biomedical Circuits and Systems
 
 Dear Editor,
 
-**This paper presents the first lossless EEG compression benchmark at the scale of the full Temple University EEG Corpus (1.76 TB, 70,831 files) and demonstrates state-of-the-art microcontroller-deployable compression on commodity RISC-V hardware (RP2350 Hazard3, 119× real-time, measured via RTL-level Verilator simulation against the Wren6991/Hazard3 v1.1 RTL; the bench harness, runbook, and evidence JSON are in the public repository at https://github.com/Quitetall/LamQuant).**
+**This paper presents the first lossless EEG compression benchmark at the scale of the full Temple University EEG Corpus (1.76 TB, 70,831 files) and demonstrates state-of-the-art microcontroller-deployable compression on commodity RISC-V hardware (RP2350 Hazard3, 119× real-time, measured via RTL-level Verilator simulation against the Wren6991/Hazard3 v1.1 RTL; the bench harness, runbook, and evidence JSON are in the public repository at https://github.com/Quitetall/LamQuant-Lossless).**
 
 I am pleased to submit the enclosed manuscript, _LamQuant Lossless: State-of-the-Art Lossless EEG Compression Designed for Microcontroller Deployment_, for consideration as a regular paper in IEEE Transactions on Biomedical Circuits and Systems.
 
@@ -27,7 +27,7 @@ The work bridges biomedical signal processing, embedded systems implementation, 
 
 ## Open science
 
-All source code, bench scripts, per-corpus JSON evidence, and reproducibility documentation are released open-source at https://github.com/Quitetall/LamQuant (`docs/paper/` and `tools/`). Every numerical claim in the paper can be reproduced by running the listed scripts against a local mirror of the publicly available corpora.
+All source code, bench scripts, per-corpus JSON evidence, and reproducibility documentation are released open-source at https://github.com/Quitetall/LamQuant-Lossless (`docs/paper/` and `tools/`). Every numerical claim in the paper can be reproduced by running the listed scripts against a local mirror of the publicly available corpora.
 
 ## Novelty
 

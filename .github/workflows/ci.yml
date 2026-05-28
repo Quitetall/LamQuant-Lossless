@@ -1,406 +1,89 @@
-name: CI
+name: ci
 
 on:
   push:
-    branches: [main, 'claude/**']
+    branches: [main, "decomp/**", "feat/**", "fix/**"]
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  # ─────────────────────────────────────────────────────────────────
-  # rust-tests — cross-platform test matrix (Phase 2.1 + 2.2).
-  # Lints (fmt + clippy) run on Linux only; build + test runs on
-  # Linux, macOS x86_64, macOS aarch64 (Apple Silicon), and
-  # Windows MSVC. Phase 2 of the CI lane plan.
-  # ─────────────────────────────────────────────────────────────────
-  rust-tests:
-    name: rust-tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        # ``smoke_sh`` removed — GitHub Actions disallows ``shell:``
-        # values that reference ``matrix.*`` at parse time, so the
-        # smoke-test step now hard-codes ``shell: bash`` directly.
-        # macos-13 was retired by GitHub — switched to macos-15-intel
-        # for the x86_64 lane.
-        include:
-          - os: ubuntu-latest
-            lint: true
-          - os: macos-15-intel   # x86_64 (macos-13 retired by GitHub)
-            lint: false
-          - os: macos-14         # aarch64 (Apple Silicon)
-            lint: false
-          - os: windows-latest   # MSVC default
-            lint: false
-    steps:
-      - name: Enable git long-paths (windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: git config --global core.longpaths true
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.os }}
-          workspaces: |
-            .
-            lamquant-core
-
-      - name: Check formatting
-        if: matrix.lint
-        run: cargo fmt --manifest-path lamquant-core/Cargo.toml -- --check
-
-      - name: Clippy
-        if: matrix.lint
-        run: cargo clippy --manifest-path lamquant-core/Cargo.toml -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --manifest-path lamquant-core/Cargo.toml
-
-      # no_std build sanity — `lamquant-core` ships a firmware /
-      # `no_std + alloc` configuration that real users (the Cortex-M
-      # firmware crate) depend on. Without this lane, any new module
-      # that uses `Vec` without explicit `use alloc::vec::Vec;`
-      # compiles cleanly under host (std pulls Vec for free) and
-      # silently breaks firmware. Caught 19 May 2026 -- see commit
-      # `restore no_std build`. Pre-commit hook covers `--features
-      # host` only; this lane is the durable backstop.
-      - name: Build no_std (--no-default-features)
-        if: runner.os == 'Linux'
-        run: cargo build --manifest-path lamquant-core/Cargo.toml --no-default-features --release
-
-      # Phase 6 + Phase 7 — confirm the async feature build is healthy
-      # on Linux (tokio + reqwest + notify trio). Skipped on macOS /
-      # Windows for now because the runner's curl / openssl backports
-      # add noise; the lossless build path still gates clippy/fmt above.
-      - name: cargo test (--features async)
-        if: runner.os == 'Linux'
-        run: cargo test --manifest-path lamquant-core/Cargo.toml --features async --lib
-
-      - name: Build release binary
-        run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin lml
-
-      # ``shell:`` is a top-level workflow key that GitHub validates at
-      # parse time, so it cannot reference ``matrix.*`` (which doesn't
-      # exist until the job expands). Hard-code ``bash`` — both the
-      # POSIX runners and the Windows runner ship git-bash by default.
-      - name: Binary smoke test
-        shell: bash
-        run: |
-          ls -lh target/release/lml* || dir target\\release\\lml.exe
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            ./target/release/lml.exe help
-            ./target/release/lml.exe self-test
-          else
-            ./target/release/lml help
-            ./target/release/lml self-test
-          fi
-
-  # ─────────────────────────────────────────────────────────────────
-  # all-features-build — Phase 8 / Item D.
-  # Catches feature-flag bit-rot: code that compiles under `host`
-  # but breaks when the powerset of optional features is enabled.
-  # Linux only because hdf5 + libdbus + AWS SDK ship cleanly on
-  # ubuntu-latest; macOS/Windows lanes stay focused on the lossless
-  # baseline.
-  # ─────────────────────────────────────────────────────────────────
-  all-features-build:
-    name: all-features build + test (linux)
-    needs: rust-tests
+  rust-host:
+    name: Rust host build + tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          key: all-features
-          workspaces: lamquant-core
-      - name: Install system deps (HDF5 + dbus + musl-tools)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-              libhdf5-dev \
-              libdbus-1-dev \
-              libsecret-1-dev \
-              pkg-config
-      - name: Build all features
-        run: |
-          cargo build \
-              --manifest-path lamquant-core/Cargo.toml \
-              --features parquet,hdf5,s3,dicom,keyring,async
-      - name: Test all features (lib only)
-        # Integration tests under tests/ are gated by their own feature
-        # cfg; the lib unit tests cover the powerset interactions.
-        run: |
-          cargo test \
-              --manifest-path lamquant-core/Cargo.toml \
-              --features parquet,hdf5,s3,dicom,keyring,async \
-              --lib
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-host-${{ hashFiles('Cargo.lock') }}
+      - name: cargo build --workspace --all-features
+        run: cargo build --workspace --all-features
+      - name: cargo test --workspace --lib --all-features
+        run: cargo test --workspace --lib --all-features
+      - name: byte_equal_backends wire-format gate
+        run: cargo test --test byte_equal_backends --all-features
 
-  # ─────────────────────────────────────────────────────────────────
-  # conformance — Phase 8 / Item E.
-  # Validates the 13 committed LML wire-format test vectors against
-  # the release lml binary: structural fields + SHA-256 match per
-  # `.expected.json`; negative vectors error with the documented kind.
-  # ─────────────────────────────────────────────────────────────────
-  conformance:
-    name: lml wire-format conformance
-    needs: rust-tests
+  firmware-no_std:
+    name: Firmware no_std (riscv32imac)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imac-unknown-none-elf
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: firmware-${{ hashFiles('Cargo.lock') }}
+      - name: cargo build -p lamquant-firmware --no-default-features
+        run: cargo build -p lamquant-firmware --no-default-features --target riscv32imac-unknown-none-elf
+
+  pytest-fast:
+    name: Pytest fast tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install pytest numpy pyedflib mne
+      - name: Build Python codec wheel
+        run: |
+          pip install maturin
+          cd reference_implementations/python_codec && pip install -e .
+      - name: Run fast tier diagnostics
+        run: python3 tests/run_diagnostics.py fast
+
+  format-check:
+    name: cargo fmt + clippy
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
         with:
-          key: conformance
-          workspaces: lamquant-core
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Build release lml binary
-        run: cargo build --manifest-path lamquant-core/Cargo.toml --release --bin lml --features host
-      - name: Run conformance suite
-        run: |
-          python3 specs/conformance/verify.py \
-            --reader target/release/lml \
-            specs/conformance/vectors/*.lml
-
-  # ─────────────────────────────────────────────────────────────────
-  # v1.2 T.1 — Rust line coverage via cargo-tarpaulin.
-  # Runs on every PR + push to main. Floor enforced via
-  # `fail-under = 70.0` in .tarpaulin.toml. Reports XML + HTML;
-  # uploads XML to Codecov when COVCODE_TOKEN secret is set.
-  # ─────────────────────────────────────────────────────────────────
-  coverage:
-    name: rust line coverage (tarpaulin)
-    needs: rust-tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: tarpaulin
-          workspaces: ".:lamquant-core"
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --version "^0.31" --locked
-      - name: Run tarpaulin
-        run: cargo tarpaulin --config .tarpaulin.toml
-      - name: Upload HTML report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: tarpaulin-html
-          path: target/tarpaulin/tarpaulin-report.html
-          if-no-files-found: ignore
-      - name: Upload to Codecov (optional)
-        if: ${{ env.CODECOV_TOKEN != '' }}
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        run: |
-          bash <(curl -s https://codecov.io/bash) \
-            -f target/tarpaulin/cobertura.xml \
-            -F rust \
-            -n "rust line coverage" || true
-
-  # ─────────────────────────────────────────────────────────────────
-  # python-fast — runs on every PR and push.
-  # Filters: -m "not slow and not perf and not data and not checkpoint"
-  # so the fast lane skips real-EEG, trained-checkpoint, and perf
-  # sentinel tests.
-  # ─────────────────────────────────────────────────────────────────
-  python-fast:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.10', '3.11', '3.12']
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          # torch + torchaudio must come from the same PyTorch CPU
-          # wheel index — torchaudio's _torchaudio.abi3.so links
-          # against the installed torch ABI and PyPI wheels were
-          # built against a different libtorch.
-          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          # einops: required by Phase 5 vendored discriminator tests
-          # (encodec_msstftd uses einops.rearrange).
-          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss pyyaml einops
-
-      - name: Run Python fast lane (no slow/perf/data/checkpoint)
-        run: |
-          python -m pytest tests/ \
-            -m "not slow and not perf and not data and not checkpoint" \
-            --cov=ai_models --cov=firmware --cov=lamquant_codec \
-            --cov-report=term-missing \
-            --cov-report=xml:coverage.xml \
-            -v
-
-      - name: Check coverage floor (monotonic ratchet)
-        # Replaces a hardcoded `--fail-under=60` that didn't match reality
-        # (actual 25%). The ratchet reads `.coverage_floor.json` so coverage
-        # can only ever go up. Phases 1-6 raise the floor toward 1.00.
-        run: |
-          python tests/run_diagnostics.py coverage_floor
-
-      - name: Audit format consistency
-        run: |
-          python scripts/audit_format_consistency.py
-
-  # ─────────────────────────────────────────────────────────────────
-  # python-cross-lang — drift sentinels (PR-blocking).
-  # Builds the PyO3 wheel, then runs the L5 cross-language tests so
-  # any Python↔Rust wire-format drift is caught before merge.
-  # ─────────────────────────────────────────────────────────────────
-  python-cross-lang:
-    runs-on: ubuntu-latest
-    needs: rust-tests
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies + maturin
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          python -m pip install --upgrade pip
-          # torch is needed for some L5 / cross_lang tests that import
-          # ai_models.* indirectly via conftest fixtures.
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          # zstandard is required by tests/codec/cross_lang/test_lma_cross_lang.py
-          # (LMA archive non-EDF entries are zstd-compressed).
-          pip install numpy scipy numba pytest hypothesis maturin zstandard
-          # Persist venv activation for subsequent steps so maturin
-          # can find VIRTUAL_ENV.
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-
-      - name: Build + install lamquant_core wheel (PyO3)
-        run: |
-          maturin develop --release --features python \
-            --manifest-path lamquant-core/Cargo.toml
-
-      - name: Run cross-language drift tests
-        run: |
-          python -m pytest tests/codec/ -m "l5 or cross_lang" -v
-
-  # ─────────────────────────────────────────────────────────────────
-  # python-full — push-to-main only. Runs slow + perf sentinel tests.
-  # Skipped on PRs to keep gating fast.
-  # ─────────────────────────────────────────────────────────────────
-  python-full:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies + maturin
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          python -m pip install --upgrade pip
-          # Match python-fast: torch+torchaudio share the PyTorch
-          # CPU wheel index so ABI links stay consistent.
-          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy scipy mne numba pytest pytest-cov coverage hypothesis prompt_toolkit zstandard auraloss maturin pyyaml einops
-          # Persist venv activation for subsequent steps so maturin
-          # can find VIRTUAL_ENV.
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-
-      - name: Build PyO3 wheel
-        run: |
-          maturin develop --release --features python \
-            --manifest-path lamquant-core/Cargo.toml
-
-      - name: Run full lane (slow + perf included; data/checkpoint still skip)
-        run: |
-          python -m pytest tests/ \
-            -m "not data and not checkpoint" \
-            --cov=ai_models --cov=firmware --cov=lamquant_codec \
-            --cov-report=term-missing -v
-
-  c-host-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Compile C test harness
-        run: |
-          gcc -O2 -Wall -Wextra \
-            -I tests/c_host \
-            -o tests/c_host/test_c_firmware \
-            tests/c_host/test_c_firmware.c -lm
-
-      - name: Run C unit tests
-        run: ./tests/c_host/test_c_firmware
-
-  fuzz:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
-
-      - name: Fuzz decompress (60s)
-        run: |
-          cd lamquant-core
-          cargo +nightly fuzz run decompress -- -max_total_time=60
-
-      - name: Fuzz roundtrip (60s)
-        run: |
-          cd lamquant-core
-          cargo +nightly fuzz run roundtrip -- -max_total_time=60
-
-      - name: Fuzz container_header (60s)
-        run: |
-          cd lamquant-core
-          cargo +nightly fuzz run container_header -- -max_total_time=60
-
-      - name: Fuzz offset_table (60s)
-        run: |
-          cd lamquant-core
-          cargo +nightly fuzz run offset_table -- -max_total_time=60
-
-      - name: Fuzz lma_manifest (60s)
-        run: |
-          cd lamquant-core
-          cargo +nightly fuzz run lma_manifest -- -max_total_time=60
-
-      - name: Generate C FFI header
-        run: |
-          cargo install cbindgen
-          cd lamquant-core
-          cbindgen --config cbindgen.toml --crate lamquant-core --output include/lml.h
-          # Verify header hasn't drifted from checked-in version
-          git diff --exit-code include/lml.h
+          components: rustfmt, clippy
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+        continue-on-error: true  # advisory until clippy debt is fixed

@@ -142,7 +142,7 @@ maintenance and stay under the TBioCAS supplementary size budget:
   runs `PipelineScheduler::encode_window` eight times under a
   64-bit `mcycle` + `minstret` bracket, and writes results to
   the testbench print MMIO at `0xC000_0000`. Repository:
-  <https://github.com/Quitetall/LamQuant/tree/main/tools/hazard3_bench>.
+  <https://github.com/Quitetall/LamQuant-Lossless/tree/main/tools/hazard3_bench>.
 - **Runbook**: `tools/bench_rp2350_silicon.md` documents three
   identical-cycle paths:
     1. Verilator on the official Hazard3 RTL (the path used for
@@ -152,7 +152,7 @@ maintenance and stay under the TBioCAS supplementary size budget:
        same cycle counts).
     3. Real Pico 2 board over probe-rs / SWD RTT — pending
        confirmation, expected to match Verilator within ±1 cycle.
-  Repository: <https://github.com/Quitetall/LamQuant/blob/main/tools/bench_rp2350_silicon.md>.
+  Repository: <https://github.com/Quitetall/LamQuant-Lossless/blob/main/tools/bench_rp2350_silicon.md>.
 - **Evidence**: `outputs/paper/rp2350_silicon_bench.json` in the
   repo captures the full bench configuration, all CSR readouts,
   and the provenance chain back to the RTL source.
@@ -172,7 +172,7 @@ runbook) and ≈26 s of wall clock to run the 129 M-cycle sim.
 - numpy: 1.24+
 - rsync: 3.x
 - LamQuant Lossless: built via `cargo build --release --bin lml`
-  from <https://github.com/Quitetall/LamQuant> at commit `34349e8`
+  from <https://github.com/Quitetall/LamQuant-Lossless> at commit `34349e8`
   or later.
 
 ## License + Patent
