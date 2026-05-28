@@ -574,8 +574,21 @@ class TestL4_L3ErrorCorrection:
 # L5: File formats — needs L3 (codec) + data
 # ============================================================
 
+@pytest.mark.skip(
+    reason="Divergent Python LQL1/LQN1 writer removed (2026-05-28): the "
+    "fileformat module is now a READ-ONLY reference reader. These "
+    "self-round-trips (LosslessWriter/NeuralWriter -> LMQReader) no "
+    "longer apply — a reader-only reference must not be round-tripped "
+    "against its own deleted writer. The Rust PyO3 codec "
+    "(lamquant_core, LML1) is the sole emitter; re-enable equivalent "
+    "round-trips against the canonical Rust writer when wired."
+)
 class TestL5_FileFormats:
-    """L5: .lmq and .lml container formats (depends on codec working)."""
+    """L5: .lmq and .lml container formats (depends on codec working).
+
+    SKIPPED: built on the removed divergent Python writer (see class
+    skip marker). Bodies retained to document the removed round-trips.
+    """
 
     def test_lml_write_read_roundtrip(self, val_window, tmp_path):
         from fileformat import LosslessWriter, LMQReader, MAGIC_LOSSLESS

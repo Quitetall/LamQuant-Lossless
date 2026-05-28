@@ -1,30 +1,37 @@
-"""LamQuant file formats: .lmq (neural compressed) and .lml (lossless).
+"""LamQuant file formats: READ-ONLY reference reader for .lmq / .lml.
 
 ⚠️ NON-CANONICAL (2026-05-28). The CANONICAL wire format is the Rust
 implementation in `lamquant-lossless/src/{lml,container}.rs` — magic
 `LML1`, 32-byte fixed header, JSON-metadata + u32 offset-index +
 length-prefixed window payloads + optional `LMLFOOT1` seek footer.
 
-This Python module uses a DIFFERENT, divergent layout (magic `LQL1`,
+This Python module READS a DIFFERENT, divergent layout (magic `LQL1`,
 64-byte header, per-window 22-byte headers + CRC32) — a structurally
 distinct container, NOT a minor-version skew. It is retained ONLY as a
-reference/experimental reader and is NOT byte-compatible with the Rust
-codec. Do not treat its output as canonical `.lml`.
+reference/experimental READER for legacy files written by the old
+divergent Python writer. Its byte layout is NOT byte-compatible with the
+Rust codec; do not treat anything it can read as canonical `.lml`.
 
-UPGRADE PATH (planned): re-port this writer/reader to the Rust `LML1`/
-32-byte layout so Python emits byte-identical `.lml` (cross-impl
-byte-equality test mirroring Rust `byte_equal_backends`), then this
-notice is removed. Until then, for real `.lml` I/O use the Rust codec
-(the `lamquant_core` PyO3 extension: `container_read`/`container_write`).
+WRITER REMOVED (2026-05-28). The divergent `LosslessWriter` / `NeuralWriter`
+emitters were deleted. The Rust PyO3 codec (`lamquant_core`, magic `LML1`)
+is now the SOLE emitter. To WRITE canonical `.lml`, use:
 
-Two file types, two extensions, clean API.
+    lamquant_core.container_write(...)    # canonical LML1, byte-equal to Rust
+
+UPGRADE PATH: this reader stays only so existing `.lml` / `.lmq` files
+produced by the old divergent layout can still be inspected in pure
+Python (no torch, no Rust). For any NEW output, emit via the Rust codec.
+Once no legacy divergent-layout files remain in circulation, this reader
+can be retired and replaced by `lamquant_core.container_read`.
+
+Two file types, two extensions, READ-ONLY here:
 
 .lmq — LamQuant neural compressed. rANS-coded FSQ tokens from the ternary
        encoder. Requires a GPU decoder (Tier 5/6/7) to reconstruct signal.
 .lml — LamQuant lossless. Integer-exact lifting + LPC + Golomb-Rice.
        Self-decodable, no neural network needed.
 
-File structure (both types):
+File structure read by this module (legacy divergent layout):
     ┌────────────────────┐
     │ File Header (64B)  │  magic, version, session metadata
     ├────────────────────┤
@@ -41,29 +48,24 @@ File structure (both types):
     │ Footer (12B)       │  index_offset (u64) + footer_magic (LQFT)
     └────────────────────┘
 
-Magic bytes:
+Magic bytes (legacy divergent layout — NON-CANONICAL):
     .lmq:  b'LQN1'  (0x4C514E31) — LamQuant Neural v1
     .lml:  b'LQL1'  (0x4C514C31) — LamQuant Lossless v1
 
 Usage:
     import lamquant_codec as lq
 
-    # Write neural compressed
-    with lq.NeuralWriter("recording.lmq", channels=21, rate=250) as w:
-        w.write_window(tokens, snn_levels, timestamp)
-
-    # Write lossless
-    with lq.LosslessWriter("recording.lml", channels=21, rate=250) as w:
-        w.write_window(signal_int16, timestamp)
-
-    # Read either format
+    # Read either (legacy divergent) format — pure-Python inspection
     with lq.open("recording.lmq") as r:
         for window in r:
             print(window.timestamp, window.payload_size)
+
+    # Writing is no longer available here. Emit canonical .lml via the
+    # Rust PyO3 codec:
+    #     lamquant_core.container_write(...)
 """
 
 import struct
-import time
 import zlib
 import numpy as np
 from dataclasses import dataclass, field
@@ -239,210 +241,24 @@ class Window:
 
 
 # ============================================================
-# Writers
+# Writers — REMOVED (2026-05-28)
 # ============================================================
-
-class NeuralWriter:
-    """Write .lmq files (neural compressed EEG).
-
-    Usage:
-        with NeuralWriter("recording.lmq", channels=21, rate=250) as w:
-            w.write_window(compressed_payload, snn_levels=levels, timestamp_us=ts)
-    """
-
-    def __init__(self, path: str, channels: int = 21, rate: int = 250,
-                 window_samples: int = 2500, session_id: int = 0,
-                 decoder_tier_hint: int = 0):
-        self.path = path
-        self.channels = channels
-        self.rate = rate
-        self.window_samples = window_samples
-        self.session_id = session_id or (zlib.crc32(str(time.time()).encode()) & 0xFFFFFFFF)
-        self.decoder_tier_hint = decoder_tier_hint
-        self._f: Optional[BinaryIO] = None
-        self._index: list[IndexEntry] = []
-        self._window_count = 0
-
-    def __enter__(self):
-        self._f = open(self.path, 'wb')
-        hdr = FileHeader(
-            magic=MAGIC_NEURAL,
-            channels=self.channels,
-            sample_rate=self.rate,
-            window_samples=self.window_samples,
-            session_id=self.session_id,
-            start_time_us=int(time.time() * 1_000_000),
-            decoder_tier_hint=self.decoder_tier_hint,
-        )
-        self._f.write(hdr.pack())
-        return self
-
-    def write_window(self, payload: bytes, *,
-                     snn_levels: Optional[bytes] = None,
-                     fsq_levels: Optional[bytes] = None,
-                     timestamp_us: Optional[int] = None,
-                     flags: int = 0):
-        """Write one neural compressed window.
-
-        Args:
-            payload: raw compressed bytes (rANS tokens + freq tables)
-            snn_levels: 10-byte SNN level map (optional)
-            fsq_levels: 10-byte FSQ level map (optional, overrides snn_levels)
-            timestamp_us: unix microseconds (default: now)
-            flags: bitfield (FLAG_HAS_SNN, FLAG_HAS_LPC, etc.)
-        """
-        if self._f is None:
-            raise RuntimeError("Writer not opened. Use 'with' statement.")
-
-        ts = timestamp_us if timestamp_us is not None else int(time.time() * 1_000_000)
-
-        # Auto-detect LMQ3 (adaptive FSQ) payloads. The per-timestep
-        # level schedule is canonical in the payload — the 10-byte
-        # header field MUST be zero. Per Q1=A in the v7.7.1 plan.
-        # NOTE: any caller-supplied `fsq_levels` / `snn_levels` is
-        # ignored for LMQ3 payloads (override is intentional; the
-        # payload is the single source of truth).
-        is_adaptive = len(payload) >= 4 and bytes(payload[:4]) == LMQ3_MAGIC
-        if is_adaptive:
-            flags |= FLAG_ADAPTIVE_FSQ
-            fsq = b'\x00' * 10
-        else:
-            fsq = fsq_levels or snn_levels or (b'\x02' * 10)
-        if snn_levels is not None:
-            flags |= FLAG_HAS_SNN
-
-        whdr = NeuralWindowHeader(
-            channels=self.channels,
-            sample_rate=self.rate,
-            window_samples=self.window_samples,
-            timestamp_us=ts,
-            fsq_levels=fsq[:10],
-            flags=flags,
-        )
-
-        offset = self._f.tell()
-        self._index.append(IndexEntry(timestamp_us=ts, offset=offset))
-
-        # Write: [payload_size:4B][header:26B][payload:NB][crc32:4B]
-        hdr_bytes = whdr.pack()
-        payload_len = struct.pack('<I', len(payload))
-        crc = struct.pack('<I', zlib.crc32(hdr_bytes + payload) & 0xFFFFFFFF)
-
-        self._f.write(payload_len)
-        self._f.write(hdr_bytes)
-        self._f.write(payload)
-        self._f.write(crc)
-        self._window_count += 1
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._f is None:
-            return
-        # Write index table
-        index_offset = self._f.tell()
-        n_entries = len(self._index)
-        self._f.write(struct.pack('<I', n_entries))
-        for entry in self._index:
-            self._f.write(entry.pack())
-        # Footer: index_offset + magic
-        self._f.write(struct.pack('<Q', index_offset))
-        self._f.write(MAGIC_FOOTER)
-        self._f.close()
-        self._f = None
-
-
-class LosslessWriter:
-    """Write .lml files (lossless compressed EEG).
-
-    Usage:
-        with LosslessWriter("recording.lml", channels=21, rate=250) as w:
-            w.write_window(signal_int16, timestamp_us=ts)
-    """
-
-    def __init__(self, path: str, channels: int = 21, rate: int = 250,
-                 window_samples: int = 2500, session_id: int = 0):
-        self.path = path
-        self.channels = channels
-        self.rate = rate
-        self.window_samples = window_samples
-        self.session_id = session_id or (zlib.crc32(str(time.time()).encode()) & 0xFFFFFFFF)
-        self._f: Optional[BinaryIO] = None
-        self._index: list[IndexEntry] = []
-        self._window_count = 0
-
-    def __enter__(self):
-        self._f = open(self.path, 'wb')
-        hdr = FileHeader(
-            magic=MAGIC_LOSSLESS,
-            channels=self.channels,
-            sample_rate=self.rate,
-            window_samples=self.window_samples,
-            session_id=self.session_id,
-            start_time_us=int(time.time() * 1_000_000),
-            decoder_tier_hint=0,  # lossless needs no decoder
-        )
-        self._f.write(hdr.pack())
-        return self
-
-    def write_window(self, signal: np.ndarray, *,
-                     timestamp_us: Optional[int] = None,
-                     lpc_orders: Optional[bytes] = None,
-                     gr_k_values: Optional[bytes] = None):
-        """Write one lossless window.
-
-        Args:
-            signal: [channels, samples] integer or float EEG signal.
-                    Rounded to int64 internally for lossless encoding.
-            timestamp_us: unix microseconds (default: now)
-            lpc_orders: 4-byte per-subband LPC orders (default: all 2)
-            gr_k_values: 4-byte per-subband GR k params (auto-computed if None)
-        """
-        if self._f is None:
-            raise RuntimeError("Writer not opened. Use 'with' statement.")
-
-        ts = timestamp_us if timestamp_us is not None else int(time.time() * 1_000_000)
-
-        # Compress the signal using LosslessCodec
-        from lamquant_codec.codec import LosslessCodec
-        codec = LosslessCodec(klt_matrix=None, n_levels=3)
-        payload = codec.compress(signal.astype(np.float64))
-
-        whdr = LosslessWindowHeader(
-            channels=self.channels,
-            sample_rate=self.rate,
-            window_samples=self.window_samples,
-            timestamp_us=ts,
-            lpc_orders=lpc_orders or b'\x02\x02\x02\x02',
-            gr_k_values=gr_k_values or b'\x00\x00\x00\x00',
-        )
-
-        offset = self._f.tell()
-        self._index.append(IndexEntry(timestamp_us=ts, offset=offset))
-
-        # Write: [payload_size:4B][header:22B][payload:NB][crc32:4B]
-        hdr_bytes = whdr.pack()
-        payload_len = struct.pack('<I', len(payload))
-        crc = struct.pack('<I', zlib.crc32(hdr_bytes + payload) & 0xFFFFFFFF)
-
-        self._f.write(payload_len)
-        self._f.write(hdr_bytes)
-        self._f.write(payload)
-        self._f.write(crc)
-        self._window_count += 1
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._f is None:
-            return
-        # Write index table
-        index_offset = self._f.tell()
-        n_entries = len(self._index)
-        self._f.write(struct.pack('<I', n_entries))
-        for entry in self._index:
-            self._f.write(entry.pack())
-        # Footer
-        self._f.write(struct.pack('<Q', index_offset))
-        self._f.write(MAGIC_FOOTER)
-        self._f.close()
-        self._f = None
+#
+# The divergent `LosslessWriter` / `NeuralWriter` emitters (LQL1 / LQN1,
+# 64-byte header + per-window 22/26-byte headers + CRC32 + index footer)
+# were DELETED. They produced a NON-CANONICAL container that was never
+# byte-compatible with the Rust `LML1` wire format, so keeping a second
+# emitter in tree only invited drift.
+#
+# The Rust PyO3 codec (`lamquant_core`, magic `LML1`) is now the SOLE
+# emitter of canonical `.lml`. To write, use:
+#
+#     lamquant_core.container_write(...)
+#
+# This module is now a READ-ONLY reference: `LMQReader` / `open_file`
+# below still parse the legacy divergent layout so old files can be
+# inspected in pure Python. `convert()` was also removed — it depended on
+# the deleted writers; transcoding now goes through the Rust codec.
 
 
 # ============================================================
@@ -641,43 +457,10 @@ def open_file(path: str) -> LMQReader:
     return LMQReader(path)
 
 
-def convert(src: str, dst: str, decoder=None, encoder=None):
-    """Convert between .lmq and .lml formats.
-
-    .lmq -> .lml: requires a decoder to reconstruct the signal
-    .lml -> .lmq: requires an encoder to compress the signal
-
-    Args:
-        src: source file path
-        dst: destination file path
-        decoder: callable(payload) -> np.ndarray for .lmq->.lml
-        encoder: callable(signal) -> bytes for .lml->.lmq
-    """
-    with open_file(src) as reader:
-        src_mode = reader.mode
-        hdr = reader.file_header
-
-        if src_mode == 'neural' and dst.endswith('.lml'):
-            if decoder is None:
-                raise ValueError("decoder required for .lmq -> .lml conversion")
-            with LosslessWriter(dst, channels=hdr.channels, rate=hdr.sample_rate,
-                                window_samples=hdr.window_samples) as writer:
-                for window in reader:
-                    signal = decoder(window.payload)
-                    writer.write_window(signal, timestamp_us=window.timestamp_us)
-
-        elif src_mode == 'lossless' and dst.endswith('.lmq'):
-            if encoder is None:
-                raise ValueError("encoder required for .lml -> .lmq conversion")
-            with NeuralWriter(dst, channels=hdr.channels, rate=hdr.sample_rate,
-                              window_samples=hdr.window_samples) as writer:
-                for window in reader:
-                    signal = window.decode()
-                    payload = encoder(signal)
-                    writer.write_window(payload, timestamp_us=window.timestamp_us)
-
-        else:
-            raise ValueError(f"Cannot convert {src_mode} -> {dst}")
+# convert() — REMOVED (2026-05-28). The transcoder was built on the deleted
+# `LosslessWriter` / `NeuralWriter` emitters, so it can no longer write the
+# divergent layout. Canonical-format transcoding now goes through the Rust
+# PyO3 codec (`lamquant_core.container_write`).
 
 
 # ============================================================
@@ -772,15 +555,18 @@ class Encoder:
       2. PCCP registry `models.snn.production_checkpoint` (production)
       3. None → raise AdaptiveFSQError unless `adaptive=False`
 
+    `Encoder.encode()` produces the per-window payload bytes only — it does
+    NOT write a container. The divergent `NeuralWriter` that used to wrap
+    these payloads into an `.lmq` file was removed (2026-05-28); emit the
+    container via the Rust PyO3 codec (`lamquant_core.container_write`).
+
     Usage:
         encoder = lq.Encoder(checkpoint="weights/student_subband.ckpt")
-        with lq.NeuralWriter("session.lmq") as w:
-            for segment in segments:
-                payload, levels = encoder.encode(segment)
-                # NeuralWriter auto-detects LMQ3 magic and sets the
-                # FLAG_ADAPTIVE_FSQ bit; pass levels=b'\\x00'*10 for
-                # adaptive (canonical) or actual bytes for legacy.
-                w.write_window(payload, fsq_levels=levels)
+        for segment in segments:
+            payload, levels = encoder.encode(segment)
+            # `payload` carries the LMQ3 magic for adaptive FSQ; `levels`
+            # is b'\\x00'*10 for adaptive (canonical) or actual bytes for
+            # legacy. Hand `payload` to the canonical Rust container writer.
     """
 
     def __init__(self, checkpoint: Optional[str] = None, quality: int = 2,

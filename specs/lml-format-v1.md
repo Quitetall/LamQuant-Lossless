@@ -38,8 +38,13 @@ Throughout this specification:
 An LML file has the extension `.lml` and consists of:
 
 ```
-[Container Header]  [Metadata]  [Window Index]  [Window Payloads]
+[Container Header]  [Metadata]  [Window Index]  [Window Payloads]  [LMLFOOT1 Footer]
 ```
+
+The trailing `LMLFOOT1` footer (Section 2.8) is additive: current encoders write it
+on every file, but a reader that stops after the last window payload still decodes
+the full signal correctly. Its presence is signalled by header flag bit 0
+(Section 2.2).
 
 ### 2.1 Container Header (32 bytes)
 
@@ -66,14 +71,19 @@ Offset  Size  Type    Field               Notes
 ### 2.2 Container Flags
 
 ```
-Bit 0:    has_seek_table (0 = no, 1 = seek table present after window index)
-Bit 1:    has_footer (0 = no, 1 = file footer present)
-Bits 2-7: reserved (MUST be 0, decoders MUST ignore)
+Bit 0:    has_footer (0 = no, 1 = LMLFOOT1 seek-table footer present at EOF)
+Bits 1-7: reserved (MUST be 0, decoders MUST ignore)
 ```
 
-**v1.0 encoders MUST set all flags to 0.** Future minor versions MAY set bits 0-1.
+Bit 0 (`FLAG_HAS_FOOTER`) is set by current encoders on **every** new file: the
+`LMLFOOT1` seek-table footer (Section 2.8) is written unconditionally. The footer
+is purely additive — it lives after the last window payload, so a reader that does
+not understand the flag stops after the final window and silently ignores the
+trailing bytes. There is no separate "has_seek_table" flag; the seek table is the
+footer.
 
-Decoders MUST ignore unknown flag bits. This allows v1.0 decoders to read v1.x files that set new flags, as long as the core format is unchanged.
+Decoders MUST ignore unknown flag bits. This allows older decoders to read newer
+files that set new flags, as long as the core format is unchanged.
 
 ### 2.3 Metadata Block
 
@@ -137,13 +147,60 @@ The compressed packet format is defined in Section 3.
 
 ### 2.7 Reserved Space and Extension
 
-The 6 reserved bytes in the header (bytes 26-31) and the 6 reserved flag bits provide room for future features without a major version bump. Possible uses:
-- Seek table for random access within large files
-- File footer with aggregate checksums
+The 6 reserved bytes in the header (`reserved_0` at bytes 26-27, `reserved_1` at
+bytes 28-31) and the 7 reserved flag bits (bits 1-7) provide room for future
+features without a major version bump. Possible uses:
 - Encryption indicator
 - Custom block types
+- Aggregate file-level checksums
 
-**v1.0 encoders MUST write zeros. v1.0 decoders MUST ignore these bytes.** This ensures that v1.1+ files with new features remain readable by v1.0 decoders (they simply skip the unknown parts).
+The random-access seek table is already realised as the `LMLFOOT1` footer
+(Section 2.8) and is no longer a reserved-space candidate.
+
+**Encoders MUST write the reserved header bytes as zero. Decoders MUST ignore
+these bytes.** This ensures that files with new features added via reserved bytes
+remain readable by older decoders (they simply skip the unknown parts).
+
+### 2.8 LMLFOOT1 Seek Footer
+
+When header flag bit 0 (`has_footer`) is set, the file ends with a per-window
+offset table immediately followed by a fixed 32-byte footer. Current encoders
+always emit this footer; it enables `O(log n)` random access to any window without
+scanning the window-length index from the start. The footer and table sit *after*
+the last window payload, so a reader that ignores flag bit 0 stops after the final
+window and never observes them.
+
+**Footer (fixed 32 bytes, at `file_end - 32 .. file_end`):**
+
+```
+Offset  Size  Type    Field          Notes
+------  ----  ------  -------------  --------------------------------------------
+0       8     bytes   magic          'LMLFOOT1' (0x4C 4D 4C 46 4F 4F 54 31)
+8       4     u32     footer_len     always 32
+12      4     u32     n_windows      number of offset-table entries
+16      4     u32     crc32          CRC-32 over (table bytes || footer bytes 0..16)
+20      4     u32     table_start    absolute file offset where the table begins
+24      8     bytes   reserved       8 × 0x00
+```
+
+**Offset table (`n_windows` × 16 bytes, at `table_start .. file_end - 32`):**
+
+```
+Offset  Size  Type   Field             Notes
+------  ----  -----  ----------------  ----------------------------------------
+0       8     u64    abs_offset        absolute file offset of the window's
+                                       4-byte length prefix
+8       4     u32    payload_len       length-prefix (4) + payload bytes
+12      4     u32    first_sample_idx  sample index of this window's first sample
+```
+
+The footer's `crc32` covers the concatenation of all table-entry bytes plus the
+leading 16 bytes of the footer (magic + footer_len + n_windows). A mismatch means
+the footer is corrupt: conformant readers MUST fall back to the slow path (scanning
+the Section 2.5 window index) rather than trusting the table. Readers MUST clamp
+`n_windows` to a sane ceiling before allocating the table (the reference reader caps
+at 2²⁰ = 1,048,576 windows) so an adversarial footer cannot trigger an unbounded
+allocation. `table_start` MUST fit in `u32`, bounding v1 footer files to 4 GiB.
 
 ---
 
@@ -204,11 +261,15 @@ Serialized per-channel, per-subband. For n_levels=3, there are 4 subbands per ch
 For each subband:
 
 ```
-[1 byte]         order (u8, 0-8)
+[1 byte]         order (u8, 0-16)
 [4*order bytes]  coefficients (i32 LE, Q27 fixed-point)
 ```
 
-When order=0, no coefficient bytes follow.
+When order=0, no coefficient bytes follow. The reference encoder caps the LPC
+order at 16 (`LPC_ORDER_HARD_CAP`); the `Fixed` mode uses a per-subband schedule
+that tops out at order 8, while `Adaptive`/`Anytime` modes search up to 16. The
+order field is a `u8`, so decoders MUST handle any declared order and validate that
+`4*order` coefficient bytes are actually present.
 
 ### 3.5 Golomb-Rice Payload
 
@@ -456,7 +517,7 @@ A conformant encoder+decoder MUST roundtrip this signal bit-exactly.
 
 | Language | Location | LOC | Status |
 |----------|----------|-----|--------|
-| Rust | `lamquant-core` crate | ~2200 | Canonical |
+| Rust | `lamquant-lossless` crate (lib target `lamquant_core`) | ~2200 | Canonical |
 | Python | `lamquant_codec/` | ~1500 | Production |
 
 Both produce byte-identical output for the same input.
@@ -471,7 +532,7 @@ Both produce byte-identical output for the same input.
 | total_samples/file | 1 | 4,294,967,295 | u32 |
 | sample_rate_mhz | 1 | 4,294,967,295 | u32 |
 | noise_bits | 0 | 63 | 6 bits |
-| LPC order | 0 | 8 | u8 |
+| LPC order | 0 | 16 | u8 |
 | Golomb-Rice k | 0 | 31 | u8 |
 | metadata_length | 0 | 16,777,216 | u32 |
 | payload_length | 0 | 268,435,456 | u32 |

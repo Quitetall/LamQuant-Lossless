@@ -188,10 +188,23 @@ class TestProductionWireFormatE2E:
             "per-timestep schedule must roundtrip exactly"
         assert roundtrip.side_info['adaptive'] is True
 
+    @pytest.mark.skip(
+        reason="Divergent Python NeuralWriter removed (2026-05-28): "
+        "fileformat is now a READ-ONLY reference reader. This test "
+        "round-tripped the deleted writer against LMQReader; a "
+        "reader-only reference must not be tested against its own "
+        "writer. The adaptive-FSQ header/flag behaviour now belongs to "
+        "the canonical Rust emitter (lamquant_core, LML1). The pure "
+        "typed-pipeline LMQ3 roundtrip is still covered by "
+        "test_lmq3_roundtrip_via_typed_pipeline above."
+    )
     def test_neuralwriter_writes_adaptive_window(self, tmp_path, subband, mock_encoder, mamba_snn):
         """NeuralWriter auto-sets FLAG_ADAPTIVE_FSQ + zeroes header
         fsq_levels when the payload magic is LMQ3. LMQReader reads back
         the same bits.
+
+        SKIPPED: built on the removed divergent Python writer (see skip
+        marker). Body retained to document the removed round-trip.
         """
         from lamquant_codec.encode import encode
         from lamquant_codec.compress import compress

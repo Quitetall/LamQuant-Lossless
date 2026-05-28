@@ -6,18 +6,16 @@ Two file formats:
     .lml — Lossless (integer lifting + LPC + Golomb-Rice)
 
 Core API:
-    # Write neural compressed recording
-    with lq.NeuralWriter("session.lmq", channels=21, rate=250) as w:
-        w.write_window(tokens, snn_levels=levels, timestamp_us=ts)
-
-    # Write lossless recording
-    with lq.LosslessWriter("session.lml", channels=21, rate=250) as w:
-        w.write_window(signal, timestamp_us=ts)
-
-    # Read either format
+    # Read either format (READ-ONLY reference reader for the legacy
+    # divergent Python layout — see lamquant_codec.fileformat).
     with lq.open("session.lmq") as r:
         for window in r:
             print(window.timestamp, window.payload_size)
+
+    # Writing the divergent Python container is no longer available. The
+    # Rust PyO3 codec (lamquant_core, magic LML1) is the SOLE emitter of
+    # canonical .lml:
+    #     lamquant_core.container_write(...)
 
     # Benchmark any codec output
     report = lq.Benchmark.full_report(original, packet)
@@ -31,9 +29,8 @@ Symbols are grouped by how much they cost to load:
                       weights. Import cost: ~50 ms.
 
     HEAVY  (lazy)   — TernaryCodec, SubbandCodec, LosslessCodec, Decoder,
-                      Encoder, NeuralWriter, LosslessWriter. These pull
-                      torch and the student-model module. Import cost on
-                      first touch: ~1400 ms.
+                      Encoder. These pull torch and the student-model
+                      module. Import cost on first touch: ~1400 ms.
 
 Callers that only need types/contracts/benchmarks never pay the torch tax.
 The heavy symbols are resolved via `module.__getattr__` (PEP 562) on first
@@ -118,12 +115,12 @@ _LAZY_MAP = {
     'encode':         ('lamquant_codec.encode',   'encode'),
     'decode':         ('lamquant_codec.decode',   'decode'),
     'decompose':      ('lamquant_codec.decompose','decompose'),
-    # File I/O (pulls codec classes transitively).
-    'NeuralWriter':   ('lamquant_codec.fileformat', 'NeuralWriter'),
-    'LosslessWriter': ('lamquant_codec.fileformat', 'LosslessWriter'),
+    # File I/O — READ-ONLY reference reader for the legacy divergent
+    # Python layout. The writer path (NeuralWriter / LosslessWriter) and
+    # the convert() transcoder were REMOVED (2026-05-28); the Rust PyO3
+    # codec (lamquant_core, LML1) is the sole canonical emitter.
     'LMQReader':      ('lamquant_codec.fileformat', 'LMQReader'),
     'open':           ('lamquant_codec.fileformat', 'open_file'),
-    'convert':        ('lamquant_codec.fileformat', 'convert'),
     'info':           ('lamquant_codec.fileformat', 'info'),
     'Window':         ('lamquant_codec.fileformat', 'Window'),
     'FileHeader':     ('lamquant_codec.fileformat', 'FileHeader'),
@@ -241,9 +238,9 @@ __all__ = [
     # Boundary datatypes
     "RawEEG", "SubbandDecomposition", "LatentTokens", "CompressedPacket",
     "BenchmarkReport", "TYPES_VERSION",
-    # File I/O (lazy)
-    "NeuralWriter", "LosslessWriter", "LMQReader",
-    "open", "convert", "info", "Window", "FileHeader",
+    # File I/O — READ-ONLY reference reader (lazy). Writer + convert removed.
+    "LMQReader",
+    "open", "info", "Window", "FileHeader",
     "Decoder", "Encoder", "MAGIC_NEURAL", "MAGIC_LOSSLESS",
     # Contracts
     "QualityContract", "CONTRACTS", "TestVector",
