@@ -1719,7 +1719,7 @@ impl App {
             logo_lines.push(Line::from(vec![
                 Span::raw("       "),
                 Span::styled(
-                    "Neural EEG Codec  ·  Gen 7.7  ·  AGPL-3.0  ·  OpenHuman.tech",
+                    "Neural EEG Codec  ·  Gen 7.7  ·  GPL-3.0-or-later  ·  OpenHuman.tech",
                     theme::dim(),
                 ),
             ]));
@@ -1837,7 +1837,7 @@ impl App {
             Line::from(Span::styled(" EEG codec + tools.", theme::dim())),
             Line::from(Span::styled(" Encode · validate · train", theme::dim())),
             Line::from(Span::styled(" firmware · visualize.", theme::dim())),
-            Line::from(Span::styled(" AGPL-3.0", theme::dim())),
+            Line::from(Span::styled(" GPL-3.0-or-later", theme::dim())),
         ];
         f.render_widget(Paragraph::new(lines), inner);
     }

@@ -357,7 +357,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = [
 # ADR 0023 Track B5+ — research-grade entropy coders (rANS, range,
 # arithmetic). Backs the constriction-flavoured arithmetic coder in
 # `src/arithmetic.rs` when the `experimental_arithmetic` feature is
-# enabled. BSD-3 license (compatible with our AGPL-3). ~25 KB binary
+# enabled. BSD-3 license (compatible with our GPL-3.0). ~25 KB binary
 # add, no transitive heavy deps.
 constriction = { version = "0.4", default-features = false, features = ["std"], optional = true }
 # Continuous distribution helpers (Laplace, etc) consumed by the

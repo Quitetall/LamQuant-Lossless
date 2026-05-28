@@ -163,7 +163,7 @@ impl Panel for SplashPanel {
         );
 
         let version = format!(
-            "Version  {}  ·  codec lamquant-core  ·  AGPL-3.0",
+            "Version  {}  ·  codec lamquant-core  ·  GPL-3.0-or-later",
             env!("CARGO_PKG_VERSION"),
         );
         let backend = format!(

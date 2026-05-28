@@ -5,7 +5,7 @@
 [workspace]
 
 [package]
-name = "lamquant-core-fuzz"
+name = "lamquant-lossless-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -17,8 +17,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tempfile = "3"
 
-[dependencies.lamquant-core]
-path = ".."
+lamquant-core = { package = "lamquant-lossless", path = ".." }
 
 [[bin]]
 name = "decompress"

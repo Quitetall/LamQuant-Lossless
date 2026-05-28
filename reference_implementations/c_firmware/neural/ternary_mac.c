@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <stdint.h>
 #include "../firmware_export/focal_net_weights.h"
 #include "../core/math_utils.h"

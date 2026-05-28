@@ -7,14 +7,14 @@ name = "lamquant-codec"
 version = "7.7.0"
 description = "LML lossless EEG compression codec + LMQ neural codec"
 readme = "README.md"
-license = {text = "AGPL-3.0"}
+license = {text = "GPL-3.0-or-later"}
 requires-python = ">=3.10"
 keywords = ["eeg", "lossless", "compression", "codec", "medical", "neuroscience"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
-    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Python :: 3",
 ]
 # Core: lossless codec works with numpy + scipy only.

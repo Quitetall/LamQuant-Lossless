@@ -2,7 +2,7 @@
   "name": "@openhuman/lml",
   "version": "0.2.0",
   "description": "LML lossless EEG compression codec (WebAssembly)",
-  "license": "AGPL-3.0",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "https://github.com/openhuman/lamquant"

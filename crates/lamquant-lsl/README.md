@@ -144,4 +144,4 @@ etc.) out of the box, not "ch0".
 
 ## License
 
-AGPL-3.0 (same as the wider LamQuant project).
+GPL-3.0-or-later (same as the wider LamQuant project).

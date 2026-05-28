@@ -1,6 +1,6 @@
 //! LML file container — 32-byte header, JSON metadata, window payloads.
 //!
-//! Spec: docs/lml-format-v1.md Section 2
+//! Spec: specs/lml-format-v1.md Section 2
 
 use crate::error::{LmlError, LmlResult};
 use crate::lml::{self, MAGIC};

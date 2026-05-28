@@ -45,9 +45,9 @@ pub fn launcher(id: &str) -> Option<(&'static str, Vec<&'static str>, &'static s
         // Setup / install
         "setup_pip"    => ("pip",   vec!["install", "-e", ".[dev]"],                       "pip install -e .[dev]"),
         "setup_extras" => ("pip",   vec!["install", "hypothesis", "prompt_toolkit", "zstandard"], "pip extras"),
-        "setup_cargo"  => ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-core/Cargo.toml", "--bin", "lml"], "cargo build lml"),
-        "setup_musl"   => ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-core/Cargo.toml", "--bin", "lml", "--target", "x86_64-unknown-linux-musl"], "static linux build"),
-        "setup_windows"=> ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-core/Cargo.toml", "--bin", "lml", "--target", "x86_64-pc-windows-gnu"], "windows build"),
+        "setup_cargo"  => ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-lossless/Cargo.toml", "--bin", "lml"], "cargo build lml"),
+        "setup_musl"   => ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-lossless/Cargo.toml", "--bin", "lml", "--target", "x86_64-unknown-linux-musl"], "static linux build"),
+        "setup_windows"=> ("cargo", vec!["build", "--release", "--manifest-path", "lamquant-lossless/Cargo.toml", "--bin", "lml", "--target", "x86_64-pc-windows-gnu"], "windows build"),
 
         // GUI / visualization launchers — T5 pipe shape (ADR 0020).
         //

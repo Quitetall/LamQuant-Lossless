@@ -43,6 +43,15 @@ if not _HAS_NEURAL:
         "firmware/test_l5_cross_impl.py",
         "firmware/test_l5_parity.py",
         "firmware/test_l3_weight_packing.py",
+        # Firmware-export tests import the neural `firmware` package
+        # (export_firmware/export_helpers/export_schema/rust_emitter/
+        # snn_emitter), which depends on neural checkpoints + emitter
+        # modules that live in LamQuant-Neural, not this Lossless carve.
+        "firmware/test_export_firmware.py",
+        "firmware/test_export_helpers.py",
+        "firmware/test_export_schema.py",
+        "firmware/test_rust_emitter.py",
+        "firmware/test_snn_emitter.py",
     ])
 
 # Expose repo modules that tests import by bare name (train_ternary,
@@ -59,6 +68,10 @@ for _rel in (
     "ai_models/validation",
     "ai_models",           # for `from snn import ...` etc.
     "firmware",
+    # Standalone Python codec reference impl: parent dir of the
+    # `lamquant_codec` package so `import lamquant_codec` resolves in
+    # the Lossless carve without an editable install.
+    "reference_implementations/python_codec",
     str(_REPO_ROOT),       # for `from ai_models.validation import ...`
 ):
     _p = str((_REPO_ROOT / _rel).resolve()) if _rel != str(_REPO_ROOT) else str(_REPO_ROOT)
