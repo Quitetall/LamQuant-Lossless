@@ -861,9 +861,9 @@ encode\_window} eight times under an \texttt{mcycle}+\texttt{minstret}
 bracket). Measured: 12{,}548{,}067 cycles/window
 $\Rightarrow$ 83.66\,ms/window\,@\,150\,MHz $\Rightarrow$
 0.627\,Msa/s = 119$\times$ real-time for a 21\,ch\,@\,250\,Hz
-input. CPI = 1.071 (achieved IPC 0.93, near the upper bound for a
-3-stage in-order scalar pipeline). On-silicon Pico 2 board
-confirmation pending.}
+input. CPI = 1.071 (achieved IPC 0.93, within 7\,\% of the IPC
+1.0 ceiling for Hazard3's single-issue 3-stage pipeline).
+On-silicon Pico 2 board confirmation pending.}
 \end{table*}
 
 \subsection{Embedded Deployment on RP2350}
@@ -894,9 +894,10 @@ firmware footprint minimal. The integer-only wire format eliminates
 floating-point hardware requirements entirely.
 
 \subsubsection{Encode Latency}
-A 21-channel 2500-sample window (52{,}500 Q31 samples, 10\,s wall
-time at 250\,SPS per channel, 102.5\,KB raw at i16) encodes in
-\textbf{12{,}548{,}067 cycles} on the Hazard3 RTL, measured by
+A 21-channel 2500-sample window (52{,}500 Q31 samples in the
+encoder hot path, 10\,s wall time at 250\,SPS per channel,
+102.5\,KB raw i16 ADC payload before fixed-point conversion)
+encodes in \textbf{12{,}548{,}067 cycles} on the Hazard3 RTL, measured by
 the \texttt{tools/hazard3\_bench/bench\_encode} harness running
 under Verilator against the official \texttt{Wren6991/Hazard3}
 v1.1 RTL (same Verilog that taped out as RP2350). At the RP2350
@@ -906,10 +907,12 @@ input stream needs 10 seconds of wall time per 52{,}500-sample
 window, so the encoder finishes \textbf{119{$\times$} ahead of
 real-time}, leaving 9.92\,seconds of every 10-second window free
 for SNN inference, BLE transmission, ADC streaming, and power
-management. The achieved CPI is 1.071 (IPC 0.93)---near the
-theoretical upper bound for a 3-stage in-order scalar pipeline
-with no superscalar issue---confirming that the codec is
-predictor-bound rather than fetch- or memory-bound.
+management. The achieved CPI is 1.071 (IPC 0.93)---within 7\,\% of the
+theoretical maximum (IPC 1.0) for Hazard3's single-issue
+3-stage in-order scalar pipeline---confirming that the codec
+is predictor-bound rather than fetch- or memory-bound, and
+that there is essentially no headroom to be gained from
+microarchitectural pipelining tricks at this design point.
 
 \subsubsection{Encoder SRAM Footprint}
 The encoder working set on a 21-channel window is dominated by the
