@@ -61,7 +61,7 @@ async = ["liblsl", "dep:tokio"]
 # Core codec — decode .lml → samples for outlet, encode samples → .lml
 # for inlet. Pinned to the workspace lamquant-core (host feature for
 # std + EDF reader + LMA container).
-lamquant-core = { path = "../../lamquant-core", default-features = false, features = ["host"] }
+lamquant-core = { package = "lamquant-lossless", path = "../../lamquant-lossless", default-features = false, features = ["host"] }
 # LSL bindings — only pulled in when the `liblsl` feature is on.
 # Pinned at the liblsl-rust master rev (instead of crates.io 0.1.1)
 # so the build picks up the more recent lsl-sys build script that

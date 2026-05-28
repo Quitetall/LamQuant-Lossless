@@ -1,0 +1,18 @@
+{
+  "name": "@openhuman/lml",
+  "version": "0.2.0",
+  "description": "LML lossless EEG compression codec (WebAssembly)",
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openhuman/lamquant"
+  },
+  "keywords": ["eeg", "lossless", "compression", "codec", "medical", "wasm"],
+  "files": ["lml_bg.wasm", "lml.js", "lml.d.ts"],
+  "main": "lml.js",
+  "types": "lml.d.ts",
+  "scripts": {
+    "build": "wasm-pack build ../lamquant-core --target web --features wasm --out-dir wasm/pkg",
+    "test": "wasm-pack test --node ../lamquant-core --features wasm"
+  }
+}

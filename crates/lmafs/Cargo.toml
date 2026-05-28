@@ -12,7 +12,7 @@ name = "lmafs"
 path = "src/main.rs"
 
 [dependencies]
-lamquant-core = { path = "../../lamquant-core", features = ["host"] }
+lamquant-core = { package = "lamquant-lossless", path = "../../lamquant-lossless", features = ["host"] }
 fuser = "0.14"
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }

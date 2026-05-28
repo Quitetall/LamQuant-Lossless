@@ -1,0 +1,4 @@
+- [Pipeline provenance audit - first run](audit_lml_lma_pipeline.md) — full chain-of-custody audit: SHA-256, CRC-32, metadata fields, silent-drop risks
+- [CRC-32 consistency](audit_crc32_consistency.md) — Rust uses custom ISO 3309 / zlib-compatible impl; Python uses zlib.crc32; both produce identical results
+- [SHA-256 hash subjects diverge between paths](audit_sha256_subjects.md) — critical: Rust LMA path emits empty signal_sha256; Python edf_to_lml hashes signal; CLI hashes signal
+- [Metadata field coverage gaps](audit_metadata_gaps.md) — fields present in Python but absent from Rust encode paths; silent drop risks per stage

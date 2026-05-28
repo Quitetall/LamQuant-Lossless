@@ -1,0 +1,58 @@
+# Empty [workspace] terminates Cargo's parent-Cargo.toml walk so this
+# fuzz harness is treated as a standalone package, not a workspace
+# member of the parent. Required because libfuzzer-sys + nightly toolchain
+# need to live outside the host workspace (drives a different resolver).
+[workspace]
+
+[package]
+name = "lamquant-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+
+[dependencies.lamquant-core]
+path = ".."
+
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+doc = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+doc = false
+
+# Phase 8 / Item F — three additional targets stressing the container
+# parsing surface that doesn't run through `decompress` / `roundtrip`.
+[[bin]]
+name = "container_header"
+path = "fuzz_targets/container_header.rs"
+doc = false
+
+[[bin]]
+name = "offset_table"
+path = "fuzz_targets/offset_table.rs"
+doc = false
+
+[[bin]]
+name = "lma_manifest"
+path = "fuzz_targets/lma_manifest.rs"
+doc = false
+
+# Cat A3 expansion (2026-05-21) — covers the lmafs FUSE attack surface:
+# arbitrary bytes interpreted as an LML container, with fuzzer-chosen
+# `seek_to_window` index plus a few `next_window` pulls. Catches
+# panic / overflow / unchecked-index bugs in the stream layer that
+# escape `decompress.rs`'s buffered API.
+[[bin]]
+name = "lml_random_seek"
+path = "fuzz_targets/lml_random_seek.rs"
+doc = false

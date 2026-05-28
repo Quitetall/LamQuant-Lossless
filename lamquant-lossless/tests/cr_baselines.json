@@ -1,0 +1,46 @@
+{
+  "baselined_at": "2026-05-21T18:30Z",
+  "lml_version": "7.7.0",
+  "method": "lml encode --bare-lml --i-understand-data-loss --lpc-mode anytime (default window)",
+  "policy": "compressed_size_bytes must be <= baseline.compressed_size_bytes per entry in regression_set. Any Track-B (codec adaptivity) commit that regresses ANY entry fails the cr_regression test. To intentionally bump a baseline (e.g. wire-format change with verified larger output), update this file in the same commit and justify in the message.",
+  "regression_set": [
+    {
+      "name": "S106R05_eegmmidb_64ch",
+      "src_path": "/mnt/4tb/data/Archive/edf/physionet/eegmmidb/S106/S106R05.edf",
+      "src_size_bytes": 780576,
+      "baseline_compressed_size_bytes": 330652,
+      "baseline_cr_vs_src": 2.3607,
+      "shape_note": "64-channel motor-imagery, short (~10 sec)"
+    },
+    {
+      "name": "S013R01_eegmmidb_64ch",
+      "src_path": "/mnt/4tb/data/Archive/edf/physionet/eegmmidb/S013/S013R01.edf",
+      "src_size_bytes": 1275936,
+      "baseline_compressed_size_bytes": 521062,
+      "baseline_cr_vs_src": 2.4487,
+      "shape_note": "64-channel motor-imagery, medium (~16 sec)"
+    },
+    {
+      "name": "chb01_01_chbmit_23ch",
+      "src_path": "/mnt/4tb/data/Archive/edf/physionet/chbmit/chb01/chb01_01.edf",
+      "src_size_bytes": 42399744,
+      "baseline_compressed_size_bytes": 17835220,
+      "baseline_cr_vs_src": 2.3773,
+      "shape_note": "23-channel clinical seizure, long (~1 hr)"
+    }
+  ],
+  "stretch_targets": [
+    {
+      "name": "bonn_all_synth_1ch",
+      "src_path": "synth from /mnt/4tb/data/Archive/ASCII/Bonn_Dataset (concatenated mega-EDF, 1 ch, 2.05M samples)",
+      "baseline_compressed_size_bytes": 1609569,
+      "current_cr_vs_12bit_ref": 1.91,
+      "sriraam_target_cr_vs_12bit_ref": 2.99,
+      "notes": "Sriraam 2012 methodology: ref = n_samples * 12 bits = 3,072,750 bytes. Stretch goal -- not a regression gate until Track A ingest lands an ASCII Bonn fixture under specs/conformance/ascii_vectors/."
+    }
+  ],
+  "notes": [
+    "Conformance vectors basic_4ch_1024s_250hz.edf and single_sample_1ch.edf fail encoder validation (separate bug: phys_dim 'uV' rejected, EDF-too-short hard error). Tracked under audit-registry / EDF reader hardening. Re-add to regression set when those gates relax.",
+    "Bonn stretch target is tracked but not gating until Track A lands a checked-in ASCII fixture + ingest pipeline. See ADR 0023."
+  ]
+}

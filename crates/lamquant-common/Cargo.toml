@@ -1,0 +1,28 @@
+[package]
+name = "lamquant-common"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "LamQuant shared primitives — CRC, EDF reader, LMA archive, DSP traits common to lossless and neural codecs."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+categories = ["compression", "science"]
+keywords = ["eeg", "edf", "lma", "biosignal"]
+
+[lib]
+name = "lamquant_common"
+crate-type = ["rlib"]
+
+[dependencies]
+serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
+
+[features]
+default = []
+# Enable Rust std library (host-side only).
+std = []
+# Host-side features: serde_json support for ingest, std::path for paths.
+host = ["std", "dep:serde_json"]
+
+[dev-dependencies]
+tempfile = "3"
+

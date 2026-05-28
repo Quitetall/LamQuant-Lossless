@@ -4685,7 +4685,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
-name = "lamquant-core"
+name = "lamquant-common"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "lamquant-firmware"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "defmt 0.3.100",
+ "defmt-rtt",
+ "embedded-alloc",
+ "embedded-hal 1.0.0",
+ "embedded-hal-nb",
+ "fixed",
+ "fugit",
+ "heapless",
+ "idsp",
+ "lamquant-ipc-types",
+ "lamquant-lossless",
+ "lamquant-weights",
+ "microfft",
+ "nb 1.1.0",
+ "panic-halt",
+ "postcard",
+ "riscv 0.12.1",
+ "rp235x-hal",
+]
+
+[[package]]
+name = "lamquant-gui"
+version = "7.0.0"
+dependencies = [
+ "lamquant-history",
+ "lamquant-lossless",
+ "lamquant-ops",
+ "log",
+ "serde",
+ "serde_json",
+ "serialport",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-log",
+ "tauri-plugin-shell",
+ "tokio",
+ "zip",
+]
+
+[[package]]
+name = "lamquant-history"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "lamquant-ipc-types"
+version = "0.1.0"
+dependencies = [
+ "defmt 0.3.100",
+ "heapless",
+ "postcard",
+ "serde",
+]
+
+[[package]]
+name = "lamquant-lossless"
 version = "7.7.0"
 dependencies = [
  "aes-gcm",
@@ -4716,6 +4788,7 @@ dependencies = [
  "indicatif",
  "insta",
  "keyring",
+ "lamquant-common",
  "lamquant-history",
  "lamquant-ops",
  "libm",
@@ -4756,74 +4829,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "lamquant-firmware"
-version = "0.1.0"
-dependencies = [
- "critical-section",
- "defmt 0.3.100",
- "defmt-rtt",
- "embedded-alloc",
- "embedded-hal 1.0.0",
- "embedded-hal-nb",
- "fixed",
- "fugit",
- "heapless",
- "idsp",
- "lamquant-core",
- "lamquant-ipc-types",
- "lamquant-weights",
- "microfft",
- "nb 1.1.0",
- "panic-halt",
- "postcard",
- "riscv 0.12.1",
- "rp235x-hal",
-]
-
-[[package]]
-name = "lamquant-gui"
-version = "7.0.0"
-dependencies = [
- "lamquant-core",
- "lamquant-history",
- "lamquant-ops",
- "log",
- "serde",
- "serde_json",
- "serialport",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-log",
- "tauri-plugin-shell",
- "tokio",
- "zip",
-]
-
-[[package]]
-name = "lamquant-history"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "lamquant-ipc-types"
-version = "0.1.0"
-dependencies = [
- "defmt 0.3.100",
- "heapless",
- "postcard",
- "serde",
-]
-
-[[package]]
 name = "lamquant-lsl"
 version = "0.1.0"
 dependencies = [
- "lamquant-core",
+ "lamquant-lossless",
  "lsl",
  "sha2 0.10.9",
  "tempfile",
@@ -5052,7 +5061,7 @@ version = "1.1.0"
 dependencies = [
  "clap",
  "fuser",
- "lamquant-core",
+ "lamquant-lossless",
  "libc",
  "tracing",
  "tracing-subscriber",

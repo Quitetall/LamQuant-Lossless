@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lamquant-common",
     "crates/lamquant-history",
     "crates/lamquant-ipc-types",
     "crates/lamquant-lsl",
     "crates/lamquant-ops",
     "crates/lmafs",
     "gui/src-tauri",
-    "lamquant-core",
+    "lamquant-lossless",
     "lamquant-firmware",
     "lamquant-weights",
 ]
@@ -20,19 +21,20 @@ members = [
 # not be present on every dev machine. Build it explicitly via
 # `cargo build -p lamquant-lsl` when LSL integration is needed.
 default-members = [
+    "crates/lamquant-common",
     "crates/lamquant-history",
     "crates/lamquant-ipc-types",
     "crates/lamquant-ops",
     "crates/lmafs",
     "gui/src-tauri",
-    "lamquant-core",
+    "lamquant-lossless",
     "lamquant-weights",
 ]
 # Fuzz harness uses libfuzzer-sys + nightly toolchain; lives outside
 # the host workspace so `cargo build` from root doesn't pull in nightly
 # deps. Drive it explicitly via `cd lamquant-core && cargo +nightly fuzz`.
 exclude = [
-    "lamquant-core/fuzz",
+    "lamquant-lossless/fuzz",
     # BLUT is its own Cargo workspace; included via git submodule but
     # NEVER absorbed into the LamQuant workspace. Build via
     # `cd blut && cargo build`. See ADR 0017.

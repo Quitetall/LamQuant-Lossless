@@ -1,0 +1,1 @@
+- [LMA/LML Wire Format Audit](project_lma_wire_format.md) — full audit 2026-04-24: all formats consistent EXCEPT critical numba floor-div bug in bias.py

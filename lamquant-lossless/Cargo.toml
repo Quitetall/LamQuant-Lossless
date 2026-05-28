@@ -1,0 +1,362 @@
+[package]
+# Renamed from `lamquant-core` during 8-repo Unix decomposition (Phase 2).
+# Library name `lamquant_core` kept stable to avoid touching every `use`
+# site across 19 Rust + 22 Python files; the lib rename is a follow-up
+# pass scheduled after the codec is in its own repo.
+name = "lamquant-lossless"
+version = "7.7.0"
+edition = "2021"
+rust-version = "1.81"
+description = "LML — lossless EEG compression codec (Le Gall lifting DWT + LPC + Golomb-Rice)"
+license = "AGPL-3.0"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+homepage = "https://github.com/Quitetall/LamQuant-Lossless"
+readme = "../README.md"
+categories = ["compression", "science"]
+keywords = ["eeg", "lossless", "codec", "medical", "neuroscience"]
+build = "build.rs"
+
+[lib]
+name = "lamquant_core"
+# cdylib is only needed for the Python extension (.so) build via maturin;
+# maturin overrides crate-type when invoked. For all other consumers
+# (firmware, host crates, tests), rlib is used.
+crate-type = ["rlib"]
+
+[dev-dependencies]
+# Used by integration tests that need scratch dirs / spawn the lml binary.
+tempfile = "3"
+lamquant-ops = { path = "../crates/lamquant-ops" }
+# tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
+# unconditionally so it's available regardless of which features the
+# host build enables.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# End-to-end codec throughput benchmarks. `html_reports` keeps the
+# HTML viewer for `target/criterion/` artifacts; `cargo_bench_support`
+# allows `cargo bench --bench codec` invocation.
+criterion = { version = "0.5", features = ["html_reports", "cargo_bench_support"] }
+# Snapshot tests for wire-format lockdown. Used by tests/snapshot/*.rs
+# to freeze LMA manifest bytes + LML header layout. Regenerate
+# snapshots via `cargo insta review` after an intentional format bump.
+# Added 2026-05-21 (Cat A crate adoption — A2).
+insta = { version = "1", features = ["yaml"] }
+# Property-based tests for `decode(encode(x)) == x` invariants.
+# Cat A — A4. Harness lives under tests/property/.
+proptest = "1"
+# Cat B comparators (2026-05-22) — host-side libs evaluated as
+# future hot-path candidates. Dev-deps so they never enter a
+# release binary; only `cargo test --features host` + the dedicated
+# smoke harness `tests/cat_b_smoke.rs` exercise them.
+pulp = "0.21"
+realfft = "3"
+# idsp's i32 DirectForm1 biquad benched vs a self-contained
+# hand-rolled DF1 in `benches/cat_b_compare.rs`.
+idsp = "0.21"
+dsp-process = "0.2"
+dsp-fixedpoint = "0.1"
+# Concurrency model checker — exercises Arc/Mutex/atomic interleavings.
+# No production use today; smoke verifies the harness is wired.
+loom = "0.7"
+# Zero-copy mmap'd archive. Watch-list per docs/changes/2026-05-22-
+# cat-b-integration.md ("trigger-conditional"). Smoke validates the
+# serialize/deserialize roundtrip works for our test envelope.
+rkyv = { version = "0.7", default-features = false, features = ["alloc", "validation", "size_32"] }
+# Single source of truth for bit-level streams (preferred over bitvec
+# per the original audit). Smoke writes 5 bits in, reads them back.
+bitstream-io = "4"
+# Pure-Rust dense linear algebra. Smoke does a 4×4 multiply to verify
+# the matrix construct/index API. Watch-list — no current dense
+# linalg in scope.
+faer = "0.22"
+
+[[bench]]
+name = "codec"
+harness = false
+required-features = ["host"]
+
+# Cat B empirical comparison bench (2026-05-22). Run via:
+#   cargo bench --features "host experimental_arithmetic" \
+#     -p lamquant-core --bench cat_b_compare
+# constriction-rANS variant only present when `experimental_arithmetic`
+# is enabled — without it the bench falls back to golomb-rice-only.
+[[bench]]
+name = "cat_b_compare"
+harness = false
+required-features = ["host"]
+
+[[bin]]
+name = "lml"
+path = "src/bin/lml.rs"
+required-features = ["host"]
+
+[[bin]]
+name = "lamquant"
+path = "src/bin/lamquant.rs"
+required-features = ["host"]
+
+[features]
+# Default = full host build (CLI, TUI, file I/O).
+default = ["host"]
+# Core DSP only — no_std + alloc. Pure math: lifting, lpc, golomb, rans, crc32, lml.
+# This is what lamquant-firmware uses on RP2350.
+std = []
+# Host build: file I/O, archives, EDF, CLI, TUI, parallel I/O.
+host = [
+    "std",
+    "base64/std",
+    "sha2/std",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:clap_mangen",
+    "dep:rayon",
+    "dep:walkdir",
+    "dep:zstd",
+    "dep:globset",
+    "dep:tempfile",
+    "dep:filetime",
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:indicatif",
+    "dep:serde_json",
+    "dep:serde",
+    "dep:serde_yaml",
+    "dep:lamquant-ops",
+    "dep:lamquant-history",
+    "dep:throbber-widgets-tui",
+    "dep:ratatui-textarea",
+    "dep:tui-big-text",
+    "dep:tui-scrollview",
+    "dep:tui-tree-widget",
+    "dep:tui-widget-list",
+    "dep:tui-piechart",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    # Phase 7 — encryption + signing primitives. RustCrypto crates,
+    # pure-Rust, no_std-compatible, tiny footprint. Always bundled into
+    # the host build so `lml encrypt` / `lml sign` are available on
+    # every install without a feature flag dance.
+    "dep:aes-gcm",
+    "dep:hmac",
+    "dep:zeroize",
+    "dep:argon2",
+    "dep:rpassword",
+    "dep:getrandom",
+]
+# Phase 6 — async + network surface. tokio runtime + reqwest HTTP +
+# notify filesystem watcher. Heavy footprint; gate behind explicit
+# `async` feature so the lossless codec build path stays minimal.
+async = [
+    "host",
+    "dep:tokio",
+    "dep:reqwest",
+    "dep:notify",
+]
+# Phase 7.3 — OS keyring lookup for AES key material. Adds the
+# `keyring` crate which on Linux pulls in libdbus + libsecret. macOS
+# and Windows use their native APIs (no extra system deps). Off by
+# default so the static-musl artifact stays clean.
+keyring = ["host", "dep:keyring"]
+# Phase 5.4 — Parquet export (`lml export -f parquet`). Pulls in the
+# Apache Arrow / parquet crate stack (~50 crates). Off by default.
+parquet = [
+    "host",
+    "dep:parquet",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+]
+# Phase 5.6 — HDF5 export (`lml export -f hdf5`). Requires libhdf5
+# system dev headers; off by default for the static-musl artifact.
+hdf5 = ["host", "dep:hdf5-metno", "dep:ndarray"]
+# Phase 4.7 — DICOM Waveform read via `dicom-rs`. Pure-Rust, no
+# system deps. Behind a feature gate because clinical DICOM workflows
+# are a tiny minority of LamQuant users.
+dicom = ["host", "dep:dicom-object", "dep:dicom-core"]
+# Phase 6.2 / 6.3 / 6.7 — S3 read/write/ETag via aws-sdk-s3. Behind
+# its own feature gate because the AWS SDK is ~100 transitive crates.
+# Implies `async` (uses the same tokio runtime as `lml watch`).
+s3 = ["async", "dep:aws-config", "dep:aws-sdk-s3"]
+python = ["host", "dep:pyo3", "dep:numpy"]
+ffi = ["host"]
+wasm = ["std", "dep:wasm-bindgen"]
+# ADR 0023 Track B5+: replace the hand-rolled WNC arithmetic
+# coder in `arithmetic.rs` with a constriction-backed range
+# coder. constriction is a research-grade entropy-coder crate
+# (BSD-3) built specifically for ML compression — rANS, range
+# coder, arithmetic, and adaptive models. We use its range coder
+# + LeakyQuantizer<Laplace> here. The crate is opt-in to keep
+# default builds dependency-clean; activate at compile time via
+# `--features experimental_arithmetic`. Runtime opt-in via the
+# `LAMQUANT_TRY_ARITHMETIC=1` env var still applies on top.
+experimental_arithmetic = ["host", "dep:constriction", "dep:probability"]
+# ADR 0024 Phase 4 — LSL CLI subcommands. Direct cyclic dep on
+# `lamquant-lsl` (which depends on lamquant-core) is not possible.
+# Phase 4 will land a separate `crates/lamquant-cli/` crate that
+# depends on BOTH lamquant-core + lamquant-lsl and exposes the
+# combined CLI. For now, LSL functionality is reached via:
+#   * `cargo run -p lamquant-lsl --features liblsl --example replay_lml -- file.lml`
+#   * The library API (`use lamquant_lsl::Outlet;`) for embedding.
+# ADR 0023 Track B1: bit-packed-residual candidate. Activates the
+# extra per-subband max_abs scan + bit_pack sizing + per-channel
+# SubbandResult storage that adds 5-45% encode latency on
+# multi-channel data. Off by default so the lossless codec hot
+# path stays at pre-B1 throughput. Opt-in via this Cargo feature
+# AND `LAMQUANT_TRY_BIT_PACK=1` at runtime.
+experimental_bit_pack = ["host"]
+
+[dependencies]
+# Shared primitives extracted during decomposition (Phase 2). lamquant-core
+# now re-exports `crc32` (and incrementally more) from this crate so both
+# lossless and (future) neural codecs share the implementation.
+lamquant-common = { path = "../crates/lamquant-common", features = ["host"] }
+# Always required (work in no_std with alloc).
+sha2 = { version = "0.10", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# `libm` supplies `log` for the adaptive-LPC AIC/MDL penalty in no_std
+# builds — `f64::ln()` is std-only and would break the firmware path.
+# Tiny, header-equivalent footprint on the embedded target.
+libm = "0.2"
+
+# Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
+# Host feature only; firmware never spawns subprocesses.
+lamquant-ops = { path = "../crates/lamquant-ops", optional = true }
+# Shared history.json reader/writer — see specs/history-schema.json.
+# Same `host`-only gate; firmware doesn't read user history.
+lamquant-history = { path = "../crates/lamquant-history", optional = true }
+
+# Host-only deps (gated by `host` feature).
+clap = { version = "4", features = ["derive"], optional = true }
+# Shell completion generator (Phase 1.8). Generates bash/zsh/fish/
+# PowerShell/elvish completion scripts on demand via the
+# `lml completions <shell>` subcommand.
+clap_complete = { version = "4", optional = true }
+# Man-page generator (Phase 1.9). Stable companion to clap_complete;
+# same idiomatic pattern via `Cli::command()` → manpage roff.
+clap_mangen = { version = "0.2", optional = true }
+rayon = { version = "1", optional = true }
+walkdir = { version = "2", optional = true }
+zstd = { version = "0.13", optional = true }
+# v1.2 I — `--include` / `--exclude` glob filters on encode + archive.
+# Compiled pattern set; tar-style semantics; fast hit-test in the
+# encoder loop. Host-only (no firmware use).
+globset = { version = "0.4", optional = true }
+tempfile = { version = "3", optional = true }
+filetime = { version = "0.2", optional = true }
+ratatui = { version = "0.30", optional = true }
+crossterm = { version = "0.28", optional = true }
+indicatif = { version = "0.17", optional = true }
+serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+# YAML parsing for the PCCP registry (`pccp/registry.yaml`). Hand-rolled
+# parser previously here was flagged in the V4 Pro review of the bones
+# A+B+C commit — under FDA PCCP, registry interpretation must match the
+# Python gate's PyYAML view byte-for-byte. host-only.
+serde_yaml = { version = "0.9", optional = true }
+
+# TUI widget ecosystem
+throbber-widgets-tui = { version = "0.11", optional = true }
+ratatui-textarea = { version = "0.8", features = ["crossterm"], optional = true }
+tui-big-text = { version = "0.8", optional = true }
+tui-scrollview = { version = "0.6", optional = true }
+tui-tree-widget = { version = "0.24", optional = true }
+tui-widget-list = { version = "0.15", optional = true }
+tui-piechart = { version = "0.3", optional = true }
+
+# Structured logging substrate (Phase 0.8). `tracing` is the abstract
+# event emitter; `tracing-subscriber` configures filtering + format. The
+# layered subscriber is initialised in `bin/lml.rs::main` so all crates
+# that call `tracing::info!` / `warn!` / `error!` route through one
+# pipeline. Phase 1.1 will migrate the bulk of existing `eprintln`s.
+# Tighten the floor — `tracing-core` 0.1.30+ introduces `Collect`
+# trait changes that older minor versions don't carry, and older
+# `tracing-subscriber` builds against incompatible cores. Both crates
+# are SemVer-disciplined; this floor avoids resolver picking ancient
+# minor versions when other deps prefer them.
+tracing = { version = "0.1.40", optional = true }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"], optional = true }
+
+# Bindings.
+pyo3 = { version = "0.25", features = ["extension-module"], optional = true }
+numpy = { version = "0.25", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+# ─── Phase 7 — Security primitives (RustCrypto, pure-Rust) ───
+# aes-gcm: AEAD encryption (confidentiality + authentication in one pass).
+# Bundled in `host`; tiny footprint, no_std-compatible.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"], optional = true }
+# hmac: keyed message-authentication for archive signing. SHA-256 is
+# already pulled in via the `sha2` dependency above.
+hmac = { version = "0.12", default-features = false, optional = true }
+# zeroize: clears key material from memory on drop. Tiny.
+zeroize = { version = "1.7", default-features = false, features = ["zeroize_derive"], optional = true }
+# v1.2 P — Argon2id KDF for `--password` flag. Pure Rust, audited
+# RustCrypto crate. Derives a 32-byte AES-GCM key from a user-typed
+# password using OWASP-recommended parameters (m=64 MiB, t=3, p=1).
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"], optional = true }
+# v1.2 P — interactive password prompt without echo. Reads from
+# /dev/tty when stdin is a pipe so the prompt still works in
+# scripted contexts that pipe data through `lml encrypt`.
+rpassword = { version = "7", optional = true }
+# v1.2 P — cryptographically-secure random number generator for the
+# 16-byte salt that the password KDF needs.
+getrandom = { version = "0.2", optional = true }
+
+# ─── Phase 6 — Async runtime + network (gated behind `async` feature) ───
+# tokio: multi-threaded async runtime. The `rt-multi-thread` + `macros` +
+# `fs` + `io-util` set is what the daemon / async wrappers need.
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "fs",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+], optional = true }
+# reqwest: HTTP client for webhook callbacks + HTTP fetch source. Uses
+# rustls (no system OpenSSL dep) so the static-musl release stays clean.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+], optional = true }
+# notify: cross-platform filesystem watcher driving the `lml watch` daemon.
+notify = { version = "6", default-features = false, features = [
+    "macos_fsevent",
+], optional = true }
+
+# Phase 7.3 — OS keyring (feature `keyring`). Pulls in libsecret on
+# Linux; Mac uses Security.framework, Windows uses DPAPI.
+keyring = { version = "3", optional = true }
+# Phase 5.4 — Parquet export. Adds the arrow-rs + parquet stack.
+parquet = { version = "53", default-features = false, features = [
+    "arrow",
+    "snap",
+], optional = true }
+arrow-array = { version = "53", default-features = false, optional = true }
+arrow-schema = { version = "53", default-features = false, optional = true }
+# Phase 5.6 — HDF5 export. Static-link the system libhdf5 dev
+# headers via the `static` feature when available.
+hdf5-metno = { version = "0.12", optional = true }
+ndarray = { version = "0.16", optional = true }
+# Phase 4.7 — DICOM Waveform parsing (feature `dicom`).
+dicom-object = { version = "0.8", optional = true }
+dicom-core = { version = "0.8", optional = true }
+# Phase 6.2 / 6.3 / 6.7 — AWS S3 SDK (feature `s3`). rustls TLS only.
+aws-config = { version = "1", default-features = false, features = [
+    "rustls",
+    "behavior-version-latest",
+], optional = true }
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "rustls",
+    "behavior-version-latest",
+], optional = true }
+# ADR 0023 Track B5+ — research-grade entropy coders (rANS, range,
+# arithmetic). Backs the constriction-flavoured arithmetic coder in
+# `src/arithmetic.rs` when the `experimental_arithmetic` feature is
+# enabled. BSD-3 license (compatible with our AGPL-3). ~25 KB binary
+# add, no transitive heavy deps.
+constriction = { version = "0.4", default-features = false, features = ["std"], optional = true }
+# Continuous distribution helpers (Laplace, etc) consumed by the
+# constriction LeakyQuantizer. Used only when
+# `experimental_arithmetic` is enabled.
+probability = { version = "0.20", optional = true }

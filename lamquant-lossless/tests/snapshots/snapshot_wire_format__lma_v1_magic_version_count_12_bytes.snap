@@ -1,0 +1,6 @@
+---
+source: lamquant-core/tests/snapshot_wire_format.rs
+assertion_line: 49
+expression: "hex_prefix(&bytes, 12)"
+---
+4C 4D 41 31 01 00 00 00 01 00 00 00
