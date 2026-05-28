@@ -104,6 +104,7 @@ std = []
 # Host build: file I/O, archives, EDF, CLI, TUI, parallel I/O.
 host = [
     "std",
+    "lamquant-common/host",
     "base64/std",
     "sha2/std",
     "dep:clap",
@@ -208,7 +209,7 @@ experimental_bit_pack = ["host"]
 # Shared primitives extracted during decomposition (Phase 2). lamquant-core
 # now re-exports `crc32` (and incrementally more) from this crate so both
 # lossless and (future) neural codecs share the implementation.
-lamquant-common = { path = "../crates/lamquant-common", features = ["host"] }
+lamquant-common = { path = "../crates/lamquant-common", default-features = false }
 # Always required (work in no_std with alloc).
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
