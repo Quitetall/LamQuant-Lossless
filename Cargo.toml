@@ -7,7 +7,6 @@ members = [
     "crates/lamquant-lsl",
     "crates/lamquant-ops",
     "crates/lmafs",
-    "gui/src-tauri",
     "lamquant-lossless",
     "lamquant-firmware",
     "lamquant-weights",
@@ -26,7 +25,6 @@ default-members = [
     "crates/lamquant-ipc-types",
     "crates/lamquant-ops",
     "crates/lmafs",
-    "gui/src-tauri",
     "lamquant-lossless",
     "lamquant-weights",
 ]
