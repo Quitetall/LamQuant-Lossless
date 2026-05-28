@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "LamQuant v7.7 firmware — bare-metal Rust for RP2350 (Hazard3 RISC-V)"
-license = "AGPL-3.0"
+license = "GPL-3.0-or-later"
 publish = false
 
 # Library exposes pure DSP/neural/codec modules so we can test them on the

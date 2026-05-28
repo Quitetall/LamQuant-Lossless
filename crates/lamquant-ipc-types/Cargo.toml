@@ -2,7 +2,7 @@
 name = "lamquant-ipc-types"
 version = "0.1.0"
 edition = "2021"
-license = "AGPL-3.0"
+license = "GPL-3.0-or-later"
 description = "Shared MCU↔host IPC envelope + message kinds (Cat A7)."
 publish = false
 

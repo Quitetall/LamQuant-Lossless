@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
 description = "Lab Streaming Layer (LSL) integration for LamQuant — replay .lml as LSL outlet, record LSL streams to .lml. World-class first-party integration with the de-facto neuroscience real-time data network."
-license = "AGPL-3.0"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/openhuman-ai/LamQuant"
 
 [lib]

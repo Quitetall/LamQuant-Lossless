@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 description = "Shared history.json + resume-state reader/writer for LamQuant front-ends."
-license = "AGPL-3.0"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/openhuman-ai/LamQuant"
 
 [lib]

@@ -4,7 +4,7 @@ version = "7.7.0"            # mirrors model checkpoint version
 edition = "2021"
 rust-version = "1.75"
 description = "LamQuant TNN/SNN weights — generated from checkpoint via export_firmware.py"
-license = "AGPL-3.0"
+license = "GPL-3.0-or-later"
 publish = false
 
 [lib]
