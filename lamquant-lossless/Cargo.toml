@@ -18,10 +18,13 @@ build = "build.rs"
 
 [lib]
 name = "lamquant_core"
-# cdylib is only needed for the Python extension (.so) build via maturin;
-# maturin overrides crate-type when invoked. For all other consumers
-# (firmware, host crates, tests), rlib is used.
-crate-type = ["rlib"]
+# rlib for firmware/host/test consumers; cdylib so maturin emits the
+# `lamquant_core` Python extension (.so). Current maturin does NOT
+# auto-inject cdylib (the old assumption was stale → it built an empty
+# wheel with no .so), so declare it explicitly. cdylib is an additive
+# output: the default rlib build (firmware, no python feature) is
+# unaffected; the .so is only produced when maturin/--crate-type asks.
+crate-type = ["rlib", "cdylib"]
 
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
