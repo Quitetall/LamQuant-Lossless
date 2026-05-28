@@ -100,12 +100,11 @@ with 24-bit resolution generates $32 \times 1024 \times 24 =
 1\,kSPS with 24-bit resolution generates $256 \times 1024 \times
 24 \approx 6.3$\,Mbps, and a clinical intracranial system at
 16\,kSPS with 24-bit resolution over 32 channels generates
-$32 \times 16000 \times 24 \approx 12$\,Mbps. Bluetooth Low
-Energy~5.x reliably sustains $\approx$1.4\,Mbps of application-
-layer throughput in practice; both high-density and intracranial
-configurations exceed this, and even modest ambulatory
-configurations leave little headroom for retransmission, encryption,
-and concurrent telemetry once raw EEG is transmitted uncompressed.
+$32 \times 16000 \times 24 \approx 12$\,Mbps. Bluetooth Low Energy~5.x sustains
+$\approx$1.4\,Mbps application-layer; high-density and intracranial
+configurations exceed it, and even modest ambulatory loads leave
+little headroom for retransmission, encryption, and concurrent
+telemetry uncompressed.
 Lossless compression therefore enables the wider range of
 clinical configurations to fit a low-power wireless transport,
 and the bit-exact constraint is hard: medicolegal and FDA archival
@@ -179,9 +178,8 @@ general-purpose compressors cannot efficiently exploit.
 The Temple University EEG Corpus (TUEG) is the largest open clinical
 EEG repository by total bytes~\cite{obeid2016}. Per the corpus
 AAREADME~\cite{tueg_aareadme_v202}, v2.0.2 (released 2026-05-21)
-contains 14{,}987 patients spread across 26{,}846 recording
-sessions and 70{,}831 EDF files (27{,}074.4 hours of total signal
-duration). Sample frequencies range from 250\,Hz to 1024\,Hz
+contains 14{,}987 patients, 26{,}846 sessions, 70{,}831 EDF files
+(27{,}074.4 hours). Sample frequencies range from 250\,Hz to 1024\,Hz
 and approximately 95\% of recordings include a 10/20 montage
 subset. Direct measurement on the local mirror sums to
 1{,}756{,}355{,}590{,}458\,bytes (1.76\,TB), spanning
@@ -195,9 +193,9 @@ laboratory datasets, and no prior lossless compression benchmark on
 the full corpus has been published.
 
 \subsection{Limitations of General-Purpose Compression on EEG}
-General-purpose compressors such as gzip (DEFLATE: LZ77 +
-Huffman)~\cite{ziv1977,deutsch1996} and zstd target byte-level repetition and
-dictionary-based string matching. EEG signals produced by
+Gzip (DEFLATE: LZ77 + Huffman)~\cite{ziv1977,deutsch1996} and
+zstd target byte-level repetition and dictionary-based string
+matching. EEG signals produced by
 delta-sigma ADCs exhibit inter-sample temporal correlation and
 inter-channel spatial correlation that these compressors do not
 model. Applied to TUEG edf/000, gzip $-9$ achieves 1.6033:1 CR,
@@ -414,19 +412,15 @@ overhead while achieving sufficient decorrelation for EEG's
 predominantly low-frequency energy distribution.
 
 \noindent\textit{DWT subbands vs.\ EEG clinical bands.}
-The DWT decomposition is a mathematical
-construct (a dyadic frequency split via the analysis filters); it
-should not be conflated with the standard EEG clinical bands
-(delta 0.5--4\,Hz, theta 4--8\,Hz, alpha 8--12\,Hz, beta
-12--30\,Hz, gamma 30+\,Hz). At a 250\,Hz sample rate, the three
-DWT levels produce four subbands that span the following frequency
-ranges: $L_3$ (LLL approximation, 0--15.6\,Hz, spanning delta +
-theta + alpha + low beta), $L_2$ (15.6--31.25\,Hz, high beta +
-low gamma), $L_1$ (31.25--62.5\,Hz, gamma + line-noise harmonics),
-and $L_0$ (62.5--125\,Hz, predominantly EMG / high-frequency
-artifact). The codec compresses subbands, not clinical bands;
-the mapping above is provided for orientation and is not used
-by the encoder.
+The DWT is a dyadic frequency split via the analysis filters,
+not the standard EEG clinical bands (delta/theta/alpha/beta/gamma).
+At 250\,Hz, the three DWT levels produce four subbands: $L_3$
+(0--15.6\,Hz; delta + theta + alpha + low beta), $L_2$
+(15.6--31.25\,Hz; high beta + low gamma), $L_1$
+(31.25--62.5\,Hz; gamma + line-noise harmonics), and $L_0$
+(62.5--125\,Hz; EMG / high-frequency artifact). The codec
+compresses subbands, not clinical bands; the mapping above is
+for orientation only.
 
 \subsection{LPC Prediction with Bias Cancellation}
 Linear predictive coding is applied to each DWT subband per channel
@@ -491,10 +485,9 @@ making GR the natural entropy coder for this pipeline.
 The Rice parameter $k$ is selected per channel per window from
 residual statistics and stored in the fixed per-window header,
 requiring no external dictionary. This design eliminates dictionary
-overhead entirely. rANS and arithmetic coding approaches were
-evaluated and found not to recover their implementation overhead at
-the window sizes and entropy levels characteristic of 250\,Hz 16-bit
-clinical EEG. This is consistent with the theoretical result that GR
+overhead. rANS and arithmetic coding were evaluated and do not
+recover their implementation overhead at the window sizes and
+entropy levels characteristic of 250\,Hz 16-bit clinical EEG. This is consistent with the theoretical result that GR
 achieves near-optimal coding efficiency for geometric sources with
 lower per-symbol overhead than asymmetric numeral systems at short
 block lengths. Windows are fully self-contained: no inter-window
@@ -642,14 +635,10 @@ Used for direct comparison with Chen et~al.~\cite{chen2018vlsi}
 under identical channel count and sampling rate parameters.
 
 \textbf{Temple University EEG Corpus v2.0.2}~\cite{obeid2016,
-tueg_aareadme_v202}: 70{,}831 EDF files (per the AAREADME)
-spanning 14{,}987 patients and 26{,}846 sessions; local mirror
-sums to 1{,}756{,}355{,}590{,}458\,bytes (1.76\,TB). The corpus
-spans 40+ channel configurations, sample frequencies from 250\,Hz
-to 1024\,Hz, and 27{,}074.4 hours of total signal duration from
-a large academic EMU. Version 2.0.2 (released 2026-05-21)
-supersedes v2.0.1 with merged TUSZ/TUEP corrections; v2.0.1
-numbers are retained in Appendix~A as a supporting prior bench.
+tueg_aareadme_v202}: 70{,}831 EDF files from 14{,}987 patients
+across 26{,}846 sessions (1.76\,TB, 27{,}074.4 hours,
+250--1024\,Hz, 40+ channel configs). Released 2026-05-21;
+v2.0.1 numbers retained in Appendix~A.
 Bench timing: the full v2.0.1 benchmark was completed first, then
 the v2.0.2 release became available mid-revision and the corpus
 was updated via incremental rsync (only the v2.0.1 $\to$ v2.0.2
@@ -671,14 +660,12 @@ independently against each sub-corpus to verify that label-aware
 sidecars introduce no encode/decode regressions.
 
 \subsection{Verification Methodology}
-Bit-exact reconstruction was verified through a four-layer protocol:
-(1)~SHA-256 computed per file on original and decoded output, matched
-for all 88{,}147 encode/decode operations; (2)~CRC-32 verified per window during
-decompression; (3)~pyedflib (C-backed EDF reader) independent
-cross-check on 500 randomly sampled TUEG files after hash
-verification, confirming EDF structural integrity; and (4)~MNE-Python
-cross-check on approximately 4,000 samples over multiple days,
-confirming signal-level bit-exact reconstruction. File counts and
+Bit-exact reconstruction was verified via four layers:
+(1)~SHA-256 per file (matched on all 88{,}147 operations);
+(2)~per-window CRC-32 during decompression;
+(3)~pyedflib (C-backed reader) structural cross-check on 500
+random TUEG files; (4)~MNE-Python signal-level cross-check on
+$\approx$\,4{,}000 samples over multiple days. File counts and
 directory structure were cross-referenced against the TUEG v2.0.2
 AAREADME. Original EDF timestamps were confirmed preserved; the only
 observed difference from source files was the OS-level \texttt{atime}
@@ -733,16 +720,14 @@ distributional.}
 \end{table*}
 
 \subsection{Comparison with Prior Work}
-Table~\ref{tab:comparison} compares LamQuant Lossless against Chen
-et~al.~\cite{chen2018vlsi} and the gzip baseline. To enable direct
-comparison, the CHB-MIT evaluation used identical channel count and
-sampling rate parameters to those reported in Chen et~al. All three
-LPC modes were benchmarked on the full 45.76\,GB CHB-MIT corpus:
-fixed-schedule CR = 2.6536:1, adaptive CR = 2.7229:1, and anytime
-(adaptive with deadline gate) CR = 2.7229:1. The adaptive mode is
-reported as the headline result; the fixed-schedule number is closer
-in spirit to Chen et~al.'s fixed-predictor architecture, and still
-exceeds it by 12.9\,\%.
+Table~\ref{tab:comparison} compares LamQuant Lossless against
+Chen et~al.~\cite{chen2018vlsi} and the gzip baseline. CHB-MIT
+used Chen et~al.'s 23-channel 256\,Hz parameters. Three LPC
+modes: fixed-schedule 2.6536:1, adaptive 2.7229:1, anytime
+(adaptive + deadline gate) 2.7229:1. The adaptive mode is the
+headline; the fixed-schedule number is closer in spirit to Chen
+et~al.'s fixed-predictor architecture and still exceeds it by
+12.9\,\%.
 
 \begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
@@ -950,10 +935,9 @@ regardless of which host architecture the encoder ran on.
 \section{Discussion}
 \label{sec:discussion}
 
-The 2.287:1 result on TUEG sits above both measured Shannon
-ceilings (memory-less $H_0 \approx 10.775$\,bits/sample and LPC-1
-$H_0(\Delta X) \approx 9.337$\,bits/sample;
-Section~\ref{sec:background}). This implies an effective residual
+The 2.287:1 result on TUEG exceeds both Shannon ceilings from
+\S\ref{sec:background} ($H_0 \approx 10.775$\,bit/s,
+$H_0(\Delta X) \approx 9.337$). This implies an effective residual
 entropy of $\leq 7.0$\,bits/sample after the LamQuant pipeline,
 i.e. the four-band lifting wavelet plus per-subband adaptive LPC
 of order up to~8 captures considerably more inter-sample structure
@@ -978,12 +962,10 @@ and annotation fidelity.
 
 \subsection{Failure-Mode Analysis on Corrupted Inputs}
 \label{sec:failure-mode}
-The verification run encountered two file populations that the
-encoder declined to process. First, two files in TUEG v2.0.0 were
-short of their declared record count and would have produced
-truncated outputs under a non-defensive codec; the corpus
-maintainers rectified them in v2.0.1, and both replacements
-processed cleanly. Second, the CAP Sleep corpus
+The verification run encountered two file populations the
+encoder declined to process. Two TUEG v2.0.0 files had record
+counts short of their declared length (rectified by the corpus
+maintainers in v2.0.1; both replacements processed cleanly). Second, the CAP Sleep corpus
 (PhysioNet) contains two EDFs (of 108 total --- approximately
 1.9\%) with malformed headers: \texttt{brux1.edf} has a
 declared file size that does not match its data record count,
@@ -1028,10 +1010,10 @@ the average applies to every individual recording.
 
 \subsection{Why Benchmark Scale Matters}
 \label{sec:scale}
-Per-file CR distributions on the 13 benched corpora make a
-methodological point worth emphasising: \emph{compression ratios
-reported on small datasets systematically overstate the achievable
-CR on larger, more diverse corpora}. On TUEG edf/000 (456 files,
+Per-file CR distributions on the 13 benched corpora highlight a
+methodological point: \emph{compression ratios reported on small
+datasets systematically overstate the achievable CR on larger,
+more diverse corpora}. On TUEG edf/000 (456 files,
 6.0\,GB) the per-file CR distribution
 (\texttt{tools/bench\_per\_file\_cr.py}) ranges from 1.05 to
 6.51 (median 2.29, $\sigma = 0.66$); a single recording achieves
@@ -1151,10 +1133,9 @@ possible 16-bit codes; see Table~\ref{tab:per-corpus-entropy}).}
 \end{figure*}
 
 \subsection{Scope Exclusions}
-Three scope boundaries deserve explicit statement.
-\textbf{(i) Sampling rate and bit depth}: benchmarking was conducted
-at the corpus-native rates (250--1024\,Hz for TUEG; up to 16\,kSPS
-on some PhysioNet datasets) and 16-bit resolution. Performance at
+\textbf{(i) Sampling rate \& bit depth}: benchmarking used
+corpus-native rates (250--1024\,Hz TUEG; up to 16\,kSPS on some
+PhysioNet datasets) and 16-bit resolution. Performance at
 higher sampling rates (e.g., 2\,kSPS for high-frequency oscillation
 detection) and 24-bit resolution at scale has not yet been
 characterised; the codec is parameter-agnostic at the algorithm
@@ -1185,11 +1166,10 @@ orders $\{3, 3, 6, 8\}$ with an optional adaptive mode of maximum
 order~16) instead is grounded in three constraints that are load-
 bearing for a clinically deployable codec.
 
-\emph{Domain generalization.} A neural predictor trained on TUEG's
-clinical recording characteristics may underperform on CHB-MIT,
-PhysioNet Sleep-EDF, Siena, or any future corpus whose hardware,
-montage, electrode contact impedance, or patient population
-diverges from training. Per-subband adaptive LPC, by contrast, fits
+\emph{Domain generalization.} A neural predictor trained on
+TUEG may underperform on CHB-MIT, Sleep-EDF, Siena, or future
+corpora with different hardware, montages, electrode impedance,
+or patient populations. Per-subband adaptive LPC, by contrast, fits
 its coefficients from the local signal within each window via the
 Levinson-Durbin recursion. There is no training set and therefore
 no domain shift; the predictor is universal across corpora by
@@ -1373,15 +1353,13 @@ acquisition.
 \section{Per-corpus Compression Breakdown}
 \label{app:per-corpus}
 
-Table~\ref{tab:per-corpus} expands the headline TUEG number with
-per-corpus figures for every TUH EEG dataset and the CHB-MIT
-PhysioNet release, providing the per-corpus input bytes, compressed
-bytes, and compression ratio. All numbers reflect the LamQuant
-Lossless default configuration (Anytime LPC mode, three-level Le~Gall
-5/3 lifting DWT, integer wire format, per-window CRC-32). Smaller
-corpora compress better because their content (clinical artifact
-recordings, brief seizure clips, well-controlled task experiments)
-is narrower than the open-ended TUEG mixed-EMU stream.
+Table~\ref{tab:per-corpus} breaks the headline TUEG number into
+per-corpus rows for every TUH EEG dataset plus the CHB-MIT
+PhysioNet release. All numbers use the default configuration
+(Anytime LPC, three-level Le~Gall 5/3 lifting DWT, integer wire
+format, per-window CRC-32). Smaller corpora compress better
+because their content (artifact, brief seizures, controlled
+task experiments) is narrower than TUEG's open-ended EMU stream.
 
 \begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
