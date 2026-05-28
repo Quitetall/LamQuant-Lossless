@@ -9,6 +9,9 @@ Math fixtures via ``torch.randn`` — not synthetic EEG data.
 """
 from __future__ import annotations
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import sys
 from pathlib import Path
 

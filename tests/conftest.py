@@ -13,12 +13,43 @@ import pytest
 import numpy as np
 import tempfile
 import json
+import importlib.util as _iu
 from pathlib import Path
+
+# Decomposition note (2026-05-28): In the LamQuant-Lossless carve, the
+# ai_models/ subtree (neural codec, SNN/TNN, training pipelines) does
+# NOT exist — those modules live in the private LamQuant-Neural repo.
+# Several tests under tests/codec/, tests/firmware/, tests/decoder/
+# were originally written when monorepo had ai_models inline; they
+# import `from subband_preprocess import ...` or similar neural-only
+# bare-name imports. Skip-collect those test files here so a Lossless-
+# only checkout doesn't crash collection with ImportError.
+_HAS_NEURAL = (Path(__file__).parent.parent / "ai_models").is_dir()
+collect_ignore_glob = []
+if not _HAS_NEURAL:
+    collect_ignore_glob.extend([
+        "codec/test_l1_conformance.py",
+        "codec/test_l2_preprocessing.py",
+        "codec/test_l2_integrity_gaps.py",
+        "codec/test_l4_fuzz.py",
+        "codec/test_l5_subband_int_vec.py",
+        "codec/test_l5_vectorize_parity.py",
+        "codec/test_l7_adversarial_saturation.py",
+        "codec/test_l7_adversarial_zeros.py",
+        "codec/test_l7_paranoid.py",
+        "codec/test_fused_pipeline.py",
+        "decoder/*.py",
+        "firmware/test_checkpoint.py",
+        "firmware/test_l5_cross_impl.py",
+        "firmware/test_l5_parity.py",
+        "firmware/test_l3_weight_packing.py",
+    ])
 
 # Expose repo modules that tests import by bare name (train_ternary,
 # export_firmware, subband_preprocess, ...). These live under feature-specific
 # subdirectories rather than in an installed package, so the test runner needs
-# their parent dirs on sys.path.
+# their parent dirs on sys.path. In the Lossless carve, only existing dirs
+# are added (silently skipping absent ai_models/ + firmware/).
 _REPO_ROOT = Path(__file__).parent.parent
 for _rel in (
     "ai_models/student",

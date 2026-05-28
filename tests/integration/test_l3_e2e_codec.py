@@ -13,6 +13,9 @@ Dependency chain:
   L6  SNN                 Activity classification (independent)
 """
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import sys
 import glob

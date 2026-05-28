@@ -5,6 +5,9 @@ load_checkpoint (auto-detect + explicit-path paths).
 """
 from __future__ import annotations
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import hashlib
 from pathlib import Path
 

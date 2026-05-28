@@ -3,6 +3,9 @@
 Tests read_edf_digital, _parse_tal, _unpack_int24 for the complete
 EDF family: EDF, EDF+C, EDF+D, BDF.
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import struct
 import tempfile

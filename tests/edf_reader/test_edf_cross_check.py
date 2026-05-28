@@ -12,6 +12,9 @@ Both test EDF files are checked into `Reference Software/`:
 If these files disappear or pyedflib is uninstalled, the tests skip cleanly.
 """
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("ai_models", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import sys
 import pytest

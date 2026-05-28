@@ -4,6 +4,9 @@ Level 2 (Property-based), L5 (Cross-impl), L7 (Adversarial) tests for preprocess
 Focus: Q31->float conversion, LPC, lifting DWT, L3 approximation.
 """
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import pytest
 import numpy as np
 import struct

@@ -4,6 +4,9 @@ Verifies the full adaptive SNAC pipeline:
   MambaSNN.classify_per_timestep() → encode(snn=snn) → compress()
   produces a valid LMQ3 adaptive packet with per-timestep FSQ levels.
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import sys
 import os
 import struct

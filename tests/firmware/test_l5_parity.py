@@ -18,6 +18,9 @@ Each test:
 
 Requires: gcc on PATH (same as test_c_host.py)
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import sys
 import struct

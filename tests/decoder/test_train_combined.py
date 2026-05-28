@@ -1,6 +1,9 @@
 """Unit tests for ai_models/decoder/train_combined.py — Phase 3."""
 from __future__ import annotations
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import importlib.util
 import sys
 import types

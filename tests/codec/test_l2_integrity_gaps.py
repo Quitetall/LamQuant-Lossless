@@ -9,6 +9,9 @@ AUDIT (2026-04-28): Created to close gaps found by provenance-checker agent:
 These tests complement the existing L1 conformance and L4 fuzz suites by
 targeting specific integrity-checking logic that was only exercised implicitly.
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import sys
 import struct

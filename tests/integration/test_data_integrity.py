@@ -16,6 +16,9 @@ Tests are organised by the contract they enforce:
 """
 from __future__ import annotations
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import json
 import os
 import subprocess

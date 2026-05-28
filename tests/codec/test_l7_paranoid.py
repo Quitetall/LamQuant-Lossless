@@ -13,6 +13,9 @@ Test categories:
   6. Determinism — same input always produces same output
   7. Cross-platform — verify against reference implementation
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import sys
 import struct

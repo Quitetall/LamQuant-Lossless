@@ -6,6 +6,9 @@ Covers the three pure-torch metric helpers (`pearson_r_loss`, `pearson_r_batch`,
 """
 from __future__ import annotations
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import importlib.util
 import sys
 import types

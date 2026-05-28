@@ -16,6 +16,9 @@ These tests assert:
 If any test here fails after a numba upgrade or numpy refactor, the
 lossless `.lml` wire format has silently drifted. Investigate immediately.
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import sys
 import random

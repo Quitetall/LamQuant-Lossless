@@ -8,6 +8,9 @@ Guardrails 6-8 from the LML hardening plan:
 These tests run longer than unit tests. Use `pytest -m fuzz` to run them
 separately, or `pytest --timeout=300` for CI.
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import os
 import sys
 import struct

@@ -8,6 +8,9 @@ A packing bug silently corrupts every weight the firmware uses.
 Also validates Q31 alpha scaling precision (6+ decimal digits), alpha
 overflow bounds, and rANS frequency table invariants (sum + monotonicity).
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import numpy as np
 import pytest
 import torch

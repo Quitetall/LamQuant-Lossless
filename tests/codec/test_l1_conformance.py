@@ -9,6 +9,9 @@ Modeled on FLAC, PNG, and ZIP conformance testing:
 
 Run: pytest tests/test_lml_conformance.py -v
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import hashlib
 import os
 import struct

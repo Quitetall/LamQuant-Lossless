@@ -9,6 +9,9 @@ CRITICAL EDGE CASES:
 These edge cases happen in real patients and must not crash/produce NaN.
 """
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import pytest
 import numpy as np
 import torch

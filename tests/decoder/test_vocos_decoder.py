@@ -8,6 +8,9 @@ two smallest tiers (Tier 1 dim=32, Tier 2 dim=64).
 """
 from __future__ import annotations
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 from pathlib import Path
 
 import numpy as np

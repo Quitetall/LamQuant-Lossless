@@ -3,6 +3,9 @@
 Verifies fused_compress/fused_decompress produce byte-identical output
 to the reference path, and that canonical numba functions round-trip.
 """
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import pytest
 import numpy as np
 

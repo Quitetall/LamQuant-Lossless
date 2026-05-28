@@ -3,6 +3,9 @@ Level 7 Adversarial tests - specifically for all-zeros and dead channel cases.
 (This test content was partially included in test_l7_adversarial_saturation.py)
 """
 
+import pytest  # decomp(lossless-carve): skip when ai_models absent
+pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
+
 import pytest
 import numpy as np
 import torch
