@@ -1,5 +1,22 @@
 """LamQuant file formats: .lmq (neural compressed) and .lml (lossless).
 
+⚠️ NON-CANONICAL (2026-05-28). The CANONICAL wire format is the Rust
+implementation in `lamquant-lossless/src/{lml,container}.rs` — magic
+`LML1`, 32-byte fixed header, JSON-metadata + u32 offset-index +
+length-prefixed window payloads + optional `LMLFOOT1` seek footer.
+
+This Python module uses a DIFFERENT, divergent layout (magic `LQL1`,
+64-byte header, per-window 22-byte headers + CRC32) — a structurally
+distinct container, NOT a minor-version skew. It is retained ONLY as a
+reference/experimental reader and is NOT byte-compatible with the Rust
+codec. Do not treat its output as canonical `.lml`.
+
+UPGRADE PATH (planned): re-port this writer/reader to the Rust `LML1`/
+32-byte layout so Python emits byte-identical `.lml` (cross-impl
+byte-equality test mirroring Rust `byte_equal_backends`), then this
+notice is removed. Until then, for real `.lml` I/O use the Rust codec
+(the `lamquant_core` PyO3 extension: `container_read`/`container_write`).
+
 Two file types, two extensions, clean API.
 
 .lmq — LamQuant neural compressed. rANS-coded FSQ tokens from the ternary
