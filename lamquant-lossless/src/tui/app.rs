@@ -1059,6 +1059,19 @@ impl App {
     }
 
     fn start_op(&mut self, op_id: &str) {
+        // Neural-codec (LMQ) ops are not wired in this build. The
+        // host-side neural encoder/decoder lives in the lamquant-neural
+        // submodule which is not linked into the lml CLI here. Bail with
+        // a clear, user-facing message instead of silently routing to
+        // the lossless `encode`/`decode` arms (which would ship LML
+        // bytes labelled "LMQ Neural" -- contract violation).
+        if matches!(op_id, "encode_neural" | "decode_neural") {
+            self.state.set_status(
+                "LMQ Neural codec not built in this release — use Lossless mode for now."
+                    .to_string(),
+            );
+            return;
+        }
         let Some(spec) = op_spec(op_id) else {
             self.state.set_status(format!("Unknown op: {}", op_id));
             return;

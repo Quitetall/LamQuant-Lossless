@@ -61,17 +61,13 @@ impl OpSpec {
 /// `specs/ui-parity.md::Op IDs`.
 pub fn op_spec(op_id: &str) -> Option<OpSpec> {
     Some(match op_id {
-        "encode_neural" => OpSpec {
-            // Neural-codec encode (LMQ). Lossy by design -- different
-            // contract from Lossless; operator picks it explicitly.
-            //
-            // --verify confirms container CRC; --cross-validate decodes
-            // the just-written LMQ and SHA-256 compares samples against
-            // the source. --skip-existing makes the op idempotent.
-            cmd: "encode", input: true, output: true,
-            output_flag: "-o", recursive: true,
-            extra: &["--verify", "--cross-validate", "--skip-existing"],
-        },
+        // `encode_neural` (LMQ) intentionally not wired here. The
+        // host-side neural encoder is not built into the `lml` CLI in
+        // this branch -- the previous arm aliased `cmd: "encode"`
+        // (lossless) which silently shipped LML bytes labelled "LMQ
+        // Neural" in the dashboard. The TUI's `start_op` short-circuits
+        // `encode_neural` / `decode_neural` with a "not built" status
+        // before reaching this lookup. See ADR 0018.
         "encode_lma" => OpSpec {
             // Default Lossless mode in the TUI. Packs the entire
             // output into per-recording .lma archives so siblings can't
@@ -95,7 +91,7 @@ pub fn op_spec(op_id: &str) -> Option<OpSpec> {
             output_flag: "-o", recursive: true,
             extra: &["--verify", "--cross-validate", "--skip-existing", "--lml-siblings"],
         },
-        "decode" | "decode_neural" => OpSpec {
+        "decode" => OpSpec {
             // --to-edf reconstructs a byte-identical EDF/BDF (header +
             // data records + trailing) from the LML container, instead
             // of the legacy raw int32 LE sample dump. Required for the
