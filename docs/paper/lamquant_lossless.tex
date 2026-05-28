@@ -305,13 +305,13 @@ LamQuant kernel choice is consistent with current TBME practice
 rather than novel. Recent low-power-wireless work by
 Cuevas-L{\'o}pez et~al.~\cite{cuevas2022wireless} achieves
 $\sim$\,1.5:1 lossless compression of in-vivo neural
-electrophysiology on FPGA (delta + Huffman, $\leq$\,3\,mW); at
-the bandwidth extreme, He et~al.~\cite{he2024nct} reported a
+electrophysiology on FPGA (delta + Huffman, $\leq$\,3\,mW).
+At the bandwidth extreme, He et~al.~\cite{he2024nct} reported a
 TBioCAS event-based neural compressive telemetry IC delivering
 $>$\,11.4{$\times$} lossless reduction on high-bandwidth
 intracortical BCI data at 1\,$\mu$W/channel by exploiting
-inter-channel spike-event sparsity---a regime structurally
-distinct from scalp clinical EEG where adjacent samples are
+inter-channel spike-event sparsity. That regime is structurally
+distinct from scalp clinical EEG, where adjacent samples are
 broadband-correlated rather than sparse-event. None of the cited prior-work systems
 validate at the scale of a full clinical corpus: typical evaluations
 use single-session datasets ranging from a few hundred megabytes to
