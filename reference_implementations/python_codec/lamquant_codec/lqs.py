@@ -1,6 +1,22 @@
 """
-LamQuant Quality Standard (LQS) v1.0
+LamQuant Quality Standard (LQS) v1.0  [DEPRECATED — Rust is canonical]
 =====================================
+.. deprecated::
+    The canonical LQS implementation is now the Rust ``lqs`` crate in
+    Eagle (https://github.com/Quitetall/Eagle, ``lqs/``). The Rust core
+    is faster (CI/pre-commit) and vendor-neutral. Rust↔Python numeric
+    parity is frozen + enforced by Eagle's ``lqs/tests/metrics_parity.rs``
+    against goldens this module generates, so the two agree to 1e-9.
+
+    This Python module is RETAINED only for: (1) backward compatibility
+    with existing callers, and (2) generating the frozen parity goldens
+    (``Eagle/tools/parity/gen_golden.py`` imports from here). Do NOT add
+    new features here — extend the Rust crate and re-freeze the goldens.
+
+    Note: the Rust L tier intentionally diverges (LQS-L = PRD exactly 0.0
+    on the integer sample domain + min_cr 0.8). C/M/A tiers match
+    field-for-field.
+
 An open standard for evaluating EEG compression quality.
 
 Any codec — neural, classical, hybrid — can declare compliance
@@ -33,11 +49,25 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+# Canonical LQS is now the Rust crate in Eagle. This Python copy is
+# kept for back-compat + frozen-golden parity generation only.
+# Suppressed during golden generation (LQS_SILENCE_DEPRECATION=1).
+import os as _os
+if _os.environ.get("LQS_SILENCE_DEPRECATION") != "1":
+    warnings.warn(
+        "lamquant_codec.lqs is deprecated; the canonical LQS implementation "
+        "is the Rust `lqs` crate in Eagle (github.com/Quitetall/Eagle). "
+        "This module is retained for back-compat + parity-golden generation.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────
