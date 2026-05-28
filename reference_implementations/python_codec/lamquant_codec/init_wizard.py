@@ -298,7 +298,7 @@ def print_next_steps(deps: dict, weights: dict) -> list[str]:
         steps.append("   lamquant train")
 
     steps.append("")
-    steps.append("Documentation: https://github.com/Quitetall/LamQuant")
+    steps.append("Documentation: https://github.com/Quitetall/LamQuant-Lossless")
 
     for s in steps:
         if s.startswith('   '):
