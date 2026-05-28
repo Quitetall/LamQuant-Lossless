@@ -25,12 +25,16 @@ jobs:
             ~/.cargo/git
             target
           key: rust-host-${{ hashFiles('Cargo.lock') }}
-      - name: cargo build --workspace --all-features
-        run: cargo build --workspace --all-features
-      - name: cargo test --workspace --lib --all-features
-        run: cargo test --workspace --lib --all-features
+      # NOTE: not --all-features. lamquant-weights enforces exactly-one
+      # architecture feature via compile_error! (subband_v1 / subband_v2 /
+      # legacy_v7_0), so --all-features is intentionally a build error.
+      # Default features exercise the full host codec path.
+      - name: cargo build --workspace
+        run: cargo build --workspace
+      - name: cargo test --workspace --lib
+        run: cargo test --workspace --lib
       - name: byte_equal_backends wire-format gate
-        run: cargo test --test byte_equal_backends --all-features
+        run: cargo test --test byte_equal_backends
 
   firmware-no_std:
     name: Firmware no_std (riscv32imac)
@@ -85,5 +89,5 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
         continue-on-error: true  # advisory until clippy debt is fixed
