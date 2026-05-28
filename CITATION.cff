@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use LamQuant Lossless, please cite both the software and the paper."
+title: "LamQuant Lossless: A Real-Time, Bit-Exact, Wirelessly-Deployable EEG Compression Algorithm"
+type: software
+authors:
+  - family-names: Lam
+    given-names: Brian
+    orcid: "https://orcid.org/0009-0001-5463-2324"
+    affiliation: "OpenHuman Technologies LLC, Florida, USA"
+    email: briankhanglam@usf.edu
+license: GPL-3.0-or-later
+repository-code: "https://github.com/Quitetall/LamQuant-Lossless"
+keywords:
+  - EEG compression
+  - lossless coding
+  - Golomb-Rice entropy coding
+  - integer lifting wavelet transform
+  - linear predictive coding
+  - microcontroller deployment
+  - Temple University EEG Corpus
+  - RISC-V
+preferred-citation:
+  type: article
+  title: "LamQuant Lossless: A Real-Time, Bit-Exact, Wirelessly-Deployable EEG Compression Algorithm"
+  authors:
+    - family-names: Lam
+      given-names: Brian
+      orcid: "https://orcid.org/0009-0001-5463-2324"
+  journal: "IEEE Transactions on Biomedical Circuits and Systems"
+  year: 2026
+  notes: "Submitted."

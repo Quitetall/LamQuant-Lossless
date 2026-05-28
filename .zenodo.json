@@ -1,0 +1,32 @@
+{
+  "title": "LamQuant Lossless: A Real-Time, Bit-Exact, Wirelessly-Deployable EEG Compression Algorithm",
+  "description": "Bit-exact lossless EEG compression codec. Integer-only Le Gall 5/3 lifting wavelet + LPC predictor (anytime adaptive, bias cancellation) + Golomb-Rice entropy coding, in a platform-independent wire format deployable on x86 / ARM / RISC-V without floating-point hardware. Achieves 2.287:1 on the full Temple University EEG Corpus (1.76 TB, 70,831 files) and 2.7229:1 on CHB-MIT. RP2350 Hazard3 RISC-V encode measured at 119x real-time via Verilator RTL simulation. Reproducibility package for the IEEE Transactions on Biomedical Circuits and Systems submission (2026).",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "GPL-3.0-or-later",
+  "creators": [
+    {
+      "name": "Lam, Brian",
+      "affiliation": "OpenHuman Technologies LLC, Florida, USA",
+      "orcid": "0009-0001-5463-2324"
+    }
+  ],
+  "keywords": [
+    "EEG compression",
+    "lossless coding",
+    "Golomb-Rice entropy coding",
+    "integer lifting wavelet transform",
+    "linear predictive coding",
+    "microcontroller deployment",
+    "Temple University EEG Corpus",
+    "RISC-V",
+    "biomedical signal processing"
+  ],
+  "related_identifiers": [
+    {
+      "relation": "isSupplementTo",
+      "identifier": "https://github.com/Quitetall/LamQuant-Lossless",
+      "scheme": "url"
+    }
+  ]
+}
