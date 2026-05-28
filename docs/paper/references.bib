@@ -285,6 +285,19 @@
   doi       = {10.1109/DSN.2002.1028931},
 }
 
+% Verilator — Snyder et al. — the open-source SystemVerilog
+% simulator used to validate the RP2350 encode-latency number.
+% Verilator converts Verilog/SystemVerilog into multi-threaded
+% C++ for cycle-by-cycle simulation against the actual RTL.
+@misc{verilator,
+  author = {Snyder, Wilson and {Veripool}},
+  title  = {{Verilator: open-source SystemVerilog simulator}},
+  year   = {2024},
+  note   = {Version 5.048 used here. RTL: Wren6991/Hazard3 v1.1
+            (the same Verilog that taped out as RP2350 Hazard3).},
+  url    = {https://www.veripool.org/verilator/},
+}
+
 % GNU Project — GPLv3 license text. Cited at the patent disclosure
 % paragraph in the Acknowledgments section: the GPLv3 release of the
 % LamQuant source carries an automatic patent grant per §11 of the

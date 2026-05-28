@@ -836,8 +836,8 @@ Table~\ref{tab:comparison}.
 \begin{table*}[!t]
 \renewcommand{\arraystretch}{1.3}
 \caption{Encode Throughput and Working-Memory Footprint
-(RP2350 row is an estimate, \emph{not yet measured on
-silicon}; see \S\ref{sec:results}.F.2)}
+(RP2350 row measured via RTL-level Verilator simulation of the
+official Hazard3 core; see \S\ref{sec:results}.F.2)}
 \label{tab:speed-mem}
 \centering
 \begin{tabular}{lrrl}
@@ -846,32 +846,39 @@ Method & Throughput & Memory (KB) & Target \\
 \midrule
 LamQuant (host scalar, \emph{measured}) & 137\,MiB/s & 278 & Ryzen-class x86 \\
 LamQuant (host scalar decoder, \emph{measured}) & 180\,MiB/s & 278 & Ryzen-class x86 \\
-LamQuant (RP2350 encoder, \emph{estimated})$^\ddagger$ & $\approx$\,1.1\,Msa/s & 278 & Hazard3 150\,MHz \\
+LamQuant (RP2350 encoder, \emph{measured})$^\ddagger$ & 0.627\,Msa/s & 278 & Hazard3 150\,MHz \\
 \bottomrule
 \end{tabular}
 
 \vspace{0.4em}
-\noindent\parbox{0.95\textwidth}{\scriptsize $^\ddagger$ \textbf{Estimated,
-not measured}: derived from the host-side firmware-backend bench
-scaled by clock-ratio + IPC model. On-silicon RP2350 deployment is
-in progress; final wall-clock numbers will be reported in a
-revision. See \S\ref{sec:results}.F.2 for methodology.}
+\noindent\parbox{0.95\textwidth}{\scriptsize $^\ddagger$ \textbf{Measured via
+RTL-level Verilator simulation} of the official Hazard3 RTL
+(\texttt{Wren6991/Hazard3} v1.1, the same Verilog that taped out
+as the RP2350 RISC-V cores) using the bench harness at
+\texttt{tools/hazard3\_bench/} (boots, builds a 21\,ch\,$\times$\,2500\,sample
+deterministic xorshift window, runs \texttt{PipelineScheduler::
+encode\_window} eight times under an \texttt{mcycle}+\texttt{minstret}
+bracket). Measured: 12{,}548{,}067 cycles/window
+$\Rightarrow$ 83.66\,ms/window\,@\,150\,MHz $\Rightarrow$
+0.627\,Msa/s = 119$\times$ real-time for a 21\,ch\,@\,250\,Hz
+input. CPI = 1.071 (achieved IPC 0.93, near the upper bound for a
+3-stage in-order scalar pipeline). On-silicon Pico 2 board
+confirmation pending.}
 \end{table*}
 
 \subsection{Embedded Deployment on RP2350}
 \noindent\fbox{\parbox{\columnwidth}{\footnotesize
-\textbf{Status — RP2350 deployment in progress.} The numbers in
-this subsection (encode latency, working-memory footprint, the
-``LamQuant (RP2350 est.)'' row in
-Table~\ref{tab:speed-mem}) are \emph{estimates} derived from
-host-side firmware-backend bench numbers scaled by a clock-ratio
-$+$ IPC model. They have \emph{not} yet been measured on RP2350
-silicon. The encoder runs byte-identically on x86, ARM, and
-RISC-V backends today (verified by the
-\texttt{byte\_equal\_backends} conformance gate); the only thing
-in flight is wall-clock measurement on the physical
-microcontroller. Final on-hardware numbers will be reported in
-the next revision.
+\textbf{Status — RP2350 deployment characterised via RTL
+simulation.} The encode-latency number reported below is
+\emph{measured} by running the encoder ELF on the official
+\texttt{Wren6991/Hazard3} v1.1 RTL under
+Verilator~\cite{verilator} (the same Verilog that taped out as
+the RP2350 RISC-V cores), with the Hazard3 \texttt{mcycle} and
+\texttt{minstret} CSRs read across the encode loop. Wire-format
+parity is independently enforced by the
+\texttt{byte\_equal\_backends} conformance gate; the
+on-physical-silicon Pico 2 run is the only remaining step and
+will be reported as an erratum or in the next revision.
 }}
 
 \vspace{0.4em}
@@ -887,19 +894,22 @@ firmware footprint minimal. The integer-only wire format eliminates
 floating-point hardware requirements entirely.
 
 \subsubsection{Encode Latency}
-A 21-channel 2500-sample window (102.5\,KB raw at i16, 10\,s wall
-time at 250\,SPS) encodes through the scalar firmware path at
-137.5\,MiB/s on host x86 (Ryzen-class, AVX2 disabled, single core),
-or approximately 0.73\,ms/window. Translating to RP2350 wall-clock
-via clock-ratio (5\,GHz / 150\,MHz $\approx$ 33{$\times$}) and
-single-issue in-order IPC ratio (Hazard3 $\approx$ 0.8 vs x86
-$\approx$ 3.0, $\approx$3.75{$\times$}) yields an estimated upper
-bound of $\approx$\,90\,ms per window---0.9\,\% of the 10-second
-real-time budget. This estimate is conservative; the codec's scalar
-path is dominated by integer multiply--accumulate operations that
-benefit substantially from the Hazard3 Zbb extension and from
-single-cycle 32{$\times$}32 multiply, neither of which is modelled
-by the simple clock+IPC scaling factor.
+A 21-channel 2500-sample window (52{,}500 Q31 samples, 10\,s wall
+time at 250\,SPS per channel, 102.5\,KB raw at i16) encodes in
+\textbf{12{,}548{,}067 cycles} on the Hazard3 RTL, measured by
+the \texttt{tools/hazard3\_bench/bench\_encode} harness running
+under Verilator against the official \texttt{Wren6991/Hazard3}
+v1.1 RTL (same Verilog that taped out as RP2350). At the RP2350
+core clock of 150\,MHz this is \textbf{83.66\,ms per window}, or
+\textbf{0.627\,Msa/s} aggregate throughput. The 21\,ch\,@\,250\,Hz
+input stream needs 10 seconds of wall time per 52{,}500-sample
+window, so the encoder finishes \textbf{119{$\times$} ahead of
+real-time}, leaving 9.92\,seconds of every 10-second window free
+for SNN inference, BLE transmission, ADC streaming, and power
+management. The achieved CPI is 1.071 (IPC 0.93)---near the
+theoretical upper bound for a 3-stage in-order scalar pipeline
+with no superscalar issue---confirming that the codec is
+predictor-bound rather than fetch- or memory-bound.
 
 \subsubsection{Encoder SRAM Footprint}
 The encoder working set on a 21-channel window is dominated by the
