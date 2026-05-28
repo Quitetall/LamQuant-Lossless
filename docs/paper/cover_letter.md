@@ -19,12 +19,9 @@ The work bridges biomedical signal processing, embedded systems implementation, 
 
 ## Key contributions
 
-1. **State-of-the-art compression ratio**: 2.72:1 on CHB-MIT (15.9% improvement over Chen *et al.* 2018), 2.287:1 on the full TUEG v2.0.2 corpus. Per-file CR up to 3.573:1 on intracranial EEG (OpenNeuro ds004100).
-2. **First full-corpus TUEG benchmark**: 70,831 files (v2.0.2 AAREADME canonical), 1.756 TB raw → 768 GB compressed, byte-exact reconstruction verified end-to-end.
-3. **Microcontroller deployability**: integer-only Le Gall 5/3 lifting DWT + per-subband adaptive LPC (orders 3, 3, 6, 8) + Golomb-Rice coder, all running byte-identically on x86, ARM, and RISC-V backends.
-4. **Empirical Shannon-entropy ceilings on 13 corpora** (52.6 × 10^9 samples): aggregate H₀(X) = 10.07, H₀(ΔX) = 7.59 bits/sample. LamQuant beats both first-order ceilings (CR_raw 1.59:1, CR_diff 2.09:1) → effective residual entropy ≤ 7.0 bits/sample after the lifting + LPC pipeline.
-5. **Methodological contribution**: "Why Benchmark Scale Matters" — per-file CR distributions show that single-file results reach 6.9:1 while corpus aggregates settle at 2.287:1, formalising why headline numbers from small-corpus benchmarks should be discounted.
-6. **Commutative-monoid wire format** enabling embarrassingly parallel encoding, append-without-re-encode, and local fault containment — properties the byte-equality conformance gate enforces across host backends.
+1. **State-of-the-art lossless EEG compression**: 2.7229:1 on CHB-MIT (a 15.9 % improvement over Chen *et al.* 2018) and **the first full-corpus benchmark on the Temple University EEG Corpus v2.0.2** (70,831 files, 1.756 TB raw → 768 GB compressed, 2.287:1, bit-exact reconstruction verified across every file).
+2. **Microcontroller-deployable integer codec verified byte-identical across x86, ARM, and RISC-V**: integer-only Le Gall 5/3 lifting DWT + per-subband adaptive LPC + Golomb-Rice, with the RP2350 (Hazard3 RISC-V, 150 MHz) encode path **measured at 119× real-time via RTL-level Verilator simulation** of the same Verilog that taped out as RP2350 (12,548,067 cycles per 21 ch × 2500 sample window, 0.627 Msa/s, CPI 1.071).
+3. **End-to-end reproducibility + methodological contributions**: byte-exact reconstruction across **88,147 encode/decode operations on 13 corpora with zero failures**, accompanied by (a) **empirical Shannon-entropy ceilings** on the 13-corpus mixture (H₀(X) = 10.07, H₀(ΔX) = 7.66 bits/sample) and (b) **per-file CR distributions formalising why small-corpus benchmarks overstate CR** (CHB-MIT 2.7229:1 vs full TUEG 2.287:1 — corpus diversity tightens the achievable aggregate).
 
 ## Open science
 
@@ -37,13 +34,17 @@ To the best of my knowledge, this is the first paper to:
 - Provide measured Shannon-entropy ceilings on a thirteen-corpus mixture covering scalp + intracranial + sleep + motor-imagery EEG;
 - Demonstrate that the codec beats first-order Shannon ceilings on every benched corpus while remaining bit-equal across x86 / ARM / RISC-V.
 
-## Suggested reviewers (optional)
+## Suggested reviewers
 
-Per TBioCAS standard practice, I am happy to suggest reviewers familiar with embedded EEG codec implementation or biomedical lossless compression on request.
+- **Prof. Joseph Picone** (Temple University, Neural Engineering Data Consortium) — maintainer of the TUEG corpus; expertise in clinical EEG storage at scale.
+- **Dr. Geoffrey Higgins** (NUI Galway, Tyndall National Institute) — recent IEEE TBME work on lossless biosignal compression for implantable hardware (region-adaptive LPC + Golomb-Rice, our [13]); directly aligned with the MCU-deployable kernel choices in this paper.
+- **Prof. N. Sriraam** (REVA University) — long-standing contributor to lossless EEG compression (our [7], [12]); referenced for the bias-cancellation lineage in §II.E.
+
+The author defers selection of an additional comparator AE from the current TBioCAS editorial board to the handling editor.
 
 ## Conflict of interest
 
-The author is the founder of OpenHuman Technologies LLC and has filed a patent application related to the codec (Patent Pending US #64/032,641). The patent covers commercial implementation rights; the source code is released open-source for academic and derivative research.
+The author is the founder of OpenHuman Technologies LLC and has filed a (provisional) patent application related to the codec (Patent Pending US #64/032,641). The source code is released open-source under the GNU General Public License version 3 (GPLv3). Section 11 of GPLv3 conveys an **automatic, irrevocable patent license** from every contributor to every downstream user of the licensed implementation, covering any claims that read on the released code. This is materially stronger than a unilateral non-enforcement commitment: every user of the GPLv3-licensed implementation already holds an irrevocable patent license for the act of using, modifying, and redistributing that implementation, by operation of the license terms.
 
 ## Funding
 

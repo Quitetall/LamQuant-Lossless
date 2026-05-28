@@ -951,7 +951,7 @@ regardless of which host architecture the encoder ran on.
 
 The 2.287:1 result on TUEG sits above both measured Shannon
 ceilings (memory-less $H_0 \approx 10.775$\,bits/sample and LPC-1
-$H_0(\Delta X) \approx 9.34$\,bits/sample;
+$H_0(\Delta X) \approx 9.337$\,bits/sample;
 Section~\ref{sec:background}). This implies an effective residual
 entropy of $\leq 7.0$\,bits/sample after the LamQuant pipeline,
 i.e. the four-band lifting wavelet plus per-subband adaptive LPC
@@ -1224,7 +1224,7 @@ audit, because the trained weights are themselves a deployment
 artifact subject to change.
 
 Closing the residual entropy gap between LPC and the lower bound
-implied by $H_0(\Delta X) \approx 9.34$\,bits/sample (and the even
+implied by $H_0(\Delta X) \approx 9.337$\,bits/sample (and the even
 lower per-corpus values reported in Section~\ref{sec:background}
 and Appendix~A) is therefore left as future work, contingent on
 predictor architectures that satisfy the three constraints above
@@ -1467,6 +1467,15 @@ OpenNeuro ds004100 (iEEG) & 128 & 9.755 & 5.378 & 1.640:1 & 2.975:1 \\
 $^\ast$ TUEG v2.0.1 row retained for traceability of the prior
 bench across the v2.0.1 $\rightarrow$ v2.0.2 corpus transition;
 the aggregate uses v2.0.1 only to avoid double-counting TUEG.
+The weighted aggregate is computed over all benched samples
+across the 13-corpus mixture ($\approx 56.3 \times 10^9$
+samples total). The supplementary
+\texttt{shannon\_entropy\_full\_summary.json} aggregate
+($H_0(X) = 9.244$, $H_0(\Delta X) = 7.656$ over
+$16.8 \times 10^9$ samples) is over the 200-file-per-corpus
+subsample used by \texttt{tools/verify\_paper\_claims.py} and
+intentionally weights smaller corpora more heavily for
+reproducibility on a downloader's local mirror.
 \end{table*}
 
 Two observations follow. First, $H_0(\Delta X)$ is consistently

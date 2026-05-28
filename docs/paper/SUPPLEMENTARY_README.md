@@ -76,10 +76,10 @@ python3 tools/bench_chbmit.py --tree /local/chbmit/
 # Adaptive mode wins: 686 files, 45.76 GB → 16.80 GB, CR 2.7229:1
 ```
 
-### Per-file CR boxplot (Fig. 6)
+### Per-file CR boxplot (Fig. 3)
 
 ```
-# Six corpora used in Fig. 6:
+# Six corpora used in Fig. 3:
 python3 tools/bench_per_file_cr.py \
   --tree tueg_sample:/local/tueg_v2.0.2 \
   --tree chbmit:/local/chbmit \
@@ -92,7 +92,7 @@ python3 tools/bench_per_file_cr.py \
 
 JSON output per corpus carries the IQR + min/max used for the boxplot whiskers.
 
-### Shannon entropy ceilings (Table III + Appendix A)
+### Shannon entropy ceilings (Table V + Appendix A)
 
 ```
 python3 tools/bench_shannon_entropy.py \
@@ -120,33 +120,49 @@ python3 tools/verify_paper_claims.py
 Cross-checks every numerical claim in the paper against the
 `evidence/*.json` files. PASS-tally is a precondition for submission.
 
-## On-silicon RP2350 measurement plan
+## RP2350 throughput — measurement provenance
 
-The Table III "LamQuant (RP2350 encoder, *estimated*)" row currently
-reports an estimate derived from host scalar-path bench × Hazard3
-CPI model. The next revision will replace it with on-silicon
-mcycle/minstret CSR readouts. The bench harness needed to capture
-those readouts is already in the repository:
+The Table III "LamQuant (RP2350 encoder)" row reports the cycle
+count **measured via RTL-level Verilator simulation** of the
+official `Wren6991/Hazard3` v1.1 RTL (the same Verilog that taped
+out as the RP2350 Hazard3 cores per the RP2350 datasheet).
+Measured: **12,548,067 cycles/window** $\Rightarrow$
+**83.66 ms/window @ 150 MHz** $\Rightarrow$ **0.627 Msa/s** =
+**119× real-time** for a 21 ch × 250 Hz input stream
+(CPI 1.071, IPC 0.93 — within 7 % of the 1.0 ceiling for a
+single-issue 3-stage in-order pipeline).
 
-- **Source**: `tools/hazard3_bench/src/bench_encode.rs` — a bare-
-  metal `riscv32imac-unknown-none-elf` binary that boots, builds a
-  21\,ch × 2500\,sample deterministic xorshift window, runs
-  `PipelineScheduler::encode_window` eight times under a
-  64-bit `mcycle` + `minstret` measurement bracket, and prints
-  `cycles_per_window`, `instrs_per_window`, CPI, `window_us@150MHz`,
-  and `Msa/s` to the print MMIO at `0xC000_0000`.
-- **Runbook**: `tools/bench_rp2350_silicon.md` covers three identical-
-  cycle-count paths:
-    1. Verilator on the official `Wren6991/Hazard3` RTL (cycle-
-       perfect against the same Verilog that taped out as RP2350).
-    2. CXXRTL on the same RTL (Yosys backend, slower compile, same
-       cycle counts).
-    3. Real Pico 2 board over probe-rs / SWD RTT.
+The bench harness, runbook, and evidence JSON live in the public
+repository — not in this supplementary zip, to avoid dual
+maintenance and stay under the TBioCAS supplementary size budget:
 
-All three produce identical `cycles_per_window` to within ±1 cycle
-(only divergence source is IRQ timing — disabled via `mstatus.mie=0`
-during the timed bracket). Run any one of them and the numbers from
-the others fall out by clock ratio.
+- **Bench harness**: `tools/hazard3_bench/src/bench_encode.rs` —
+  a bare-metal `riscv32imac-unknown-none-elf` binary that boots,
+  builds a 21 ch × 2500 sample deterministic xorshift window,
+  runs `PipelineScheduler::encode_window` eight times under a
+  64-bit `mcycle` + `minstret` bracket, and writes results to
+  the testbench print MMIO at `0xC000_0000`. Repository:
+  <https://github.com/Quitetall/LamQuant/tree/main/tools/hazard3_bench>.
+- **Runbook**: `tools/bench_rp2350_silicon.md` documents three
+  identical-cycle paths:
+    1. Verilator on the official Hazard3 RTL (the path used for
+       Table III). Cycle-perfect against the silicon-equivalent
+       Verilog.
+    2. CXXRTL on the same RTL (Yosys backend, slower compile,
+       same cycle counts).
+    3. Real Pico 2 board over probe-rs / SWD RTT — pending
+       confirmation, expected to match Verilator within ±1 cycle.
+  Repository: <https://github.com/Quitetall/LamQuant/blob/main/tools/bench_rp2350_silicon.md>.
+- **Evidence**: `outputs/paper/rp2350_silicon_bench.json` in the
+  repo captures the full bench configuration, all CSR readouts,
+  and the provenance chain back to the RTL source.
+
+A reviewer who wants to reproduce the cycle count can clone the
+repo, run `cd tools/hazard3_bench && cargo build --release`,
+then load the produced ELF into any of the three test environments
+above. The Verilator path takes ≈20 s to build the testbench (with
+`VK_PCH_I_FAST= VK_PCH_I_SLOW=` to bypass a GCC 16 PCH bug — see
+runbook) and ≈26 s of wall clock to run the 129 M-cycle sim.
 
 ## Software environment
 
