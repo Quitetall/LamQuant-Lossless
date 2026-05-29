@@ -520,7 +520,14 @@ class Decoder:
                              "Use window.decode() for lossless.")
         # Decompress the rANS payload to latent, then decode
         import torch
-        from lamquant_codec.codec import SubbandCodec
+        try:
+            from lamquant_neural.codec import SubbandCodec
+        except ImportError as exc:
+            raise RuntimeError(
+                "decoding neural (.lmq) windows requires the neural codec, "
+                "which now lives in LamQuant-Neural (pip install lamquant-neural). "
+                "The lossless (.lml) path does not need it."
+            ) from exc
 
         # The payload is a self-describing SubbandCodec packet
         # Try adaptive first (LMQ3), fall back to uniform (LMQ2)
@@ -583,13 +590,27 @@ class Encoder:
     def _ensure_codec(self):
         if self._codec is not None:
             return
-        from lamquant_codec.codec import SubbandCodec
+        try:
+            from lamquant_neural.codec import SubbandCodec
+        except ImportError as exc:
+            raise RuntimeError(
+                "neural encoding requires the neural codec, which now lives "
+                "in LamQuant-Neural (pip install lamquant-neural). The lossless "
+                "(.lml) path does not need it."
+            ) from exc
         codec = SubbandCodec.from_checkpoint(self.checkpoint)
 
         if self.adaptive:
-            from lamquant_codec.models.snn import (
-                load_mamba_snn, resolve_production_snn,
-            )
+            try:
+                from lamquant_neural.models.snn import (
+                    load_mamba_snn, resolve_production_snn,
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "adaptive FSQ requires the Mamba SNN loader, which now "
+                    "lives in LamQuant-Neural (pip install lamquant-neural). "
+                    "Pass adaptive=False for the non-adaptive neural path."
+                ) from exc
             from lamquant_codec.errors import AdaptiveFSQError
 
             snn_path = self.snn_checkpoint

@@ -237,7 +237,7 @@ class TestProductionWireFormatE2E:
         fallback to LMQ1 is forbidden.
 
         Lazy-import contract: Encoder._ensure_codec does
-        `from lamquant_codec.models.snn import resolve_production_snn`
+        `from lamquant_neural.models.snn import resolve_production_snn`
         INSIDE the method, so each call freshly looks up the attribute
         on the module. Monkeypatching the module attribute therefore
         takes effect even though imports happen at call time. If a
@@ -246,7 +246,7 @@ class TestProductionWireFormatE2E:
         """
         from lamquant_codec.fileformat import Encoder
         from lamquant_codec.errors import AdaptiveFSQError
-        import lamquant_codec.models.snn as snn_mod
+        import lamquant_neural.models.snn as snn_mod
 
         monkeypatch.setattr(snn_mod, 'resolve_production_snn', lambda: None)
 
@@ -264,7 +264,7 @@ class TestProductionWireFormatE2E:
         """
         from lamquant_codec.fileformat import Encoder
         from pathlib import Path
-        import lamquant_codec.models.snn as snn_mod
+        import lamquant_neural.models.snn as snn_mod
 
         ckpt = Path('/mnt/4tb/LamQuant/weights/student_subband.ckpt')
         if not ckpt.is_file():

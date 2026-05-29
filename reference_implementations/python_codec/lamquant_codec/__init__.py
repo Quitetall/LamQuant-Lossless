@@ -106,10 +106,15 @@ from lamquant_codec.lqs import (
 
 # Names that require torch / checkpoints. Resolved on first use.
 _LAZY_MAP = {
-    # Legacy codec classes (in lamquant_codec.codec)
-    'TernaryCodec':   ('lamquant_codec.codec', 'TernaryCodec'),
-    'SubbandCodec':   ('lamquant_codec.codec', 'SubbandCodec'),
+    # Lossless codec class — stays in lamquant_codec.codec (PUBLIC).
     'LosslessCodec':  ('lamquant_codec.codec', 'LosslessCodec'),
+    # Neural codec wrappers — MOVED to PRIVATE LamQuant-Neural on
+    # 2026-05-29. Accessing these as `lamquant_codec.SubbandCodec` resolves
+    # to `lamquant_neural.codec` IF that wheel is installed; otherwise
+    # __getattr__ raises a clear "install lamquant-neural" error. The
+    # public Lossless package no longer hard-depends on the neural defs.
+    'TernaryCodec':   ('lamquant_neural.codec', 'TernaryCodec'),
+    'SubbandCodec':   ('lamquant_neural.codec', 'SubbandCodec'),
     # Pipeline encode/decode (torch inside function bodies but eager module
     # import is harmless; we still lazy-load for symmetry with codecs).
     'encode':         ('lamquant_codec.encode',   'encode'),
@@ -149,7 +154,20 @@ def __getattr__(name):
     if name in _LAZY_MAP:
         module_path, attr = _LAZY_MAP[name]
         import importlib
-        mod = importlib.import_module(module_path)
+        try:
+            mod = importlib.import_module(module_path)
+        except ImportError as exc:
+            # The neural wrappers live in the PRIVATE LamQuant-Neural wheel.
+            # The public Lossless package degrades with a clear error rather
+            # than hard-failing at import time.
+            if module_path.startswith("lamquant_neural"):
+                raise ImportError(
+                    f"lamquant_codec.{name} now lives in LamQuant-Neural "
+                    f"(module {module_path!r}); install it with "
+                    f"`pip install lamquant-neural`. The lossless LML/LMA "
+                    f"path does not require it."
+                ) from exc
+            raise
         value = getattr(mod, attr)
         globals()[name] = value   # cache on the package — zero cost thereafter
         return value

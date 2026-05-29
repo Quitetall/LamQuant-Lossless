@@ -10,8 +10,9 @@ as quiet/active/seizure and produces a per-timestep FSQ level schedule
 compression — quiet segments get aggressive compression (high CR),
 active/seizure segments preserve clinical signal (low CR).
 
-For the production path, lamquant_codec.codec.SubbandCodec wraps a
-checkpoint and satisfies this interface; call encode(subband, codec.model).
+For the production path, lamquant_neural.codec.SubbandCodec (in the private
+LamQuant-Neural wheel) wraps a checkpoint and satisfies this interface;
+call encode(subband, codec.model).
 """
 import numpy as np
 import torch

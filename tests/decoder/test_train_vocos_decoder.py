@@ -37,7 +37,7 @@ def _stub(name: str, **attrs):
 _STUBBED = ("vocos_decoder", "train_student_subband", "auraloss",
              "auraloss.freq", "streaming_dataset", "flow_postfilter",
              "perceptual_losses", "lamquant_codec",
-             "lamquant_codec.models", "lamquant_codec.models.encoder",
+             "lamquant_neural.models", "lamquant_neural.models.encoder",
              "ai_models.decoder.train_vocos_decoder_under_test")
 
 
@@ -73,14 +73,14 @@ def tvd():
             "perceptual_losses", MultiTeacherPerceptualLoss=object)
     if "lamquant_codec" not in sys.modules:
         pkg = _stub("lamquant_codec")
-        models = _stub("lamquant_codec.models")
-        enc = _stub("lamquant_codec.models.encoder",
+        models = _stub("lamquant_neural.models")
+        enc = _stub("lamquant_neural.models.encoder",
                      TernaryMobileNetV5_Subband=object)
         pkg.models = models  # type: ignore[attr-defined]
         models.encoder = enc  # type: ignore[attr-defined]
         sys.modules["lamquant_codec"] = pkg
-        sys.modules["lamquant_codec.models"] = models
-        sys.modules["lamquant_codec.models.encoder"] = enc
+        sys.modules["lamquant_neural.models"] = models
+        sys.modules["lamquant_neural.models.encoder"] = enc
 
     name = "ai_models.decoder.train_vocos_decoder_under_test"
     spec = importlib.util.spec_from_file_location(name, _MODULE_PATH)

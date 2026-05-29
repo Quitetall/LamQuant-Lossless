@@ -39,7 +39,7 @@ def _stub(name: str, **attrs) -> types.ModuleType:
 
 
 _STUBBED = ("vocos_decoder", "discriminator", "lamquant_codec",
-             "lamquant_codec.models", "lamquant_codec.models.encoder",
+             "lamquant_neural.models", "lamquant_neural.models.encoder",
              "raw_window_dataset", "data_types", "auraloss", "auraloss.freq",
              "ai_models.decoder.run_decoder_tier_under_test")
 
@@ -64,9 +64,9 @@ def rdt():
         _stub("discriminator", EEGDiscriminator=object)
     if "lamquant_codec" not in sys.modules:
         pkg = _stub("lamquant_codec")
-        models = _stub("lamquant_codec.models")
+        models = _stub("lamquant_neural.models")
         encoder_mod = _stub(
-            "lamquant_codec.models.encoder",
+            "lamquant_neural.models.encoder",
             TernaryMobileNetV5_Subband=object,
             TernaryMobileNetV5_Subband_V2=object,
         )

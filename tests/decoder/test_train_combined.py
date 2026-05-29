@@ -29,8 +29,8 @@ def _stub(name, **attrs):
 _STUBBED = ("vocos_decoder", "train_teacher", "train_student_subband",
              "streaming_dataset", "raw_window_dataset",
              "auraloss", "auraloss.freq",
-             "lamquant_codec", "lamquant_codec.models",
-             "lamquant_codec.models.encoder",
+             "lamquant_codec", "lamquant_neural.models",
+             "lamquant_neural.models.encoder",
              "ai_models.decoder.train_combined_under_test")
 
 
@@ -52,14 +52,14 @@ def tc():
     sys.modules["auraloss"] = pkg
     sys.modules["auraloss.freq"] = freq
     cpkg = _stub("lamquant_codec")
-    cmodels = _stub("lamquant_codec.models")
-    cenc = _stub("lamquant_codec.models.encoder",
+    cmodels = _stub("lamquant_neural.models")
+    cenc = _stub("lamquant_neural.models.encoder",
                   TernaryMobileNetV5_Subband=object)
     cpkg.models = cmodels  # type: ignore[attr-defined]
     cmodels.encoder = cenc  # type: ignore[attr-defined]
     sys.modules["lamquant_codec"] = cpkg
-    sys.modules["lamquant_codec.models"] = cmodels
-    sys.modules["lamquant_codec.models.encoder"] = cenc
+    sys.modules["lamquant_neural.models"] = cmodels
+    sys.modules["lamquant_neural.models.encoder"] = cenc
 
     name = "ai_models.decoder.train_combined_under_test"
     spec = importlib.util.spec_from_file_location(name, _MODULE_PATH)

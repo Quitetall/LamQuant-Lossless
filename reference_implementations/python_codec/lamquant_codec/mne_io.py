@@ -152,7 +152,14 @@ def read_raw_lmq(path,
     """
     import numpy as np
     import torch
-    from lamquant_codec.codec import SubbandCodec
+    try:
+        from lamquant_neural.codec import SubbandCodec
+    except ImportError as exc:
+        raise RuntimeError(
+            "reading neural (.lmq) via MNE requires the neural codec, now in "
+            "LamQuant-Neural (pip install lamquant-neural). Lossless (.lml) "
+            "reads need only lamquant-codec."
+        ) from exc
     path = Path(path)
     with open(path, 'rb') as f:
         data = f.read()
@@ -238,7 +245,14 @@ def write_lmq(raw, path, *, checkpoint, quality: str = 'clinical',
     """
     import numpy as np
     import torch
-    from lamquant_codec.codec import SubbandCodec
+    try:
+        from lamquant_neural.codec import SubbandCodec
+    except ImportError as exc:
+        raise RuntimeError(
+            "writing neural (.lmq) via MNE requires the neural codec, now in "
+            "LamQuant-Neural (pip install lamquant-neural). Use write_lml for "
+            "the lossless path."
+        ) from exc
     path = Path(path)
     qmap = {'alerting': 0, 'monitoring': 1, 'clinical': 2}
     if quality not in qmap:

@@ -100,7 +100,7 @@ def val_window():
 @pytest.fixture(scope="module")
 def student_model():
     """Load the production student model."""
-    from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
+    from lamquant_neural.models.encoder import TernaryMobileNetV5_Subband
     model = TernaryMobileNetV5_Subband(in_ch=21, latent_dim=32)
     ckpt_paths = [
         os.path.join(_REPO, "weights/student_subband.ckpt"),
@@ -120,7 +120,7 @@ def student_model():
 @pytest.fixture(scope="module")
 def codec(student_model):
     """SubbandCodec with loaded student."""
-    from lamquant_codec.codec import SubbandCodec
+    from lamquant_neural.codec import SubbandCodec
     return SubbandCodec(student_model)
 
 

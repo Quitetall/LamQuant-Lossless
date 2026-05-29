@@ -277,7 +277,14 @@ def _compress_one(job: dict) -> BatchResult:
         elif mode == 'neural':
             if not ckpt:
                 raise ValueError("neural mode requires --checkpoint")
-            from lamquant_codec.codec import SubbandCodec
+            try:
+                from lamquant_neural.codec import SubbandCodec  # noqa: F401
+            except ImportError as exc:
+                raise RuntimeError(
+                    "neural batch mode requires the neural codec, now in "
+                    "LamQuant-Neural (pip install lamquant-neural). Use "
+                    "mode='lossless' for the LML path."
+                ) from exc
             import torch
             # Per-worker model cache (each process loads at most once).
             codec = _get_neural_codec(ckpt)
@@ -462,7 +469,13 @@ def _get_neural_codec(ckpt_path):
     key = str(Path(ckpt_path).resolve())
     if key not in _NEURAL_CODEC_CACHE:
         _NEURAL_CODEC_CACHE.clear()
-        from lamquant_codec.codec import SubbandCodec
+        try:
+            from lamquant_neural.codec import SubbandCodec
+        except ImportError as exc:
+            raise RuntimeError(
+                "neural batch mode requires the neural codec, now in "
+                "LamQuant-Neural (pip install lamquant-neural)."
+            ) from exc
         _NEURAL_CODEC_CACHE[key] = SubbandCodec.from_checkpoint(key)
     return _NEURAL_CODEC_CACHE[key]
 

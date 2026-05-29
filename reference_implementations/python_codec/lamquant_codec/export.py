@@ -28,7 +28,14 @@ def main():
     args = parser.parse_args()
 
     import torch
-    from lamquant_codec.models.encoder import TernaryMobileNetV5_Subband
+    try:
+        from lamquant_neural.models.encoder import TernaryMobileNetV5_Subband
+    except ImportError as exc:
+        raise SystemExit(
+            "lamquant-export needs the neural encoder definition, which now "
+            "lives in LamQuant-Neural (pip install lamquant-neural). This "
+            "firmware-header exporter reads the trained encoder weights."
+        ) from exc
 
     # Auto-detect model variant from checkpoint
     model = TernaryMobileNetV5_Subband.from_checkpoint(args.checkpoint, device='cpu')

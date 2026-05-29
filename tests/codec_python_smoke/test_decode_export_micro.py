@@ -107,7 +107,7 @@ class TestExportMain:
              patch.object(exp, "compute_firmware_crc") as cfc, \
              patch.object(exp, "export_fsq_lattice") as efl, \
              patch.object(exp, "export_toeplitz_seeds") as ets, \
-             patch("lamquant_codec.models.encoder.TernaryMobileNetV5_Subband.from_checkpoint",
+             patch("lamquant_neural.models.encoder.TernaryMobileNetV5_Subband.from_checkpoint",
                     return_value=mock_model):
             monkeypatch.setattr(sys, "argv", [
                 "lamquant-export",
