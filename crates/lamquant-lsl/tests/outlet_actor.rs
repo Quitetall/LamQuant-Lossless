@@ -88,3 +88,61 @@ async fn actor_three_parallel() {
         act_c.shutdown(),
     );
 }
+
+/// Codec-independent path: build an outlet straight from channel
+/// labels + sample rate (no `.lml`), then push a live chunk. This is
+/// the decoded-buffer / live-stream entry point Vision uses to bridge
+/// decoded EEG to LSL consumers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actor_from_channels_push_chunk() {
+    let channels = vec!["Fp1".to_string(), "F7".to_string(), "T3".to_string()];
+    let actor = OutletActor::spawn_from_channels(
+        channels,
+        256.0,
+        "DecodedStream".into(),
+        "lamquant:test-decoded".into(),
+    )
+    .await
+    .expect("spawn_from_channels");
+
+    // 5 time-steps × 3 channels.
+    let chunk: Vec<Vec<i32>> = (0..5)
+        .map(|t| vec![t, t + 10, t + 20])
+        .collect();
+    let pushed = actor.push_chunk(chunk).await.expect("push_chunk");
+    assert_eq!(pushed, 5);
+
+    // Empty chunk is a no-op.
+    let none = actor.push_chunk(Vec::new()).await.expect("empty chunk");
+    assert_eq!(none, 0);
+
+    actor.shutdown().await.expect("shutdown");
+}
+
+/// A mis-shaped chunk (wrong channel count) must return a clean
+/// `Err`, NOT panic the worker thread (the underlying
+/// `lsl::StreamOutlet` would `assert_eq!`-panic without the
+/// Rust-side guard). After the error the actor must still be usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actor_push_chunk_rejects_wrong_width() {
+    let channels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let actor = OutletActor::spawn_from_channels(
+        channels,
+        100.0,
+        "WidthGuard".into(),
+        "lamquant:test-width".into(),
+    )
+    .await
+    .expect("spawn");
+
+    // 3-channel outlet, but a 2-wide sample row.
+    let bad: Vec<Vec<i32>> = vec![vec![1, 2, 3], vec![4, 5]];
+    let err = actor.push_chunk(bad).await;
+    assert!(err.is_err(), "mis-shaped chunk must error, not panic");
+
+    // Actor still alive: a correctly-shaped chunk now succeeds.
+    let good: Vec<Vec<i32>> = vec![vec![1, 2, 3]];
+    assert_eq!(actor.push_chunk(good).await.expect("good chunk"), 1);
+
+    actor.shutdown().await.expect("shutdown");
+}

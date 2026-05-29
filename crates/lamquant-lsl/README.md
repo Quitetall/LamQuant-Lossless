@@ -9,10 +9,10 @@ container and the de-facto neuroscience real-time data network.
     GUI, MATLAB LSL toolbox, pylsl, and every other LSL consumer
     can subscribe to.
 
-  * **Inlet** (Phase 3): subscribe to a live LSL stream, buffer
-    samples into the codec's window-sized chunks, encode straight
-    to `.lml` on disk. Live recording of clinical sessions into the
-    LamQuant compressed format.
+  * **Inlet**: subscribe to a live LSL stream, buffer samples into
+    the codec's window-sized chunks, encode straight to `.lml` on
+    disk. Live recording of clinical sessions into the LamQuant
+    compressed format.
 
 ## Quick start
 
@@ -136,11 +136,17 @@ etc.) out of the box, not "ch0".
 
   * Phase 1 (shipped): outlet + metadata + stream_id + sync core
   * Phase 2 (shipped): standalone Pacer primitive
-  * Phase 3 (planned): Inlet (LSL → `.lml` live recording)
-  * Phase 4 (planned): CLI subcommands `lml stream`, `lml record`
+  * Phase 3 (shipped): Inlet (LSL → `.lml` live recording) —
+    `inlet::{Inlet, RecordSession, SampleBuffer}`
+  * Phase 4 (shipped): CLI binaries `lml-stream`, `lml-record`,
+    `lml-discover` (built with `--features liblsl`)
   * Phase 5 (planned): pylsl interop tests, LabRecorder field test
-  * Phase 6 (optional): XDF interop
+  * Phase 6 (shipped): XDF interop (`xdf::write_xdf_from_lml`,
+    `write_xdf_multistream` — pure Rust, no liblsl dep)
   * Phase 7 (planned): ADR 0024 + production polish
+
+  See `FEATURES.md` for the full per-module shipped-feature
+  inventory (the authoritative status snapshot).
 
 ## License
 

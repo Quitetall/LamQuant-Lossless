@@ -112,6 +112,6 @@ pub use stream_id::stream_id_from_lml;
 #[cfg(feature = "liblsl")]
 pub use inlet::{Inlet, RecordSession};
 #[cfg(feature = "liblsl")]
-pub use metadata::stream_info_from_lml;
+pub use metadata::{stream_info_from_lml, stream_info_from_spec};
 #[cfg(feature = "liblsl")]
 pub use outlet::{Outlet, Rate};

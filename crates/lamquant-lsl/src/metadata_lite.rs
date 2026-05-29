@@ -38,6 +38,61 @@ pub struct StreamSpec {
     pub channel_unit: String,
 }
 
+impl StreamSpec {
+    /// Build a `StreamSpec` directly from caller-supplied channel
+    /// labels + sample rate — the codec-independent path. Vision is
+    /// the LSL bridge per the project vision, so an outlet must be
+    /// constructable from any decoded / live buffer (a device serial
+    /// stream, an in-memory decode, a Python-decoded window) without
+    /// touching the `.lml` codec at all.
+    ///
+    /// `channel_labels` drives both the channel count and the LSL
+    /// XML `<channels>` block. `name` is the human-readable stream
+    /// name LabRecorder shows in its source picker. `source_id` is
+    /// the LSL dedup key — pass a stable per-source string (e.g. the
+    /// device serial or a content hash) so reconnects dedup; empty
+    /// disables LSL's recovery/dedup.
+    ///
+    /// Channel format is fixed to `Int32` (the lossless wire format
+    /// LamQuant emits — EDF int24 + synth i16 both fit). `stream_type`
+    /// defaults to `"EEG"`; `channel_unit` to `"uV"`.
+    pub fn from_channels(
+        name: &str,
+        nominal_srate: f64,
+        channel_labels: Vec<String>,
+        source_id: &str,
+    ) -> Result<Self, LslIntegrationError> {
+        if channel_labels.is_empty() {
+            return Err(LslIntegrationError::MissingMetadata(
+                "StreamSpec::from_channels: at least one channel label required".to_string(),
+            ));
+        }
+        if !nominal_srate.is_finite() || nominal_srate < 0.0 {
+            return Err(LslIntegrationError::MissingMetadata(format!(
+                "StreamSpec::from_channels: nominal_srate {} must be finite + >= 0 \
+                 (0 == lsl::IRREGULAR_RATE)",
+                nominal_srate
+            )));
+        }
+        let channel_count = u32::try_from(channel_labels.len()).map_err(|_| {
+            LslIntegrationError::MissingMetadata(format!(
+                "channel count {} doesn't fit in u32",
+                channel_labels.len()
+            ))
+        })?;
+        Ok(StreamSpec {
+            name: name.to_string(),
+            stream_type: "EEG".to_string(),
+            channel_count,
+            nominal_srate,
+            channel_format: ChannelFormatLite::Int32,
+            source_id: source_id.to_string(),
+            channel_labels,
+            channel_unit: "uV".to_string(),
+        })
+    }
+}
+
 /// Build a StreamSpec by reading the LML container header +
 /// metadata JSON. No liblsl dep, so this is reachable from any
 /// build configuration.
@@ -184,5 +239,42 @@ mod tests {
         let json = r#"{"phys_dim":"uV","other":"def"}"#;
         assert_eq!(extract_str_field(json, "phys_dim"), Some("uV".into()));
         assert_eq!(extract_str_field(json, "missing"), None);
+    }
+
+    #[test]
+    fn from_channels_basic() {
+        let spec = StreamSpec::from_channels(
+            "MyAmp",
+            256.0,
+            vec!["Fp1".into(), "F7".into(), "T3".into()],
+            "lamquant:abc123",
+        )
+        .expect("valid spec");
+        assert_eq!(spec.name, "MyAmp");
+        assert_eq!(spec.nominal_srate, 256.0);
+        assert_eq!(spec.channel_count, 3);
+        assert_eq!(spec.channel_format, ChannelFormatLite::Int32);
+        assert_eq!(spec.channel_labels, vec!["Fp1", "F7", "T3"]);
+        assert_eq!(spec.source_id, "lamquant:abc123");
+        assert_eq!(spec.stream_type, "EEG");
+        assert_eq!(spec.channel_unit, "uV");
+    }
+
+    #[test]
+    fn from_channels_rejects_empty() {
+        assert!(StreamSpec::from_channels("x", 256.0, Vec::new(), "id").is_err());
+    }
+
+    #[test]
+    fn from_channels_rejects_negative_srate() {
+        assert!(
+            StreamSpec::from_channels("x", -1.0, vec!["ch0".into()], "id").is_err()
+        );
+    }
+
+    #[test]
+    fn from_channels_allows_irregular_rate() {
+        // 0.0 == lsl::IRREGULAR_RATE — legitimate for marker streams.
+        assert!(StreamSpec::from_channels("x", 0.0, vec!["ch0".into()], "id").is_ok());
     }
 }

@@ -6,7 +6,7 @@
 //! Only compiled with the `liblsl` Cargo feature.
 
 use crate::error::LslIntegrationError;
-use crate::metadata_lite::{stream_spec_from_lml, ChannelFormatLite};
+use crate::metadata_lite::{stream_spec_from_lml, ChannelFormatLite, StreamSpec};
 use lsl::{ChannelFormat, StreamInfo};
 
 /// Convert our zero-dep `ChannelFormatLite` into the real
@@ -31,6 +31,17 @@ pub fn stream_info_from_lml(
 ) -> Result<StreamInfo, LslIntegrationError> {
     let source_id = crate::stream_id::stream_id_from_lml(lml_path)?;
     let spec = stream_spec_from_lml(lml_path, name, Some("EEG"), &source_id)?;
+    stream_info_from_spec(&spec)
+}
+
+/// Build a populated `lsl::StreamInfo` from a [`StreamSpec`] — the
+/// codec-independent path. Shared by `stream_info_from_lml` (which
+/// derives the spec from an `.lml` header) and the
+/// `Outlet::create_outlet` constructor (which takes channels +
+/// sample rate directly from a decoded / live buffer). Writes the
+/// per-channel label + unit + type into the StreamInfo XML so LSL
+/// consumers display real channel names.
+pub fn stream_info_from_spec(spec: &StreamSpec) -> Result<StreamInfo, LslIntegrationError> {
     let mut info = StreamInfo::new(
         &spec.name,
         &spec.stream_type,
@@ -51,7 +62,7 @@ pub fn stream_info_from_lml(
         let mut ch = channels.append_child("channel");
         ch.append_child_value("label", &display);
         ch.append_child_value("unit", &spec.channel_unit);
-        ch.append_child_value("type", "EEG");
+        ch.append_child_value("type", &spec.stream_type);
     }
     Ok(info)
 }

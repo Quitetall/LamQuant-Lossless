@@ -8,7 +8,8 @@
 //! `tokio::task::spawn_blocking`.
 
 use crate::error::LslIntegrationError;
-use crate::metadata::stream_info_from_lml;
+use crate::metadata::{stream_info_from_lml, stream_info_from_spec};
+use crate::metadata_lite::StreamSpec;
 use lsl::Pushable;
 
 /// Replay-rate selector. World-class field tools support all three:
@@ -55,6 +56,11 @@ pub struct Outlet {
     pub samples: Vec<Vec<i32>>,
     pub nominal_srate: f64,
     pub rate: Rate,
+    /// Channel count declared in the StreamInfo. Cached so the
+    /// codec-independent push path can reject mis-shaped chunks with
+    /// a clean error instead of letting `lsl::StreamOutlet`'s internal
+    /// `assert_eq!` panic the (worker) thread.
+    pub channel_count: usize,
 }
 
 impl Outlet {
@@ -78,6 +84,7 @@ impl Outlet {
     ) -> Result<Self, LslIntegrationError> {
         let info = stream_info_from_lml(lml_path, name)?;
         let nominal_srate = info.nominal_srate();
+        let channel_count = info.channel_count().max(0) as usize;
         let outlet = lsl::StreamOutlet::new(&info, 0, 360)
             .map_err(LslIntegrationError::Lsl)?;
         // Decode the full signal. For large files this loads
@@ -92,7 +99,113 @@ impl Outlet {
             samples,
             nominal_srate,
             rate,
+            channel_count,
         })
+    }
+
+    /// Create a **codec-independent** outlet from channel labels +
+    /// sample rate. This is the live-streaming / decoded-buffer path:
+    /// nothing about `.lml` is involved, so a caller can push samples
+    /// straight from a decoded window, a device serial stream, or a
+    /// Python-decoder bridge.
+    ///
+    /// `channels` is the ordered list of channel labels (its length
+    /// is the channel count; LabRecorder shows these names).
+    /// `srate` is the nominal sample rate in Hz (`0.0` ==
+    /// `lsl::IRREGULAR_RATE` for marker-style streams). `name` is the
+    /// LSL stream name. `source_id` is the LSL dedup/recovery key —
+    /// pass a stable per-source string (device serial, content hash);
+    /// empty disables dedup.
+    ///
+    /// The returned outlet starts with an empty sample buffer; feed
+    /// it via [`Outlet::push_chunk`] / [`Outlet::push_sample`]. The
+    /// `from_lml`-style buffered [`Outlet::push_all`] is unaffected
+    /// (its `samples` start empty here).
+    pub fn create_outlet(
+        channels: &[String],
+        srate: f64,
+        name: &str,
+        source_id: &str,
+    ) -> Result<Self, LslIntegrationError> {
+        let spec = StreamSpec::from_channels(name, srate, channels.to_vec(), source_id)?;
+        let info = stream_info_from_spec(&spec)?;
+        let nominal_srate = info.nominal_srate();
+        let channel_count = info.channel_count().max(0) as usize;
+        // chunk_size 0 = transmit each push immediately; max_buffered
+        // 360 s matches the from_lml outlet.
+        let outlet = lsl::StreamOutlet::new(&info, 0, 360)
+            .map_err(LslIntegrationError::Lsl)?;
+        Ok(Self {
+            outlet,
+            samples: Vec::new(),
+            nominal_srate,
+            rate: Rate::Burst,
+            channel_count,
+        })
+    }
+
+    /// Push one sample (one reading per channel) to the LSL outlet
+    /// immediately. The vec length must equal the outlet's channel
+    /// count. Codec-independent live path; no pacing (the caller
+    /// paces, e.g. an acquisition loop or a [`crate::pacing::Pacer`]).
+    ///
+    /// Takes the sample by value: `Pushable::push_sample` needs a
+    /// `&Vec<i32>`, and the actor / streaming caller already owns the
+    /// data, so moving it in avoids a copy.
+    pub fn push_sample(&self, sample: Vec<i32>) -> Result<(), LslIntegrationError> {
+        // Validate Rust-side: `lsl::StreamOutlet` `assert_eq!`s the
+        // length internally + would PANIC the (worker) thread on a
+        // mismatch. For frontend-/network-supplied data a clean error
+        // is required.
+        if sample.len() != self.channel_count {
+            return Err(LslIntegrationError::Other(format!(
+                "push_sample: sample width {} != outlet channel count {}",
+                sample.len(),
+                self.channel_count
+            )));
+        }
+        self.outlet
+            .push_sample(&sample)
+            .map_err(LslIntegrationError::Lsl)
+    }
+
+    /// Push a chunk of samples (each inner `Vec` is one time-step's
+    /// readings across all channels) to the LSL outlet in a single
+    /// batched call. Returns the number of samples pushed. Each inner
+    /// vec's length must equal the channel count.
+    ///
+    /// This is the primary codec-independent entry point: decode a
+    /// window to `[n_samples][n_channels] i32` (the same per-sample
+    /// layout [`transpose_to_per_sample_i32`] produces) and hand it
+    /// straight here. Pacing is the caller's responsibility — for
+    /// real-time playback wrap with [`crate::pacing::Pacer`].
+    ///
+    /// Takes the chunk by value (the caller owns it) to avoid an
+    /// extra copy of what can be a large `[n_samples][n_channels]`
+    /// matrix.
+    pub fn push_chunk(&self, samples: Vec<Vec<i32>>) -> Result<usize, LslIntegrationError> {
+        if samples.is_empty() {
+            return Ok(0);
+        }
+        // Validate every inner-vec width Rust-side BEFORE handing to
+        // the C library, whose internal `assert_eq!` would panic the
+        // worker thread on the first mismatched row.
+        for (i, s) in samples.iter().enumerate() {
+            if s.len() != self.channel_count {
+                return Err(LslIntegrationError::Other(format!(
+                    "push_chunk: sample {} width {} != outlet channel count {}",
+                    i,
+                    s.len(),
+                    self.channel_count
+                )));
+            }
+        }
+        let n = samples.len();
+        // `Pushable::push_chunk` takes `&Vec<Vec<i32>>`.
+        self.outlet
+            .push_chunk(&samples)
+            .map_err(LslIntegrationError::Lsl)?;
+        Ok(n)
     }
 
     /// Drain every sample to the LSL outlet. Returns the number of

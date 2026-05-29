@@ -29,6 +29,13 @@ enum Cmd {
     /// Drain every buffered sample to the outlet, reply with the
     /// pushed count.
     PushAll(oneshot::Sender<Result<usize, LslIntegrationError>>),
+    /// Push a chunk of live samples (`[n_samples][n_channels]`) to
+    /// the outlet, reply with the pushed count. The codec-independent
+    /// streaming path.
+    PushChunk(
+        Vec<Vec<i32>>,
+        oneshot::Sender<Result<usize, LslIntegrationError>>,
+    ),
     /// Shut down cleanly. Worker exits after replying.
     Shutdown(oneshot::Sender<()>),
 }
@@ -50,6 +57,40 @@ impl OutletActor {
         name: Option<String>,
         rate: Rate,
     ) -> Result<Self, LslIntegrationError> {
+        Self::spawn_with(move || {
+            Outlet::from_lml_with_rate(&lml_path, name.as_deref(), rate)
+        })
+        .await
+    }
+
+    /// Spawn an actor that opens a **codec-independent** `Outlet`
+    /// from channel labels + sample rate. This is the live-streaming
+    /// path: the worker thread owns the `!Send` `lsl::StreamOutlet`
+    /// and the async caller feeds it via [`OutletActor::push_chunk`].
+    ///
+    /// `channels` is the ordered channel-label list (its length is
+    /// the channel count). `srate` is the nominal sample rate in Hz.
+    /// `name` is the LSL stream name. `source_id` is the LSL
+    /// dedup/recovery key — pass a stable per-source string.
+    pub async fn spawn_from_channels(
+        channels: Vec<String>,
+        srate: f64,
+        name: String,
+        source_id: String,
+    ) -> Result<Self, LslIntegrationError> {
+        Self::spawn_with(move || {
+            Outlet::create_outlet(&channels, srate, &name, &source_id)
+        })
+        .await
+    }
+
+    /// Shared spawn core: run `build` on the worker thread (where the
+    /// `!Send` outlet must live), signal readiness, then service the
+    /// command loop until the channel closes.
+    async fn spawn_with<F>(build: F) -> Result<Self, LslIntegrationError>
+    where
+        F: FnOnce() -> Result<Outlet, LslIntegrationError> + Send + 'static,
+    {
         let (tx, mut rx) = mpsc::channel::<Cmd>(16);
         let (ready_tx, ready_rx) = oneshot::channel::<Result<(), LslIntegrationError>>();
 
@@ -59,11 +100,7 @@ impl OutletActor {
                 // Build the outlet on this thread (where it must
                 // live — !Send). Signal readiness; bail if construct
                 // fails.
-                let outlet = match Outlet::from_lml_with_rate(
-                    &lml_path,
-                    name.as_deref(),
-                    rate,
-                ) {
+                let outlet = match build() {
                     Ok(o) => {
                         let _ = ready_tx.send(Ok(()));
                         o
@@ -81,6 +118,10 @@ impl OutletActor {
                     match cmd {
                         Cmd::PushAll(reply) => {
                             let result = outlet.push_all();
+                            let _ = reply.send(result);
+                        }
+                        Cmd::PushChunk(samples, reply) => {
+                            let result = outlet.push_chunk(samples);
                             let _ = reply.send(result);
                         }
                         Cmd::Shutdown(ack) => {
@@ -125,6 +166,24 @@ impl OutletActor {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(Cmd::PushAll(reply_tx))
+            .await
+            .map_err(|_| LslIntegrationError::Other("actor: worker disconnected".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| LslIntegrationError::Other("actor: reply channel closed".into()))?
+    }
+
+    /// Push a chunk of live samples (`[n_samples][n_channels]`) to
+    /// the outlet on the worker thread. Returns the number of samples
+    /// pushed. The codec-independent streaming entry point: pair with
+    /// [`OutletActor::spawn_from_channels`].
+    pub async fn push_chunk(
+        &self,
+        samples: Vec<Vec<i32>>,
+    ) -> Result<usize, LslIntegrationError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Cmd::PushChunk(samples, reply_tx))
             .await
             .map_err(|_| LslIntegrationError::Other("actor: worker disconnected".into()))?;
         reply_rx
