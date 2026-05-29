@@ -3,12 +3,10 @@
 pub mod browse_results;
 pub mod cockpit;
 pub mod codec_hub;
+pub mod dialog;
 pub mod eagle;
-pub mod exit_confirm;
 pub mod file_browser;
 pub mod firmware;
-pub mod help;
-pub mod info_text;
 pub mod input;
 pub mod lossless_prompt;
 pub mod main_hub;

@@ -18,10 +18,8 @@ use std::time::Duration;
 use super::operations::{channel, op_spec, runner};
 use super::panel::{Action, Panel, PanelAction};
 use super::panels::browse_results::BrowseResultsPanel;
-use super::panels::exit_confirm::ExitConfirmPanel;
+use super::panels::dialog::DialogPanel;
 use super::panels::file_browser::FileBrowserPanel;
-use super::panels::help::HelpPanel;
-use super::panels::info_text::InfoTextPanel;
 use super::panels::input::InputPanel;
 use super::panels::main_hub::{HubTile, MainHubPanel};
 use super::panels::menu::{MenuItem, MenuPanel};
@@ -99,7 +97,7 @@ pub struct App {
     input_panel: InputPanel,
     output_panel: OutputPanel,
     preflight_panel: PreflightPanel,
-    exit_confirm: ExitConfirmPanel,
+    exit_confirm: DialogPanel,
     settings_panel: SettingsPanel,
     settings_help_panel: SettingsHelpPanel,
     wizard_panel: WizardPanel,
@@ -137,7 +135,7 @@ impl App {
             input_panel: InputPanel::new("Enter value"),
             output_panel: OutputPanel::new(),
             preflight_panel: PreflightPanel::new(),
-            exit_confirm: ExitConfirmPanel::new(),
+            exit_confirm: DialogPanel::exit_confirm(),
             settings_panel: SettingsPanel::new(),
             settings_help_panel: SettingsHelpPanel::new(),
             wizard_panel: WizardPanel::new(initial_cfg),
@@ -303,7 +301,7 @@ impl App {
 
         // Help, Train/Eagle/Setup as info_text.
         self.panels
-            .insert(router::SCREEN_HELP.to_string(), Box::new(HelpPanel::new()));
+            .insert(router::SCREEN_HELP.to_string(), Box::new(DialogPanel::help()));
         self.panels.insert(
             router::SCREEN_PEERS.to_string(),
             Box::new(super::panels::peers::PeersPanel::new()),
@@ -368,7 +366,7 @@ impl App {
         ];
         self.panels.insert(
             router::SCREEN_COMING_V11.to_string(),
-            Box::new(InfoTextPanel::new(
+            Box::new(DialogPanel::info(
                 router::SCREEN_COMING_V11,
                 "Coming in v1.1",
                 coming_body,
