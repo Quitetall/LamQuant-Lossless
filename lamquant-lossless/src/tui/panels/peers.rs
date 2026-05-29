@@ -115,7 +115,11 @@ impl Panel for PeersPanel {
                 Line::from(Span::styled("  No peers configured.", theme::dim())),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "  Add ~/.config/lamquant/peers.json with [[peers]] entries.",
+                    "  Add ~/.config/lamquant/peers.json — a JSON object with a",
+                    theme::dim(),
+                )),
+                Line::from(Span::styled(
+                    "  \"peers\": [...] array (id, display, host, transport).",
                     theme::dim(),
                 )),
             ];

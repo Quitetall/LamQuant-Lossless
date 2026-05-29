@@ -219,20 +219,24 @@ impl Panel for CockpitPanel {
         )));
         lines.push(Line::from(""));
 
-        // ── BLUT cockpit migration banner (T3 of optimized-seeking-bentley.md).
-        // The new one-stop training shop is `blut tui` (Rust DAG executor +
-        // recipe launcher + live jobs/log/system panes). This screen stays
-        // as an ad-hoc probe (live pgrep, tmux scan) but is no longer the
-        // canonical entrypoint for launching training.
+        // ── BLUT cockpit handoff banner ─────────────────────────────────
+        // BLUT's `blut tui` is now THE canonical training cockpit and a
+        // superset of this panel + the retired Python cockpit. The hub's
+        // "Train a model" tile execs `blut tui` directly (see
+        // app.rs::handle_navigate, SCREEN_TRAIN → exec_handoff). This
+        // in-process panel is now only a FALLBACK shown when the `blut`
+        // binary is missing from PATH; it stays as an ad-hoc probe (live
+        // pgrep, tmux scan) + per-recipe launcher so training is never
+        // fully blocked.
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled("→ ", theme::highlight()),
             Span::styled(
-                "NEW: run `blut tui` for the one-stop training cockpit ",
+                "FALLBACK cockpit — `blut tui` is the canonical training cockpit ",
                 theme::key_hint(),
             ),
             Span::styled(
-                "(jobs · log tail · recipe launcher · GPU/RAM live)",
+                "(install BLUT; this opens automatically when blut is missing)",
                 theme::dim(),
             ),
         ]));

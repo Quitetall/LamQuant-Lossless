@@ -80,6 +80,12 @@ impl Panel for HelpPanel {
             kv("s  /  r", "Save  /  reset to defaults"),
             kv("Esc / b", "Back (warns if dirty)"),
             Line::from(""),
+            section("Remote & launcher"),
+            kv("N", "Peers — pick a remote SSH target for ops"),
+            kv("lamquant", "Launch this TUI (default front door)"),
+            kv("lamquant --gui", "Launch the desktop GUI instead"),
+            kv("lamquant <cmd>", "Pass through to `lml <cmd>`"),
+            Line::from(""),
             section("CLI mode"),
             Line::from(Span::styled("    Run with args to skip TUI:", theme::dim())),
             Line::from(Span::styled(

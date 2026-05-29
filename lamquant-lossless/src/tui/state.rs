@@ -216,6 +216,15 @@ pub struct AppState {
     /// new Started event. Not serialized — Instant is monotonic and
     /// lives only in-process; the snapshot doesn't expose it.
     pub op_done_at: Option<std::time::Instant>,
+
+    // ── Full-terminal handoff (training cockpit → `blut tui`) ──────────
+    /// Pending request to suspend the hub TUI, hand the whole terminal
+    /// to a child interactive program (e.g. `blut tui`), and resume the
+    /// hub when it exits. Set by the Training Cockpit panel; consumed by
+    /// the main `run()` loop, which owns the `Terminal` and can safely
+    /// drop raw mode + leave the alt-screen around the child. `None`
+    /// in the GUI bridge (no shared terminal to hand off there).
+    pub exec_handoff: Option<(String, Vec<String>)>,
 }
 
 /// Maximum op_log lines retained in AppState. Older lines drop on push.
@@ -263,6 +272,8 @@ impl AppState {
             op_progress: None,
             op_terminal_ok: None,
             op_done_at: None,
+
+            exec_handoff: None,
         }
     }
 

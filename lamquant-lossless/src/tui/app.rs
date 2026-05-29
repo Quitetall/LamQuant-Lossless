@@ -457,6 +457,65 @@ impl App {
             terminal.draw(|f| self.render(f))?;
             self.handle_events()?;
             self.tick_panels();
+            // Full-terminal handoff to a child interactive program
+            // (the Training Cockpit → `blut tui`). The hub owns the
+            // Terminal here, so this is the only place we can safely
+            // drop raw mode + leave the alt-screen, run the child to
+            // completion, then restore the hub.
+            if let Some((program, args)) = self.state.exec_handoff.take() {
+                self.run_handoff(terminal, &program, &args)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Suspend the hub TUI, hand the whole terminal to `program args`
+    /// (e.g. `blut tui`), wait for it to exit, then restore the hub's
+    /// raw-mode alt-screen. A missing binary is non-fatal: we surface a
+    /// status hint and stay in the hub (the in-process CockpitPanel is
+    /// still reachable as a fallback).
+    fn run_handoff(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        program: &str,
+        args: &[String],
+    ) -> io::Result<()> {
+        use crossterm::{
+            execute,
+            terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        };
+        // Leave the hub's alt-screen + raw mode so the child has a clean
+        // terminal of its own.
+        disable_raw_mode().ok();
+        execute!(io::stdout(), LeaveAlternateScreen).ok();
+
+        let status = std::process::Command::new(program)
+            .args(args)
+            .status();
+
+        // Restore the hub regardless of how the child exited.
+        enable_raw_mode().ok();
+        execute!(io::stdout(), EnterAlternateScreen).ok();
+        terminal.clear().ok();
+
+        match status {
+            Ok(st) if st.success() => {
+                self.state.set_status("Returned from BLUT training cockpit.");
+            }
+            Ok(st) => {
+                self.state
+                    .set_status(format!("BLUT training cockpit exited ({st})."));
+            }
+            Err(e) => {
+                // `blut` not on PATH (or not executable). Fall back to the
+                // in-process cockpit panel so the user is not left without
+                // any training UI.
+                self.state.set_status(format!(
+                    "Could not launch `blut tui` ({e}). Install BLUT or run `blut tui` directly. \
+                     Opening the built-in cockpit."
+                ));
+                self.router.navigate(router::SCREEN_TRAIN);
+            }
         }
         Ok(())
     }
@@ -851,6 +910,21 @@ impl App {
         }
         if let Some(stripped) = target.strip_prefix("launch:") {
             self.start_launcher(stripped);
+            return;
+        }
+        // ── Training cockpit handoff ───────────────────────────────────
+        // "Train a model" / SCREEN_TRAIN now opens BLUT's full ratatui
+        // training cockpit (`blut tui`) instead of the in-process
+        // CockpitPanel. BLUT is the single canonical cockpit (superset of
+        // this hub's old cockpit + the retired Python cockpit). Request a
+        // full-terminal handoff; the main `run()` loop suspends the hub,
+        // execs `blut tui` to completion, and restores the hub on exit.
+        // We do NOT navigate to SCREEN_TRAIN — control returns straight
+        // to the previous screen when BLUT exits. The CockpitPanel is
+        // retained as a fallback for environments where `blut` is missing
+        // (run() surfaces a status hint, see consume of exec_handoff).
+        if target == router::SCREEN_TRAIN {
+            self.state.exec_handoff = Some(("blut".to_string(), vec!["tui".to_string()]));
             return;
         }
         if target == SCREEN_SETTINGS_HELP {
