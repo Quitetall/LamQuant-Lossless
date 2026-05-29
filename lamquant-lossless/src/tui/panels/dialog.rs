@@ -97,10 +97,13 @@ impl DialogPanel {
     }
 
     /// Help dialog preset — identical bindings to `info` but with
-    /// "Help" as the static id/title slot.
+    /// "LamQuant — Help" as the static border title (matches the
+    /// pre-merge `HelpPanel` exactly so the visible border doesn't
+    /// regress to a bare "Help"). `id` stays `"help"` so the router /
+    /// `panels::mod.rs` resolution path is unchanged.
     pub fn help() -> Self {
         let body = Self::help_body();
-        Self::info("help", "Help", body)
+        Self::info("help", "LamQuant — Help", body)
     }
 
     /// Exit confirmation preset — y/Y/Enter → Quit, n/N/Esc/Backspace → Back.
