@@ -1,0 +1,24 @@
+                                                                                
+   WORKFLOWS                                                                    
+                                                                                
+ > [1]  Visualization         Live EEG viewers · launch external tools          
+   [2]  Codec Hub             Compress · decompress · browse · verify           
+   [3]  Validation Suite      Eagle Validation Suite · LQS compliance ·         
+benchmarks                                                                      
+   [4]  Firmware Hub          Flash · export · build for MCUs                   
+   [5]  Train a model         ML training cockpit · experiments                 
+                                                                                
+   SYSTEM                                                                       
+                                                                                
+   [N]  Peers                 Remote LamQuant devices · SSH targets             
+   [s]  Settings              Workers · paths · device profiles                 
+   [i]  Install & setup       Wizard · dependencies · syscheck · GPU probe      
+   [t]  Diagnostics           Internal Testing Suite · Crashlog Viewer · Health 
+Check                                                                           
+                                                                                
+   tip: lamquant --gui  opens the desktop GUI (or set LAMQUANT_UI=gui)          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
