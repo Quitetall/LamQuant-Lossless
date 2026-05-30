@@ -35,19 +35,11 @@ pub const SCREEN_INFO: &str = "info";
 pub const SCREEN_STATS: &str = "stats";
 pub const SCREEN_BENCH: &str = "bench";
 pub const SCREEN_SETTINGS: &str = "settings";
-pub const SCREEN_FIRMWARE: &str = "firmware";
-pub const SCREEN_TRAIN: &str = "train";
-pub const SCREEN_EAGLE: &str = "eagle";
 pub const SCREEN_SETUP: &str = "setup";
 pub const SCREEN_HELP: &str = "help";
 pub const SCREEN_BROWSE: &str = "browse";
 pub const SCREEN_TEST: &str = "test";
-pub const SCREEN_VIZ: &str = "visualization";
 pub const SCREEN_PEERS: &str = "peers";
-/// "Coming in v1.1" placeholder screen — used by panels that list
-/// deferred features so users see a clear "not built yet" instead of a
-/// fading status message. All defer routes navigate here.
-pub const SCREEN_COMING_V11: &str = "coming_v11";
 
 // ── Op routes (handle_navigate dispatches `op:` prefix to start_op) ──
 // Use these constants from panels to prevent typos. Compile-error if you
@@ -81,27 +73,6 @@ pub const LAUNCH_EAGLE_FULL: &str = "launch:eagle_full";
 pub const LAUNCH_EAGLE_PERF: &str = "launch:eagle_perf";
 pub const LAUNCH_EAGLE_RD: &str = "launch:eagle_rd";
 pub const LAUNCH_EAGLE_H2H: &str = "launch:eagle_h2h";
-pub const LAUNCH_FW_EXPORT: &str = "launch:fw_export";
-pub const LAUNCH_TRAIN_ENCODER: &str = "launch:train_encoder";
-pub const LAUNCH_COCKPIT_RESET: &str = "launch:cockpit_reset";
-pub const LAUNCH_COCKPIT_CHECKPOINTS: &str = "launch:cockpit_checkpoints";
-pub const LAUNCH_COCKPIT_METRICS: &str = "launch:cockpit_metrics";
-pub const LAUNCH_COCKPIT_JOBS: &str = "launch:cockpit_jobs";
-pub const LAUNCH_COCKPIT_EXPORT: &str = "launch:cockpit_export";
-
-// BLUT-tier launchers — dispatched via `runner::spawn_blut`
-// (status.jsonl tail + StageEvent → OpEvent), not
-// `runner::spawn_command`. App-layer resolution probes
-// `blut_launcher` BEFORE `launcher` so these win.
-pub const LAUNCH_COCKPIT_DATA_PREP: &str = "launch:cockpit_data_prep";
-pub const LAUNCH_COCKPIT_TRAIN_ENCODER: &str = "launch:cockpit_train_encoder";
-pub const LAUNCH_COCKPIT_TRAIN_SNN: &str = "launch:cockpit_train_snn";
-pub const LAUNCH_COCKPIT_TRAIN_ORACLE: &str = "launch:cockpit_train_oracle";
-
-// ── Firmware target routes (handle_navigate dispatches `fw:` prefix) ──
-pub const FW_RP2350: &str = "fw:rp2350";
-pub const FW_ESP32S3: &str = "fw:esp32s3";
-pub const FW_ESP32P4: &str = "fw:esp32p4";
 
 // ── Sub-screens ──
 pub const SCREEN_PREFLIGHT: &str = "preflight";

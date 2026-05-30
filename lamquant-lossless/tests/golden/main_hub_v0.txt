@@ -1,12 +1,7 @@
                                                                                 
    WORKFLOWS                                                                    
                                                                                 
- > [1]  Visualization         Live EEG viewers · launch external tools          
-   [2]  Codec Hub             Compress · decompress · browse · verify           
-   [3]  Validation Suite      Eagle Validation Suite · LQS compliance ·         
-benchmarks                                                                      
-   [4]  Firmware Hub          Flash · export · build for MCUs                   
-   [5]  Train a model         ML training cockpit · experiments                 
+ > [1]  Codec Hub             Compress · decompress · browse · verify           
                                                                                 
    SYSTEM                                                                       
                                                                                 
@@ -17,6 +12,11 @@ benchmarks
 Check                                                                           
                                                                                 
    tip: lamquant --gui  opens the desktop GUI (or set LAMQUANT_UI=gui)          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 

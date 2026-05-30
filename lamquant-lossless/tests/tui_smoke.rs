@@ -69,13 +69,14 @@ fn navigates_into_lossless_submenu() {
     // exit_confirm, Esc backs out → main. So Esc twice from main
     // is a safe round-trip.
     dismiss_startup_overlays(&mut app);
-    // '1' is the Visualization shortcut on the new main hub (was LML Lossless
-    // before the hub redesign — see panels/main_hub.rs HubTile assignments).
+    // After codec-only hub shrink, '1' is the Codec Hub shortcut on the
+    // main hub (was Visualization before the shrink — see panels/main_hub.rs
+    // HubTile assignments).
     app.dispatch_key_for_test(key(KeyCode::Char('1')));
     let mut term = make_terminal();
     app.render_for_test(&mut term).expect("render");
     assert!(
-        ["visualization", "main", "wizard"].contains(&app.current_screen().as_str()),
+        ["codec_hub", "main", "wizard"].contains(&app.current_screen().as_str()),
         "screen={}",
         app.current_screen(),
     );
@@ -169,7 +170,10 @@ fn exit_confirm_y_quits() {
 #[test]
 fn renders_every_top_level_screen_without_panic() {
     let mut term = make_terminal();
-    for shortcut in ['1', '2', '3', '4', '5', '6', '7', '8', 'h'] {
+    // After codec-only hub shrink, surviving top-level shortcuts are:
+    //   '1' Codec Hub, 'N' Peers, 's' Settings, 'i' Install & setup,
+    //   't' Diagnostics, 'h' Help.
+    for shortcut in ['1', 'N', 's', 'i', 't', 'h'] {
         let mut app = make_app();
         dismiss_startup_overlays(&mut app);
         app.dispatch_key_for_test(key(KeyCode::Char(shortcut)));

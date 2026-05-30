@@ -160,22 +160,6 @@ pub struct AppState {
 
     // ── External launcher state ────────────────────────────────────────
     pub launch_state: LaunchState,
-    /// Name of the viz tool that was last launched (drives EEG sidebar gating).
-    pub active_viz_tool: Option<String>,
-    /// User-selected input file for the next viz launcher (T5 / ADR 0020).
-    /// `start_launcher` substitutes any `$INPUT` token in the launcher's
-    /// argv with this path. `None` means the user hasn't picked a file
-    /// yet; pipe-shaped viz tools reject the launch with a clear error
-    /// instead of opening blank.
-    pub viz_selected_input: Option<std::path::PathBuf>,
-    /// Firmware export source: weights checkpoint path (T6 / ADR 0019).
-    /// `start_launcher` substitutes any `$WEIGHTS` token in the
-    /// launcher's argv with this path.
-    pub fw_weights_input: Option<std::path::PathBuf>,
-    /// Firmware export destination: output bundle path (T6 / ADR 0019).
-    /// `start_launcher` substitutes any `$OUTPUT` token in the
-    /// launcher's argv with this path.
-    pub fw_output_path: Option<std::path::PathBuf>,
 
     // ── UI / sidebar ───────────────────────────────────────────────────
     /// Whether arrow keys route to the sidebar process list instead of workflows.
@@ -217,14 +201,6 @@ pub struct AppState {
     /// lives only in-process; the snapshot doesn't expose it.
     pub op_done_at: Option<std::time::Instant>,
 
-    // ── Full-terminal handoff (training cockpit → `blut tui`) ──────────
-    /// Pending request to suspend the hub TUI, hand the whole terminal
-    /// to a child interactive program (e.g. `blut tui`), and resume the
-    /// hub when it exits. Set by the Training Cockpit panel; consumed by
-    /// the main `run()` loop, which owns the `Terminal` and can safely
-    /// drop raw mode + leave the alt-screen around the child. `None`
-    /// in the GUI bridge (no shared terminal to hand off there).
-    pub exec_handoff: Option<(String, Vec<String>)>,
 }
 
 /// Maximum op_log lines retained in AppState. Older lines drop on push.
@@ -255,10 +231,6 @@ impl AppState {
             processes: Vec::new(),
 
             launch_state: LaunchState::Idle,
-            active_viz_tool: None,
-            viz_selected_input: None,
-            fw_weights_input: None,
-            fw_output_path: None,
 
             sidebar_focused: false,
             sidebar_selected: 0,
@@ -272,8 +244,6 @@ impl AppState {
             op_progress: None,
             op_terminal_ok: None,
             op_done_at: None,
-
-            exec_handoff: None,
         }
     }
 

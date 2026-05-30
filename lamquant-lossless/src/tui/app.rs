@@ -33,7 +33,6 @@ use super::panels::settings_help::SettingsHelpPanel;
 use super::panels::splash::SplashPanel;
 use super::panels::syscheck::SyscheckPanel;
 use super::panels::tutorial::TutorialPanel;
-use super::panels::visualization::VisualizationPanel;
 use super::panels::wizard::WizardPanel;
 use super::router::{self, Router};
 use super::state::{AppState, LaunchState, PendingOp, TrackedProcess};
@@ -108,7 +107,6 @@ pub struct App {
     syscheck_panel: SyscheckPanel,
     resume_panel: ResumePanel,
     splash_panel: SplashPanel,
-    viz_panel: VisualizationPanel,
 }
 
 impl Default for App {
@@ -146,7 +144,6 @@ impl App {
             syscheck_panel: SyscheckPanel::new(),
             resume_panel: ResumePanel::new(),
             splash_panel: SplashPanel::new(),
-            viz_panel: VisualizationPanel::new(),
         };
         app.register_panels();
         if app.state.history.interrupted {
@@ -181,12 +178,8 @@ impl App {
     }
 
     fn register_panels(&mut self) {
-        // Main hub — uses the dedicated splash panel with the LAMQUANT
-        // logo, sectioned WORKFLOWS / SYSTEM blocks, and the bottom
-        // version + Ready footer. Tile keys, IDs, and order MUST match
-        // `specs/ui-parity.md::Workflow inventory` byte-for-byte —
-        // `crates/lamquant-ops/tests/workflow_parity.rs` enforces parity
-        // with the GUI's TS workflows.ts and the Python TUI menu.
+        // lml codec-only hub — see ADR 0026 for the full-umbrella tile
+        // set that lives in the meta lamquant repo.
         self.panels.insert(
             router::SCREEN_MAIN.to_string(),
             Box::new(MainHubPanel::new(
@@ -194,33 +187,9 @@ impl App {
                 vec![
                     HubTile::new(
                         "1",
-                        "Visualization",
-                        "Live EEG viewers · launch external tools",
-                        router::SCREEN_VIZ,
-                    ),
-                    HubTile::new(
-                        "2",
                         "Codec Hub",
                         "Compress · decompress · browse · verify",
                         router::SCREEN_CODEC_HUB,
-                    ),
-                    HubTile::new(
-                        "3",
-                        "Validation Suite",
-                        "Eagle Validation Suite · LQS compliance · benchmarks",
-                        router::SCREEN_EAGLE,
-                    ),
-                    HubTile::new(
-                        "4",
-                        "Firmware Hub",
-                        "Flash · export · build for MCUs",
-                        router::SCREEN_FIRMWARE,
-                    ),
-                    HubTile::new(
-                        "5",
-                        "Train a model",
-                        "ML training cockpit · experiments",
-                        router::SCREEN_TRAIN,
                     ),
                 ],
                 vec![
@@ -290,11 +259,6 @@ impl App {
             )),
         );
 
-        self.panels.insert(
-            router::SCREEN_FIRMWARE.to_string(),
-            Box::new(super::panels::firmware::FirmwarePanel::new()),
-        );
-
         // Settings — full editor.
         // Settings + settings_help live as direct fields (App owns them) so
         // the help panel can be populated from settings panel state.
@@ -305,114 +269,6 @@ impl App {
         self.panels.insert(
             router::SCREEN_PEERS.to_string(),
             Box::new(super::panels::peers::PeersPanel::new()),
-        );
-
-        // "Coming in v1.1" placeholder for deferred features. Cockpit and
-        // Eagle stubs (hyperparam editor, experiment runner, leaderboard,
-        // downstream tasks, etc.) navigate here so users see a single
-        // clear "not yet built" screen instead of fading status messages.
-        // Listed in alphabetical groups so the same screen serves both
-        // panels and stays scannable.
-        let coming_body: Vec<Line<'static>> = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Features tracked for the v1.1 milestone",
-                theme::dim(),
-            )),
-            Line::from(""),
-            Line::from(Span::styled("  Training cockpit:", theme::heading())),
-            Line::from(Span::raw("    [4]  Queue & schedule pipeline runner")),
-            Line::from(Span::raw("    [6]  Hyperparameter editor (TrainingConfig)")),
-            Line::from(Span::raw("    [7]  Experiment runner — A/B sweeps")),
-            Line::from(Span::raw("    [9]  Leaderboard — runs ranked by R")),
-            Line::from(Span::raw("    [a]  Compare runs — side-by-side metrics")),
-            Line::from(""),
-            Line::from(Span::styled("  Eagle validation:", theme::heading())),
-            Line::from(Span::raw(
-                "    [3]  Targeted LQS level (use [1] for full sweep)",
-            )),
-            Line::from(Span::raw(
-                "    [7]  Downstream tasks (seizure / sleep / pathology)",
-            )),
-            Line::from(Span::raw("    [8]  Hallucination detection suite")),
-            Line::from(Span::raw("    [p]  Publish badge — signed compliance cert")),
-            Line::from(Span::raw("    [x]  Export report (HTML)")),
-            Line::from(""),
-            Line::from(Span::styled("  Firmware:", theme::heading())),
-            Line::from(Span::raw(
-                "    [c]  cmake configure — per-target toolchain wiring",
-            )),
-            Line::from(Span::raw("    [m]  make build — depends on configure")),
-            Line::from(Span::raw(
-                "    [f]  picotool/esptool flash — toolchain-specific",
-            )),
-            Line::from(Span::raw(
-                "    [z]  size report — riscv32-elf-size / arm-none-eabi-size",
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  These keys currently route here. Track progress at",
-                theme::dim(),
-            )),
-            Line::from(Span::styled(
-                "  https://github.com/openhuman-ai/LamQuant/milestones",
-                theme::dim(),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Press [b] / [Esc] / [Backspace] / [Enter] to return.",
-                theme::dim(),
-            )),
-        ];
-        self.panels.insert(
-            router::SCREEN_COMING_V11.to_string(),
-            Box::new(DialogPanel::info(
-                router::SCREEN_COMING_V11,
-                "Coming in v1.1",
-                coming_body,
-            )),
-        );
-
-        self.panels.insert(
-            router::SCREEN_TRAIN.to_string(),
-            Box::new(super::panels::cockpit::CockpitPanel::new()),
-        );
-
-        // Stale linear menu kept under a hidden screen id for backward compat
-        // (no UI references it; left here so existing tests keep building).
-        self.panels.insert(
-            "train_legacy".to_string(),
-            Box::new(MenuPanel::new(
-                "train_legacy",
-                "Train a Model",
-                "legacy",
-                vec![
-                    MenuItem::new(
-                        "1",
-                        "Encoder",
-                        "V1/V2 lossy encoder",
-                        "launch:train_encoder",
-                    ),
-                    MenuItem::new("2", "SNN", "Mamba SNN seizure detector", "launch:train_snn"),
-                    MenuItem::new(
-                        "3",
-                        "TNN",
-                        "Ternary NN firmware-deployable",
-                        "launch:train_tnn",
-                    ),
-                    MenuItem::new(
-                        "4",
-                        "Resume latest",
-                        "Continue interrupted run from checkpoint",
-                        "launch:train_resume",
-                    ),
-                ],
-            )),
-        );
-
-        self.panels.insert(
-            router::SCREEN_EAGLE.to_string(),
-            Box::new(super::panels::eagle::EaglePanel::new()),
         );
 
         self.panels.insert(
@@ -455,65 +311,6 @@ impl App {
             terminal.draw(|f| self.render(f))?;
             self.handle_events()?;
             self.tick_panels();
-            // Full-terminal handoff to a child interactive program
-            // (the Training Cockpit → `blut tui`). The hub owns the
-            // Terminal here, so this is the only place we can safely
-            // drop raw mode + leave the alt-screen, run the child to
-            // completion, then restore the hub.
-            if let Some((program, args)) = self.state.exec_handoff.take() {
-                self.run_handoff(terminal, &program, &args)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Suspend the hub TUI, hand the whole terminal to `program args`
-    /// (e.g. `blut tui`), wait for it to exit, then restore the hub's
-    /// raw-mode alt-screen. A missing binary is non-fatal: we surface a
-    /// status hint and stay in the hub (the in-process CockpitPanel is
-    /// still reachable as a fallback).
-    fn run_handoff(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        program: &str,
-        args: &[String],
-    ) -> io::Result<()> {
-        use crossterm::{
-            execute,
-            terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-        };
-        // Leave the hub's alt-screen + raw mode so the child has a clean
-        // terminal of its own.
-        disable_raw_mode().ok();
-        execute!(io::stdout(), LeaveAlternateScreen).ok();
-
-        let status = std::process::Command::new(program)
-            .args(args)
-            .status();
-
-        // Restore the hub regardless of how the child exited.
-        enable_raw_mode().ok();
-        execute!(io::stdout(), EnterAlternateScreen).ok();
-        terminal.clear().ok();
-
-        match status {
-            Ok(st) if st.success() => {
-                self.state.set_status("Returned from BLUT training cockpit.");
-            }
-            Ok(st) => {
-                self.state
-                    .set_status(format!("BLUT training cockpit exited ({st})."));
-            }
-            Err(e) => {
-                // `blut` not on PATH (or not executable). Fall back to the
-                // in-process cockpit panel so the user is not left without
-                // any training UI.
-                self.state.set_status(format!(
-                    "Could not launch `blut tui` ({e}). Install BLUT or run `blut tui` directly. \
-                     Opening the built-in cockpit."
-                ));
-                self.router.navigate(router::SCREEN_TRAIN);
-            }
         }
         Ok(())
     }
@@ -623,7 +420,6 @@ impl App {
                 self.router.back();
             }
         }
-        self.viz_panel.tick();
         self.state.context_tick = self.state.context_tick.wrapping_add(1);
 
         // P3: drain subprocess events through the dispatch chokepoint.
@@ -795,7 +591,6 @@ impl App {
             SCREEN_SYSCHECK => self.syscheck_panel.handle_event(key, &self.state),
             SCREEN_RESUME => self.resume_panel.handle_event(key, &self.state),
             SCREEN_SPLASH => self.splash_panel.handle_event(key, &self.state),
-            x if x == router::SCREEN_VIZ => self.viz_panel.handle_event(key, &self.state),
             // Main hub: Tab toggles sidebar focus; when focused, route to sidebar handler.
             x if x == router::SCREEN_MAIN && self.state.sidebar_focused => {
                 self.handle_sidebar_key(key)
@@ -902,27 +697,8 @@ impl App {
             self.start_op(stripped);
             return;
         }
-        if let Some(stripped) = target.strip_prefix("fw:") {
-            self.start_firmware(stripped);
-            return;
-        }
         if let Some(stripped) = target.strip_prefix("launch:") {
             self.start_launcher(stripped);
-            return;
-        }
-        // ── Training cockpit handoff ───────────────────────────────────
-        // "Train a model" / SCREEN_TRAIN now opens BLUT's full ratatui
-        // training cockpit (`blut tui`) instead of the in-process
-        // CockpitPanel. BLUT is the single canonical cockpit (superset of
-        // this hub's old cockpit + the retired Python cockpit). Request a
-        // full-terminal handoff; the main `run()` loop suspends the hub,
-        // execs `blut tui` to completion, and restores the hub on exit.
-        // We do NOT navigate to SCREEN_TRAIN — control returns straight
-        // to the previous screen when BLUT exits. The CockpitPanel is
-        // retained as a fallback for environments where `blut` is missing
-        // (run() surfaces a status hint, see consume of exec_handoff).
-        if target == router::SCREEN_TRAIN {
-            self.state.exec_handoff = Some(("blut".to_string(), vec!["tui".to_string()]));
             return;
         }
         if target == SCREEN_SETTINGS_HELP {
@@ -1294,11 +1070,6 @@ impl App {
             return;
         };
 
-        // Track viz tool launches for the EEG sidebar.
-        if id.starts_with("viz_") {
-            self.state.active_viz_tool = Some(label.to_string());
-        }
-
         self.preempt_inflight_op();
         self.state.launch_state = LaunchState::Launching {
             tool: label.to_string(),
@@ -1309,119 +1080,17 @@ impl App {
         let (tx, rx) = channel();
         self.output_panel.start(title, rx);
         self.output_panel.bell_on_done = self.state.cfg.output.bell_on_done;
-        // Argv placeholder substitution. Three tokens supported:
-        //   $INPUT   — viz file (T5 / ADR 0020)
-        //   $WEIGHTS — firmware-export source ckpt (T6 / ADR 0019)
-        //   $OUTPUT  — firmware-export destination bundle (T6 / ADR 0019)
-        // Each placeholder draws from a dedicated AppState field;
-        // a missing selection aborts the launch with a clear status
-        // hint rather than spawning the subprocess with a literal
-        // "$INPUT" / "$WEIGHTS" / "$OUTPUT" string.
-        let owned_args: Vec<String> = {
-            let raw: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            if raw.iter().any(|a| a == "$INPUT") {
-                let Some(input) = &self.state.viz_selected_input else {
-                    self.state.set_status(
-                        "Pick a file via [Tab] file picker before launching this viz tool."
-                            .to_string(),
-                    );
-                    self.state.launch_state = LaunchState::Idle;
-                    return;
-                };
-                let input_str = input.display().to_string();
-                raw.into_iter()
-                    .map(|a| if a == "$INPUT" { input_str.clone() } else { a })
-                    .collect()
-            } else if raw.iter().any(|a| a == "$WEIGHTS" || a == "$OUTPUT") {
-                let Some(weights) = &self.state.fw_weights_input else {
-                    self.state.set_status(
-                        "Pick a weights checkpoint via [w] before launching firmware export."
-                            .to_string(),
-                    );
-                    self.state.launch_state = LaunchState::Idle;
-                    return;
-                };
-                let Some(output) = &self.state.fw_output_path else {
-                    self.state.set_status(
-                        "Pick an output path via [o] before launching firmware export."
-                            .to_string(),
-                    );
-                    self.state.launch_state = LaunchState::Idle;
-                    return;
-                };
-                let w = weights.display().to_string();
-                let o = output.display().to_string();
-                raw.into_iter()
-                    .map(|a| match a.as_str() {
-                        "$WEIGHTS" => w.clone(),
-                        "$OUTPUT" => o.clone(),
-                        _ => a,
-                    })
-                    .collect()
-            } else {
-                raw
-            }
-        };
+        let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         self.state.op_handle = Some(runner::spawn_command(program.to_string(), owned_args, tx));
 
         // Register process for sidebar tracking.
-        let kind: &'static str = if id.starts_with("viz_") {
-            "viz"
-        } else if id.starts_with("train_") {
-            "train"
-        } else {
-            "launch"
-        };
         self.state.processes.push(TrackedProcess::new(
             label,
-            kind,
+            "launch",
             Some(SCREEN_RUNNING.to_string()),
         ));
 
         self.router.navigate(SCREEN_RUNNING);
-    }
-
-    fn start_firmware(&mut self, target: &str) {
-        // T6 / ADR 0019: route firmware actions through the launcher
-        // table so per-target cargo+probe-rs invocations stay in one
-        // place. The pre-T6 hardcoded `scripts/firmware/build_*.sh`
-        // references pointed at files that didn't exist; the launcher
-        // now uses `cargo build --features target-<id>` directly +
-        // `probe-rs run` for flash.
-        //
-        // Target → launcher-id mapping:
-        //   list                 → fw_list_devices (probe-rs list)
-        //   rp2350 / nrf54l15 /
-        //   esp32p4 / stm32n6    → fw_build_<id>
-        //   esp32s3              → fw_legacy_esp32s3 (sequester)
-        //   flash_<id>           → fw_flash_<id>
-        //   export               → fw_export ($WEIGHTS/$OUTPUT)
-        //
-        // Any verb not in the table falls through to the legacy
-        // path-based dispatch so any in-flight firmware-panel code
-        // that hasn't been updated still works.
-        let launcher_id: Option<&str> = match target {
-            "list" => Some("fw_list_devices"),
-            "rp2350" => Some("fw_build_rp2350"),
-            "nrf54l15" => Some("fw_build_nrf54l15"),
-            "esp32p4" => Some("fw_build_esp32p4"),
-            "stm32n6" => Some("fw_build_stm32n6"),
-            "esp32s3" => Some("fw_legacy_esp32s3"),
-            "flash_rp2350" => Some("fw_flash_rp2350"),
-            "flash_nrf54l15" => Some("fw_flash_nrf54l15"),
-            "flash_esp32p4" => Some("fw_flash_esp32p4"),
-            "flash_stm32n6" => Some("fw_flash_stm32n6"),
-            "export" => Some("fw_export"),
-            _ => None,
-        };
-        if let Some(id) = launcher_id {
-            self.start_launcher(id);
-            return;
-        }
-        // Fallback for any unmapped verb (defensive — should not be
-        // reachable from the current panel surface).
-        self.state
-            .set_status(format!("Unknown firmware target: {}", target));
     }
 
     /// Returns true if the pending op should pause for the pre-flight
@@ -1821,7 +1490,6 @@ impl App {
             SCREEN_SYSCHECK => self.syscheck_panel.render(state, f, chunks[1]),
             SCREEN_RESUME => self.resume_panel.render(state, f, chunks[1]),
             SCREEN_SPLASH => self.splash_panel.render(state, f, chunks[1]),
-            x if x == router::SCREEN_VIZ => self.viz_panel.render(state, f, chunks[1]),
             x if x == router::SCREEN_MAIN => self.render_main_hub_screen(f, chunks[1]),
             other => {
                 if let Some(panel) = self.panels.get(other) {
@@ -2203,13 +1871,9 @@ impl App {
         let op = self.state.history.last_op.as_deref().unwrap_or("");
 
         // Determine context mode.
-        enum Ctx<'a> {
+        enum Ctx {
             Encode,
             Decode,
-            Train,
-            Viz(&'a str),
-            Eagle,
-            Firmware,
             Idle,
         }
         let ctx = if is_running {
@@ -2218,13 +1882,8 @@ impl App {
                     Ctx::Encode
                 }
                 "decode" | "decode_neural" => Ctx::Decode,
-                s if s.starts_with("train_") => Ctx::Train,
-                s if s.starts_with("eagle_") => Ctx::Eagle,
-                s if s.starts_with("fw_") || s == "flash" => Ctx::Firmware,
                 _ => Ctx::Idle,
             }
-        } else if let Some(tool) = &self.state.active_viz_tool {
-            Ctx::Viz(tool.as_str())
         } else {
             Ctx::Idle
         };
@@ -2232,10 +1891,6 @@ impl App {
         let (title_label, title_extra) = match &ctx {
             Ctx::Encode => (" ENCODE ", " compressing… "),
             Ctx::Decode => (" DECODE ", " expanding…   "),
-            Ctx::Train => (" TRAIN ", " model fit…   "),
-            Ctx::Viz(t) => (" EEG ", *t),
-            Ctx::Eagle => (" EAGLE ", " validating…  "),
-            Ctx::Firmware => (" FIRMWARE ", " building…    "),
             Ctx::Idle => (" CONTEXT", " ○ IDLE"),
         };
 
@@ -2318,71 +1973,6 @@ impl App {
                     ]));
                 }
                 lines.push(Line::from(""));
-            }
-            Ctx::Train => {
-                // Scrolling loss indicator + epoch counter.
-                let epoch_str = self.output_panel.progress_msg().unwrap_or("training…");
-                let wave_phase = if w > 0 {
-                    (t / 4 % w as u64) as usize
-                } else {
-                    0
-                };
-                let wave: String = (0..w.min(24))
-                    .map(|i| {
-                        let v = ((i + wave_phase) % 8) as u8;
-                        [' ', ' ', '·', '·', '-', '-', '▄', '▄'][v as usize]
-                    })
-                    .collect();
-                lines.push(Line::from(Span::styled(wave, theme::dim())));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", truncate_chars(epoch_str, w.saturating_sub(3))),
-                    theme::normal(),
-                )));
-                lines.push(Line::from(""));
-            }
-            Ctx::Viz(tool) => {
-                // EEG channel bars (existing logic).
-                let bar_w = w.saturating_sub(10);
-                let channels: &[(&str, ratatui::style::Color, f32)] = &[
-                    ("ch01 Fp1", theme::CYAN, 0.93),
-                    ("ch08 O3 ", theme::GREEN, 0.79),
-                    ("ch15 Pz ", Color::Blue, 0.86),
-                    ("ch21 O2 ", Color::Magenta, 0.58),
-                ];
-                let _ = tool;
-                for (label, color, fill) in channels {
-                    let filled = (bar_w as f32 * fill) as usize;
-                    let bar: String = "█".repeat(filled);
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{label} "), theme::dim()),
-                        Span::styled(bar, Style::default().fg(*color)),
-                    ]));
-                }
-                lines.push(Line::from(Span::styled(
-                    format!("  0s{}now", " ".repeat(w.saturating_sub(8))),
-                    theme::dim(),
-                )));
-            }
-            Ctx::Eagle => {
-                let spinner = ['◐', '◓', '◑', '◒'][(t / 5 % 4) as usize];
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(format!("{} running validation", spinner), theme::dim()),
-                ]));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  LQS suite in progress",
-                    theme::dim(),
-                )));
-            }
-            Ctx::Firmware => {
-                let spinner =
-                    ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][(t / 3 % 10) as usize];
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(format!("{} building firmware", spinner), theme::dim()),
-                ]));
             }
             Ctx::Idle => {
                 // Pulsing dot grid + waiting label. Layout matches STATUS idle:

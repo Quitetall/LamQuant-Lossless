@@ -48,33 +48,9 @@ fn make_main_hub_panel() -> MainHubPanel {
         vec![
             HubTile::new(
                 "1",
-                "Visualization",
-                "Live EEG viewers · launch external tools",
-                router::SCREEN_VIZ,
-            ),
-            HubTile::new(
-                "2",
                 "Codec Hub",
                 "Compress · decompress · browse · verify",
                 router::SCREEN_CODEC_HUB,
-            ),
-            HubTile::new(
-                "3",
-                "Validation Suite",
-                "Eagle Validation Suite · LQS compliance · benchmarks",
-                router::SCREEN_EAGLE,
-            ),
-            HubTile::new(
-                "4",
-                "Firmware Hub",
-                "Flash · export · build for MCUs",
-                router::SCREEN_FIRMWARE,
-            ),
-            HubTile::new(
-                "5",
-                "Train a model",
-                "ML training cockpit · experiments",
-                router::SCREEN_TRAIN,
             ),
         ],
         vec![

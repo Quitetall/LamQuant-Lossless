@@ -148,7 +148,6 @@ pub struct StateSnapshot {
 
     pub processes: Vec<TrackedProcessSnapshot>,
     pub launch_state: LaunchStateSnapshot,
-    pub active_viz_tool: Option<String>,
 
     pub sidebar_focused: bool,
     pub sidebar_selected: usize,
@@ -184,7 +183,6 @@ impl From<&AppState> for StateSnapshot {
             remote_op: s.remote_handle.is_some(),
             processes: s.processes.iter().map(Into::into).collect(),
             launch_state: (&s.launch_state).into(),
-            active_viz_tool: s.active_viz_tool.clone(),
             sidebar_focused: s.sidebar_focused,
             sidebar_selected: s.sidebar_selected,
             context_tick: s.context_tick,
