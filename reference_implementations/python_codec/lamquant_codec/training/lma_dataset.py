@@ -81,12 +81,16 @@ def _lazy_imports():
     if _LAZY:
         return
     import lamquant_core  # PyO3 extension
-    # CHANNEL_PRESETS lives in ai_models.dataset_sim.preprocess; the
-    # earlier lamquant_codec.preprocess_signal module was retired in
-    # the BLUT pivot. lml_digital_to_float is no longer needed — the
-    # Rust container_read_phys_f32 path does digital→physical inside
-    # the decode loop.
-    from ai_models.dataset_sim.preprocess import CHANNEL_PRESETS as _CP
+    # CHANNEL_PRESETS moved to lamquant.dataset.preprocess in the BLUT/Neural
+    # split (was ai_models.dataset_sim.preprocess). Repoint to the current
+    # location; fall back to the inline 21-channel 10-20 firmware contract so a
+    # decode can never crash on a missing import (R1 fix 2026-05-29).
+    try:
+        from lamquant.dataset.preprocess import CHANNEL_PRESETS as _CP
+    except ImportError:
+        _CP = {21: [
+            'Fp1', 'Fp2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2',
+            'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 'Fz', 'Cz', 'Pz', 'A1', 'A2']}
     from lamquant_codec import channel_resolver as _cr
     from lamquant_codec.ops.pipeline import preprocess_subband_single as _psbs
     from scipy.signal import resample_poly as _rp
@@ -136,6 +140,51 @@ def list_lma_entries(lma_path: str) -> List[str]:
     return [ln for ln in res.stdout.splitlines() if ln]
 
 
+def list_lma_entries_typed(lma_path: str) -> List[Tuple[str, str]]:
+    """Return ``[(entry_path, method)]`` for one ``.lma`` archive.
+
+    Parses ``lml list-archive`` (the table form) so callers can tell a
+    losslessly-compressed RECORDING (``method == "lml"``) from a sibling
+    annotation stored via zstd / store. Needed for the ``lml archive``
+    (per-corpus source-of-truth) layout, where recordings keep their
+    original data-file name (``chb01/chb01_01.edf``, method ``lml``)
+    rather than a ``<stem>.lml`` rename.
+
+    Table columns: ``PATH  ORIGINAL  COMPRESSED  METHOD  SHA256``. The
+    size columns embed a space (``40.4 MB``), so PATH is the first field
+    and METHOD/SHA256 are the last two. Header / separator / summary
+    lines are skipped.
+    """
+    import subprocess
+    try:
+        res = subprocess.run(
+            ["lml", "list-archive", str(lma_path)],
+            capture_output=True, text=True, timeout=120, check=True,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "lml binary not on PATH; cannot list LMA entries"
+        ) from e
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"lml list-archive failed for {lma_path}: rc={e.returncode} "
+            f"{e.stderr[:300]}"
+        ) from e
+    out: List[Tuple[str, str]] = []
+    for ln in res.stdout.splitlines():
+        s = ln.strip()
+        if not s or s.startswith("PATH") or set(s) <= set("-"):
+            continue
+        if "files," in s and "original" in s:  # summary line
+            continue
+        parts = ln.split()
+        if len(parts) < 3:
+            continue
+        path, method = parts[0], parts[-2]
+        out.append((path, method))
+    return out
+
+
 def build_lma_entry_index(lma_paths: Sequence[str]) -> dict:
     """Walk every LMA's entries; return ``{stem: {"lma": <path>,
     "lml": <internal_path>, "labels": <internal_path>|None,
@@ -154,21 +203,46 @@ def build_lma_entry_index(lma_paths: Sequence[str]) -> dict:
     ordering of ``lma_paths``); a warning is logged for collisions so
     audit can investigate cross-corpus duplicates.
     """
+    import os
     import re
     out: dict = {}
-    lml_re = re.compile(r"(?:^|/)([A-Za-z0-9_]+_s\d+_t\d+)\.lml$")
-    lbl_re = re.compile(r"(?:^|/)([A-Za-z0-9_]+_s\d+_t\d+)_labels\.npz$")
+    # Match ANY recording stem basename — TUH <subj>_sN_tN, TUEV <subj>_8digit,
+    # CHB-MIT chbNN_NN, Siena PNxx-N (R2 fix 2026-05-29). The basename IS the stem.
+    lml_re = re.compile(r"(?:^|/)([^/]+)\.lml$")
+    lbl_re = re.compile(r"(?:^|/)([^/]+)_labels\.npz$")
     for lp in lma_paths:
         entries = list_lma_entries(lp)
+        matched_any = False
         for e in entries:
             m_lml = lml_re.search(e)
             if m_lml:
+                matched_any = True
                 stem = m_lml.group(1)
                 if stem in out:
                     LOG.debug("stem %s already mapped to %s; skipping %s",
                               stem, out[stem]["lma"], lp)
                     continue
                 out[stem] = {"lma": str(lp), "lml": e, "labels": None,
+                             "meta": None}
+        if not matched_any:
+            # `lml archive` source-of-truth layout (2026-05-30): recordings
+            # keep their original data-file name (``chb01/chb01_01.edf``,
+            # method ``lml``) instead of a ``<stem>.lml`` rename, and there is
+            # no ``meta.json`` or in-archive labels NPZ (labels live in the
+            # disk-staged cache). Recognise lml-method data entries as
+            # recordings; the basename minus its extension is the stem.
+            # `lma_read_entry` on an lml-method entry returns the LML
+            # container bytes (magic LML1), so decode_lma_signal works
+            # unchanged. Pays the heavier `list-archive` cost only for these
+            # raw-archive corpora; the `<stem>.lml` fast path above is
+            # untouched.
+            for path, method in list_lma_entries_typed(lp):
+                if method != "lml":
+                    continue
+                stem = os.path.splitext(os.path.basename(path))[0]
+                if not stem or stem in out:
+                    continue
+                out[stem] = {"lma": str(lp), "lml": path, "labels": None,
                              "meta": None}
         # Second pass for labels (LML entry must exist for stem before we
         # attach labels; orphan labels with no LML are ignored).
