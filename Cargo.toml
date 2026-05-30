@@ -2,25 +2,16 @@
 resolver = "2"
 members = [
     "crates/lamquant-common",
-    "crates/lamquant-lsl",
     "crates/lmafs",
     "lamquant-lossless",
-    "lamquant-firmware",
-    "lamquant-weights",
 ]
-# Firmware + weights use a different target (riscv32imac) and the firmware
-# profile. Default `cargo build` from root only touches host crates;
-# weights crate is no_std + alloc-free so it builds cleanly anywhere.
-#
-# lamquant-lsl is intentionally excluded from `default-members` — it
-# depends on the system liblsl (or builds it via build.rs) which may
-# not be present on every dev machine. Build it explicitly via
-# `cargo build -p lamquant-lsl` when LSL integration is needed.
+# Firmware + weights moved to the LamQuant-Firmware submodule (ADR 0026
+# phase B.1, 2026-05-30). lamquant-lsl moved to the Vision submodule
+# (ADR 0026 phase B.2, 2026-05-30). This workspace is now host codec-only.
 default-members = [
     "crates/lamquant-common",
     "crates/lmafs",
     "lamquant-lossless",
-    "lamquant-weights",
 ]
 # Fuzz harness uses libfuzzer-sys + nightly toolchain; lives outside
 # the host workspace so `cargo build` from root doesn't pull in nightly
@@ -33,21 +24,5 @@ exclude = [
     "blut",
 ]
 
-# Custom profile for firmware builds. Use with:
-#   cargo build --profile firmware -p lamquant-firmware
-[profile.firmware]
-inherits = "release"
-opt-level = "s"
-lto = true
-codegen-units = 1
-panic = "abort"
-overflow-checks = false
-debug = false
-strip = "symbols"
-
-[profile.firmware-dev]
-inherits = "dev"
-opt-level = 1
-panic = "abort"
-overflow-checks = true
-debug = 2
+# Firmware-specific profiles (firmware, firmware-dev) moved to the
+# LamQuant-Firmware submodule workspace (ADR 0026 phase B.1, 2026-05-30).
