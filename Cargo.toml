@@ -2,10 +2,7 @@
 resolver = "2"
 members = [
     "crates/lamquant-common",
-    "crates/lamquant-history",
-    "crates/lamquant-ipc-types",
     "crates/lamquant-lsl",
-    "crates/lamquant-ops",
     "crates/lmafs",
     "lamquant-lossless",
     "lamquant-firmware",
@@ -21,9 +18,6 @@ members = [
 # `cargo build -p lamquant-lsl` when LSL integration is needed.
 default-members = [
     "crates/lamquant-common",
-    "crates/lamquant-history",
-    "crates/lamquant-ipc-types",
-    "crates/lamquant-ops",
     "crates/lmafs",
     "lamquant-lossless",
     "lamquant-weights",

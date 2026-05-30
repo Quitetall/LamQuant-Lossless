@@ -29,7 +29,7 @@ crate-type = ["rlib", "cdylib"]
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
-lamquant-ops = { path = "../crates/lamquant-ops" }
+lamquant-ops = { path = "../../crates/lamquant-ops" }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.
@@ -223,10 +223,10 @@ libm = "0.2"
 
 # Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
 # Host feature only; firmware never spawns subprocesses.
-lamquant-ops = { path = "../crates/lamquant-ops", optional = true }
+lamquant-ops = { path = "../../crates/lamquant-ops", optional = true }
 # Shared history.json reader/writer — see specs/history-schema.json.
 # Same `host`-only gate; firmware doesn't read user history.
-lamquant-history = { path = "../crates/lamquant-history", optional = true }
+lamquant-history = { path = "../../crates/lamquant-history", optional = true }
 
 # Host-only deps (gated by `host` feature).
 clap = { version = "4", features = ["derive"], optional = true }

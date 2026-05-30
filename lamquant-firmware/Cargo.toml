@@ -89,7 +89,7 @@ heapless = { version = "0.8", default-features = false }
 # `comms.rs` uses `PostcardEnvelope` + `MsgKind` for every cross-link
 # message. Optional defmt-format gives on-MCU pretty-print without
 # pulling payload bytes into the format string.
-lamquant-ipc-types = { path = "../crates/lamquant-ipc-types" }
+lamquant-ipc-types = { path = "../../crates/lamquant-ipc-types" }
 # postcard pulled in transitively via lamquant-ipc-types but declared
 # explicitly so `comms.rs` can call `postcard::take_from_bytes` /
 # `postcard::to_slice` without going through a re-export.
