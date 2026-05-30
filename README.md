@@ -7,6 +7,8 @@ Bit-exact lossless EEG compression codec. Real-time, integer-only, deployable on
 
 **Cite:** archived at Zenodo — [`10.5281/zenodo.20436114`](https://doi.org/10.5281/zenodo.20436114) (see [`CITATION.cff`](CITATION.cff)).
 
+**API reference:** [API.md](API.md) — the `lml` CLI, `.lml`/`.lma` wire formats, Rust crates + Python bindings. Authoritative for the LML/LMA format contract.
+
 **Headline numbers (paper, full evidence in [Eagle](https://github.com/Quitetall/Eagle)):**
 - TUEG v2.0.2 (1.76 TB, 70,831 EDF files): **2.287:1** compression ratio
 - CHB-MIT: **2.7229:1** (15.9% improvement over Chen et al.)
