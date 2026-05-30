@@ -68,11 +68,9 @@ pub const OP_RECOVER: &str = "op:recover";
 // ── Launcher routes (handle_navigate dispatches `launch:` prefix) ──
 pub const LAUNCH_SETUP_PIP: &str = "launch:setup_pip";
 pub const LAUNCH_SETUP_CARGO: &str = "launch:setup_cargo";
-pub const LAUNCH_EAGLE_QUICK: &str = "launch:eagle_quick";
-pub const LAUNCH_EAGLE_FULL: &str = "launch:eagle_full";
-pub const LAUNCH_EAGLE_PERF: &str = "launch:eagle_perf";
-pub const LAUNCH_EAGLE_RD: &str = "launch:eagle_rd";
-pub const LAUNCH_EAGLE_H2H: &str = "launch:eagle_h2h";
+// LAUNCH_EAGLE_* consts removed in ADR 0026 W2 phase A.6 — Eagle tile
+// dropped from lml codec-only hub. Umbrella copy with full launcher
+// set lives at /lamquant/src/tui/router.rs (meta-repo).
 
 // ── Sub-screens ──
 pub const SCREEN_PREFLIGHT: &str = "preflight";

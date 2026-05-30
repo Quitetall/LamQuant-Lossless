@@ -93,10 +93,10 @@ name = "lml"
 path = "src/bin/lml.rs"
 required-features = ["host"]
 
-[[bin]]
-name = "lamquant"
-path = "src/bin/lamquant.rs"
-required-features = ["host"]
+# `lamquant` umbrella binary moved to meta-repo /lamquant/ crate per
+# ADR 0026 (W2 phase A.6). LamQuant-Lossless now ships ONLY the lml
+# bin + lossless codec lib. Install the umbrella via
+# `cargo install --path /path/to/LamQuant/lamquant`.
 
 [features]
 # Default = full host build (CLI, TUI, file I/O).
