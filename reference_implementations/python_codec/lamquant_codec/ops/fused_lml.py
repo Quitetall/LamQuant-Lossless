@@ -20,7 +20,6 @@ import zlib
 import numpy as np
 
 from lamquant_codec.errors import (
-    LmlCrcError,
     LmlHeaderError,
     LmlLegacyMagicError,
     LmlMagicError,
@@ -234,14 +233,13 @@ def fused_decompress(data: bytes) -> np.ndarray:
                 f"Data is truncated or corrupt.")
 
         # CRC-32 verification — covers header_var (4..18) + payload.
-        # Mirrors encoder; magic and CRC field excluded.
+        # Mirrors encoder; magic and CRC field excluded. Shared helper tries
+        # the modern scope first, then the legacy payload-only scope so
+        # pre-a81cd04 artefacts still decode (DECODE-ONLY back-compat).
+        from lamquant_codec.lossless import _verify_packet_crc
         payload = data[hdr_size:hdr_size + lpc_len + sub_len]
         header_var = data[4:18]
-        crc_actual = zlib.crc32(header_var + payload) & 0xFFFFFFFF
-        if crc_actual != crc_expected:
-            raise LmlCrcError(
-                f"CRC-32 mismatch: expected 0x{crc_expected:08X}, "
-                f"got 0x{crc_actual:08X}. Data is corrupted.")
+        _verify_packet_crc(header_var, payload, crc_expected)
         # Fused orchestrator requires exactly 3-level lifting
         if n_levels != 3:
             from lamquant_codec.lossless import _decompress_bytes_ref

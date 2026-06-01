@@ -50,6 +50,89 @@ LIFT_PREC = 20       # Q20 fixed-point for lifting coefficients
 LIFT_HALF = 1 << 19  # rounding bias = 2^(PREC-1)
 
 
+# ---------------------------------------------------------------------------
+# Legacy (pre-a81cd04) CRC back-compat — DECODE ONLY.
+#
+# ROOT CAUSE: commit a81cd04 (2026-05-11, "fix(lml): CRC covers packet header
+# to detect single-byte header corruption") widened the LML1 per-window CRC-32
+# scope from `crc32(lpc_meta || payload)` (legacy, payload-only) to
+# `crc32(header[4..18] || lpc_meta || payload)` (modern) on BOTH encode and
+# decode, with no version field in the LML1 header and no back-compat read
+# path. Every file written before a81cd04 therefore fails CRC under the current
+# reader even though its bytes are perfectly intact.
+#
+# This helper is the Python parity of `lamquant_core::lml::verify_packet_crc`:
+# on a miss against the modern scope, recompute the legacy payload-only scope;
+# if THAT matches, the packet is a valid pre-a81cd04 packet — accept it, latch
+# `SAW_LEGACY_CRC`, and warn once. If both scopes miss, raise `LmlCrcError`.
+#
+# DECODE-ONLY: the encoder (`_compress_bytes`, `fused_compress`) is untouched
+# and keeps writing the modern scope. The legacy scope is only ever recomputed
+# on the read side, exactly mirroring the Rust fix.
+
+# Monotonic latch: set True the first time any decode in this process accepts a
+# packet via the legacy payload-only CRC scope. Never cleared automatically
+# (matches the Rust `AtomicBool` — a process that has seen one legacy packet has
+# seen one, for the life of the run). Tests may reset it explicitly to observe
+# their own effect. Read it to detect that legacy artefacts are still in use.
+SAW_LEGACY_CRC = False
+
+# Warn-once guard so a multi-window legacy file emits a single notice, not one
+# per window. Like `SAW_LEGACY_CRC`, deliberately never auto-cleared.
+_WARNED_LEGACY_CRC = False
+
+
+def _verify_packet_crc(header_var: bytes, payload: bytes, crc_expected: int) -> None:
+    """Verify a per-window LML1 packet CRC, accepting the legacy scope on miss.
+
+    Parameters mirror the wire layout:
+      * ``header_var`` — the variable-fields header slice ``data[4:18]``
+        (n_ch, T, n_levels, flags, lpc_len, sub_len). The constant 'LML1' magic
+        (data[0:4]) and the CRC field itself (data[18:22]) are excluded.
+      * ``payload`` — ``lpc_meta || subband_payload`` (the contiguous bytes the
+        legacy encoder hashed payload-only).
+      * ``crc_expected`` — the u32 stored in the packet header.
+
+    Order of checks (fast path first, identical cost to the pre-fix decoder on
+    the common case):
+      1. MODERN scope ``crc32(header_var || payload)`` — return on match.
+      2. LEGACY scope ``crc32(payload)`` — on match, latch ``SAW_LEGACY_CRC``,
+         warn once, return. This is exactly the pre-a81cd04 payload-only scope
+         (``reference_implementations/.../legacy/lossless_legacy.py:83``).
+      3. Both miss → ``LmlCrcError`` reporting the MODERN actual (the scope the
+         current encoder writes), so the genuine-corruption message only fires
+         when the legacy scope ALSO failed.
+    """
+    global SAW_LEGACY_CRC, _WARNED_LEGACY_CRC
+    import zlib
+
+    crc_modern = zlib.crc32(header_var + bytes(payload)) & 0xFFFFFFFF
+    if crc_modern == crc_expected:
+        return
+
+    crc_legacy = zlib.crc32(bytes(payload)) & 0xFFFFFFFF
+    if crc_legacy == crc_expected:
+        SAW_LEGACY_CRC = True
+        if not _WARNED_LEGACY_CRC:
+            _WARNED_LEGACY_CRC = True
+            import warnings
+            warnings.warn(
+                "LML packet uses the legacy pre-2026-05-11 payload-only CRC "
+                "scope; decoding via back-compat fallback. Re-encode to adopt "
+                "the current header+payload CRC.",
+                stacklevel=2,
+            )
+        return
+
+    # Both scopes miss → genuine corruption. Report the modern actual: that is
+    # the scope the current encoder writes, so it is the meaningful diagnostic.
+    raise LmlCrcError(
+        f"CRC-32 mismatch: expected 0x{crc_expected:08X}, got "
+        f"0x{crc_modern:08X}. Data is corrupted (neither the current "
+        f"header+payload CRC scope nor the legacy pre-2026-05-11 "
+        f"payload-only scope matched).")
+
+
 # ============================================================
 # KLT / lifting-rotation primitives (pure, no torch).
 # ============================================================
@@ -414,15 +497,12 @@ def _decompress_bytes_ref(data: bytes, *, lifting_rots=None) -> np.ndarray:
 
     # CRC-32 verification — covers variable-fields header (4..18) plus
     # lpc_meta + subband payload. Mirrors the encoder side; magic and the
-    # CRC field itself are excluded.
-    import zlib
+    # CRC field itself are excluded. `_verify_packet_crc` tries the modern
+    # scope first, then falls back to the legacy payload-only scope so
+    # pre-a81cd04 artefacts still decode (DECODE-ONLY back-compat).
     payload = data[hdr_size:hdr_size + lpc_len + sub_len]
     header_var = data[4:18]
-    crc_actual = zlib.crc32(header_var + payload) & 0xFFFFFFFF
-    if crc_actual != crc_expected:
-        raise LmlCrcError(
-            f"CRC-32 mismatch: expected 0x{crc_expected:08X}, "
-            f"got 0x{crc_actual:08X}. Data is corrupted.")
+    _verify_packet_crc(header_var, payload, crc_expected)
 
     # Integrity check: verify total data length matches header
     expected_len = hdr_size + lpc_len + sub_len

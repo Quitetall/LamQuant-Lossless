@@ -59,7 +59,9 @@ impl fmt::Display for LmlError {
             ),
             Self::CrcMismatch { expected, actual } => write!(
                 f,
-                "CRC-32 mismatch: expected 0x{:08X}, got 0x{:08X}. Data is corrupted.",
+                "CRC-32 mismatch: expected 0x{:08X}, got 0x{:08X}. Data is corrupted \
+                 (neither the current header+payload CRC scope nor the legacy \
+                 pre-2026-05-11 payload-only scope matched).",
                 expected, actual
             ),
             Self::InvalidHeader(msg) => write!(f, "Invalid header: {}", msg),

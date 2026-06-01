@@ -245,9 +245,46 @@ Bits 2-7:  noise_bits (0-63; 0 = fully lossless)
 
 CRC-32 per ISO 3309 / ITU-T V.42. Polynomial: 0xEDB88320 (reflected). Same algorithm as `zlib.crc32()`.
 
-**Scope:** Computed over the concatenation of `lpc_meta` and `payload` bytes. The 22-byte header is NOT included in the CRC.
+**Scope:** There are TWO CRC scopes in the wild. Both are computed with the
+identical CRC-32 algorithm above; they differ only in which bytes are fed in.
 
-Decoders MUST verify the CRC-32 and reject packets where it mismatches.
+| Scope | Cutover | CRC input bytes |
+|-------|---------|-----------------|
+| **Modern** (current encoder) | commit a81cd04, **2026-05-11** onward | `header[4..18]` (the 14 variable-header bytes: `n_channels`, `n_samples`, `n_levels`, `flags`, `lpc_meta_length`, `payload_length`) **then** `lpc_meta` **then** `payload` |
+| **Legacy** (pre-a81cd04) | all files encoded before 2026-05-11 | `lpc_meta` **then** `payload` only — the 22-byte header is NOT covered |
+
+The legacy scope cannot detect a single-byte corruption of the variable
+header (e.g. a flipped `n_samples`) because those bytes are outside the CRC.
+The modern scope was widened to close that gap. **The magic, the magic-byte
+version digit, and `crc32` field itself (header bytes 0–3 and 18–21) are
+excluded from both scopes** — only `header[4..18]` is added by the modern
+scope.
+
+#### 3.3.1 Back-compat fallback contract (decode side only)
+
+The per-window packet header (Section 3.2) carries **no format-version
+field**, so a decoder cannot tell a legacy packet from a modern one by
+inspection — it must branch on the CRC itself. A conformant decoder MUST:
+
+1. Compute the **modern** scope. If it equals the stored `crc32` → accept;
+   this is the common fast path.
+2. On mismatch ONLY, recompute the **legacy** (payload-only) scope. If THAT
+   equals the stored `crc32`, the packet is a valid pre-a81cd04 packet whose
+   data is intact (only the older CRC convention was used) → accept it, and
+   SHOULD surface that a legacy-scope packet was read (the reference reader
+   latches `lml::SAW_LEGACY_CRC` and warns once per process).
+3. If BOTH scopes miss → genuine corruption → reject with a CRC error.
+
+This fallback is **decode-side only**. Encoders MUST always write the modern
+scope — they MUST NOT emit legacy-scope CRCs for new files. The fallback
+never weakens corruption detection: a flipped byte inside `lpc_meta`/`payload`
+fails both scopes (it is covered by both), so it is still rejected. Only a
+flipped byte inside `header[4..18]` is asymmetric — it fails the modern scope
+but, on a legacy file, was never CRC-covered to begin with, exactly as it was
+not before a81cd04.
+
+Decoders MUST verify the CRC-32 (per the contract above) and reject packets
+where neither scope matches.
 
 ### 3.4 LPC Metadata
 
@@ -468,7 +505,18 @@ All files encoded with LML v1.x MUST be decodable by all future LML readers. Thi
 
 ### 7.1 Per-Window CRC-32
 
-Every window packet has CRC-32 covering the payload. Decoders MUST verify and reject on mismatch.
+Every window packet has a CRC-32 (Section 3.3). The current ("modern")
+encoder covers `header[4..18] || lpc_meta || payload`; files written before
+commit a81cd04 (2026-05-11) cover `lpc_meta || payload` only. Decoders MUST
+verify the CRC using the two-scope fallback contract in Section 3.3.1 and
+reject only when BOTH scopes miss.
+
+**Hardening gap (known).** The per-window packet header (Section 3.2) has no
+format-version field, so the modern vs legacy CRC scope is NOT self-describing
+— a reader must branch on the CRC value itself. The a81cd04 cutover changed
+the scope on both encode and decode with no version gate, which silently broke
+back-compat for every pre-cutover file until the Section 3.3.1 fallback was
+added. See Appendix F for the planned remediation.
 
 ### 7.2 Per-File SHA-256
 
@@ -548,3 +596,35 @@ This format uses **little-endian** byte order exclusively. Example: the value 0x
 - **v2.0.0** (major): Format changes that break v1 decoders. Minimum 2 years notice. v2 decoders MUST read v1.
 
 This specification is designed to last 30+ years. Changes are made reluctantly.
+
+## Appendix F. Future Work — Per-Packet Format Version (NOT YET IMPLEMENTED)
+
+**Status: PROPOSED. Not part of v1.0. Do not implement against this section
+yet — it is recorded here so the gap is tracked, not closed.**
+
+The root cause of the a81cd04 (2026-05-11) CRC-scope back-compat break
+(Sections 3.3.1, 7.1) is that the per-window packet header (Section 3.2)
+carries **no format-version field**. Old and new packets are therefore not
+self-describing: a reader cannot tell which CRC scope a packet used without
+trial-recomputing both. The Section 3.3.1 fallback patches the symptom for
+this one cutover, but the underlying ambiguity remains for any future
+scope/layout change.
+
+The intended permanent fix is a real **per-packet format-version field** so
+that old and new packets self-describe and a reader can dispatch the correct
+CRC scope (and any future layout variation) deterministically, with no
+CRC-guessing fallback. Candidate encoding, to be finalised when this is
+scheduled:
+
+- Repurpose one of the two reserved bits in the packet flags byte (Section
+  3.2, bits 0–1 currently "MUST be 0"), OR a small `u8` in a minor-version
+  packet layout, to carry a packet-format generation number.
+- Generation 0 = legacy payload-only CRC scope; generation 1 = a81cd04
+  header+payload scope; future generations as needed.
+- Once present, the Section 3.3.1 "recompute both scopes" fallback becomes a
+  pure read-compat shim for generation-0 files that lack the field, and new
+  writers stamp the generation explicitly.
+
+This is a minor (v1.x) additive change under Appendix E — old decoders ignore
+the reserved bit, new decoders honour it — and MUST preserve the Section 6.5
+backward-compatibility commitment.
