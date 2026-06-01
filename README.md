@@ -1,11 +1,11 @@
 # LamQuant Lossless
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20436114.svg)](https://doi.org/10.5281/zenodo.20436114)
+[![DOI](https://zenodo.org/badge/1252499254.svg)](https://doi.org/10.5281/zenodo.20436113)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-Bit-exact lossless EEG compression codec. Real-time, integer-only, deployable on x86 / ARM / RISC-V without floating-point hardware. Paper subject of *IEEE Transactions on Biomedical Circuits and Systems* (2026 submission).
+Bit-exact lossless EEG compression codec. Real-time, integer-only, deployable on x86 / ARM / RISC-V without floating-point hardware. Paper submitted to *IEEE Transactions on Biomedical Engineering* (2026).
 
-**Cite:** archived at Zenodo — [`10.5281/zenodo.20436114`](https://doi.org/10.5281/zenodo.20436114) (see [`CITATION.cff`](CITATION.cff)).
+**Cite:** archived at Zenodo — [`10.5281/zenodo.20436113`](https://doi.org/10.5281/zenodo.20436113) (see [`CITATION.cff`](CITATION.cff)).
 
 **API reference:** [API.md](API.md) — the `lml` CLI, `.lml`/`.lma` wire formats, Rust crates + Python bindings. Authoritative for the LML/LMA format contract.
 
@@ -81,7 +81,7 @@ cargo build -p lamquant-firmware --no-default-features             # firmware no
 
 Paper bench numbers, Verilator RTL harness, MNE/pyedflib cross-validation, and per-corpus evidence JSON live in the separate **Eagle** repository: https://github.com/Quitetall/Eagle
 
-The IEEE TBioCAS manuscript source lives at `docs/paper/lamquant_lossless.tex`. Rebuild the submission bundle with:
+The IEEE TBME manuscript source lives at `docs/paper/lamquant_lossless.tex`. Rebuild the submission bundle with:
 
 ```bash
 bash tools/build_submission.sh   # → outputs/submission/manuscript.pdf (12 pp, 0 warnings)
@@ -109,7 +109,7 @@ GNU GENERAL PUBLIC LICENSE v3 (see `LICENSE.md`). Patent grant per GPLv3 §11 co
 @article{lam2026lamquant,
   title   = {LamQuant Lossless: A Real-Time, Bit-Exact, Wirelessly-Deployable EEG Compression Algorithm},
   author  = {Lam, Brian},
-  journal = {IEEE Transactions on Biomedical Circuits and Systems},
+  journal = {IEEE Transactions on Biomedical Engineering},
   year    = {2026},
   note    = {Submitted}
 }

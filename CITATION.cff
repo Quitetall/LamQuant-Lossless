@@ -9,11 +9,11 @@ authors:
     affiliation: "OpenHuman Technologies LLC, Florida, USA"
     email: briankhanglam@usf.edu
 license: GPL-3.0-or-later
-doi: 10.5281/zenodo.20436114
+doi: 10.5281/zenodo.20436113
 repository-code: "https://github.com/Quitetall/LamQuant-Lossless"
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.20436114
+    value: 10.5281/zenodo.20436113
     description: "Zenodo archive of the LamQuant Lossless source + reproducibility package"
 keywords:
   - EEG compression
@@ -31,6 +31,6 @@ preferred-citation:
     - family-names: Lam
       given-names: Brian
       orcid: "https://orcid.org/0009-0001-5463-2324"
-  journal: "IEEE Transactions on Biomedical Circuits and Systems"
+  journal: "IEEE Transactions on Biomedical Engineering"
   year: 2026
   notes: "Submitted."
