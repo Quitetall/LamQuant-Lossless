@@ -47,8 +47,14 @@ jobs:
       - name: legacy .lml decode back-compat gate
         run: cargo test -p lamquant-lossless --test legacy_crc_decode
 
-  firmware-no_std:
-    name: Firmware no_std (riscv32imac)
+  core-no_std:
+    # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
+    # 0026 phase B.1), but the no_std build path it depends on lives HERE:
+    # lamquant-lossless --no-default-features is the pure core codec
+    # (lifting, lpc, golomb, rans, crc32, lml) that the MCU links. This
+    # lane keeps that core no_std-clean so a new host-only module can't
+    # silently break the firmware build downstream.
+    name: Core no_std (riscv32imac)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -63,9 +69,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: firmware-${{ hashFiles('Cargo.lock') }}
-      - name: cargo build -p lamquant-firmware --no-default-features
-        run: cargo build -p lamquant-firmware --no-default-features --target riscv32imac-unknown-none-elf
+          key: core-no_std-${{ hashFiles('Cargo.lock') }}
+      - name: cargo build -p lamquant-lossless --no-default-features
+        run: cargo build -p lamquant-lossless --no-default-features --target riscv32imac-unknown-none-elf
 
   pytest-fast:
     name: Pytest fast tier

@@ -33,7 +33,7 @@ Raw EEG [21, 2500] @ 250 Hz
 
 ## 1. Encoder: TernaryMobileNetV5_Subband
 
-**Source:** `lamquant_codec/models/encoder.py`
+**Source:** `lamquant_neural/models/encoder.py`
 
 ### Specifications
 
