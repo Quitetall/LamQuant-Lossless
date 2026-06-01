@@ -4,8 +4,8 @@
 
 Bit-exact lossless EEG compression codec. Real-time, integer-only, deployable on x86 / ARM / RISC-V without floating-point hardware. Paper submitted to *IEEE Transactions on Biomedical Engineering* (2026).
 
-**Cite:** [![DOI](https://zenodo.org/badge/1252499254.svg)](https://doi.org/10.5281/zenodo.20436113)
-archived at Zenodo: [`10.5281/zenodo.20436113`](https://doi.org/10.5281/zenodo.20436113) (see [`CITATION.cff`](CITATION.cff)).
+**Cite:** [![DOI](https://zenodo.org/badge/1252499254.svg)](https://doi.org/10.5281/zenodo.20484969)
+archived at Zenodo: [`10.5281/zenodo.20436113`](https://doi.org/10.5281/zenodo.20484969) (see [`CITATION.cff`](CITATION.cff)).
 
 **API reference:** [API.md](API.md): Full `lml` CLI, `.lml`/`.lma` wire formats, Rust crates + Python bindings. Authoritative for the LML/LMA format contract.
 
