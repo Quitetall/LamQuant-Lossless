@@ -129,6 +129,103 @@ fn subband_lengths(t: usize, n_levels: u8) -> Vec<usize> {
     out
 }
 
+/// Warn-once latch for legacy (pre-a81cd04) CRC-scope acceptance.
+///
+/// Set the first time a packet is accepted via the payload-only legacy
+/// CRC scope (see [`verify_packet_crc`]). On `std` builds this also emits
+/// a one-shot `eprintln!` so the operator can observe that an archive
+/// predates the 2026-05-11 header-CRC change. Public so callers (tools,
+/// tests) can query whether any legacy packet was read this run.
+///
+/// Latched false→true on the first legacy accept and **never cleared** in
+/// production — that monotonicity is what makes the warning fire exactly
+/// once per process. Tests reset it explicitly to observe their own runs.
+pub static SAW_LEGACY_CRC: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Outcome of the per-window CRC verification — which scope matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrcScope {
+    /// Modern (a81cd04+) scope: `crc32(header[4..18] || lpc_meta || payload)`.
+    /// This is the common fast path; the legacy recompute never runs here.
+    Modern,
+    /// Legacy (pre-a81cd04) scope: `crc32(lpc_meta || payload)` — the
+    /// header variable-fields were NOT covered. The packet's data is
+    /// valid; only the older CRC convention was used. A warn-once is
+    /// emitted and [`SAW_LEGACY_CRC`] is latched.
+    Legacy,
+}
+
+/// Verify a per-window LML1 packet CRC with back-compat fallback.
+///
+/// ROOT CAUSE: commit a81cd04 (2026-05-11) widened the per-window CRC
+/// scope from `crc32(lpc_meta || payload)` to
+/// `crc32(header[4..18] || lpc_meta || payload)` on BOTH encode and
+/// decode with no version gate, so every file written *before* that
+/// commit fails CRC under the current reader even though its bytes are
+/// intact. The LML1 packet header has no version field to branch on, so
+/// we branch on the CRC itself:
+///
+///   1. Compute the **modern** scope. If it matches → `Ok(Modern)`. This
+///      is the common path and costs exactly what it did before — the
+///      legacy recompute below never runs for a modern file.
+///   2. On mismatch, recompute the **legacy** scope (payload-only, i.e.
+///      omit the `data[4..18]` prefix). If it matches → `Ok(Legacy)`:
+///      the packet is a genuine pre-a81cd04 packet whose data is valid;
+///      latch [`SAW_LEGACY_CRC`] + warn-once so the read is observable.
+///   3. If both miss → `Err(CrcMismatch)`: genuine corruption.
+///
+/// `header_var` is `&data[4..18]` (the 14 variable-header bytes) and
+/// `payload_data` is `&data[HEADER_SIZE..HEADER_SIZE + lpc_len + sub_len]`
+/// (== `lpc_meta || payload`, contiguous). The encoder is unchanged: new
+/// files keep the stronger modern scope. This is decode-side only.
+#[inline]
+fn verify_packet_crc(
+    header_var: &[u8],
+    payload_data: &[u8],
+    crc_exp: u32,
+) -> LmlResult<CrcScope> {
+    // (1) Modern scope — the fast path. Identical cost to the old code.
+    let mut crc_state = CRC32_INIT;
+    crc_state = crc32_update(crc_state, header_var);
+    crc_state = crc32_update(crc_state, payload_data);
+    let crc_modern = crc_state ^ CRC32_INIT;
+    if crc_modern == crc_exp {
+        return Ok(CrcScope::Modern);
+    }
+
+    // (2) Legacy scope — payload-only (no header[4..18] prefix). Only
+    // runs when the modern scope already missed, so the common path
+    // stays byte-for-byte the same cost.
+    let mut crc_legacy_state = CRC32_INIT;
+    crc_legacy_state = crc32_update(crc_legacy_state, payload_data);
+    let crc_legacy = crc_legacy_state ^ CRC32_INIT;
+    if crc_legacy == crc_exp {
+        // Latch + warn-once: the read is observable, but the data is good.
+        if !SAW_LEGACY_CRC.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            #[cfg(feature = "std")]
+            eprintln!(
+                "warning: LML packet accepted via legacy (pre-2026-05-11) \
+                 payload-only CRC scope. Archive predates commit a81cd04; \
+                 data is valid. Re-encode to upgrade to the header+payload CRC."
+            );
+        }
+        return Ok(CrcScope::Legacy);
+    }
+
+    // (3) Both scopes miss → genuine corruption. Report `crc_modern` as
+    // `actual`: the modern header+payload scope is the authoritative one
+    // for any file this codec writes, so it is the canonical "what we
+    // computed" value. Do NOT switch this to `crc_legacy` — that would
+    // make a corrupt MODERN file (the common case) report a meaningless
+    // payload-only CRC. The human-readable Display string spells out that
+    // neither scope matched, so the diagnostic is unambiguous either way.
+    Err(LmlError::CrcMismatch {
+        expected: crc_exp,
+        actual: crc_modern,
+    })
+}
+
 /// LML1 packet magic. Single source of truth — used by `lml.rs` here,
 /// the container-format wrapper in `container.rs`, and the streaming
 /// parser in `stream.rs`. Any drift between these breaks decode.
@@ -954,17 +1051,13 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     // lpc_meta + payload. Magic (bytes 0..4) is constant so excluded;
     // the CRC field itself (bytes 18..22) is excluded to avoid self-
     // reference. This matches the encoder side in `compress`.
+    //
+    // `verify_packet_crc` first checks the modern (a81cd04+) scope — the
+    // common fast path, byte-for-byte the old cost. Only on mismatch does
+    // it recompute the legacy payload-only scope to accept pre-a81cd04
+    // packets (warn-once via SAW_LEGACY_CRC). Both miss → CrcMismatch.
     let payload_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len + sub_len];
-    let mut crc_state = crate::crc32::CRC32_INIT;
-    crc_state = crc32_update(crc_state, &data[4..18]);
-    crc_state = crc32_update(crc_state, payload_data);
-    let crc_got = crc_state ^ crate::crc32::CRC32_INIT;
-    if crc_got != crc_exp {
-        return Err(LmlError::CrcMismatch {
-            expected: crc_exp,
-            actual: crc_got,
-        });
-    }
+    verify_packet_crc(&data[4..18], payload_data, crc_exp)?;
 
     let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
     let mut lpc_pos = 0usize;
@@ -1285,17 +1378,11 @@ pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         });
     }
 
+    // Same modern-then-legacy CRC verification as the sequential
+    // `decompress` path (see `verify_packet_crc`). Decode-side only;
+    // the encoder still writes the modern header+payload scope.
     let payload_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len + sub_len];
-    let mut crc_state = crate::crc32::CRC32_INIT;
-    crc_state = crc32_update(crc_state, &data[4..18]);
-    crc_state = crc32_update(crc_state, payload_data);
-    let crc_got = crc_state ^ crate::crc32::CRC32_INIT;
-    if crc_got != crc_exp {
-        return Err(LmlError::CrcMismatch {
-            expected: crc_exp,
-            actual: crc_got,
-        });
-    }
+    verify_packet_crc(&data[4..18], payload_data, crc_exp)?;
 
     let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
     let mut lpc_pos = 0usize;
