@@ -32,6 +32,7 @@ real wire bytes, not a synthetic re-encode.
 import hashlib
 import struct
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -40,9 +41,16 @@ import lamquant_codec.lossless as lossless
 from lamquant_codec.errors import LmlCrcError
 
 # Shared with the Rust gate's FIXTURE constant — the same frozen file.
-FIXTURE = (
-    "/mnt/4tb/LamQuant/LamQuant-Lossless/lamquant-lossless/"
-    "tests/fixtures/legacy_payload_crc.lml"
+# Resolve relative to THIS file so the test is portable across CI runners
+# and contributor checkouts (mirrors the Rust gate's CARGO_MANIFEST_DIR).
+# This file lives at <repo>/tests/codec/; the fixture at
+# <repo>/lamquant-lossless/tests/fixtures/.
+FIXTURE = str(
+    Path(__file__).resolve().parents[2]
+    / "lamquant-lossless"
+    / "tests"
+    / "fixtures"
+    / "legacy_payload_crc.lml"
 )
 
 # sha256 over window-0's decoded samples (channel-major, each i64 little-endian).
