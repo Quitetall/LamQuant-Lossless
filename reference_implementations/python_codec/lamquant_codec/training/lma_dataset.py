@@ -54,6 +54,12 @@ from torch.utils.data import Dataset
 
 LOG = logging.getLogger(__name__)
 
+# Data-file extensions that carry an LML-encoded recording in an `lml archive`
+# corpus LMA (sidecars like .csv/.tse/.npz are NOT recordings). Matched
+# case-insensitively. All current corpora are EDF; extend here if a BDF/other
+# EDF-family format is ever ingested.
+_RECORDING_EXTS = (".edf", ".bdf")
+
 # ----------------------------------------------------------------------
 # Shape constants — must match the deprecated NPZ + L3 pipeline so swap
 # is bit-exact (verified against 250-file sample, zero mismatches).
@@ -224,20 +230,33 @@ def build_lma_entry_index(lma_paths: Sequence[str]) -> dict:
                     continue
                 out[stem] = {"lma": str(lp), "lml": e, "labels": None,
                              "meta": None}
-        if not matched_any:
-            # `lml archive` source-of-truth layout (2026-05-30): recordings
-            # keep their original data-file name (``chb01/chb01_01.edf``,
-            # method ``lml``) instead of a ``<stem>.lml`` rename, and there is
-            # no ``meta.json`` or in-archive labels NPZ (labels live in the
-            # disk-staged cache). Recognise lml-method data entries as
-            # recordings; the basename minus its extension is the stem.
-            # `lma_read_entry` on an lml-method entry returns the LML
-            # container bytes (magic LML1), so decode_lma_signal works
-            # unchanged. Pays the heavier `list-archive` cost only for these
-            # raw-archive corpora; the `<stem>.lml` fast path above is
-            # untouched.
-            for path, method in list_lma_entries_typed(lp):
-                if method != "lml":
+        # `lml archive` source-of-truth layout (2026-05-30): recordings keep
+        # their original data-file name (``chb01/chb01_01.edf``, method
+        # ``lml``) instead of a ``<stem>.lml`` rename, and there is no
+        # ``meta.json`` or in-archive labels NPZ (labels live in the
+        # disk-staged cache). Recognise lml-method data entries as recordings;
+        # the basename minus its extension is the stem. `lma_read_entry` on an
+        # lml-method entry returns the LML container bytes (magic LML1), so
+        # decode_lma_signal works unchanged.
+        #
+        # Run this whenever the archive has any non-``.lml`` entry — NOT only
+        # when zero ``<stem>.lml`` matched. A single stray ``<stem>.lml`` left
+        # in an EDF source tree would otherwise flip ``matched_any`` and mask
+        # thousands of ``.edf`` recordings (tuep_v3.1.0 regen: 1 stray `.lml`
+        # hid 2808 `.edf`). Deduped by stem, so the ``<stem>.lml`` fast-path
+        # entries above stay authoritative. Pure-``.lml`` archives skip the
+        # heavier ``list-archive`` typed scan entirely (fast path preserved).
+        if any(not e.endswith(".lml") for e in entries):
+            # Identify recordings by data-file extension from the FULL `lml ls`
+            # paths already in `entries`. Do NOT parse `lml list-archive` here:
+            # its table left-truncates the PATH column to a fixed width, so
+            # entry names longer than ~60 chars are corrupted (tuep's
+            # `00_epilepsy/...edf` -> `epilepsy/...edf`), silently breaking the
+            # lookup. `lma_read_entry` on these returns the LML container bytes
+            # (magic LML1); a data file that wasn't lml-stored decodes to None
+            # downstream and is skipped, so extension is a safe discriminator.
+            for path in entries:
+                if not path.lower().endswith(_RECORDING_EXTS):
                     continue
                 stem = os.path.splitext(os.path.basename(path))[0]
                 if not stem or stem in out:
