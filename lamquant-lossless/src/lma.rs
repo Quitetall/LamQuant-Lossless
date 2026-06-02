@@ -33,6 +33,39 @@ const MAX_ENTRY_DECOMPRESS_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// (zstd bomb pattern) before we attempt the decompression.
 const MAX_ENTRY_ORIGINAL_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_SIZE: usize = 256 * 1024 * 1024; // 256 MB decompressed
+/// Compressed-manifest alloc cap (refuse to allocate before decompress when the
+/// manifest is zstd). Sits beside MAX_MANIFEST_SIZE as the single source of
+/// truth for the chokepoint + any future caller.
+const MAX_COMPRESSED_MANIFEST_SIZE: usize = 16 * 1024 * 1024;
+
+// ---- LMA v2 (streaming, footer/EOCD) ----
+// v1 writes the manifest at the FRONT (offset 16), so packing must stage every
+// payload to a temp file (to learn the offsets the front manifest needs) and
+// then COPY temp -> final after the manifest -- 2x the archive size in
+// transient disk, which overflows on huge corpora (TUEG ~700 GB -> 1.4 TB
+// transient). v2 puts the manifest in a trailing EOCD-style footer so payloads
+// stream straight into the final file in one forward pass (offsets accrue as
+// written), the manifest + footer go last, and the SHA-256 is computed
+// incrementally over the whole stream -- no temp, no seek-back, 1x disk.
+//
+// v2 layout:
+//   header(16):  magic "LMA2" | version(u32 LE = 2) | reserved(8, zero)
+//   payloads:    concatenated entry payloads, starting at offset 16
+//   manifest:    zstd (or stored) manifest JSON -- identical schema to v1
+//   footer(12):  manifest_len_field(u32 LE, top bit = uncompressed)
+//                | n_entries(u32 LE) | foot_magic "LFT2"
+//   trailer(32): sha256 over [header .. footer], appended last
+// The reader locates the manifest from the end: [-32..]=sha, [-36..-32]=
+// foot_magic, [-40..-36]=n_entries, [-44..-40]=manifest_len_field, manifest at
+// [-44-manifest_len .. -44]; payload section is [16 .. -44-manifest_len]. A
+// half-written v2 archive has no valid footer -> reads fail cleanly as
+// incomplete (v1 could falsely list a growing file).
+const LMA_MAGIC_V2: &[u8; 4] = b"LMA2";
+const LMA_VERSION_V2: u32 = 2;
+const LMA_FOOT_MAGIC: &[u8; 4] = b"LFT2";
+/// v2 fixed footer size, excluding the trailing 32-byte sha: manifest_len(4)
+/// + n_entries(4) + foot_magic(4).
+const LMA_V2_FOOTER_LEN: u64 = 12;
 
 /// Monotonic counter for tempfile uniqueness across concurrent calls.
 /// Combined with `std::process::id()` it gives a per-call tempname
@@ -388,6 +421,218 @@ fn decode_zstd_bounded(
         .into());
     }
     Ok(out)
+}
+
+/// Resolved on-disk layout of an LMA archive: the parsed manifest
+/// entries plus the byte bounds of the payload section. This is the
+/// SINGLE place where the v1-vs-v2 layout difference lives — every
+/// reader funnels through `read_lma_index` and then works purely in
+/// terms of `entries`, `payload_base`, and `payload_end`. Entry
+/// offsets in the manifest are relative to `payload_base`, so the
+/// absolute byte position of an entry's payload is
+/// `payload_base + entry.offset`. The payload section occupies
+/// `[payload_base .. payload_end]`; an entry's
+/// `offset + compressed_size` must fit within
+/// `payload_end - payload_base`.
+struct LmaIndex {
+    entries: Vec<ArchiveEntry>,
+    payload_base: u64,
+    payload_end: u64,
+    /// Directory (path, mtime-seconds) pairs from the manifest's
+    /// `directories` array, used by `unpack_archive` to restore dir
+    /// mtimes after extraction. Empty for manifests that carry no
+    /// directory metadata (e.g. append-built archives).
+    directories: Vec<(String, u64)>,
+}
+
+/// The ONE dispatch chokepoint for the LMA on-disk layout. Reads the
+/// 16-byte header, sniffs the magic+version, and locates + decodes the
+/// manifest for both wire formats:
+///
+///   - v2 (`LMA2` / version 2): streaming/EOCD layout. The manifest +
+///     12-byte footer + 32-byte sha live at the END of the file. We
+///     seek to `file_size - 32 - 12`, read the footer, validate its
+///     `LFT2` magic, then read the compressed manifest immediately
+///     before it. Payloads start at offset 16; the payload section
+///     ends where the manifest begins.
+///   - v1 (`LMA1` / version <= 1): legacy front-manifest layout. The
+///     manifest sits right after the 16-byte header; payloads follow
+///     it. payload_base = 16 + manifest_len, payload_end = file_size
+///     - 32 (sha trailer). v1 read retained for migration; remove once
+///     all archives are v2.
+///
+/// The manifest *decode* (alloc caps, top-bit uncompressed flag,
+/// zstd-vs-raw, serde parse, `parse_manifest_entries`) is byte-
+/// identical between the two versions once the manifest bytes + flag
+/// are located, so it lives in a single shared block below — only the
+/// positioning differs per version.
+fn read_lma_index<R: Read + Seek>(
+    f: &mut R,
+    file_size: u64,
+) -> Result<LmaIndex, Box<dyn std::error::Error + Send + Sync>> {
+    // Minimum valid archive: 16 (header) + 0 (manifest) + 32 (sha) = 48.
+    // (v2 also carries a 12-byte footer, but the 48-byte floor is the
+    // shared guard kept from the v1 readers; a real v2 archive is
+    // always >= 60 bytes and the footer read below bounds-checks
+    // itself.)
+    if file_size < 48 {
+        return Err(format!(
+            "Archive too small ({} bytes, minimum 48)",
+            file_size
+        )
+        .into());
+    }
+
+    // Header: [4 magic][4 version][8 ...]. For v1 the trailing 8 bytes
+    // are [n_entries][manifest_len_field]; for v2 they are reserved
+    // (zero). We read magic + version first, then dispatch.
+    f.seek(SeekFrom::Start(0))?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic)?;
+    let mut buf4 = [0u8; 4];
+    f.read_exact(&mut buf4)?;
+    let version = u32::from_le_bytes(buf4);
+
+    // Per-version positioning yields (manifest_bytes, uncompressed_flag,
+    // payload_base, payload_end). The manifest decode is shared below.
+    // (alloc cap MAX_COMPRESSED_MANIFEST_SIZE is module-level.)
+    let (manifest_payload, manifest_uncompressed, payload_base, payload_end): (
+        Vec<u8>,
+        bool,
+        u64,
+        u64,
+    ) = if &magic == LMA_MAGIC_V2 && version == LMA_VERSION_V2 {
+        // ── v2: trailing footer + manifest ──────────────────────────
+        // Layout from the end: [-32..] sha, [-44..-32] footer (12),
+        // manifest immediately before the footer.
+        let foot_pos = file_size - 32 - LMA_V2_FOOTER_LEN;
+        f.seek(SeekFrom::Start(foot_pos))?;
+        let mut footer = [0u8; LMA_V2_FOOTER_LEN as usize];
+        f.read_exact(&mut footer)?;
+        if &footer[8..12] != LMA_FOOT_MAGIC {
+            return Err("incomplete/corrupt v2 archive — truncated?".into());
+        }
+        let manifest_len_field = u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
+        let manifest_uncompressed = (manifest_len_field & 0x8000_0000) != 0;
+        let manifest_len = (manifest_len_field & 0x7FFF_FFFF) as usize;
+
+        let alloc_cap = if manifest_uncompressed {
+            MAX_MANIFEST_SIZE
+        } else {
+            MAX_COMPRESSED_MANIFEST_SIZE
+        };
+        if manifest_len > alloc_cap {
+            return Err(format!(
+                "Manifest length {} (uncompressed={}) exceeds cap {} \
+                 — refusing to allocate",
+                manifest_len, manifest_uncompressed, alloc_cap,
+            )
+            .into());
+        }
+        // manifest occupies [foot_pos - manifest_len .. foot_pos].
+        let manifest_start = foot_pos.checked_sub(manifest_len as u64).ok_or_else(
+            || -> Box<dyn std::error::Error + Send + Sync> {
+                "corrupt v2 archive: manifest_len larger than file".into()
+            },
+        )?;
+        // payload_base = 16 (header). The manifest must not overlap the
+        // header.
+        if manifest_start < 16 {
+            return Err(format!(
+                "corrupt v2 archive: manifest starts at {} (< payload_base 16)",
+                manifest_start
+            )
+            .into());
+        }
+        f.seek(SeekFrom::Start(manifest_start))?;
+        let mut manifest_payload = vec![0u8; manifest_len];
+        f.read_exact(&mut manifest_payload)?;
+        (manifest_payload, manifest_uncompressed, 16u64, manifest_start)
+    } else if &magic == LMA_MAGIC && version <= LMA_VERSION {
+        // ── v1: front manifest ──────────────────────────────────────
+        // v1 read retained for migration; remove once all archives are v2.
+        // Header trailing 8 bytes = [n_entries][manifest_len_field].
+        f.read_exact(&mut buf4)?; // n_entries — derivable from manifest
+        f.read_exact(&mut buf4)?;
+        let manifest_len_field = u32::from_le_bytes(buf4);
+        let manifest_uncompressed = (manifest_len_field & 0x8000_0000) != 0;
+        let manifest_len = (manifest_len_field & 0x7FFF_FFFF) as usize;
+
+        let alloc_cap = if manifest_uncompressed {
+            MAX_MANIFEST_SIZE
+        } else {
+            MAX_COMPRESSED_MANIFEST_SIZE
+        };
+        if manifest_len > alloc_cap {
+            return Err(format!(
+                "Manifest length {} (uncompressed={}) exceeds cap {} \
+                 — refusing to allocate",
+                manifest_len, manifest_uncompressed, alloc_cap,
+            )
+            .into());
+        }
+        // Manifest sits at offset 16 (right after the header).
+        let mut manifest_payload = vec![0u8; manifest_len];
+        f.read_exact(&mut manifest_payload)?;
+        let payload_base = 16u64 + manifest_len as u64;
+        let payload_end = file_size.saturating_sub(32);
+        (manifest_payload, manifest_uncompressed, payload_base, payload_end)
+    } else {
+        return Err(format!(
+            "Not an LMA archive / unsupported version (magic: {:?}, version: {})",
+            magic, version
+        )
+        .into());
+    };
+
+    // ── shared manifest decode (identical for v1 + v2) ──────────────
+    let manifest_raw = if manifest_uncompressed {
+        manifest_payload
+    } else {
+        decode_zstd_bounded(&manifest_payload, MAX_MANIFEST_SIZE, "manifest")?
+    };
+    if manifest_raw.len() > MAX_MANIFEST_SIZE {
+        return Err(format!(
+            "Manifest too large after decompression ({} bytes, max {})",
+            manifest_raw.len(),
+            MAX_MANIFEST_SIZE
+        )
+        .into());
+    }
+    let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_raw)?;
+    let entries = parse_manifest_entries(&manifest_json)?;
+    // Directory mtimes (used by unpack_archive). Absent in array-shaped
+    // (oldest) manifests and in append-built manifests.
+    let directories: Vec<(String, u64)> = manifest_json
+        .get("directories")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| {
+                    let path = d.get("path")?.as_str()?.to_string();
+                    let mtime = d.get("mtime")?.as_u64()?;
+                    Some((path, mtime))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Sanity: payload_base must not exceed payload_end for any
+    // well-formed archive (an empty-payload archive has them equal).
+    if payload_base > payload_end {
+        return Err(format!(
+            "Corrupt archive: payload_base ({}) exceeds payload_end ({})",
+            payload_base, payload_end
+        )
+        .into());
+    }
+
+    Ok(LmaIndex {
+        entries,
+        payload_base,
+        payload_end,
+        directories,
+    })
 }
 
 /// SHA-256 hex digest of a byte slice.
@@ -1184,27 +1429,45 @@ pub fn pack_archive(
     // tempfile_in IO error -- V4 Pro review of 5769562 caught this.
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
         format!(
-            "Cannot create payload-tempfile dir {}: {}",
+            "Cannot create archive output dir {}: {}",
             tmp_dir.display(),
             e
         )
     })?;
-    let payload_tmp = tempfile::Builder::new()
-        .prefix(".lamquant-payload-")
-        .tempfile_in(&tmp_dir)?;
-    let payload_tmp_path = payload_tmp.path().to_path_buf();
-    drop(payload_tmp);
-    let mut payload_writer = BufWriter::new(std::fs::File::create(&payload_tmp_path)?);
-    let mut payload_offset: u64 = 0;
 
-    // Ensure temp file cleanup on all exit paths
+    // v2 STREAMING: write directly into a same-dir `.partial` staging file and
+    // rename to `output_path` on success (atomic; a half-written pack never
+    // appears at the final path). This is 1x disk -- the staging file IS the
+    // final archive, streamed once, then renamed. No payload temp + no
+    // temp->final copy (the v1 2x-disk blowup). The 16-byte v2 header goes
+    // first; payloads stream in during the loop at offset 16+; the manifest +
+    // footer + sha are appended after the loop. The sha is computed
+    // incrementally over the whole stream (header .. footer), no seek-back.
+    let staging_path = {
+        let mut s = output_path.as_os_str().to_os_string();
+        s.push(".partial");
+        PathBuf::from(s)
+    };
+    // CleanupGuard removes the staging file on any early-return / panic before
+    // the successful rename, so a footer-less partial never lingers.
     struct CleanupGuard(PathBuf);
     impl Drop for CleanupGuard {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
     }
-    let _cleanup = CleanupGuard(payload_tmp_path.clone());
+    let cleanup = CleanupGuard(staging_path.clone());
+    let mut out = BufWriter::new(std::fs::File::create(&staging_path)?);
+    let mut hasher = Sha256::new();
+    {
+        let mut header = [0u8; 16];
+        header[0..4].copy_from_slice(LMA_MAGIC_V2);
+        header[4..8].copy_from_slice(&LMA_VERSION_V2.to_le_bytes());
+        // bytes 8..16 reserved, left zero
+        out.write_all(&header)?;
+        hasher.update(header);
+    }
+    let mut payload_offset: u64 = 0;
 
     let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(all_files.len());
     let mut total_original: u64 = 0;
@@ -1345,7 +1608,10 @@ pub fn pack_archive(
         let compressed_size = compressed.len() as u64;
         let offset = payload_offset;
 
-        payload_writer.write_all(&compressed)?;
+        // Stream the payload straight into the final archive (offset 16+),
+        // hashing as we go. No payload temp (the v1 2x-disk staging).
+        out.write_all(&compressed)?;
+        hasher.update(&compressed);
         // ADR 0021 Tier 2 audit (N11): checked_add. Won't fire in
         // practice (would need > 18 EB of payload) but matches the
         // saturating/checked pattern used at extract sites.
@@ -1380,10 +1646,9 @@ pub fn pack_archive(
         }
     }
 
-    payload_writer.flush()?;
-    drop(payload_writer);
+    // (payloads already streamed into `out`; nothing to flush here)
 
-    // Validate entry count fits in u32 header field
+    // Validate entry count fits in u32 footer field
     if entries.len() > u32::MAX as usize {
         return Err(format!(
             "Too many entries ({}) — LMA format max is {}",
@@ -1456,52 +1721,39 @@ pub fn pack_archive(
         };
     let manifest_compressed = manifest_payload;
 
-    // Write final archive: header + manifest + payloads + SHA-256
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut hasher = Sha256::new();
-    let mut out = BufWriter::new(std::fs::File::create(output_path)?);
-
-    // 16-byte header
-    let header = {
-        let mut h = [0u8; 16];
-        h[0..4].copy_from_slice(LMA_MAGIC);
-        h[4..8].copy_from_slice(&LMA_VERSION.to_le_bytes());
-        h[8..12].copy_from_slice(&(entries.len() as u32).to_le_bytes());
-        // Top bit of this u32 = "manifest stored uncompressed"
-        // (set when ZSTD compression fell back to STORE). Lower 31
-        // bits = byte length of the manifest payload.
-        h[12..16].copy_from_slice(&manifest_len_field.to_le_bytes());
-        h
-    };
-    out.write_all(&header)?;
-    hasher.update(header);
-
-    // Manifest
+    // v2 final write: the 16-byte header + all payloads are already streamed
+    // into `out` (offset 16+). Append manifest -> 12-byte footer -> sha
+    // trailer, then atomic-rename the staging file onto output_path.
     out.write_all(&manifest_compressed)?;
     hasher.update(&manifest_compressed);
 
-    // Stream payloads from temp file in 8 MB chunks
-    {
-        let mut ptf = BufReader::new(std::fs::File::open(&payload_tmp_path)?);
-        let mut buf = vec![0u8; 8 * 1024 * 1024];
-        loop {
-            let n = ptf.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            hasher.update(&buf[..n]);
-        }
-    }
+    // Footer (12 bytes): manifest_len_field(u32, top bit = uncompressed)
+    // | n_entries(u32) | foot_magic. Lets the reader locate the manifest
+    // from the end of the file in one backward seek.
+    let mut footer = [0u8; LMA_V2_FOOTER_LEN as usize];
+    footer[0..4].copy_from_slice(&manifest_len_field.to_le_bytes());
+    footer[4..8].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+    footer[8..12].copy_from_slice(LMA_FOOT_MAGIC);
+    out.write_all(&footer)?;
+    hasher.update(footer);
 
-    // Archive SHA-256 trailer
+    // SHA-256 trailer over [header .. footer], appended last.
     let archive_hash = hasher.finalize();
     out.write_all(&archive_hash)?;
     out.flush()?;
     drop(out);
+
+    // Atomic publish: rename staging -> final, then disarm the cleanup guard
+    // (the staging file no longer exists under its old name).
+    std::fs::rename(&staging_path, output_path).map_err(|e| {
+        format!(
+            "Cannot publish archive {} -> {}: {}",
+            staging_path.display(),
+            output_path.display(),
+            e
+        )
+    })?;
+    std::mem::forget(cleanup);
     // _cleanup guard drops here and removes temp file
 
     let archive_bytes = std::fs::metadata(output_path)?.len();
@@ -1895,7 +2147,13 @@ pub fn extract_entry(
     entry_path: &str,
     output_path: &Path,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let entries = read_manifest(archive_path)?;
+    // Single dispatch chokepoint: parsed entries + payload bounds for
+    // v1/v2 in one read. We keep `f` open afterwards for the payload
+    // seek+read (no separate header re-parse).
+    let mut f = BufReader::new(std::fs::File::open(archive_path)?);
+    let file_size = std::fs::metadata(archive_path)?.len();
+    let idx = read_lma_index(&mut f, file_size)?;
+    let entries = idx.entries;
     // Exact-match first; suffix-match second (helps when the user
     // types just the basename, e.g. `foo.edf`).
     //
@@ -1938,20 +2196,9 @@ pub fn extract_entry(
         })?
         .clone();
 
-    // Re-read the 16-byte header to derive payload_start.
-    // Header layout: magic(4) + version(4) + n_entries(4) + manifest_len_field(4)
-    let mut f = BufReader::new(std::fs::File::open(archive_path)?);
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != LMA_MAGIC {
-        return Err(format!("Not an LMA archive (magic: {magic:?})").into());
-    }
-    let mut buf4 = [0u8; 4];
-    f.read_exact(&mut buf4)?; // version
-    f.read_exact(&mut buf4)?; // n_entries
-    f.read_exact(&mut buf4)?; // manifest_len_field
-    let manifest_len = (u32::from_le_bytes(buf4) & 0x7FFF_FFFF) as u64;
-    let payload_start = 16u64 + manifest_len;
+    // payload_start / payload_end come from the chokepoint index
+    // (v1/v2-aware). entry.offset is relative to payload_start.
+    let payload_start = idx.payload_base;
 
     // Bounds guard before allocation -- adversarial archives could
     // claim absurd entry.compressed_size OR original_size. We check
@@ -1975,11 +2222,15 @@ pub fn extract_entry(
 
     // Bound the seek before issuing it. unpack_archive (line ~2133)
     // and the read_entry sibling paths check entry.offset +
-    // compressed_size against payload_section_size; extract_entry
+    // compressed_size against the payload section; extract_entry
     // historically did not, leaving an adversarial manifest free to
     // wrap `payload_start + entry.offset` past u64::MAX or land the
     // read inside the header/manifest region. Audit-2026-05-20.
-    let file_len = f.get_ref().metadata()?.len();
+    // Bound against `idx.payload_end` (the tighter, v2-correct end of
+    // the payload section), not the whole file — for v2 the manifest +
+    // footer + sha live AFTER the payloads, so the payload must not
+    // extend into them.
+    let payload_end = idx.payload_end;
     let abs_offset = payload_start.checked_add(entry.offset).ok_or_else(|| {
         format!(
             "lma extract-entry: entry '{entry_path}' offset overflow \
@@ -1994,11 +2245,11 @@ pub fn extract_entry(
             abs_offset, entry.compressed_size,
         )
     })?;
-    if entry_end > file_len {
+    if entry_end > payload_end {
         return Err(format!(
-            "lma extract-entry: entry '{entry_path}' extends past archive end \
-             (entry_end={} > file_len={})",
-            entry_end, file_len,
+            "lma extract-entry: entry '{entry_path}' extends past payload section end \
+             (entry_end={} > payload_end={})",
+            entry_end, payload_end,
         )
         .into());
     }
@@ -2100,15 +2351,21 @@ pub fn extract_entry(
 /// Phase 3.8 — append one file to an existing LMA archive without
 /// rewriting payload bytes of pre-existing entries.
 ///
-/// Strategy: byte-copy the old payload section verbatim from
-/// `[16 + manifest_len_old .. file_end - 32]` into a same-directory
-/// `<archive>.lma.new` tempfile, append the new entry's compressed
-/// payload, regenerate the manifest (covering N+1 entries), write the
-/// 16-byte header + new manifest + payloads + SHA-256 trailer, fsync,
-/// then atomic-rename `<archive>.lma.new` -> `<archive>`. The old
-/// archive is moved to `<archive>.lma.bak` first so an interrupted
-/// rename leaves both the old archive (`.bak`) and the partial new
-/// archive (`.new`) — no data loss on power-cut. Bible R27.
+/// Strategy (v2 streaming): byte-copy the existing prefix verbatim from
+/// `[0 .. old payload_end]` (the 16-byte v2 header + all existing
+/// payloads — their absolute positions and offsets don't move) into a
+/// same-directory `<archive>.lma.new` tempfile, append the new entry's
+/// compressed payload immediately after, then write a fresh combined
+/// manifest (covering N+1 entries) + 12-byte v2 footer + SHA-256
+/// trailer. The old manifest + footer + sha are dropped. The new
+/// entry's offset (relative to payload_base 16) is `old payload_end -
+/// 16`. A v1 source is normalised to v2 on append: its leading header
+/// is replaced with a fresh v2 header and the existing entries' offsets
+/// are re-based onto payload_base 16 (the dead v1 front manifest stays
+/// inside the copied prefix, harmlessly superseded by the new footer
+/// manifest). The old archive is moved to `<archive>.lma.bak` first so
+/// an interrupted rename leaves both the old archive (`.bak`) and the
+/// partial new archive (`.new`) — no data loss on power-cut. Bible R27.
 ///
 /// `entry_path` is the relative path the new entry will carry inside
 /// the manifest (e.g. `"sub-02.edf"`). `source_path` is the file on
@@ -2128,28 +2385,52 @@ pub fn append_entry(
     force_overwrite: bool,
     keep_bak: bool,
 ) -> Result<ArchiveSummary, Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Read existing manifest + sniff archive layout.
-    let entries_old = read_manifest(archive_path)?;
+    // 1. Read existing index (v1/v2-aware) + sniff archive layout.
+    //
+    // v2 rewrite: append = copy [0 .. old payload_end] verbatim (the
+    // 16-byte header + all existing payloads, whose absolute positions
+    // and offsets are unchanged), then stream the new entry's payload
+    // immediately after, then write a fresh combined manifest + v2
+    // footer + sha. The old manifest + footer + sha (which lived AFTER
+    // the payloads in v2, or before them in v1) are dropped. The new
+    // entry's offset (relative to payload_base 16) is
+    // `old_payload_end - 16`.
     let archive_size = std::fs::metadata(archive_path)?.len();
     if archive_size < 48 {
         return Err(format!("lma append: archive too small ({archive_size} bytes, min 48)").into());
     }
-    // Header probe (re-parse the 16 bytes; we need manifest_len).
-    // ADR 0021 Tier 2 audit (N7): refuse to append over an archive
-    // whose manifest is stored uncompressed (top bit of manifest_len_
-    // field set). The rebuild path at the bottom of this function
-    // always writes a zstd-compressed manifest, which would silently
-    // drop the "zstd encode failed at pack time" recovery signal.
-    // Forcing the operator to repack the archive is the safer
-    // default than silently changing the manifest codec.
-    let manifest_len_old: u64 = {
+    let idx = {
         let mut f = BufReader::new(std::fs::File::open(archive_path)?);
-        let mut hdr = [0u8; 16];
-        f.read_exact(&mut hdr)?;
-        if &hdr[0..4] != LMA_MAGIC {
+        read_lma_index(&mut f, archive_size)?
+    };
+    let entries_old = idx.entries;
+    let payload_base_old = idx.payload_base; // 16 for v2, 16+mlen for v1
+    let payload_end_old = idx.payload_end;
+    // ADR 0021 Tier 2 audit (N7): refuse to append over an archive
+    // whose manifest is stored uncompressed (top bit of the manifest_
+    // len field set). The rebuild path below always writes a zstd-
+    // compressed manifest, which would silently drop the "zstd encode
+    // failed at pack time" recovery signal. The chokepoint index
+    // doesn't surface that flag, so re-read it directly: for v2 it's in
+    // the footer at [file-44 .. file-40]; for v1 it's in the header at
+    // [12..16].
+    {
+        let mut f = BufReader::new(std::fs::File::open(archive_path)?);
+        let mut magic = [0u8; 4];
+        f.read_exact(&mut magic)?;
+        let mlf: u32 = if &magic == LMA_MAGIC_V2 {
+            let foot_pos = archive_size - 32 - LMA_V2_FOOTER_LEN;
+            f.seek(SeekFrom::Start(foot_pos))?;
+            let mut footer = [0u8; LMA_V2_FOOTER_LEN as usize];
+            f.read_exact(&mut footer)?;
+            u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]])
+        } else if &magic == LMA_MAGIC {
+            let mut hdr_tail = [0u8; 12];
+            f.read_exact(&mut hdr_tail)?; // version(4) + n_entries(4) + manifest_len_field(4)
+            u32::from_le_bytes([hdr_tail[8], hdr_tail[9], hdr_tail[10], hdr_tail[11]])
+        } else {
             return Err("lma append: input is not an LMA archive (bad magic)".into());
-        }
-        let mlf = u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]);
+        };
         if (mlf & 0x8000_0000) != 0 {
             return Err(format!(
                 "lma append: source archive has uncompressed-manifest flag set \
@@ -2159,18 +2440,27 @@ pub fn append_entry(
             )
             .into());
         }
-        (mlf & 0x7FFF_FFFF) as u64
-    };
-    let payload_start_old = 16u64 + manifest_len_old;
-    let payload_end_old = archive_size - 32;
-    if payload_start_old > payload_end_old {
-        return Err(format!(
-            "lma append: corrupt archive — payload_start {} > payload_end {}",
-            payload_start_old, payload_end_old
-        )
-        .into());
     }
-    let payload_section_len = payload_end_old - payload_start_old;
+    // Verbatim-copy region = [0 .. old payload_end] = header + old
+    // payloads. New entry's offset (relative to payload_base 16) =
+    // old_payload_end - 16. (For v1 archives the front manifest sits
+    // inside this copied region; that's fine — the new v2 archive moves
+    // the manifest to the footer and re-derives all offsets relative to
+    // 16, so a v1→v2 append also normalises the layout.)
+    let copy_prefix_len = payload_end_old; // bytes [0 .. payload_end_old]
+    let new_entry_offset = payload_end_old.checked_sub(16).ok_or_else(
+        || -> Box<dyn std::error::Error + Send + Sync> {
+            format!(
+                "lma append: corrupt archive — payload_end {} < header 16",
+                payload_end_old
+            )
+            .into()
+        },
+    )?;
+    // For v1 sources, existing manifest offsets are relative to
+    // `payload_base_old` (16 + old manifest_len), NOT 16. Re-base them
+    // onto payload_base 16 so the rewritten v2 manifest is correct.
+    let v1_offset_shift = payload_base_old - 16;
 
     // 2. Build new entry. mtime/mode captured at append time.
     let resolved_entry_path = match entry_path {
@@ -2316,11 +2606,20 @@ pub fn append_entry(
         }
     };
 
-    // 3. Compose new entries list. New entry's `offset` =
-    //    payload_section_len (placed immediately after existing payloads).
+    // 3. Compose new entries list. Existing entries keep their absolute
+    //    byte positions (we copy the prefix verbatim), but the v2
+    //    manifest expresses offsets relative to payload_base 16. For a
+    //    v1 source the old offsets were relative to 16+manifest_len, so
+    //    re-base them by `v1_offset_shift` (0 for v2 sources). The new
+    //    entry sits at absolute `payload_end_old`, i.e. v2-relative
+    //    offset `new_entry_offset` (= payload_end_old - 16).
     let mut entries_new: Vec<ArchiveEntry> = entries_old
         .into_iter()
         .filter(|e| e.path != resolved_entry_path)
+        .map(|mut e| {
+            e.offset += v1_offset_shift;
+            e
+        })
         .collect();
     entries_new.push(ArchiveEntry {
         path: resolved_entry_path.clone(),
@@ -2328,7 +2627,7 @@ pub fn append_entry(
         compressed_size: compressed.len() as u64,
         method,
         sha256: new_sha,
-        offset: payload_section_len,
+        offset: new_entry_offset,
         mtime,
         mtime_nanos,
         mode,
@@ -2389,38 +2688,70 @@ pub fn append_entry(
     {
         let mut out = BufWriter::new(std::fs::File::create(&new_path)?);
         let mut hasher = Sha256::new();
-        // Header
-        let mut header = [0u8; 16];
-        header[0..4].copy_from_slice(LMA_MAGIC);
-        header[4..8].copy_from_slice(&LMA_VERSION.to_le_bytes());
-        header[8..12].copy_from_slice(&(entries_new.len() as u32).to_le_bytes());
-        header[12..16].copy_from_slice(&manifest_len_field_new.to_le_bytes());
-        out.write_all(&header)?;
-        hasher.update(header);
-        // New manifest
-        out.write_all(&manifest_payload)?;
-        hasher.update(&manifest_payload);
-        // Old payload section, byte-copied 8 MiB at a time
+        // v2 streaming layout:
+        //   [0 .. payload_end_old]  copied verbatim from the source
+        //                            (v2/v1 header + existing payloads)
+        //   new entry payload
+        //   manifest (zstd or raw)
+        //   12-byte footer (manifest_len_field | n_entries | LFT2)
+        //   32-byte sha over everything above.
+        //
+        // The verbatim prefix carries the SOURCE's header bytes. For a
+        // v2 source that's already an LMA2/version-2 header; for a v1
+        // source it's the LMA1 header + front manifest. Either way the
+        // bytes are reproduced unchanged, and the NEW footer/manifest we
+        // append below is what the reader uses — but a v1 prefix would
+        // leave an `LMA1` magic at offset 0, which the v2 chokepoint
+        // rejects. So when the source is v1, overwrite the leading
+        // 16-byte header region with a fresh v2 header before copying
+        // the rest. We detect v1 via `v1_offset_shift != 0` (v1 has a
+        // front manifest, so payload_base > 16).
+        let mut copy_from: u64 = 0;
+        if v1_offset_shift != 0 {
+            // Emit a fresh v2 header (16 bytes) in place of the v1
+            // header; the v1 front manifest that follows it (bytes
+            // 16..payload_base_old) becomes dead space inside the
+            // copied prefix but is harmless — the new footer manifest
+            // supersedes it and all offsets were re-based above.
+            let mut header = [0u8; 16];
+            header[0..4].copy_from_slice(LMA_MAGIC_V2);
+            header[4..8].copy_from_slice(&LMA_VERSION_V2.to_le_bytes());
+            // bytes 8..16 reserved, left zero
+            out.write_all(&header)?;
+            hasher.update(header);
+            copy_from = 16;
+        }
+        // Copy [copy_from .. payload_end_old] verbatim, 8 MiB at a time.
         {
             let mut src = BufReader::new(std::fs::File::open(archive_path)?);
-            src.seek(SeekFrom::Start(payload_start_old))?;
-            let mut remaining = payload_section_len;
+            src.seek(SeekFrom::Start(copy_from))?;
+            let mut remaining = copy_prefix_len - copy_from;
             let mut buf = vec![0u8; 8 * 1024 * 1024];
             while remaining > 0 {
                 let to_read = (remaining as usize).min(buf.len());
                 let n = src.read(&mut buf[..to_read])?;
                 if n == 0 {
-                    return Err("lma append: short read on old payload section".into());
+                    return Err("lma append: short read on old prefix (header + payloads)".into());
                 }
                 out.write_all(&buf[..n])?;
                 hasher.update(&buf[..n]);
                 remaining -= n as u64;
             }
         }
-        // New entry payload
+        // New entry payload (sits at absolute payload_end_old).
         out.write_all(&compressed)?;
         hasher.update(&compressed);
-        // SHA-256 trailer
+        // New manifest.
+        out.write_all(&manifest_payload)?;
+        hasher.update(&manifest_payload);
+        // v2 footer (12 bytes).
+        let mut footer = [0u8; LMA_V2_FOOTER_LEN as usize];
+        footer[0..4].copy_from_slice(&manifest_len_field_new.to_le_bytes());
+        footer[4..8].copy_from_slice(&(entries_new.len() as u32).to_le_bytes());
+        footer[8..12].copy_from_slice(LMA_FOOT_MAGIC);
+        out.write_all(&footer)?;
+        hasher.update(footer);
+        // SHA-256 trailer over [0 .. footer].
         let archive_hash = hasher.finalize();
         out.write_all(&archive_hash)?;
         out.flush()?;
@@ -2604,104 +2935,34 @@ pub fn unpack_archive(
         }
     }
 
-    // Parse header
-    f.seek(SeekFrom::Start(0))?;
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != LMA_MAGIC {
-        // Check for Unicode BOM
-        if magic[0] == 0xEF && magic[1] == 0xBB && magic[2] == 0xBF {
-            return Err(
-                "File starts with UTF-8 BOM — not a valid LMA archive. Strip the BOM.".into(),
-            );
+    // BOM sniff: surface the friendlier "strip the BOM" diagnostic
+    // before the generic chokepoint error. The chokepoint already
+    // rejects non-LMA magic, but its message doesn't single out BOMs.
+    {
+        f.seek(SeekFrom::Start(0))?;
+        let mut magic = [0u8; 4];
+        f.read_exact(&mut magic)?;
+        if &magic != LMA_MAGIC && &magic != LMA_MAGIC_V2 {
+            if magic[0] == 0xEF && magic[1] == 0xBB && magic[2] == 0xBF {
+                return Err(
+                    "File starts with UTF-8 BOM — not a valid LMA archive. Strip the BOM."
+                        .into(),
+                );
+            }
+            if (magic[0] == 0xFF && magic[1] == 0xFE) || (magic[0] == 0xFE && magic[1] == 0xFF) {
+                return Err("File starts with UTF-16 BOM — not a valid LMA archive.".into());
+            }
         }
-        if (magic[0] == 0xFF && magic[1] == 0xFE) || (magic[0] == 0xFE && magic[1] == 0xFF) {
-            return Err("File starts with UTF-16 BOM — not a valid LMA archive.".into());
-        }
-        return Err(format!("Not an LMA archive (magic: {:?})", magic).into());
     }
 
-    let mut buf4 = [0u8; 4];
-    f.read_exact(&mut buf4)?;
-    let version = u32::from_le_bytes(buf4);
-    if version > LMA_VERSION {
-        return Err(format!(
-            "LMA version {} not supported (max {})",
-            version, LMA_VERSION
-        )
-        .into());
-    }
-
-    f.read_exact(&mut buf4)?;
-    let _n_entries = u32::from_le_bytes(buf4);
-
-    f.read_exact(&mut buf4)?;
-    let manifest_len_field = u32::from_le_bytes(buf4);
-    // Top bit = "manifest stored uncompressed" (cascade fallback when
-    // ZSTD failed at archive time — see archive_directory).
-    let manifest_uncompressed = (manifest_len_field & 0x8000_0000) != 0;
-    let manifest_len = (manifest_len_field & 0x7FFF_FFFF) as usize;
-
-    // Audit-2026-05-11 Fix-#7: bound BOTH uncompressed AND compressed
-    // manifest_len before the alloc. Previously only the uncompressed
-    // path was bounded; the compressed path allowed an attacker to set
-    // manifest_len up to the full u31 range (2 GB) and force a 2 GB
-    // malloc before any decompress-side check. The compressed manifest
-    // ceiling is much smaller than the decompressed ceiling because
-    // real manifests compress well — 16 MB compressed is far more than
-    // any realistic input would produce.
-    const MAX_COMPRESSED_MANIFEST_SIZE: usize = 16 * 1024 * 1024;
-    let alloc_cap = if manifest_uncompressed {
-        MAX_MANIFEST_SIZE
-    } else {
-        MAX_COMPRESSED_MANIFEST_SIZE
-    };
-    if manifest_len > alloc_cap {
-        return Err(format!(
-            "Manifest length {} (uncompressed={}) exceeds cap {} \
-             — refusing to allocate (likely malicious or corrupt archive)",
-            manifest_len, manifest_uncompressed, alloc_cap,
-        )
-        .into());
-    }
-
-    // Read manifest payload. If uncompressed-flag is set, treat the
-    // bytes as raw JSON; otherwise zstd-decompress (with bomb guard).
-    let mut manifest_payload = vec![0u8; manifest_len];
-    f.read_exact(&mut manifest_payload)?;
-    let manifest_raw = if manifest_uncompressed {
-        eprintln!(
-            "  ARCHIVE NOTE: manifest stored uncompressed (zstd cascade \
-             fallback fired during archive write)."
-        );
-        manifest_payload
-    } else {
-        decode_zstd_bounded(&manifest_payload, MAX_MANIFEST_SIZE, "manifest")?
-    };
-    if manifest_raw.len() > MAX_MANIFEST_SIZE {
-        return Err(format!(
-            "Manifest too large after decompression ({} bytes, max {})",
-            manifest_raw.len(),
-            MAX_MANIFEST_SIZE
-        )
-        .into());
-    }
-    let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_raw)?;
-
-    // Parse entries
-    let entries = parse_manifest_entries(&manifest_json)?;
-
-    // Payload section starts at offset 16 + manifest_len
-    let payload_start = 16u64 + manifest_len as u64;
-    let payload_end = file_size.saturating_sub(32);
-
-    if payload_start > payload_end {
-        return Err(format!(
-            "Corrupt archive: payload start ({}) exceeds file size ({})",
-            payload_start, file_size
-        )
-        .into());
-    }
+    // Single dispatch chokepoint: v1/v2 layout + parsed entries +
+    // payload bounds. `read_lma_index` seeks internally, so the prior
+    // verify-pass full read doesn't disturb it.
+    let idx = read_lma_index(&mut f, file_size)?;
+    let entries = idx.entries;
+    let payload_start = idx.payload_base;
+    let payload_end = idx.payload_end;
+    let directories = idx.directories;
 
     std::fs::create_dir_all(output_dir)?;
 
@@ -2983,16 +3244,14 @@ pub fn unpack_archive(
     }
 
     // Restore directory modification times (must happen AFTER all files are written,
-    // because writing files into a directory updates its mtime)
-    if let Some(dir_arr) = manifest_json.get("directories").and_then(|v| v.as_array()) {
+    // because writing files into a directory updates its mtime). The
+    // `directories` list comes from the chokepoint index (manifest's
+    // `directories` array), so this works identically for v1 + v2.
+    {
         // Process deepest directories first so parent mtimes aren't overwritten
-        let mut dir_entries: Vec<(&str, u64)> = dir_arr
+        let mut dir_entries: Vec<(&str, u64)> = directories
             .iter()
-            .filter_map(|d| {
-                let path = d.get("path")?.as_str()?;
-                let mtime = d.get("mtime")?.as_u64()?;
-                Some((path, mtime))
-            })
+            .map(|(path, mtime)| (path.as_str(), *mtime))
             .collect();
         dir_entries.sort_by(|a, b| b.0.len().cmp(&a.0.len())); // deepest first
 
@@ -3070,72 +3329,13 @@ pub fn read_entry(
     let mut f = BufReader::new(std::fs::File::open(archive_path)?);
     let file_size = std::fs::metadata(archive_path)?.len();
 
-    if file_size < 48 {
-        return Err(format!(
-            "Archive too small ({} bytes, minimum 48): {}",
-            file_size,
-            archive_path.display()
-        )
-        .into());
-    }
-
-    // Header: [4 magic][4 version][4 n_entries][4 manifest_len_field]
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != LMA_MAGIC {
-        return Err(format!("Not an LMA archive (magic: {:?})", magic).into());
-    }
-
-    let mut buf4 = [0u8; 4];
-    f.read_exact(&mut buf4)?;
-    let version = u32::from_le_bytes(buf4);
-    if version > LMA_VERSION {
-        return Err(format!(
-            "LMA version {} not supported (max {})",
-            version, LMA_VERSION
-        )
-        .into());
-    }
-
-    f.read_exact(&mut buf4)?; // n_entries — derivable from manifest
-    f.read_exact(&mut buf4)?;
-    let manifest_len_field = u32::from_le_bytes(buf4);
-    let manifest_uncompressed = (manifest_len_field & 0x8000_0000) != 0;
-    let manifest_len = (manifest_len_field & 0x7FFF_FFFF) as usize;
-
-    // Same alloc cap as unpack_archive (Fix-#7).
-    const MAX_COMPRESSED_MANIFEST_SIZE: usize = 16 * 1024 * 1024;
-    let alloc_cap = if manifest_uncompressed {
-        MAX_MANIFEST_SIZE
-    } else {
-        MAX_COMPRESSED_MANIFEST_SIZE
-    };
-    if manifest_len > alloc_cap {
-        return Err(format!(
-            "Manifest length {} (uncompressed={}) exceeds cap {} \
-             — refusing to allocate",
-            manifest_len, manifest_uncompressed, alloc_cap,
-        )
-        .into());
-    }
-
-    let mut manifest_payload = vec![0u8; manifest_len];
-    f.read_exact(&mut manifest_payload)?;
-    let manifest_raw = if manifest_uncompressed {
-        manifest_payload
-    } else {
-        decode_zstd_bounded(&manifest_payload, MAX_MANIFEST_SIZE, "manifest")?
-    };
-    if manifest_raw.len() > MAX_MANIFEST_SIZE {
-        return Err(format!(
-            "Manifest too large after decompression ({} bytes, max {})",
-            manifest_raw.len(),
-            MAX_MANIFEST_SIZE
-        )
-        .into());
-    }
-    let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_raw)?;
-    let entries = parse_manifest_entries(&manifest_json)?;
+    // Single dispatch chokepoint: resolves v1/v2 layout, returns parsed
+    // entries + payload bounds. payload_base + entry.offset = absolute
+    // byte position of the entry's payload.
+    let idx = read_lma_index(&mut f, file_size)?;
+    let entries = idx.entries;
+    let payload_start = idx.payload_base;
+    let payload_end = idx.payload_end;
 
     let entry = entries.iter().find(|e| e.path == entry_name).ok_or_else(
         || -> Box<dyn std::error::Error + Send + Sync> {
@@ -3149,8 +3349,6 @@ pub fn read_entry(
     )?;
 
     // Payload section bounds (same math as unpack_archive).
-    let payload_start = 16u64 + manifest_len as u64;
-    let payload_end = file_size.saturating_sub(32);
     let payload_section_size = payload_end.checked_sub(payload_start).ok_or_else(
         || -> Box<dyn std::error::Error + Send + Sync> {
             "archive payload_start > payload_end (underflow)".into()
@@ -3249,66 +3447,11 @@ pub fn read_entry_decoded(
     // manifest so we know which tier the entry sits on.
     let mut f = BufReader::new(std::fs::File::open(archive_path)?);
     let file_size = std::fs::metadata(archive_path)?.len();
-    if file_size < 48 {
-        return Err(format!(
-            "Archive too small ({} bytes, minimum 48): {}",
-            file_size,
-            archive_path.display()
-        )
-        .into());
-    }
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != LMA_MAGIC {
-        return Err(format!("Not an LMA archive (magic: {:?})", magic).into());
-    }
-    let mut buf4 = [0u8; 4];
-    f.read_exact(&mut buf4)?;
-    let version = u32::from_le_bytes(buf4);
-    if version > LMA_VERSION {
-        return Err(format!(
-            "LMA version {} not supported (max {})",
-            version, LMA_VERSION
-        )
-        .into());
-    }
-    f.read_exact(&mut buf4)?; // n_entries
-    f.read_exact(&mut buf4)?;
-    let manifest_len_field = u32::from_le_bytes(buf4);
-    let manifest_uncompressed = (manifest_len_field & 0x8000_0000) != 0;
-    let manifest_len = (manifest_len_field & 0x7FFF_FFFF) as usize;
-
-    const MAX_COMPRESSED_MANIFEST_SIZE: usize = 16 * 1024 * 1024;
-    let alloc_cap = if manifest_uncompressed {
-        MAX_MANIFEST_SIZE
-    } else {
-        MAX_COMPRESSED_MANIFEST_SIZE
-    };
-    if manifest_len > alloc_cap {
-        return Err(format!(
-            "Manifest length {} (uncompressed={}) exceeds cap {} \
-             — refusing to allocate",
-            manifest_len, manifest_uncompressed, alloc_cap,
-        )
-        .into());
-    }
-    let mut manifest_payload = vec![0u8; manifest_len];
-    f.read_exact(&mut manifest_payload)?;
-    let manifest_raw = if manifest_uncompressed {
-        manifest_payload
-    } else {
-        decode_zstd_bounded(&manifest_payload, MAX_MANIFEST_SIZE, "manifest")?
-    };
-    if manifest_raw.len() > MAX_MANIFEST_SIZE {
-        return Err(format!(
-            "Manifest too large after decompression ({} bytes, max {})",
-            manifest_raw.len(),
-            MAX_MANIFEST_SIZE
-        )
-        .into());
-    }
-    let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_raw)?;
-    let entries = parse_manifest_entries(&manifest_json)?;
+    // Single dispatch chokepoint: v1/v2 layout + parsed entries.
+    let idx = read_lma_index(&mut f, file_size)?;
+    let entries = idx.entries;
+    let payload_start = idx.payload_base;
+    let payload_end = idx.payload_end;
     let entry = entries.iter().find(|e| e.path == entry_name).ok_or_else(
         || -> Box<dyn std::error::Error + Send + Sync> {
             format!(
@@ -3319,8 +3462,6 @@ pub fn read_entry_decoded(
             .into()
         },
     )?;
-    let payload_start = 16u64 + manifest_len as u64;
-    let payload_end = file_size.saturating_sub(32);
     let payload_section_size = payload_end.checked_sub(payload_start).ok_or_else(
         || -> Box<dyn std::error::Error + Send + Sync> {
             "archive payload_start > payload_end (underflow)".into()
@@ -3503,74 +3644,13 @@ fn build_manifest_json(
 fn read_manifest(
     archive_path: &Path,
 ) -> Result<Vec<ArchiveEntry>, Box<dyn std::error::Error + Send + Sync>> {
+    // Thin wrapper over the single dispatch chokepoint. `list_archive`,
+    // `extract_entry`, and `append_entry` all source their entries here,
+    // so routing through `read_lma_index` makes all three v2-correct for
+    // free (they only need the parsed entries, not the payload bounds).
     let mut f = BufReader::new(std::fs::File::open(archive_path)?);
     let file_size = std::fs::metadata(archive_path)?.len();
-
-    if file_size < 48 {
-        return Err(format!(
-            "Archive too small ({} bytes, minimum 48): {}",
-            file_size,
-            archive_path.display()
-        )
-        .into());
-    }
-
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != LMA_MAGIC {
-        return Err(format!("Not an LMA archive (magic: {:?})", magic).into());
-    }
-
-    let mut buf4 = [0u8; 4];
-    f.read_exact(&mut buf4)?; // version
-    let version = u32::from_le_bytes(buf4);
-    if version > LMA_VERSION {
-        return Err(format!("LMA version {} not supported", version).into());
-    }
-
-    f.read_exact(&mut buf4)?; // n_entries
-    f.read_exact(&mut buf4)?; // manifest_len_field
-    let manifest_len_field = u32::from_le_bytes(buf4);
-    let manifest_uncompressed = (manifest_len_field & 0x8000_0000) != 0;
-    let manifest_len = (manifest_len_field & 0x7FFF_FFFF) as usize;
-
-    // Audit-2026-05-11 Fix-#7: same compressed + uncompressed alloc cap
-    // as the extract path. 16 MB compressed manifest ceiling, 256 MB
-    // uncompressed.
-    const MAX_COMPRESSED_MANIFEST_SIZE: usize = 16 * 1024 * 1024;
-    let alloc_cap = if manifest_uncompressed {
-        MAX_MANIFEST_SIZE
-    } else {
-        MAX_COMPRESSED_MANIFEST_SIZE
-    };
-    if manifest_len > alloc_cap {
-        return Err(format!(
-            "Manifest length {} (uncompressed={}) exceeds cap {} \
-             — refusing to allocate",
-            manifest_len, manifest_uncompressed, alloc_cap,
-        )
-        .into());
-    }
-
-    let mut manifest_payload = vec![0u8; manifest_len];
-    f.read_exact(&mut manifest_payload)?;
-
-    let manifest_raw = if manifest_uncompressed {
-        manifest_payload
-    } else {
-        decode_zstd_bounded(&manifest_payload, MAX_MANIFEST_SIZE, "manifest")?
-    };
-    if manifest_raw.len() > MAX_MANIFEST_SIZE {
-        return Err(format!(
-            "Manifest too large after decompression ({} bytes, max {})",
-            manifest_raw.len(),
-            MAX_MANIFEST_SIZE
-        )
-        .into());
-    }
-    let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_raw)?;
-
-    parse_manifest_entries(&manifest_json)
+    Ok(read_lma_index(&mut f, file_size)?.entries)
 }
 
 fn parse_manifest_entries(
@@ -4237,5 +4317,315 @@ mod tests {
         // Actual window after rate scaling: 10000 * 100 / 250 = 4000.
         let actual = (ws as f64 * 100.0 / 250.0).ceil() as usize;
         assert_eq!(actual, 4000);
+    }
+
+    // ─── LMA v2 streaming (footer/EOCD) end-to-end roundtrip ────────
+    //
+    // Packs a tiny tree (empty file, binary file, deep/long-path text
+    // file) into a v2 archive and exercises every reader through the
+    // chokepoint: header magic/version, list_archive (untruncated
+    // paths), read_entry (byte-equal), unpack_archive (byte-equal
+    // tree), no leftover `.partial`, and an explicit sha-trailer check
+    // over [0 .. len-32].
+    #[test]
+    fn v2_pack_list_read_unpack_roundtrip() {
+        let src = tempfile::tempdir().unwrap();
+
+        // 1) empty file
+        let empty_rel = "empty.dat";
+        std::fs::write(src.path().join(empty_rel), b"").unwrap();
+
+        // 2) binary file (varied bytes, not just a constant)
+        let bin_rel = "sub/data.bin";
+        let bin_content: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        std::fs::create_dir_all(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join(bin_rel), &bin_content).unwrap();
+
+        // 3) text file at a deep, long relative path (> 60 chars total).
+        //    The leaf filename alone is > 60 chars to catch any
+        //    fixed-width path truncation in the manifest roundtrip.
+        let deep_rel =
+            "00_epilepsy/aaaa/s001/02_tcp_le/rec_long_name_over_sixty_chars_total.txt";
+        assert!(
+            deep_rel.len() > 60,
+            "deep path must exceed 60 chars to exercise truncation; got {}",
+            deep_rel.len()
+        );
+        let deep_content = b"col1,col2,col3\n1.0,2.0,3.0\nseizure,onset,offset\n";
+        let deep_abs = src.path().join(deep_rel);
+        std::fs::create_dir_all(deep_abs.parent().unwrap()).unwrap();
+        std::fs::write(&deep_abs, deep_content).unwrap();
+
+        // Pack to a v2 .lma. Signature: (input_dir, output_path,
+        // zstd_level, verbose, progress_fn).
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive = out_dir.path().join("roundtrip.lma");
+        let summary = pack_archive(src.path(), &archive, 9, false, None).unwrap();
+        assert_eq!(summary.n_files, 3, "expected 3 entries packed");
+
+        // Header is v2: magic "LMA2", version u32 LE = 2.
+        let raw = std::fs::read(&archive).unwrap();
+        assert!(raw.len() >= 48, "archive too small");
+        assert_eq!(&raw[0..4], LMA_MAGIC_V2, "header magic must be LMA2");
+        assert_eq!(
+            u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+            LMA_VERSION_V2,
+            "header version must be 2"
+        );
+
+        // list_archive returns all 3 FULL paths, untruncated.
+        let entries = list_archive(&archive).unwrap();
+        assert_eq!(entries.len(), 3);
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&empty_rel), "empty path missing: {:?}", paths);
+        assert!(paths.contains(&bin_rel), "bin path missing: {:?}", paths);
+        assert!(
+            paths.contains(&deep_rel),
+            "deep/long path was truncated or missing: {:?}",
+            paths
+        );
+
+        // read_entry returns byte-equal source bytes for each.
+        assert_eq!(read_entry(&archive, empty_rel).unwrap(), b"");
+        assert_eq!(read_entry(&archive, bin_rel).unwrap(), bin_content);
+        assert_eq!(
+            read_entry(&archive, deep_rel).unwrap(),
+            deep_content.to_vec()
+        );
+
+        // extract_entry (separate reader: v2 seek = payload_base+offset,
+        // bounded against payload_end) writes a byte-equal file for the
+        // deep/long-path entry.
+        let extracted = out_dir.path().join("extracted_deep.txt");
+        let n = extract_entry(&archive, deep_rel, &extracted).unwrap();
+        assert_eq!(n as usize, deep_content.len());
+        assert_eq!(
+            std::fs::read(&extracted).unwrap(),
+            deep_content.to_vec(),
+            "extract_entry produced non-byte-equal output on v2"
+        );
+
+        // unpack_archive reproduces all 3 files byte-equal (verify=true
+        // also exercises the v2-agnostic archive-level sha pass).
+        let dst = tempfile::tempdir().unwrap();
+        let unpack = unpack_archive(&archive, dst.path(), true, false, None).unwrap();
+        assert_eq!(unpack.n_files, 3);
+        assert_eq!(std::fs::read(dst.path().join(empty_rel)).unwrap(), b"");
+        assert_eq!(std::fs::read(dst.path().join(bin_rel)).unwrap(), bin_content);
+        assert_eq!(
+            std::fs::read(dst.path().join(deep_rel)).unwrap(),
+            deep_content.to_vec()
+        );
+
+        // No `.partial` staging file lingers next to the output.
+        let partial = {
+            let mut s = archive.as_os_str().to_os_string();
+            s.push(".partial");
+            std::path::PathBuf::from(s)
+        };
+        assert!(
+            !partial.exists(),
+            "leftover .partial staging file at {}",
+            partial.display()
+        );
+
+        // Explicit sha-trailer check: sha256 over [0 .. len-32] must
+        // equal the trailing 32 bytes. (Independent of unpack's verify.)
+        let (body, trailer) = raw.split_at(raw.len() - 32);
+        let computed = {
+            let mut h = Sha256::new();
+            h.update(body);
+            h.finalize()
+        };
+        assert_eq!(
+            computed.as_slice(),
+            trailer,
+            "v2 sha trailer over [0..len-32] does not validate"
+        );
+    }
+
+    // v2 append roundtrip: append a 4th entry to a v2 archive, then
+    // confirm both the original three and the appended entry read back
+    // byte-equal and the result is still a valid v2 archive with a
+    // self-consistent sha trailer.
+    #[test]
+    fn v2_append_then_readback() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.bin"), [0x11u8; 100]).unwrap();
+        std::fs::write(src.path().join("b.bin"), [0x22u8; 200]).unwrap();
+        std::fs::write(src.path().join("c.bin"), [0x33u8; 300]).unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive = out_dir.path().join("app.lma");
+        pack_archive(src.path(), &archive, 9, false, None).unwrap();
+
+        // Source file for the appended entry.
+        let appended = out_dir.path().join("d_source.bin");
+        let d_content: Vec<u8> = (0u8..=255).cycle().take(1234).collect();
+        std::fs::write(&appended, &d_content).unwrap();
+
+        let summary = append_entry(
+            &archive,
+            &appended,
+            Some("nested/d.bin"),
+            9,
+            false,
+            false, // keep_bak=false so no .bak lingers
+        )
+        .unwrap();
+        assert_eq!(summary.n_files, 4, "append should yield 4 entries");
+
+        // Still a v2 archive.
+        let raw = std::fs::read(&archive).unwrap();
+        assert_eq!(&raw[0..4], LMA_MAGIC_V2);
+        assert_eq!(
+            u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+            LMA_VERSION_V2
+        );
+
+        // All four entries read back byte-equal — proves the existing
+        // payload offsets stayed valid AND the new entry landed right.
+        assert_eq!(read_entry(&archive, "a.bin").unwrap(), vec![0x11u8; 100]);
+        assert_eq!(read_entry(&archive, "b.bin").unwrap(), vec![0x22u8; 200]);
+        assert_eq!(read_entry(&archive, "c.bin").unwrap(), vec![0x33u8; 300]);
+        assert_eq!(read_entry(&archive, "nested/d.bin").unwrap(), d_content);
+
+        // sha trailer self-consistent after the rewrite.
+        let (body, trailer) = raw.split_at(raw.len() - 32);
+        let mut h = Sha256::new();
+        h.update(body);
+        assert_eq!(h.finalize().as_slice(), trailer, "v2 append sha invalid");
+
+        // unpack reproduces the tree byte-equal too.
+        let dst = tempfile::tempdir().unwrap();
+        unpack_archive(&archive, dst.path(), true, false, None).unwrap();
+        assert_eq!(std::fs::read(dst.path().join("a.bin")).unwrap(), vec![0x11u8; 100]);
+        assert_eq!(std::fs::read(dst.path().join("nested/d.bin")).unwrap(), d_content);
+    }
+
+    /// Hand-build a legacy v1 archive (front manifest) so the v1 read
+    /// path and the v1→v2 append branch can be exercised even though no
+    /// v1 writer remains in-tree. Returns the on-disk path inside `dir`.
+    /// v1 layout: header(16) | manifest(zstd) | payloads | sha256(32).
+    fn build_v1_archive(dir: &std::path::Path, files: &[(&str, Vec<u8>)]) -> std::path::PathBuf {
+        // Store all entries verbatim (Method::Store) — offsets are
+        // relative to the v1 payload_base (16 + manifest_len).
+        let mut entries: Vec<ArchiveEntry> = Vec::new();
+        let mut payloads: Vec<u8> = Vec::new();
+        let mut offset: u64 = 0;
+        for (path, content) in files {
+            let sha = sha256_hex(content);
+            entries.push(ArchiveEntry {
+                path: (*path).to_string(),
+                original_size: content.len() as u64,
+                compressed_size: content.len() as u64,
+                method: Method::Store,
+                sha256: sha,
+                offset,
+                mtime: None,
+                mtime_nanos: None,
+                mode: None,
+                synthetic_from: None,
+            });
+            payloads.extend_from_slice(content);
+            offset += content.len() as u64;
+        }
+        let manifest_json = build_manifest_json(&entries, 9, &[]);
+        let manifest_payload = zstd::encode_all(manifest_json.as_bytes(), 9).unwrap();
+        let manifest_len_field = manifest_payload.len() as u32; // compressed, top bit 0
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(LMA_MAGIC); // "LMA1"
+        out.extend_from_slice(&LMA_VERSION.to_le_bytes()); // 1
+        out.extend_from_slice(&(entries.len() as u32).to_le_bytes()); // n_entries
+        out.extend_from_slice(&manifest_len_field.to_le_bytes());
+        out.extend_from_slice(&manifest_payload);
+        out.extend_from_slice(&payloads);
+        // sha256 over everything before the trailer.
+        let mut h = Sha256::new();
+        h.update(&out);
+        let digest = h.finalize();
+        out.extend_from_slice(&digest);
+
+        let path = dir.join("legacy_v1.lma");
+        std::fs::write(&path, &out).unwrap();
+        path
+    }
+
+    // The v1 read path: a hand-built LMA1 archive lists + reads back
+    // byte-equal through the chokepoint (proves the v1 positioning +
+    // front-manifest decode survive the conversion).
+    #[test]
+    fn v1_archive_reads_through_chokepoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = (0u8..=255).cycle().take(500).collect::<Vec<u8>>();
+        let b = vec![0x7Eu8; 321];
+        let archive = build_v1_archive(dir.path(), &[("x/one.bin", a.clone()), ("two.bin", b.clone())]);
+
+        let entries = list_archive(&archive).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(read_entry(&archive, "x/one.bin").unwrap(), a);
+        assert_eq!(read_entry(&archive, "two.bin").unwrap(), b);
+
+        let dst = tempfile::tempdir().unwrap();
+        unpack_archive(&archive, dst.path(), true, false, None).unwrap();
+        assert_eq!(std::fs::read(dst.path().join("x/one.bin")).unwrap(), a);
+        assert_eq!(std::fs::read(dst.path().join("two.bin")).unwrap(), b);
+    }
+
+    // The v1→v2 append branch (offset re-base + fresh v2 header +
+    // dead-v1-manifest-inside-payload). Append to a hand-built v1
+    // archive; assert the result is a valid v2 archive and EVERY entry
+    // (the two original v1 entries + the appended one) reads back
+    // byte-equal with a self-consistent sha trailer.
+    #[test]
+    fn v1_to_v2_append_rebases_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = (0u8..=255).cycle().take(500).collect::<Vec<u8>>();
+        let b = vec![0x7Eu8; 321];
+        let archive = build_v1_archive(dir.path(), &[("x/one.bin", a.clone()), ("two.bin", b.clone())]);
+
+        let appended = dir.path().join("d_source.bin");
+        let d_content: Vec<u8> = (0..999u32).map(|i| (i.wrapping_mul(37) & 0xFF) as u8).collect();
+        std::fs::write(&appended, &d_content).unwrap();
+
+        let summary = append_entry(
+            &archive,
+            &appended,
+            Some("deep/three.bin"),
+            9,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(summary.n_files, 3);
+
+        // Result is now v2.
+        let raw = std::fs::read(&archive).unwrap();
+        assert_eq!(&raw[0..4], LMA_MAGIC_V2, "v1→v2 append must emit an LMA2 header");
+        assert_eq!(
+            u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+            LMA_VERSION_V2
+        );
+
+        // Every entry reads back byte-equal — this is the load-bearing
+        // proof that the v1 offsets were correctly re-based onto
+        // payload_base 16.
+        assert_eq!(read_entry(&archive, "x/one.bin").unwrap(), a, "v1 entry one corrupted after append");
+        assert_eq!(read_entry(&archive, "two.bin").unwrap(), b, "v1 entry two corrupted after append");
+        assert_eq!(read_entry(&archive, "deep/three.bin").unwrap(), d_content, "appended entry corrupted");
+
+        // sha trailer self-consistent.
+        let (body, trailer) = raw.split_at(raw.len() - 32);
+        let mut h = Sha256::new();
+        h.update(body);
+        assert_eq!(h.finalize().as_slice(), trailer, "v1→v2 append sha invalid");
+
+        // unpack reproduces the full tree byte-equal.
+        let dst = tempfile::tempdir().unwrap();
+        unpack_archive(&archive, dst.path(), true, false, None).unwrap();
+        assert_eq!(std::fs::read(dst.path().join("x/one.bin")).unwrap(), a);
+        assert_eq!(std::fs::read(dst.path().join("two.bin")).unwrap(), b);
+        assert_eq!(std::fs::read(dst.path().join("deep/three.bin")).unwrap(), d_content);
     }
 }
