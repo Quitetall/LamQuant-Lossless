@@ -3424,6 +3424,122 @@ pub fn read_entry(
     Ok(data)
 }
 
+/// Batch ranged-header read: parse the LMA index ONCE, then for each
+/// requested name read only the first `n_bytes` of its payload.
+///
+/// Motivation (#229): callers that only need a recording's LML
+/// container *header* (e.g. `duration_s` → training window count) were
+/// going through `read_entry`, which (a) re-parses the whole footer
+/// manifest on every call (~130 ms on the 70 K-entry TUEG LMA) and
+/// (b) reads the ENTIRE entry (~6.67 MB) just to look at its first few
+/// KB. On TUEG that is ~700 GB of reads + hours of repeated manifest
+/// parsing. This helper amortises the index parse across all requested
+/// names (one `read_lma_index` call) and reads only a prefix per entry.
+///
+/// Prefix validity: a prefix read is only meaningful for entries stored
+/// **raw** — `Method::Lml` (raw LML packet bytes) and `Method::Store`
+/// (stored uncompressed). For `Method::Zstd` the first `n_bytes` are a
+/// truncated zstd stream that cannot be partially decoded into a usable
+/// container, so those entries return `None` and the caller must fall
+/// back to the full `read_entry`/`read_entry_decoded` path.
+///
+/// Returns a `Vec` aligned 1:1 with `names`:
+///   - `Some(bytes)` — entry found, raw method, prefix read OK. `bytes`
+///     length is `min(n_bytes, entry.compressed_size)`. The caller is
+///     responsible for tolerating a too-short prefix (e.g. an LML
+///     container whose metadata JSON exceeds `n_bytes`): parse the
+///     prefix and, on a truncation error, fall back to the full read.
+///   - `None` — name not in the manifest, OR a compressed
+///     (`Method::Zstd`) entry, OR an out-of-bounds / oversized entry.
+///     The caller falls back to the full read in every `None` case.
+///
+/// This function is purely additive and does NOT alter the behaviour of
+/// `read_lma_index`, `read_entry`, or `read_entry_decoded`. It performs
+/// NO SHA verification (it returns a partial payload by design); callers
+/// that need integrity-checked full bytes must use `read_entry`.
+pub fn read_entry_headers<R: Read + Seek>(
+    reader: &mut R,
+    file_size: u64,
+    names: &[String],
+    n_bytes: usize,
+) -> Result<Vec<Option<Vec<u8>>>, Box<dyn std::error::Error + Send + Sync>> {
+    // Parse the on-disk index exactly ONCE for the whole batch.
+    let idx = read_lma_index(reader, file_size)?;
+    let payload_start = idx.payload_base;
+    let payload_end = idx.payload_end;
+    let payload_section_size = payload_end.checked_sub(payload_start).ok_or_else(
+        || -> Box<dyn std::error::Error + Send + Sync> {
+            "archive payload_start > payload_end (underflow)".into()
+        },
+    )?;
+
+    // Name → entry lookup so each requested name is O(1) instead of a
+    // linear scan over the (potentially 70 K-entry) manifest.
+    let mut by_name: std::collections::HashMap<&str, &ArchiveEntry> =
+        std::collections::HashMap::with_capacity(idx.entries.len());
+    for e in &idx.entries {
+        by_name.insert(e.path.as_str(), e);
+    }
+
+    let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(entry) = by_name.get(name.as_str()).copied() else {
+            out.push(None);
+            continue;
+        };
+        // Only raw-stored tiers can be prefix-read meaningfully.
+        if !matches!(entry.method, Method::Lml | Method::Store) {
+            out.push(None);
+            continue;
+        }
+        // Reject entries whose declared bounds fall outside the payload
+        // section (corrupt manifest) — same guard as read_entry.
+        if entry.offset.saturating_add(entry.compressed_size) > payload_section_size {
+            out.push(None);
+            continue;
+        }
+        // How many bytes to actually read: the smaller of the caller's
+        // budget and the entry's stored size. `read_len` fits in usize
+        // because n_bytes is already usize and we min() against it.
+        let avail = entry.compressed_size.min(n_bytes as u64);
+        let read_len = avail as usize;
+        if read_len == 0 {
+            // Empty entry (or n_bytes == 0): nothing to read; hand back
+            // an empty buffer so the caller can decide (parse will fail
+            // and trigger fallback).
+            out.push(Some(Vec::new()));
+            continue;
+        }
+        if reader
+            .seek(SeekFrom::Start(payload_start + entry.offset))
+            .is_err()
+        {
+            out.push(None);
+            continue;
+        }
+        let mut buf = vec![0u8; read_len];
+        match reader.read_exact(&mut buf) {
+            Ok(()) => out.push(Some(buf)),
+            Err(_) => out.push(None),
+        }
+    }
+    Ok(out)
+}
+
+/// Path-based convenience wrapper over [`read_entry_headers`] that opens
+/// the archive, stats its size, and runs the batch in one call. Used by
+/// the PyO3 binding (`lma_entry_headers`). Additive — see
+/// `read_entry_headers` for semantics.
+pub fn read_entry_headers_path(
+    archive_path: &Path,
+    names: &[String],
+    n_bytes: usize,
+) -> Result<Vec<Option<Vec<u8>>>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut f = BufReader::new(std::fs::File::open(archive_path)?);
+    let file_size = std::fs::metadata(archive_path)?.len();
+    read_entry_headers(&mut f, file_size, names, n_bytes)
+}
+
 /// Like `read_entry`, but for `Method::Lml` entries the raw LML
 /// payload is transparently decoded back to the byte-identical
 /// EDF/BDF source via `decode_lml_to_edf`. The returned bytes match
@@ -4029,6 +4145,80 @@ mod tests {
 
         let lml_bytes = read_entry(archive.path(), "recording.lml").unwrap();
         assert_eq!(lml_bytes, fake_lml);
+    }
+
+    #[test]
+    fn read_entry_headers_prefix_matches_full_read_for_raw_tiers() {
+        // #229: batch ranged-header read. Build a tree with a Store
+        // (.lml) entry, a Zstd (.csv) entry, and a second Store (.lml)
+        // so the batch path is exercised with > 1 raw entry.
+        let src = tempfile::tempdir().unwrap();
+        let fake_lml: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let fake_lml2: Vec<u8> = (0u8..=255).rev().cycle().take(1000).collect();
+        std::fs::write(src.path().join("a.lml"), &fake_lml).unwrap();
+        std::fs::write(src.path().join("b.lml"), &fake_lml2).unwrap();
+        std::fs::write(src.path().join("notes.csv"), b"x,y,z\n9,8,7\n").unwrap();
+
+        let archive = tempfile::NamedTempFile::new().unwrap();
+        pack_archive(src.path(), archive.path(), 9, false, None).unwrap();
+
+        // Confirm tiers as expected.
+        let entries = list_archive(archive.path()).unwrap();
+        for e in &entries {
+            match e.path.as_str() {
+                "a.lml" | "b.lml" => assert_eq!(e.method, Method::Store),
+                "notes.csv" => assert_eq!(e.method, Method::Zstd),
+                other => panic!("unexpected entry {}", other),
+            }
+        }
+
+        let names = vec![
+            "a.lml".to_string(),
+            "notes.csv".to_string(),  // zstd -> None
+            "missing.lml".to_string(), // absent -> None
+            "b.lml".to_string(),
+        ];
+
+        // Generous prefix (>= every raw entry size).
+        let out = read_entry_headers_path(archive.path(), &names, 8192).unwrap();
+        assert_eq!(out.len(), 4);
+        // a.lml: full prefix == full read (n_bytes > size -> min == size).
+        assert_eq!(out[0].as_deref(), Some(fake_lml.as_slice()));
+        // notes.csv is zstd -> None (prefix of a zstd stream is useless).
+        assert!(out[1].is_none());
+        // missing entry -> None.
+        assert!(out[2].is_none());
+        // b.lml: full bytes back.
+        assert_eq!(out[3].as_deref(), Some(fake_lml2.as_slice()));
+
+        // Truncating prefix: 100 bytes -> exactly the first 100 bytes of
+        // the raw payload, which (Store tier) equals the original file.
+        let out_short = read_entry_headers_path(
+            archive.path(),
+            &["a.lml".to_string()],
+            100,
+        )
+        .unwrap();
+        assert_eq!(out_short[0].as_deref(), Some(&fake_lml[..100]));
+
+        // n_bytes == 0 -> empty buffer (caller-decides), not None.
+        let out_zero =
+            read_entry_headers_path(archive.path(), &["a.lml".to_string()], 0).unwrap();
+        assert_eq!(out_zero[0].as_deref(), Some(&[][..]));
+
+        // Index is parsed ONCE per call regardless of name count: a
+        // batch of all names returns aligned results.
+        let all: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+        let out_all = read_entry_headers_path(archive.path(), &all, 8192).unwrap();
+        assert_eq!(out_all.len(), all.len());
+    }
+
+    #[test]
+    fn read_entry_headers_rejects_corrupt_archive() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"shorty").unwrap(); // < 48 bytes
+        let r = read_entry_headers_path(tmp.path(), &["anything".to_string()], 8192);
+        assert!(r.is_err());
     }
 
     #[test]
