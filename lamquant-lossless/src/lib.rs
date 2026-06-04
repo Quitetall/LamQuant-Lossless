@@ -399,6 +399,63 @@ mod python {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    /// Batch ranged-header read across many entries in one LMA archive.
+    ///
+    /// Parses the archive index ONCE, then reads only the first
+    /// `n_bytes` of each named entry's payload — for raw-stored tiers
+    /// only (`lml` / `store`). Built for #229: getting each recording's
+    /// LML container header (e.g. `duration_s` for the training window
+    /// count) without reading the whole ~6.67 MB entry and without
+    /// re-parsing the 70 K-entry footer manifest per call.
+    ///
+    /// Returns a list aligned 1:1 with `names`:
+    ///   - `bytes` — entry found, raw tier, prefix read OK. Length is
+    ///     `min(n_bytes, entry compressed_size)`. May be a *truncated*
+    ///     container if the entry's header/metadata exceeds `n_bytes`;
+    ///     the caller must tolerate a parse failure and fall back to
+    ///     `lma_read_entry` for that name.
+    ///   - `None` — name not in the manifest, OR a compressed (`zstd`)
+    ///     entry (a prefix of a zstd stream isn't decodable), OR an
+    ///     out-of-bounds entry. The caller falls back to the full read.
+    ///
+    /// Performs NO SHA verification (it returns a partial payload by
+    /// design). Use `lma_read_entry` when you need integrity-checked
+    /// full bytes.
+    ///
+    /// Raises `IOError` on missing archive / read failure, `ValueError`
+    /// on a corrupt archive (bad magic / oversized manifest).
+    #[pyfunction]
+    fn lma_entry_headers<'py>(
+        py: Python<'py>,
+        archive_path: &str,
+        names: Vec<String>,
+        n_bytes: usize,
+    ) -> PyResult<Vec<Option<Bound<'py, PyBytes>>>> {
+        let results = crate::lma::read_entry_headers_path(
+            std::path::Path::new(archive_path),
+            &names,
+            n_bytes,
+        )
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Not an LMA archive")
+                || msg.contains("not supported")
+                || msg.contains("Manifest")
+                || msg.contains("exceeds")
+                || msg.contains("corrupt")
+                || msg.contains("too small")
+            {
+                pyo3::exceptions::PyValueError::new_err(msg)
+            } else {
+                pyo3::exceptions::PyIOError::new_err(msg)
+            }
+        })?;
+        Ok(results
+            .into_iter()
+            .map(|opt| opt.map(|b| PyBytes::new(py, &b)))
+            .collect())
+    }
+
     #[pymodule]
     pub fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(golomb_encode_dense, m)?)?;
@@ -414,6 +471,7 @@ mod python {
         m.add_function(wrap_pyfunction!(container_read_phys_f32, m)?)?;
         m.add_function(wrap_pyfunction!(container_metadata, m)?)?;
         m.add_function(wrap_pyfunction!(lma_read_entry, m)?)?;
+        m.add_function(wrap_pyfunction!(lma_entry_headers, m)?)?;
         Ok(())
     }
 }
