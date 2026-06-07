@@ -95,6 +95,13 @@ pub fn encode_lmqc(
             return Err(LmqcError::BadNamesLen);
         }
     }
+    // Names are '\n'-joined on the wire; a name containing '\n' would split
+    // into the wrong count on decode. Reject it (no real EEG label has one).
+    if let Some(nm) = names {
+        if nm.iter().any(|s| s.contains('\n')) {
+            return Err(LmqcError::BadNamesLen);
+        }
+    }
     let mut flags = 0u8;
     if coords.is_some() {
         flags |= FLAG_COORDS;
@@ -123,10 +130,12 @@ pub fn encode_lmqc(
     if let Some(nm) = names {
         let joined = nm.join("\n");
         let bytes = joined.as_bytes();
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        let len: u32 = bytes.len().try_into().map_err(|_| LmqcError::BadNamesLen)?;
+        buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(bytes);
     }
-    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    let plen: u32 = payload.len().try_into().map_err(|_| LmqcError::Truncated)?;
+    buf.extend_from_slice(&plen.to_le_bytes());
     buf.extend_from_slice(payload);
 
     let crc = crc32(&buf);
@@ -167,13 +176,21 @@ pub fn decode_lmqc(buf: &[u8]) -> Result<LmqcContainer, LmqcError> {
     let n = n_channels as usize;
     let end = buf.len() - 4; // exclude crc
 
+    // All offset arithmetic is checked: a crafted length field (near u32::MAX)
+    // must NOT wrap `off + len` past `end` and bypass the bound on 32-bit
+    // (firmware) targets. `bounded(off, len)` returns the validated end offset.
+    let bounded = |off: usize, len: usize| -> Result<usize, LmqcError> {
+        match off.checked_add(len) {
+            Some(v) if v <= end => Ok(v),
+            _ => Err(LmqcError::Truncated),
+        }
+    };
+
     let mut off = HEADER_SIZE;
     let mut coords = None;
     if flags & FLAG_COORDS != 0 {
-        let nbytes = n * 3 * 4;
-        if off + nbytes > end {
-            return Err(LmqcError::Truncated);
-        }
+        let nbytes = n.checked_mul(12).ok_or(LmqcError::Truncated)?; // 3 * f32
+        let stop = bounded(off, nbytes)?;
         let mut c = Vec::with_capacity(n * 3);
         for i in 0..n * 3 {
             c.push(f32::from_le_bytes([
@@ -184,36 +201,33 @@ pub fn decode_lmqc(buf: &[u8]) -> Result<LmqcContainer, LmqcError> {
             ]));
         }
         coords = Some(c);
-        off += nbytes;
+        off = stop;
     }
     let mut channels = None;
     if flags & FLAG_NAMES != 0 {
-        if off + 4 > end {
-            return Err(LmqcError::Truncated);
-        }
+        let after_len = bounded(off, 4)?;
         let nlen = rd_u32(buf, off) as usize;
-        off += 4;
-        if off + nlen > end {
-            return Err(LmqcError::Truncated);
-        }
-        let s = core::str::from_utf8(&buf[off..off + nlen]).map_err(|_| LmqcError::BadUtf8)?;
+        off = after_len;
+        let stop = bounded(off, nlen)?;
+        let s = core::str::from_utf8(&buf[off..stop]).map_err(|_| LmqcError::BadUtf8)?;
         let names: Vec<String> = if nlen == 0 {
             Vec::new()
         } else {
             s.split('\n').map(|x| x.to_string()).collect()
         };
+        // The names count MUST match n_channels (a crafted file could carry
+        // fewer names than the header claims, silently mismatching the montage).
+        if names.len() != n {
+            return Err(LmqcError::BadNamesLen);
+        }
         channels = Some(names);
-        off += nlen;
+        off = stop;
     }
-    if off + 4 > end {
-        return Err(LmqcError::Truncated);
-    }
+    let after_len = bounded(off, 4)?;
     let plen = rd_u32(buf, off) as usize;
-    off += 4;
-    if off + plen > end {
-        return Err(LmqcError::Truncated);
-    }
-    let payload = buf[off..off + plen].to_vec();
+    off = after_len;
+    let stop = bounded(off, plen)?;
+    let payload = buf[off..stop].to_vec();
 
     Ok(LmqcContainer {
         version,
@@ -296,5 +310,55 @@ mod tests {
     #[test]
     fn too_short_rejected() {
         assert_eq!(decode_lmqc(&[1, 2, 3]), Err(LmqcError::TooShort));
+    }
+
+    #[test]
+    fn newline_in_name_rejected() {
+        let names: Vec<String> = vec!["A".to_string(), "B\nC".to_string()];
+        assert_eq!(
+            encode_lmqc(2, 32, 79, 250, 2500, 0, None, Some(&names), &[]),
+            Err(LmqcError::BadNamesLen)
+        );
+    }
+
+    #[test]
+    fn names_only_and_coords_only_roundtrip() {
+        let names = names21();
+        let b1 = encode_lmqc(21, 32, 79, 250, 2500, 0, None, Some(&names), &[7]).unwrap();
+        let d1 = decode_lmqc(&b1).unwrap();
+        assert_eq!(d1.channels.as_ref().unwrap(), &names);
+        assert!(d1.coords.is_none());
+
+        let coords: Vec<f32> = vec![0.1; 63];
+        let b2 = encode_lmqc(21, 32, 79, 250, 2500, 0, Some(&coords), None, &[7]).unwrap();
+        let d2 = decode_lmqc(&b2).unwrap();
+        assert_eq!(d2.coords.as_ref().unwrap(), &coords);
+        assert!(d2.channels.is_none());
+    }
+
+    #[test]
+    fn crafted_names_count_mismatch_rejected() {
+        // Header claims 21 channels but the names blob holds only 1 → reject.
+        let one = vec!["solo".to_string()];
+        let mut buf = encode_lmqc(1, 32, 79, 250, 2500, 0, None, Some(&one), &[]).unwrap();
+        // patch n_channels (offset 8, u16 LE) from 1 → 21, fix CRC.
+        buf[8] = 21;
+        buf[9] = 0;
+        let crc = crc32(&buf[..buf.len() - 4]);
+        let n = buf.len();
+        buf[n - 4..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(decode_lmqc(&buf), Err(LmqcError::BadNamesLen));
+    }
+
+    #[test]
+    fn crafted_huge_len_does_not_panic() {
+        // A names length near u32::MAX must be rejected, not wrap+OOB.
+        let mut buf = encode_lmqc(1, 32, 79, 250, 2500, 0, None, Some(&vec!["x".to_string()]), &[]).unwrap();
+        // names-len prefix sits right after the 20-byte header → bytes [20..24].
+        buf[20..24].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        let crc = crc32(&buf[..buf.len() - 4]);
+        let n = buf.len();
+        buf[n - 4..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(decode_lmqc(&buf), Err(LmqcError::Truncated));
     }
 }
