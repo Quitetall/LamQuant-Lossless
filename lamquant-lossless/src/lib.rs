@@ -50,6 +50,7 @@ pub mod error;
 pub mod golomb;
 pub mod lifting;
 pub mod lml;
+pub mod lmqc;
 pub mod lpc;
 pub mod rans;
 
@@ -104,7 +105,7 @@ pub mod wasm;
 mod python {
     use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
     use pyo3::prelude::*;
-    use pyo3::types::{PyByteArray, PyBytes};
+    use pyo3::types::{PyByteArray, PyBytes, PyDict};
 
     fn extract_bytes(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
         if let Ok(b) = data.downcast::<PyBytes>() {
@@ -456,6 +457,60 @@ mod python {
             .collect())
     }
 
+    /// Write a channel-agnostic neural container (.lmq / LMQC) carrying the
+    /// per-recording montage so the decoder can reconstruct N channels
+    /// off-device. `coords`: flat row-major `[N*3]` f32 (NaN = unknown) or None;
+    /// `channels`: per-channel names or None; `payload`: encoded latent bytes;
+    /// `payload_kind`: 0 = fp16-latent (1 = FSQ tokens, reserved).
+    #[pyfunction]
+    #[pyo3(signature = (path, n_channels, latent_c, latent_t, sample_rate,
+                        window_samples, payload_kind, payload, coords=None, channels=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn write_ca_lmq(
+        path: &str,
+        n_channels: u16,
+        latent_c: u16,
+        latent_t: u16,
+        sample_rate: u16,
+        window_samples: u32,
+        payload_kind: u8,
+        payload: &[u8],
+        coords: Option<Vec<f32>>,
+        channels: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        let buf = crate::lmqc::encode_lmqc(
+            n_channels, latent_c, latent_t, sample_rate, window_samples,
+            payload_kind, coords.as_deref(), channels.as_deref(), payload,
+        )
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("LMQC encode: {:?}", e)))?;
+        std::fs::write(path, &buf)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    }
+
+    /// Read an LMQC `.lmq` container → dict with montage + payload. Verifies
+    /// magic + CRC. `coords` is a flat `[N*3]` list (or None); `channels` is a
+    /// `list[str]` (or None); `payload` is bytes (caller decodes per
+    /// `payload_kind`). Raises on corruption / bad magic / version.
+    #[pyfunction]
+    fn read_ca_lmq<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>> {
+        let buf = std::fs::read(path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let c = crate::lmqc::decode_lmqc(&buf)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("LMQC decode: {:?}", e)))?;
+        let d = PyDict::new(py);
+        d.set_item("version", c.version)?;
+        d.set_item("n_channels", c.n_channels)?;
+        d.set_item("latent_c", c.latent_c)?;
+        d.set_item("latent_t", c.latent_t)?;
+        d.set_item("sample_rate", c.sample_rate)?;
+        d.set_item("window_samples", c.window_samples)?;
+        d.set_item("payload_kind", c.payload_kind)?;
+        d.set_item("coords", c.coords)?; // Option<Vec<f32>> -> list[float] | None
+        d.set_item("channels", c.channels)?; // Option<Vec<String>> -> list[str] | None
+        d.set_item("payload", PyBytes::new(py, &c.payload))?;
+        Ok(d)
+    }
+
     #[pymodule]
     pub fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(golomb_encode_dense, m)?)?;
@@ -472,6 +527,8 @@ mod python {
         m.add_function(wrap_pyfunction!(container_metadata, m)?)?;
         m.add_function(wrap_pyfunction!(lma_read_entry, m)?)?;
         m.add_function(wrap_pyfunction!(lma_entry_headers, m)?)?;
+        m.add_function(wrap_pyfunction!(write_ca_lmq, m)?)?;
+        m.add_function(wrap_pyfunction!(read_ca_lmq, m)?)?;
         Ok(())
     }
 }
