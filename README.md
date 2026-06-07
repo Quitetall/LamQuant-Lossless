@@ -13,7 +13,7 @@ archived at Zenodo: [`10.5281/zenodo.20484969`](https://doi.org/10.5281/zenodo.2
 - TUEG v2.0.2 (1.76 TB, 70,831 EDF files): **2.287:1** compression ratio
 - CHB-MIT: **2.7229:1** (15.9% improvement over Chen et al.)
 - RP2350 Hazard3 (RISC-V, Verilator-measured): 0.627 Msa/s, **119× real-time**, CPI 1.071
-- Bit-exact roundtrip verified on 88,147 encode/decode operations across 13 corpora — zero failures
+- Bit-exact roundtrip verified on 88,147 encode/decode operations across 13 corpora and zero failures
 
 ## Pipeline
 
