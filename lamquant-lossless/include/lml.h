@@ -24,15 +24,43 @@
 #include <stddef.h>
 
 /**
- * Streaming CRC-32: feed multiple slices without concatenating.
- *
- * Usage:
- *     let mut state = CRC32_INIT;
- *     state = crc32_update(state, &slice_a);
- *     state = crc32_update(state, &slice_b);
- *     let crc = state ^ CRC32_INIT;
+ * Maximum bits per packed residual. zigzag(i64::MIN) yields a u64
+ * up to 2^64 - 1, which needs 64 bits. We cap at 63 because the
+ * LPC residual ceiling (`golomb::MAX_Q = 2^40`) is way smaller and
+ * 63 fits in a `u8` width-field with one bit reserved for a future
+ * extension. Any value requiring ≥ 64 bits is rejected.
  */
-#define CRC32_INIT 4294967295
+#define MAX_BIT_PACK_BITS 63
+
+/**
+ * Minimum bits per packed residual. Forced to 1 even when every
+ * sample is zero — the alternative is special-casing a zero-length
+ * payload which adds branchy decoder code for negligible savings.
+ */
+#define MIN_BIT_PACK_BITS 1
+
+#define LMQC_VERSION 1
+
+#define HEADER_SIZE 20
+
+#define FLAG_NAMES (1 << 0)
+
+#define FLAG_COORDS (1 << 1)
+
+#define PAYLOAD_FP16_LATENT 0
+
+#define PAYLOAD_FSQ_TOKENS 1
+
+/**
+ * Upper bound on the n_symbols a caller can request the decoder to
+ * produce. Bounds `Vec::with_capacity(n_symbols)` against attacker-
+ * supplied size so an adversarial Python client can't force an OOM
+ * abort by claiming billions of output symbols. EEG windows are
+ * bounded at ~2500 samples × ~32 channels × ~4 subbands ≈ 320 K
+ * max realistic n_symbols. 2^20 = 1 M is a generous defensive
+ * ceiling; legitimate calls stay well below it.
+ */
+#define MAX_RANS_SYMBOLS (1 << 20)
 
 /**
  * Fixed footer size in bytes. Pinned across the lifetime of `LMLFOOT1`;
@@ -44,6 +72,21 @@
  * Bytes per offset table entry.
  */
 #define ENTRY_SIZE 16
+
+#define ENC_VERSION 1
+
+#define ENC_NONCE_LEN 12
+
+#define ENC_HEADER_LEN ((8 + 1) + ENC_NONCE_LEN)
+
+#define KEY_LEN 32
+
+#define HMAC_TAG_LEN 32
+
+/**
+ * Magic + version + params length. Used by callers to size buffers.
+ */
+#define LmcryptHeader_SIZE 32
 
 /**
  * Maximum op_log lines retained in AppState. Older lines drop on push.

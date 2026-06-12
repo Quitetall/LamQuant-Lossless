@@ -231,11 +231,25 @@ impl SignalSourceReader for EeglabReader {
                     self.set_path.display()
                 ))
             })?;
-        let expected_bytes = meta.n_channels * meta.n_samples * 4;
+        // Checked multiply in u64: n_channels/n_samples come straight from
+        // the (untrusted) .set sidecar JSON with no upper bound, so the
+        // plain `usize` product could overflow and wrap to a SMALL value,
+        // sneaking past the `fdt_size < expected_bytes` guard below and
+        // letting the downstream per-channel alloc OOM/OOB. Overflow ->
+        // reject; otherwise the real product is cross-checked against the
+        // actual .fdt size, which bounds n_samples to what's on disk.
+        let expected_bytes = (meta.n_channels as u64)
+            .checked_mul(meta.n_samples as u64)
+            .and_then(|p| p.checked_mul(4))
+            .ok_or_else(|| {
+                LmlError::InvalidHeader(
+                    "eeglab: n_channels * n_samples * 4 overflows u64".into(),
+                )
+            })?;
         let fdt_size = std::fs::metadata(&fdt_path).map_err(LmlError::Io)?.len();
-        if fdt_size < expected_bytes as u64 {
+        if fdt_size < expected_bytes {
             return Err(LmlError::Truncated {
-                expected: expected_bytes,
+                expected: expected_bytes as usize,
                 actual: fdt_size as usize,
                 context: "eeglab .fdt",
             });

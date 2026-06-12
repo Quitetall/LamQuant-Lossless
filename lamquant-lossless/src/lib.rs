@@ -124,7 +124,9 @@ mod python {
         py: Python<'py>,
         coeffs: PyReadonlyArray1<'py, i64>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let slice = coeffs.as_slice().expect("contiguous array required");
+        let slice = coeffs.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(alloc::format!("array must be contiguous: {e}"))
+        })?;
         // ADR 0021: surface GolombError as PyValueError instead of
         // panic. Notebook callers see a typed Python error.
         let result = crate::golomb::encode_dense(slice).map_err(|e| {
@@ -156,9 +158,15 @@ mod python {
         start: PyReadonlyArray1<'py, i32>,
         m: u64,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let sym = symbols.as_slice().expect("contiguous");
-        let f = freq.as_slice().expect("contiguous");
-        let s = start.as_slice().expect("contiguous");
+        let sym = symbols.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(alloc::format!("array must be contiguous: {e}"))
+        })?;
+        let f = freq.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(alloc::format!("array must be contiguous: {e}"))
+        })?;
+        let s = start.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(alloc::format!("array must be contiguous: {e}"))
+        })?;
         // ADR 0021: surface RansError as PyValueError.
         let result = crate::rans::encode(sym, f, s, m)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(alloc::format!("{}", e)))?;
@@ -176,9 +184,15 @@ mod python {
         n_symbols: usize,
     ) -> PyResult<Bound<'py, PyArray1<i64>>> {
         let bytes = extract_bytes(data)?;
-        let f = freq.as_slice().expect("contiguous");
-        let s = start.as_slice().expect("contiguous");
-        let c = cum2sym.as_slice().expect("contiguous");
+        let f = freq.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(alloc::format!("array must be contiguous: {e}"))
+        })?;
+        let s = start.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(alloc::format!("array must be contiguous: {e}"))
+        })?;
+        let c = cum2sym.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(alloc::format!("array must be contiguous: {e}"))
+        })?;
         let result = crate::rans::decode(&bytes, f, s, c, m, n_symbols)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(alloc::format!("{}", e)))?;
         Ok(PyArray1::from_vec(py, result))

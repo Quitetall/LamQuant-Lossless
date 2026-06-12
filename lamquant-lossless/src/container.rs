@@ -740,6 +740,23 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
     if n_windows == 0 {
         return Err(LmlError::InvalidHeader("zero windows".into()));
     }
+    // Bound the signal allocation against the data-implied size. The decode
+    // fills window-by-window, so total_samples can never exceed
+    // n_windows * window_size. Without this an attacker-set total_samples
+    // (u32 from the header) drives a multi-TB
+    // `vec![vec![0i64; total_samples]; n_ch]` BEFORE any window is read or
+    // bounds-checked. (Mirrors the lml.rs MAX_DECODE_BYTES guard; also
+    // catches window_size == 0, which forces max_samples == 0 < total.)
+    let max_samples = (n_windows as u64)
+        .checked_mul(window_size as u64)
+        .ok_or_else(|| {
+            LmlError::InvalidHeader("n_windows * window_size overflows u64".into())
+        })?;
+    if total_samples as u64 > max_samples {
+        return Err(LmlError::InvalidHeader(format!(
+            "total_samples {total_samples} exceeds n_windows*window_size {max_samples}"
+        )));
+    }
 
     let mut pos = hdr_end;
     if pos + meta_len > data.len() {
@@ -783,8 +800,23 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
         let window = lml::decompress(&data[pos..pos + payload_len])?;
         pos += payload_len;
 
+        // Refuse to silently truncate/zero-fill on a channel-count
+        // mismatch — header says `n_ch`, and a window decoding to a
+        // different count is corruption, not a partial read. The two
+        // sibling decoders (read_bytes_into_f32_calibrated, read_window)
+        // already reject this; `read_bytes` previously used
+        // `n_ch.min(window.len())`, which dropped extra rows and left
+        // missing rows zero-filled — silent garbage. Match the siblings.
+        if window.len() != n_ch {
+            return Err(LmlError::InvalidHeader(format!(
+                "window {w}: decoded channel count {} != header n_ch {}",
+                window.len(),
+                n_ch
+            )));
+        }
+
         let start = w * window_size;
-        for ch in 0..n_ch.min(window.len()) {
+        for ch in 0..n_ch {
             let end = (start + window[ch].len()).min(total_samples);
             let copy_len = end - start;
             signal[ch][start..start + copy_len].copy_from_slice(&window[ch][..copy_len]);
@@ -902,6 +934,21 @@ mod tests {
                 "length-prefix mismatch at abs_offset={off}"
             );
         }
+    }
+
+    #[test]
+    fn read_bytes_rejects_oversized_total_samples() {
+        // A header claiming far more total_samples than n_windows*window_size
+        // must be rejected BEFORE the signal matrix is allocated — otherwise
+        // an attacker-set u32 drives a multi-TB vec on a tiny file.
+        let sig = synth_signal(2, 256, 9);
+        let mut sink: Vec<u8> = Vec::new();
+        write_into(&mut sink, &sig, 250.0, 128, 0, "{}", LpcMode::default()).unwrap();
+        assert!(read_bytes(&sink).is_ok(), "unmutated container should decode");
+        // total_samples is the u32 at header bytes [10..14] (32-byte header).
+        sink[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
+        let r = read_bytes(&sink);
+        assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "{r:?}");
     }
 
     #[test]

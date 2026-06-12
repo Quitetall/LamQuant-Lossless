@@ -5,6 +5,12 @@
 # pass scheduled after the codec is in its own repo.
 name = "lamquant-lossless"
 version = "7.7.0"
+# Not crates.io-publishable yet: it path-deps the sibling lamquant-common
+# crate without a version (crates.io forbids versionless path deps). The
+# Phase-8 release rebuild adds versions + a publish flow; until then
+# publish=false is honest and lets cargo-deny's allow-wildcard-paths accept
+# the internal path deps (the supply-chain bans gate).
+publish = false
 edition = "2021"
 rust-version = "1.81"
 description = "LML — lossless EEG compression codec (Le Gall lifting DWT + LPC + Golomb-Rice)"

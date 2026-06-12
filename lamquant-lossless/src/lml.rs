@@ -1039,6 +1039,19 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if t == 0 {
         return Err(LmlError::InvalidHeader("zero samples".into()));
     }
+    // n_levels is the lifting-DWT depth; only 0..=3 are defined (the
+    // synthesis match below handles 3/2/1 and 0). A crafted CRC-valid
+    // packet with n_levels>=4 would otherwise decode n_levels+1 subbands
+    // and fall through the `_` arm to return ONLY the first subband —
+    // wrong-length output presented as Ok instead of an error. Reject it.
+    // (The serial `decompress` and parallel `decompress_parallel` paths
+    // share this identical guard.)
+    if n_levels > 3 {
+        return Err(LmlError::InvalidHeader(format!(
+            "n_levels must be 0..=3, got {}",
+            n_levels
+        )));
+    }
     if HEADER_SIZE + lpc_len + sub_len > data.len() {
         return Err(LmlError::Truncated {
             expected: HEADER_SIZE + lpc_len + sub_len,
@@ -1369,6 +1382,19 @@ pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     }
     if t == 0 {
         return Err(LmlError::InvalidHeader("zero samples".into()));
+    }
+    // n_levels is the lifting-DWT depth; only 0..=3 are defined (the
+    // synthesis match below handles 3/2/1 and 0). A crafted CRC-valid
+    // packet with n_levels>=4 would otherwise decode n_levels+1 subbands
+    // and fall through the `_` arm to return ONLY the first subband —
+    // wrong-length output presented as Ok instead of an error. Reject it.
+    // (The serial `decompress` and parallel `decompress_parallel` paths
+    // share this identical guard.)
+    if n_levels > 3 {
+        return Err(LmlError::InvalidHeader(format!(
+            "n_levels must be 0..=3, got {}",
+            n_levels
+        )));
     }
     if HEADER_SIZE + lpc_len + sub_len > data.len() {
         return Err(LmlError::Truncated {
@@ -1795,6 +1821,32 @@ mod tests {
         // Valid case still works.
         let r = compress(&signal, 0);
         assert!(r.is_ok(), "valid input rejected: {r:?}");
+    }
+
+    #[test]
+    fn decompress_rejects_out_of_range_n_levels() {
+        // A packet whose header claims n_levels >= 4 must be REJECTED, not
+        // silently decoded to just the first subband (the old `_`-arm bug).
+        // Build a real packet, then flip the n_levels byte (header offset 8).
+        // The n_levels guard runs before the CRC check, so the mutated byte
+        // is rejected regardless of the now-stale CRC.
+        let signal: Vec<Vec<i64>> = vec![vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]; 2];
+        let mut packet = compress(&signal, 0).expect("compress");
+        assert!(decompress(&packet).is_ok(), "unmutated packet should decode");
+        // The packet may carry a prefix before MAGIC (decompress locates it
+        // via find_magic_offset), so n_levels is at magic_pos + 8, not byte 8.
+        let magic_pos = packet
+            .windows(4)
+            .position(|w| w == MAGIC)
+            .expect("packet contains MAGIC");
+        packet[magic_pos + 8] = 4; // n_levels = 4, outside the defined 0..=3 range
+        let r = decompress(&packet);
+        assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "serial: {r:?}");
+        #[cfg(feature = "host")]
+        {
+            let r = decompress_parallel(&packet);
+            assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "parallel: {r:?}");
+        }
     }
 }
 
