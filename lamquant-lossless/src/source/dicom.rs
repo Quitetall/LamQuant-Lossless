@@ -136,10 +136,23 @@ impl SignalSourceReader for DicomWaveformReader {
             let waveform_bytes = waveform_data_el.to_bytes().map_err(|e| {
                 LmlError::InvalidHeader(format!("dicom: group {idx} WaveformData to_bytes: {e}"))
             })?;
-            let expected_bytes = (meta.n_channels as usize) * (meta.n_samples as usize) * 2;
-            if waveform_bytes.len() < expected_bytes {
+            // Checked u64 multiply: n_channels/n_samples are header-derived
+            // and untrusted. A plain `usize` product can overflow, wrap to a
+            // SMALL value, pass the `waveform_bytes.len() < expected_bytes`
+            // guard, and then the decode loop below (bounds 0..n_samples,
+            // 0..n_channels — the REAL huge values) indexes far past
+            // waveform_bytes and panics. Overflow -> reject.
+            let expected_bytes = (meta.n_channels as u64)
+                .checked_mul(meta.n_samples as u64)
+                .and_then(|p| p.checked_mul(2))
+                .ok_or_else(|| {
+                    LmlError::InvalidHeader(format!(
+                        "dicom: group {idx} n_channels * n_samples * 2 overflows u64"
+                    ))
+                })?;
+            if (waveform_bytes.len() as u64) < expected_bytes {
                 return Err(LmlError::Truncated {
-                    expected: expected_bytes,
+                    expected: expected_bytes as usize,
                     actual: waveform_bytes.len(),
                     context: "dicom WaveformData",
                 });

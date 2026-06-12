@@ -45,9 +45,14 @@ fn lma_header_magic_version_count() {
         .expect("pack_archive");
 
     let bytes = fs::read(&archive).expect("read .lma");
-    // 12 bytes = magic(4) + version_le(4) + entry_count_le(4)
+    // 12 bytes = magic(4) + version_le(4) + entry_count_le(4). The writer
+    // now emits the LMA v2 streaming format: magic "LMA2", version 2, and a
+    // header entry_count of 0 — in v2 the manifest/entry index moved to the
+    // EOCD footer (single-pass, 1x-disk pack), so the header count field is
+    // no longer populated. (Snapshot was stale at v1 — the `--lib`-only CI
+    // never exercised this integration suite; the widened suite does.)
     insta::assert_snapshot!(
-        "lma_v1_magic_version_count_12_bytes",
+        "lma_v2_magic_version_count_12_bytes",
         hex_prefix(&bytes, 12)
     );
 }
