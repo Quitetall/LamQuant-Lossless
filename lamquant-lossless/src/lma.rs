@@ -1339,6 +1339,148 @@ fn encode_edf_to_lml(
 /// - Payloads stream to a temp file (constant memory)
 ///
 /// Returns summary with counts and sizes.
+/// One file's fully-encoded payload + provenance metadata, computed OFF the
+/// archive write thread so the per-file LML/zstd encode (the pack hot path) can
+/// run on many rayon workers in parallel. The sequential writer consumes these
+/// IN ORDER, so the archive stays byte-identical to the old single-threaded pack.
+enum EncodedEntry {
+    /// File read failed — skip it (logged) and record the error.
+    Skipped { rel_path: String, msg: String },
+    /// Encoded OK. `warnings` carries non-fatal cascade messages (e.g. an
+    /// LML→zstd fallback) to fold into the summary in file order.
+    Ready {
+        rel_path: String,
+        compressed: Vec<u8>,
+        method: Method,
+        original_size: u64,
+        file_hash: String,
+        mtime: Option<u64>,
+        mtime_nanos: Option<u32>,
+        mode: Option<u32>,
+        synthetic_from: Option<SyntheticFromInfo>,
+        warnings: Vec<(String, String)>,
+    },
+}
+
+/// Pure per-file encode: read + the compression cascade (LML → zstd → store) +
+/// provenance metadata (mtime/mode/sha). NO shared state — safe to call from
+/// many rayon workers concurrently: the per-file LML/zstd tempfiles use unique
+/// `tempfile::Builder` names, so parallel calls never collide. All ordered
+/// side-effects (write, offset, counts, sha) are done by the sequential writer
+/// in [`pack_archive`], keeping the output byte-identical.
+fn encode_archive_entry(
+    full_path: &Path,
+    rel_path: &str,
+    zstd_level: i32,
+    tmp_dir: &Path,
+    verbose: bool,
+) -> EncodedEntry {
+    let mut warnings: Vec<(String, String)> = Vec::new();
+    let raw = match std::fs::read(full_path) {
+        Ok(data) => data,
+        Err(e) => {
+            return EncodedEntry::Skipped {
+                rel_path: rel_path.to_string(),
+                msg: format!("read failed: {}", e),
+            };
+        }
+    };
+    let original_size = raw.len() as u64;
+    let file_hash = sha256_hex(&raw);
+    let mut method = choose_method(full_path);
+    let mut synthetic_from: Option<SyntheticFromInfo> = None;
+
+    // Compression cascade: preferred method → zstd fallback → store raw.
+    let compressed: Vec<u8> = match method {
+        Method::Lml => match encode_edf_to_lml(full_path, Some(tmp_dir)) {
+            Ok(lml_bytes) => lml_bytes,
+            Err(e) => {
+                let msg = format!("{}", e);
+                if verbose {
+                    eprintln!(
+                        "  WARN: LML failed for {}: {}, falling back to zstd",
+                        rel_path, msg
+                    );
+                }
+                warnings.push((rel_path.to_string(), msg));
+                method = Method::Zstd;
+                match zstd::encode_all(raw.as_slice(), zstd_level) {
+                    Ok(zstd_bytes) => zstd_bytes,
+                    Err(_) => {
+                        method = Method::Store;
+                        raw
+                    }
+                }
+            }
+        },
+        Method::Zstd => match zstd::encode_all(raw.as_slice(), zstd_level) {
+            Ok(zstd_bytes) => {
+                // ADR 0023 Track A-3: try the ingest pipeline for non-EDF files.
+                // Only commits to LML if strictly smaller than zstd, so ingest
+                // never regresses the archive CR.
+                let filename = full_path.file_name().and_then(|s| s.to_str());
+                if let Some((lml_bytes, sf)) =
+                    try_ingest_to_lml(&raw, filename, tmp_dir, zstd_bytes.len())
+                {
+                    method = Method::Lml;
+                    synthetic_from = Some(sf);
+                    lml_bytes
+                } else {
+                    zstd_bytes
+                }
+            }
+            Err(_) => {
+                method = Method::Store;
+                raw
+            }
+        },
+        Method::Store => raw,
+    };
+
+    // Capture mtime + Unix mode for exact restoration (best-effort; warn-not-fail).
+    let meta = match std::fs::metadata(full_path) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!(
+                "WARNING: cannot read metadata for {}: {} (mtime/mode lost)",
+                full_path.display(),
+                e
+            );
+            None
+        }
+    };
+    let modified = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    let mtime = modified.map(|d| d.as_secs());
+    let mtime_nanos = modified.map(|d| d.subsec_nanos());
+    let mode: Option<u32> = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.as_ref().map(|m| m.permissions().mode())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+
+    EncodedEntry::Ready {
+        rel_path: rel_path.to_string(),
+        compressed,
+        method,
+        original_size,
+        file_hash,
+        mtime,
+        mtime_nanos,
+        mode,
+        synthetic_from,
+        warnings,
+    }
+}
+
 pub fn pack_archive(
     input_dir: &Path,
     output_path: &Path,
@@ -1476,173 +1618,93 @@ pub fn pack_archive(
     let mut counts_store: usize = 0;
     let mut errors: Vec<(String, String)> = Vec::new();
 
-    for (i, (full_path, rel_path)) in all_files.iter().enumerate() {
-        // Never skip a file — if we can't read it, log and continue
-        let raw = match std::fs::read(full_path) {
-            Ok(data) => data,
-            Err(e) => {
-                let msg = format!("read failed: {}", e);
-                eprintln!("  WARN: skipping {}: {}", rel_path, msg);
-                errors.push((rel_path.clone(), msg));
-                continue;
-            }
-        };
-        let original_size = raw.len() as u64;
-        total_original += original_size;
-        let file_hash = sha256_hex(&raw);
-        let mut method = choose_method(full_path);
-        // ADR 0023 Track A-3: populated when try_ingest_to_lml fires;
-        // serialised onto the manifest entry below so the extract
-        // path can re-emit the original (non-EDF) bytes.
-        let mut synthetic_from: Option<SyntheticFromInfo> = None;
-
-        // Compression cascade: try preferred method → zstd fallback → store raw
-        let compressed: Vec<u8> = match method {
-            Method::Lml => {
-                // Co-locate the LML encode tempfile on the output
-                // volume (pack_archive's payload tempfile already
-                // lives there since 5769562).
-                match encode_edf_to_lml(full_path, Some(tmp_dir.as_path())) {
-                    Ok(lml_bytes) => {
-                        counts_lml += 1;
-                        lml_bytes
-                    }
-                    Err(e) => {
-                        let msg = format!("{}", e);
-                        if verbose {
-                            eprintln!(
-                                "  WARN: LML failed for {}: {}, falling back to zstd",
-                                rel_path, msg
-                            );
-                        }
-                        errors.push((rel_path.clone(), msg));
-                        method = Method::Zstd;
-                        // Fallback: zstd → store raw
-                        match zstd::encode_all(raw.as_slice(), zstd_level) {
-                            Ok(zstd_bytes) => {
-                                counts_zstd += 1;
-                                zstd_bytes
-                            }
-                            Err(_) => {
-                                method = Method::Store;
-                                counts_store += 1;
-                                raw
-                            }
-                        }
-                    }
+    use rayon::prelude::*;
+    // Parallelize the per-file encode (the LML/zstd hot path) while keeping the
+    // archive bytes IDENTICAL to the old single-threaded pack: encode a bounded
+    // CHUNK of files on the rayon pool, then stream the results into `out` IN
+    // ORDER. All ordered side-effects (write, sha, offset, counts) stay on this
+    // one thread; only the pure `encode_archive_entry` runs in parallel.
+    // `par_iter().collect()` preserves input order within a chunk, and chunks
+    // are consumed in order — so payload offsets + the incremental sha match the
+    // sequential pack byte-for-byte. Chunking caps the in-flight payloads held
+    // in RAM (vs collecting all of them), keeping the v2 stream bounded-memory.
+    let chunk_size = rayon::current_num_threads().saturating_mul(8).max(16);
+    let mut processed = 0usize;
+    for chunk in all_files.chunks(chunk_size) {
+        let encoded: Vec<EncodedEntry> = chunk
+            .par_iter()
+            .map(|(full_path, rel_path)| {
+                encode_archive_entry(full_path, rel_path, zstd_level, tmp_dir.as_path(), verbose)
+            })
+            .collect();
+        for ent in encoded {
+            processed += 1;
+            let rel_path: String = match ent {
+                EncodedEntry::Skipped { rel_path, msg } => {
+                    eprintln!("  WARN: skipping {}: {}", rel_path, msg);
+                    errors.push((rel_path.clone(), msg));
+                    rel_path
                 }
-            }
-            Method::Zstd => {
-                match zstd::encode_all(raw.as_slice(), zstd_level) {
-                    Ok(zstd_bytes) => {
-                        // ADR 0023 Track A-3: try the ingest pipeline
-                        // for non-EDF files. Only commits to LML if
-                        // strictly smaller than the zstd output, so
-                        // ingest never regresses the archive CR.
-                        let filename =
-                            full_path.file_name().and_then(|s| s.to_str());
-                        if let Some((lml_bytes, sf)) = try_ingest_to_lml(
-                            &raw,
-                            filename,
-                            tmp_dir.as_path(),
-                            zstd_bytes.len(),
-                        ) {
-                            method = Method::Lml;
-                            synthetic_from = Some(sf);
-                            counts_lml += 1;
-                            lml_bytes
-                        } else {
-                            counts_zstd += 1;
-                            zstd_bytes
-                        }
+                EncodedEntry::Ready {
+                    rel_path,
+                    compressed,
+                    method,
+                    original_size,
+                    file_hash,
+                    mtime,
+                    mtime_nanos,
+                    mode,
+                    synthetic_from,
+                    warnings,
+                } => {
+                    total_original += original_size;
+                    match method {
+                        Method::Lml => counts_lml += 1,
+                        Method::Zstd => counts_zstd += 1,
+                        Method::Store => counts_store += 1,
                     }
-                    Err(_) => {
-                        // zstd failed — store raw, never lose data
-                        method = Method::Store;
-                        counts_store += 1;
-                        raw
-                    }
+                    errors.extend(warnings);
+
+                    let compressed_size = compressed.len() as u64;
+                    let offset = payload_offset;
+                    // Stream the payload straight into the final archive
+                    // (offset 16+), hashing as we go. No payload temp.
+                    out.write_all(&compressed)?;
+                    hasher.update(&compressed);
+                    // ADR 0021 Tier 2 audit (N11): checked_add. Won't fire in
+                    // practice (> 18 EB) but matches the extract-site pattern.
+                    payload_offset = payload_offset.checked_add(compressed_size).ok_or_else(
+                        || -> Box<dyn std::error::Error + Send + Sync> {
+                            format!(
+                                "lma pack: payload offset overflowed u64 after {} bytes",
+                                payload_offset
+                            )
+                            .into()
+                        },
+                    )?;
+
+                    entries.push(ArchiveEntry {
+                        path: rel_path.clone(),
+                        original_size,
+                        compressed_size,
+                        method,
+                        sha256: file_hash,
+                        offset,
+                        mtime,
+                        mtime_nanos,
+                        mode,
+                        synthetic_from,
+                    });
+                    rel_path
                 }
-            }
-            Method::Store => {
-                counts_store += 1;
-                raw
-            }
-        };
+            };
 
-        // Capture file modification time + Unix permission bits for
-        // exact restoration. mtime is portable; mode is Unix-only.
-        //
-        // Audit-2026-05-11 Fix-#36: warn when metadata read fails so
-        // operators can investigate why a freshly-read file dropped
-        // provenance instead of silently losing mtime/mode.
-        let meta = match std::fs::metadata(full_path) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                eprintln!(
-                    "WARNING: cannot read metadata for {}: {} (mtime/mode lost)",
-                    full_path.display(),
-                    e
-                );
-                None
+            if verbose && processed % 500 == 0 {
+                eprintln!("    {}/{} files...", processed, all_files.len());
             }
-        };
-        let modified = meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-        let mtime = modified.map(|d| d.as_secs());
-        let mtime_nanos = modified.map(|d| d.subsec_nanos());
-        let mode: Option<u32> = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                meta.as_ref().map(|m| m.permissions().mode())
+            if let Some(f) = progress_fn {
+                f(processed, all_files.len(), &rel_path);
             }
-            #[cfg(not(unix))]
-            {
-                None
-            }
-        };
-
-        let compressed_size = compressed.len() as u64;
-        let offset = payload_offset;
-
-        // Stream the payload straight into the final archive (offset 16+),
-        // hashing as we go. No payload temp (the v1 2x-disk staging).
-        out.write_all(&compressed)?;
-        hasher.update(&compressed);
-        // ADR 0021 Tier 2 audit (N11): checked_add. Won't fire in
-        // practice (would need > 18 EB of payload) but matches the
-        // saturating/checked pattern used at extract sites.
-        payload_offset = payload_offset.checked_add(compressed_size).ok_or_else(
-            || -> Box<dyn std::error::Error + Send + Sync> {
-                format!(
-                    "lma pack: payload offset overflowed u64 after {} bytes",
-                    payload_offset
-                )
-                .into()
-            },
-        )?;
-
-        entries.push(ArchiveEntry {
-            path: rel_path.clone(),
-            original_size,
-            compressed_size,
-            method,
-            sha256: file_hash,
-            offset,
-            mtime,
-            mtime_nanos,
-            mode,
-            synthetic_from,
-        });
-
-        if verbose && (i + 1) % 500 == 0 {
-            eprintln!("    {}/{} files...", i + 1, all_files.len());
-        }
-        if let Some(f) = progress_fn {
-            f(i + 1, all_files.len(), rel_path);
         }
     }
 

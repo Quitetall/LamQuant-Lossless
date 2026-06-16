@@ -7908,81 +7908,98 @@ fn cmd_verify_archive(input: &Path) -> R {
     let entries = lma::list_archive(input)?;
     println!("  Manifest: {} files", entries.len());
 
-    // 3. Verify each entry's payload is readable and consistent
+    // 3. Verify each entry's payload is readable and consistent.
+    use rayon::prelude::*;
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::io::BufReader::new(std::fs::File::open(input)?);
 
-    // Parse header to get payload_start
-    let mut header = [0u8; 16];
-    f.read_exact(&mut header)?;
-    let manifest_len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as u64;
-    let payload_start = 16 + manifest_len;
+    // Parse the 16-byte header once to locate the payload region.
+    let payload_start = {
+        let mut header = [0u8; 16];
+        std::io::BufReader::new(std::fs::File::open(input)?).read_exact(&mut header)?;
+        let manifest_len =
+            u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as u64;
+        16 + manifest_len
+    };
 
-    let mut verified = 0usize;
-    let mut failed = 0usize;
+    // Verify entries IN PARALLEL: each rayon worker opens its OWN file handle and
+    // decode-checks its payload independently (verify is read-only — no ordering
+    // constraint). The per-file LML verify uses a uniquely-named tempfile, so
+    // concurrent verifies never collide. `None` = pass; `Some(msg)` = fail.
+    // Messages are printed IN MANIFEST ORDER below, so output stays deterministic.
+    let verdicts: Vec<Option<String>> = entries
+        .par_iter()
+        .map(|entry| -> Option<String> {
+            let mut f = match std::fs::File::open(input) {
+                Ok(f) => f,
+                Err(e) => return Some(format!("  FAIL: {} — open error: {}", entry.path, e)),
+            };
+            if let Err(e) = f.seek(SeekFrom::Start(payload_start + entry.offset)) {
+                return Some(format!("  FAIL: {} — seek error: {}", entry.path, e));
+            }
+            let mut payload = vec![0u8; entry.compressed_size as usize];
+            if let Err(e) = f.read_exact(&mut payload) {
+                return Some(format!("  FAIL: {} — read error: {}", entry.path, e));
+            }
 
-    for entry in &entries {
-        // Seek to payload and read it
-        f.seek(SeekFrom::Start(payload_start + entry.offset))?;
-        let mut payload = vec![0u8; entry.compressed_size as usize];
-        f.read_exact(&mut payload)?;
-
-        match entry.method {
-            lma::Method::Lml => {
-                // Verify LML payload is decodable (CRC check inside decompress)
-                let tmp = tempfile::NamedTempFile::new()?;
-                std::fs::write(tmp.path(), &payload)?;
-                match container::read_file(tmp.path()) {
-                    Ok(_) => {
-                        verified += 1;
+            match entry.method {
+                lma::Method::Lml => {
+                    // Decodable LML payload (CRC checked inside container::read_file).
+                    let tmp = match tempfile::NamedTempFile::new() {
+                        Ok(t) => t,
+                        Err(e) => return Some(format!("  FAIL: {} — tempfile: {}", entry.path, e)),
+                    };
+                    if let Err(e) = std::fs::write(tmp.path(), &payload) {
+                        return Some(format!("  FAIL: {} — tempfile write: {}", entry.path, e));
                     }
-                    Err(e) => {
-                        println!("  FAIL: {} — LML decode error: {}", entry.path, e);
-                        failed += 1;
+                    match container::read_file(tmp.path()) {
+                        Ok(_) => None,
+                        Err(e) => Some(format!("  FAIL: {} — LML decode error: {}", entry.path, e)),
                     }
                 }
-            }
-            lma::Method::Zstd => {
-                // Verify zstd decompresses and SHA matches
-                match zstd::decode_all(payload.as_slice()) {
+                lma::Method::Zstd => match zstd::decode_all(payload.as_slice()) {
                     Ok(decompressed) => {
                         let hash = format!("{:x}", Sha256::digest(&decompressed));
                         if hash == entry.sha256 {
-                            verified += 1;
+                            None
                         } else {
-                            println!("  FAIL: {} — SHA-256 mismatch", entry.path);
-                            failed += 1;
+                            Some(format!("  FAIL: {} — SHA-256 mismatch", entry.path))
                         }
                     }
                     Err(e) => {
-                        println!("  FAIL: {} — zstd decompress error: {}", entry.path, e);
-                        failed += 1;
+                        Some(format!("  FAIL: {} — zstd decompress error: {}", entry.path, e))
+                    }
+                },
+                lma::Method::Store => {
+                    let hash = format!("{:x}", Sha256::digest(&payload));
+                    if hash == entry.sha256 {
+                        None
+                    } else {
+                        Some(format!("  FAIL: {} — SHA-256 mismatch", entry.path))
                     }
                 }
-            }
-            lma::Method::Store => {
-                // Verify SHA of stored bytes
-                let hash = format!("{:x}", Sha256::digest(&payload));
-                if hash == entry.sha256 {
-                    verified += 1;
-                } else {
-                    println!("  FAIL: {} — SHA-256 mismatch", entry.path);
-                    failed += 1;
-                }
-            }
-            _ => {
-                // Unknown method (future Method variant the writer added).
-                // Fail-closed — clinical contract: never treat unknown as Store.
-                println!(
+                // Unknown method (future Method variant). Fail-closed — clinical
+                // contract: never treat unknown as Store.
+                _ => Some(format!(
                     "  FAIL: {} — unknown compression method (writer is newer than this reader)",
                     entry.path
-                );
+                )),
+            }
+        })
+        .collect();
+
+    // Aggregate + report in deterministic (manifest) order.
+    let mut verified = 0usize;
+    let mut failed = 0usize;
+    for (i, verdict) in verdicts.iter().enumerate() {
+        match verdict {
+            None => verified += 1,
+            Some(msg) => {
                 failed += 1;
+                println!("{}", msg);
             }
         }
-
-        if (verified + failed) % 500 == 0 && (verified + failed) > 0 {
-            println!("    {}/{} verified...", verified + failed, entries.len());
+        if (i + 1) % 500 == 0 {
+            println!("    {}/{} verified...", i + 1, entries.len());
         }
     }
 
