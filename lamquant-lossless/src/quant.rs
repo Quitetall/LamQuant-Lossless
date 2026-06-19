@@ -84,8 +84,11 @@ pub fn steps_for_scale(scale: f64, gains: &[f64]) -> Vec<i64> {
     gains
         .iter()
         .map(|&g| {
-            let k = (max_g / g).sqrt();
-            let q = (scale * k).round() as i64;
+            // libm::sqrt + manual round keep this no_std-clean (firmware build):
+            // f64::sqrt/round require std. `scale * k >= 0` always (scale from
+            // the rate search is >= 0, k >= 1), so `+ 0.5` truncating == round.
+            let k = libm::sqrt(max_g / g);
+            let q = (scale * k + 0.5) as i64;
             q.max(1)
         })
         .collect()
