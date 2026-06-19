@@ -4,7 +4,7 @@
 # site across 19 Rust + 22 Python files; the lib rename is a follow-up
 # pass scheduled after the codec is in its own repo.
 name = "lamquant-lml"
-version = "7.7.1"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.81"
 description = "LamQuant LML — lossless EEG/biosignal codec (Le Gall 5/3 + LPC + Golomb), archives, NWB/HDF5 export, no_std/MCU-capable. Ships the `lml` CLI/TUI."
