@@ -70,6 +70,17 @@ if _os.environ.get("LQS_SILENCE_DEPRECATION") != "1":
     )
 
 
+# The LQS specification version this mirror tracks (Eagle ``lqs/SPEC/
+# LQS-v1.0.md``). Stamped onto emitted results so a Python-side compliance
+# record is self-identifying, matching the Rust ``lqs::SPEC_VERSION``. Per
+# the spec §11 a change to any tier threshold / metric / the L-tier rule is a
+# major bump; the canonical thresholds live in Eagle ``lqs/src/levels.rs``.
+# NOTE: ``TaskRequirement`` (downstream task preservation) is INFORMATIVE
+# only in v1.0 — the task-concordance axis is reported separately and never
+# gates an L/C/M/A tier (spec §10).
+LQS_SPEC_VERSION: str = "1.0"
+
+
 # ────────────────────────────────────────────────────────────────────
 # Standard types
 # ────────────────────────────────────────────────────────────────────
