@@ -2,15 +2,15 @@
 resolver = "2"
 members = [
     "crates/lamquant-common",
-    "crates/lmafs",
     "lamquant-lossless",
 ]
 # Firmware + weights moved to the LamQuant-Firmware submodule (ADR 0026
 # phase B.1, 2026-05-30). lamquant-lsl moved to the Vision submodule
-# (ADR 0026 phase B.2, 2026-05-30). This workspace is now host codec-only.
+# (ADR 0026 phase B.2, 2026-05-30). lmafs moved to meta-repo
+# plugins/linux/lmafs/ (OS plugin layer, 2026-06-19).
+# This workspace is now host codec-only.
 default-members = [
     "crates/lamquant-common",
-    "crates/lmafs",
     "lamquant-lossless",
 ]
 # Fuzz harness uses libfuzzer-sys + nightly toolchain; lives outside
