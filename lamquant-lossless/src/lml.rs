@@ -22,6 +22,7 @@ use crate::error::{LmlError, LmlResult};
 use crate::golomb;
 use crate::lifting;
 use crate::lpc;
+use crate::quant;
 
 /// ADR 0023 Track B1: `flags` bit 0 indicates whether the payload uses
 /// the per-subband codec-tag framing. When unset (legacy), every
@@ -54,9 +55,16 @@ pub(crate) const FLAG_BIT_TRACK2_MODE: u8 = 1 << 1;
 
 /// Track-2 mode ids (first byte of lpc_meta when `FLAG_BIT_TRACK2_MODE`).
 /// `0x01` = bounded-MAE closed-loop DPCM (sample-domain, guarantees
-/// `max|orig − recon| ≤ δ`); δ follows as a u64 LE. Future: `0x02` =
-/// target-BPS coefficient-domain (ADR 0051 track-2 P2).
+/// `max|orig − recon| ≤ δ`); δ follows as a u64 LE. `0x02` = target-BPS
+/// coefficient-domain (wavelet subbands deadzone-quantized, rate-controlled).
 pub(crate) const MODE_BOUNDED_MAE: u8 = 0x01;
+
+/// Track-2 mode `0x02`: target-BPS rate-controlled lossy. Sub-header is
+/// `[0x02][n_sub:u8][q_s:u32 LE × n_sub]`, then per channel per subband
+/// `[order:u8][coeffs:i32 × order]`; payload = per channel per subband
+/// `golomb(residual)`. Uses the real `n_levels` (wavelet path). See
+/// [`compress_target_bps`].
+pub(crate) const MODE_TARGET_BPS: u8 = 0x02;
 /// ADR 0023 Track B5: Witten-Neal-Cleary arithmetic coding with a
 /// static Laplace probability model. Decoder support is always
 /// compiled in on host builds; firmware (no_std) decoder fails
@@ -633,29 +641,206 @@ pub fn compress_bounded_mae(
     Ok(out)
 }
 
+/// Forward lifting of one channel into its ordered subbands for the given
+/// `n_levels` (`[approx, detail_top, ..., detail_1]`). Mirrors
+/// `encode_one_channel`'s split + `quant::inverse_for_levels`.
+fn forward_subbands(signal_ch: &[i64], n_levels: u8) -> Vec<Vec<i64>> {
+    match n_levels {
+        3 => {
+            let (a3, d3, d2, d1) = lifting::forward_3level(signal_ch);
+            vec![a3, d3, d2, d1]
+        }
+        2 => {
+            let (l1a, l1d) = lifting::forward(signal_ch);
+            let (l2a, l2d) = lifting::forward(&l1a);
+            vec![l2a, l2d, l1d]
+        }
+        1 => {
+            let (a, d) = lifting::forward(signal_ch);
+            vec![a, d]
+        }
+        _ => vec![signal_ch.to_vec()],
+    }
+}
+
+/// Compress [n_ch][T] → LML1 **target-BPS rate-controlled lossy** packet
+/// (ADR 0051 track 2, mode `MODE_TARGET_BPS`).
+///
+/// Minimizes distortion subject to a bits-per-sample ceiling — the H.BWC
+/// WP1..WP8 competition tier. Each channel is lifting-transformed; each
+/// subband is deadzone-quantized with a per-subband step `q_s` weighted by the
+/// subband's synthesis gain (finer steps where errors amplify most), the
+/// quantized indices are LPC-coded, and the residual Golomb-coded. A single
+/// global `scale` is binary-searched so the packet lands at/under `target_bps`
+/// (the finest quantization meeting the budget). Host-side search; the decode
+/// is integer-only and firmware-capable.
+pub fn compress_target_bps(
+    signal: &[Vec<i64>],
+    target_bps: f64,
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    if n_ch == 0 || n_ch > 1024 {
+        return Err(LmlError::InvalidHeader(format!("n_ch={} out of range 1..=1024", n_ch)));
+    }
+    if t == 0 || t > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader(format!("T={} out of range 1..={}", t, u16::MAX)));
+    }
+    for (c, ch) in signal.iter().enumerate() {
+        if ch.len() != t {
+            return Err(LmlError::InvalidHeader(format!(
+                "ragged channels: ch {} has {} samples, expected {}",
+                c, ch.len(), t
+            )));
+        }
+    }
+    if !(target_bps.is_finite() && target_bps > 0.0) {
+        return Err(LmlError::InvalidHeader(format!(
+            "target_bps must be finite > 0, got {}",
+            target_bps
+        )));
+    }
+
+    let n_levels = compute_n_levels(t);
+    let sub_lens = subband_lengths(t, n_levels);
+    let n_sub = sub_lens.len();
+    let gains = quant::synthesis_gains(n_levels, &sub_lens);
+
+    // Transform every channel ONCE; the rate search re-quantizes these.
+    let chan_subs: Vec<Vec<Vec<i64>>> =
+        signal.iter().map(|ch| forward_subbands(ch, n_levels)).collect();
+
+    let nm = (n_ch * t) as f64;
+    // Fixed wire overhead outside meta_body+payload: 22-byte header + mode_id
+    // + n_sub byte + q_s table.
+    let fixed_overhead = HEADER_SIZE + 1 + 1 + 4 * n_sub;
+
+    // Encode all channels at a quantizer scale → (meta_body, payload, q_s).
+    let encode_at = |scale: f64| -> LmlResult<(Vec<u8>, Vec<u8>, Vec<i64>)> {
+        let qs = quant::steps_for_scale(scale, &gains);
+        let mut meta = Vec::new();
+        let mut payload = Vec::new();
+        for subs in &chan_subs {
+            for (sb_idx, sub) in subs.iter().enumerate() {
+                let idx = quant::quantize(sub, qs[sb_idx]);
+                let scoped = scope_lpc_mode(mode, lpc_max_order(sub.len()));
+                let (coeffs, residual, order) =
+                    lpc::analyze_with_mode(&idx, sb_idx, scoped, BIAS_CTX, None);
+                meta.push(order as u8);
+                for &c in &coeffs {
+                    meta.extend_from_slice(&c.to_le_bytes());
+                }
+                payload.extend_from_slice(&golomb::encode_dense(&residual)?);
+            }
+        }
+        Ok((meta, payload, qs))
+    };
+    let bps_of = |meta: &[u8], payload: &[u8]| -> f64 {
+        (fixed_overhead + meta.len() + payload.len()) as f64 * 8.0 / nm
+    };
+
+    // Binary-search the smallest scale whose packet fits the BPS ceiling
+    // (smallest scale = finest quantization = best quality within budget).
+    let (m0, p0, _) = encode_at(0.0)?;
+    let best_scale = if bps_of(&m0, &p0) <= target_bps {
+        0.0
+    } else {
+        let mut hi = 1.0f64;
+        let mut iters = 0;
+        loop {
+            let (m, p, _) = encode_at(hi)?;
+            if bps_of(&m, &p) <= target_bps || hi >= 1.0e7 {
+                break;
+            }
+            hi *= 2.0;
+            iters += 1;
+            if iters > 40 {
+                break;
+            }
+        }
+        let mut lo = 0.0f64;
+        for _ in 0..40 {
+            let mid = 0.5 * (lo + hi);
+            let (m, p, _) = encode_at(mid)?;
+            if bps_of(&m, &p) <= target_bps {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    };
+
+    let (meta_body, payload, qs) = encode_at(best_scale)?;
+
+    // lpc_meta = [MODE_TARGET_BPS][n_sub][q_s × n_sub] + per-ch per-sub meta.
+    let mut lpc_meta = Vec::with_capacity(2 + 4 * n_sub + meta_body.len());
+    lpc_meta.push(MODE_TARGET_BPS);
+    lpc_meta.push(n_sub as u8);
+    for &q in &qs {
+        lpc_meta.extend_from_slice(&(q as u32).to_le_bytes());
+    }
+    lpc_meta.extend_from_slice(&meta_body);
+
+    let flags: u8 = FLAG_BIT_TRACK2_MODE;
+    let mut header_var = [0u8; 14];
+    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
+    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
+    header_var[4] = n_levels;
+    header_var[5] = flags;
+    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
+    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+
+    let mut crc_state = CRC32_INIT;
+    crc_state = crc32_update(crc_state, &header_var);
+    crc_state = crc32_update(crc_state, &lpc_meta);
+    crc_state = crc32_update(crc_state, &payload);
+    let crc = crc_state ^ CRC32_INIT;
+
+    let prefix = format!("LML | {}ch | lossy-bps | CRC-32\n", n_ch);
+    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(prefix.as_bytes());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&header_var);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&lpc_meta);
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
 /// Decode a track-2 packet (lpc_meta begins with a `mode_id`). Shared by the
 /// serial and parallel decoders. `lpc_data` and `payload` are the already
 /// CRC-verified, bounds-checked regions. Integer-only ⇒ firmware-decodable.
 fn decode_track2(
     n_ch: usize,
     t: usize,
+    n_levels: u8,
     lpc_data: &[u8],
     payload: &[u8],
 ) -> LmlResult<Vec<Vec<i64>>> {
-    if lpc_data.len() < 9 {
+    if lpc_data.is_empty() {
         return Err(LmlError::Truncated {
-            expected: 9,
-            actual: lpc_data.len(),
-            context: "track-2 mode sub-header",
+            expected: 1,
+            actual: 0,
+            context: "track-2 mode id",
         });
     }
     let mode_id = lpc_data[0];
-    let delta = u64::from_le_bytes([
-        lpc_data[1], lpc_data[2], lpc_data[3], lpc_data[4], lpc_data[5], lpc_data[6],
-        lpc_data[7], lpc_data[8],
-    ]);
     match mode_id {
         MODE_BOUNDED_MAE => {
+            if lpc_data.len() < 9 {
+                return Err(LmlError::Truncated {
+                    expected: 9,
+                    actual: lpc_data.len(),
+                    context: "track-2 bounded-MAE sub-header",
+                });
+            }
+            let delta = u64::from_le_bytes([
+                lpc_data[1], lpc_data[2], lpc_data[3], lpc_data[4], lpc_data[5], lpc_data[6],
+                lpc_data[7], lpc_data[8],
+            ]);
             if delta > (i64::MAX as u64 - 1) / 2 {
                 return Err(LmlError::InvalidHeader(format!(
                     "track-2 delta={} exceeds max budget",
@@ -709,6 +894,105 @@ fn decode_track2(
                     )));
                 }
                 *ch = lpc::synthesize_closed_loop_bounded(&indices, &coeffs, order, q);
+            }
+            Ok(signal)
+        }
+        MODE_TARGET_BPS => {
+            // [0x02][n_sub:u8][q_s:u32 × n_sub] then per-ch per-sub [order][coeffs];
+            // payload = per-ch per-sub golomb(residual). Decode: golomb → LPC
+            // synth → dequant (×q_s) → inverse lifting.
+            if lpc_data.len() < 2 {
+                return Err(LmlError::Truncated {
+                    expected: 2,
+                    actual: lpc_data.len(),
+                    context: "track-2 target-BPS sub-header",
+                });
+            }
+            let n_sub = lpc_data[1] as usize;
+            let expected_sub = if n_levels == 0 { 1 } else { n_levels as usize + 1 };
+            if n_sub != expected_sub {
+                return Err(LmlError::InvalidHeader(format!(
+                    "track-2 target-BPS n_sub={} != expected {} for n_levels={}",
+                    n_sub, expected_sub, n_levels
+                )));
+            }
+            let mut lpc_pos = 2usize;
+            let mut qs = Vec::with_capacity(n_sub);
+            for _ in 0..n_sub {
+                if lpc_pos + 4 > lpc_data.len() {
+                    return Err(LmlError::Truncated {
+                        expected: lpc_pos + 4,
+                        actual: lpc_data.len(),
+                        context: "track-2 quantizer steps",
+                    });
+                }
+                let q = u32::from_le_bytes([
+                    lpc_data[lpc_pos],
+                    lpc_data[lpc_pos + 1],
+                    lpc_data[lpc_pos + 2],
+                    lpc_data[lpc_pos + 3],
+                ]) as i64;
+                if q < 1 {
+                    return Err(LmlError::InvalidHeader("track-2 quantizer step < 1".into()));
+                }
+                qs.push(q);
+                lpc_pos += 4;
+            }
+            let sub_lens = subband_lengths(t, n_levels);
+            let mut sub_pos = 0usize;
+            let mut signal = vec![vec![0i64; t]; n_ch];
+            for ch in signal.iter_mut() {
+                let mut subs: Vec<Vec<i64>> = Vec::with_capacity(n_sub);
+                for sb_idx in 0..n_sub {
+                    if lpc_pos >= lpc_data.len() {
+                        return Err(LmlError::Truncated {
+                            expected: lpc_pos + 1,
+                            actual: lpc_data.len(),
+                            context: "track-2 LPC order",
+                        });
+                    }
+                    let order = lpc_data[lpc_pos] as usize;
+                    lpc_pos += 1;
+                    let mut coeffs = Vec::with_capacity(order);
+                    for _ in 0..order {
+                        if lpc_pos + 4 > lpc_data.len() {
+                            return Err(LmlError::Truncated {
+                                expected: lpc_pos + 4,
+                                actual: lpc_data.len(),
+                                context: "track-2 LPC coefficients",
+                            });
+                        }
+                        coeffs.push(i32::from_le_bytes([
+                            lpc_data[lpc_pos],
+                            lpc_data[lpc_pos + 1],
+                            lpc_data[lpc_pos + 2],
+                            lpc_data[lpc_pos + 3],
+                        ]));
+                        lpc_pos += 4;
+                    }
+                    if sub_pos > payload.len() {
+                        return Err(LmlError::InvalidHeader(format!(
+                            "track-2 payload cursor {sub_pos} past end {}",
+                            payload.len()
+                        )));
+                    }
+                    let (residual, consumed) = golomb::decode_dense(&payload[sub_pos..], 0)?;
+                    sub_pos += consumed;
+                    let want = sub_lens.get(sb_idx).copied().unwrap_or(0);
+                    if residual.len() != want {
+                        return Err(LmlError::InvalidHeader(format!(
+                            "track-2 subband {} decoded {} samples, expected {}",
+                            sb_idx,
+                            residual.len(),
+                            want
+                        )));
+                    }
+                    let idx = lpc::synthesize(&residual, &coeffs, order, BIAS_CTX);
+                    subs.push(quant::dequantize(&idx, qs[sb_idx]));
+                }
+                let mut recon = quant::inverse_for_levels(n_levels, &subs);
+                recon.resize(t, 0); // forward/inverse preserve length; guard anyway
+                *ch = recon;
             }
             Ok(signal)
         }
@@ -1293,7 +1577,7 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if flags & FLAG_BIT_TRACK2_MODE != 0 {
         let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
         let payload = &data[HEADER_SIZE + lpc_len..HEADER_SIZE + lpc_len + sub_len];
-        return decode_track2(n_ch, t, lpc_data, payload);
+        return decode_track2(n_ch, t, n_levels, lpc_data, payload);
     }
 
     let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
@@ -1641,7 +1925,7 @@ pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if flags & FLAG_BIT_TRACK2_MODE != 0 {
         let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
         let payload = &data[HEADER_SIZE + lpc_len..HEADER_SIZE + lpc_len + sub_len];
-        return decode_track2(n_ch, t, lpc_data, payload);
+        return decode_track2(n_ch, t, n_levels, lpc_data, payload);
     }
 
     let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];

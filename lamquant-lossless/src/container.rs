@@ -102,6 +102,63 @@ pub fn write_file_bounded_mae(
         metadata_json,
         lpc_mode,
         Some(delta),
+        None,
+    )?;
+    let compressed_size = cw.count as usize;
+    f.sync_all().map_err(LmlError::Io)?;
+    let n_ch = signal.len();
+    let total_samples = signal.first().map(|ch| ch.len()).unwrap_or(0);
+    let raw_size = n_ch * total_samples * 2;
+    Ok(ContainerStats {
+        n_windows,
+        n_channels: n_ch,
+        total_samples,
+        compressed_size,
+        raw_size,
+        cr: if compressed_size > 0 {
+            raw_size as f64 / compressed_size as f64
+        } else {
+            0.0
+        },
+        duration_s: if sample_rate > 0.0 {
+            total_samples as f64 / sample_rate
+        } else {
+            0.0
+        },
+    })
+}
+
+/// Write a complete LML container file in **target-BPS rate-controlled lossy**
+/// mode (ADR 0051 track 2 P2): each window is rate-controlled to `target_bps`
+/// (minimize distortion s.t. the bits-per-sample ceiling). Standard `.lml`
+/// container — all readers work unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn write_file_target_bps(
+    path: &Path,
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    target_bps: f64,
+    metadata_json: &str,
+    lpc_mode: LpcMode,
+) -> LmlResult<ContainerStats> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(LmlError::Io)?;
+    let mut f = std::fs::File::create(path).map_err(LmlError::Io)?;
+    let mut cw = CountingWriter {
+        inner: &mut f,
+        count: 0,
+    };
+    let n_windows = encode_into(
+        &mut cw,
+        signal,
+        sample_rate,
+        window_size,
+        0,
+        metadata_json,
+        lpc_mode,
+        None,
+        Some(target_bps),
     )?;
     let compressed_size = cw.count as usize;
     f.sync_all().map_err(LmlError::Io)?;
@@ -160,6 +217,7 @@ pub fn write_into<W: std::io::Write>(
         noise_bits,
         metadata_json,
         lpc_mode,
+        None,
         None,
     )?;
     let compressed_size = cw.count as usize;
@@ -221,6 +279,9 @@ fn encode_into<W: std::io::Write + ?Sized>(
     // ADR 0051 track 2: Some(δ) → per-window bounded-MAE near-lossless
     // (mutually exclusive with noise_bits); None → standard path.
     delta: Option<u64>,
+    // ADR 0051 track 2 P2: Some(bps) → per-window target-BPS lossy (takes
+    // precedence over delta/noise_bits). None → not target-BPS.
+    target_bps: Option<f64>,
 ) -> LmlResult<usize /* n_windows */> {
     let n_ch = signal.len();
     if n_ch == 0 {
@@ -307,7 +368,9 @@ fn encode_into<W: std::io::Write + ?Sized>(
         // ADR 0051 track 2: when `delta` is set, every window is a bounded-MAE
         // packet (closed-loop DPCM, MAE<=delta per window => overall). Backend
         // is irrelevant for the bounded path (integer-only, no SIMD divergence).
-        let compressed = if let Some(d) = delta {
+        let compressed = if let Some(tb) = target_bps {
+            lml::compress_target_bps(&window, tb, lpc_mode)?
+        } else if let Some(d) = delta {
             lml::compress_bounded_mae(&window, d, lpc_mode)?
         } else {
             match backend {

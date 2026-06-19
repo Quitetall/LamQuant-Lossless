@@ -209,6 +209,16 @@ SOURCE FORMATS:
         /// Mutually exclusive with `--noise-bits`.
         #[arg(long = "max-error", value_name = "DELTA", conflicts_with = "noise_bits")]
         max_error: Option<u64>,
+        /// Track-2 target-BPS rate-controlled lossy: minimize distortion s.t.
+        /// bits-per-sample <= X (ADR 0051, the H.BWC WP tier). Single-file →
+        /// `.lml`. Mutually exclusive with --noise-bits / --max-error.
+        #[arg(
+            long = "target-bps",
+            value_name = "BPS",
+            conflicts_with = "noise_bits",
+            conflicts_with = "max_error"
+        )]
+        target_bps: Option<f64>,
         /// Samples per compression window
         #[arg(long, default_value = "2500")]
         window_size: usize,
@@ -1404,6 +1414,7 @@ fn main() {
                 cross_validate,
                 noise_bits,
                 max_error,
+                target_bps,
                 window_size,
                 threads,
                 recursive,
@@ -1424,7 +1435,16 @@ fn main() {
                 // the batch/bundle machinery (the lossy `.lml` has no `.lma`
                 // sibling-envelope semantics). For the H.BWC working-point
                 // bench + clinical near-lossless use.
-                if let Some(delta) = max_error {
+                if let Some(tb) = target_bps {
+                    cmd_encode_target_bps(
+                        &input,
+                        output.as_deref(),
+                        tb,
+                        window_size,
+                        parse_lpc_mode(&lpc_mode),
+                        verify,
+                    )
+                } else if let Some(delta) = max_error {
                     cmd_encode_bounded_mae(
                         &input,
                         output.as_deref(),
@@ -8111,6 +8131,74 @@ fn cmd_encode_bounded_mae(
             stats.n_channels,
             stats.total_samples,
             delta,
+            stats.compressed_size,
+            bps
+        );
+    }
+    Ok(())
+}
+
+/// ADR 0051 track 2 P2: encode a single EDF/BDF to a target-BPS rate-controlled
+/// lossy `.lml` container. Minimizes distortion subject to the bits-per-sample
+/// ceiling. Prints achieved BPS (and, with --verify, the measured PRD).
+fn cmd_encode_target_bps(
+    input: &Path,
+    output: Option<&Path>,
+    target_bps: f64,
+    window_size: usize,
+    mode: lamquant_core::lpc::LpcMode,
+    verify: bool,
+) -> R {
+    if input.is_dir() {
+        return Err("--target-bps expects a single EDF/BDF file, not a directory".into());
+    }
+    let edf = edf::read_edf(input)?;
+    let out_path = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| input.with_extension("lml"));
+    let stats = container::write_file_target_bps(
+        &out_path,
+        &edf.signal,
+        edf.sample_rate,
+        window_size,
+        target_bps,
+        "{}",
+        mode,
+    )?;
+    let nm = (stats.n_channels * stats.total_samples).max(1);
+    let bps = stats.compressed_size as f64 * 8.0 / nm as f64;
+
+    if verify {
+        // Mean-removed PRD (CfP definition) vs the original.
+        let (recon, _meta) = container::read_file(&out_path)?;
+        let mut num = 0.0f64;
+        let mut den = 0.0f64;
+        for (o, r) in edf.signal.iter().zip(recon.iter()) {
+            let mean = o.iter().sum::<i64>() as f64 / o.len().max(1) as f64;
+            for (a, b) in o.iter().zip(r.iter()) {
+                let e = (*a - *b) as f64;
+                num += e * e;
+                den += (*a as f64 - mean) * (*a as f64 - mean);
+            }
+        }
+        let prd = if den == 0.0 { 0.0 } else { 100.0 * (num / den).sqrt() };
+        println!(
+            "target-BPS: {} ({}ch x {}) target={:.3} -> {} bytes, {:.4} BPS, PRD {:.3}%",
+            out_path.display(),
+            stats.n_channels,
+            stats.total_samples,
+            target_bps,
+            stats.compressed_size,
+            bps,
+            prd
+        );
+    } else {
+        println!(
+            "target-BPS: {} ({}ch x {}) target={:.3} -> {} bytes, {:.4} BPS",
+            out_path.display(),
+            stats.n_channels,
+            stats.total_samples,
+            target_bps,
             stats.compressed_size,
             bps
         );
