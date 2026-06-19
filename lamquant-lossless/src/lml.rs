@@ -23,6 +23,7 @@ use crate::golomb;
 use crate::lifting;
 use crate::lpc;
 use crate::quant;
+use crate::zrle;
 
 /// ADR 0023 Track B1: `flags` bit 0 indicates whether the payload uses
 /// the per-subband codec-tag framing. When unset (legacy), every
@@ -65,6 +66,54 @@ pub(crate) const MODE_BOUNDED_MAE: u8 = 0x01;
 /// `golomb(residual)`. Uses the real `n_levels` (wavelet path). See
 /// [`compress_target_bps`].
 pub(crate) const MODE_TARGET_BPS: u8 = 0x02;
+
+/// Track-2 per-subband payload entropy coder tags (ADR 0051 P3). Each track-2
+/// subband payload is prefixed with one of these so the decoder dispatches and
+/// the encoder can keep whichever is smaller per subband.
+const PAYLOAD_CODER_GOLOMB: u8 = 0x00;
+const PAYLOAD_CODER_ZRLE: u8 = 0x01;
+
+/// Encode one track-2 subband residual, keeping the smaller of Golomb-Rice and
+/// zero-run-length (P3). Output is `[tag][coded]`. zrle wins on the zero-heavy
+/// heavily-quantized low-BPS streams (Golomb's 1-bit/symbol floor); Golomb wins
+/// on dense streams. Never worse than min(golomb, zrle) + 1 tag byte.
+fn encode_subband_payload(values: &[i64]) -> LmlResult<Vec<u8>> {
+    let g = golomb::encode_dense(values)?;
+    let z = zrle::encode_dense(values)?;
+    let mut out = Vec::with_capacity(1 + g.len().min(z.len()));
+    if z.len() < g.len() {
+        out.push(PAYLOAD_CODER_ZRLE);
+        out.extend_from_slice(&z);
+    } else {
+        out.push(PAYLOAD_CODER_GOLOMB);
+        out.extend_from_slice(&g);
+    }
+    Ok(out)
+}
+
+/// Decode one track-2 subband payload written by [`encode_subband_payload`],
+/// starting at `offset`. Returns `(values, bytes_consumed_from_offset)`.
+fn decode_subband_payload(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> {
+    if offset >= data.len() {
+        return Err(LmlError::Truncated {
+            expected: offset + 1,
+            actual: data.len(),
+            context: "track-2 payload coder tag",
+        });
+    }
+    let tag = data[offset];
+    let (vals, consumed) = match tag {
+        PAYLOAD_CODER_GOLOMB => golomb::decode_dense(data, offset + 1)?,
+        PAYLOAD_CODER_ZRLE => zrle::decode_dense(data, offset + 1)?,
+        other => {
+            return Err(LmlError::InvalidHeader(format!(
+                "unknown track-2 payload coder tag 0x{:02X}",
+                other
+            )))
+        }
+    };
+    Ok((vals, consumed + 1))
+}
 /// ADR 0023 Track B5: Witten-Neal-Cleary arithmetic coding with a
 /// static Laplace probability model. Decoder support is always
 /// compiled in on host builds; firmware (no_std) decoder fails
@@ -609,8 +658,7 @@ pub fn compress_bounded_mae(
             lpc_meta.extend_from_slice(&c.to_le_bytes());
         }
 
-        let golomb_bytes = golomb::encode_dense(&indices)?;
-        payload.extend_from_slice(&golomb_bytes);
+        payload.extend_from_slice(&encode_subband_payload(&indices)?);
     }
 
     let flags: u8 = FLAG_BIT_TRACK2_MODE;
@@ -731,7 +779,7 @@ pub fn compress_target_bps(
                 for &c in &coeffs {
                     meta.extend_from_slice(&c.to_le_bytes());
                 }
-                payload.extend_from_slice(&golomb::encode_dense(&residual)?);
+                payload.extend_from_slice(&encode_subband_payload(&residual)?);
             }
         }
         Ok((meta, payload, qs))
@@ -884,7 +932,7 @@ fn decode_track2(
                         payload.len()
                     )));
                 }
-                let (indices, consumed) = golomb::decode_dense(&payload[sub_pos..], 0)?;
+                let (indices, consumed) = decode_subband_payload(&payload[sub_pos..], 0)?;
                 sub_pos += consumed;
                 if indices.len() != t {
                     return Err(LmlError::InvalidHeader(format!(
@@ -976,7 +1024,7 @@ fn decode_track2(
                             payload.len()
                         )));
                     }
-                    let (residual, consumed) = golomb::decode_dense(&payload[sub_pos..], 0)?;
+                    let (residual, consumed) = decode_subband_payload(&payload[sub_pos..], 0)?;
                     sub_pos += consumed;
                     let want = sub_lens.get(sb_idx).copied().unwrap_or(0);
                     if residual.len() != want {

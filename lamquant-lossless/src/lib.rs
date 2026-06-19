@@ -54,6 +54,7 @@ pub mod lmqc;
 pub mod lpc;
 pub mod quant;
 pub mod rans;
+pub mod zrle;
 
 // ─── Host-only (require std + heavy deps) ─────────────────────────
 
