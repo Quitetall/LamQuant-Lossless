@@ -58,6 +58,12 @@ pub fn inverse_for_levels(n_levels: u8, subs: &[Vec<i64>]) -> Vec<i64> {
 /// subband and running the inverse transform: `G_s = ||inverse(impulse)||² `.
 /// A large impulse amplitude is used so the integer lifting rounding (`>>1`,
 /// `>>2`) does not annihilate the response. Returns one gain per subband.
+// Host-only: f64 R-D weighting, used only by the encode-side rate search.
+// The firmware (no_std) build never runs target-BPS encoding — its decode
+// path reads the per-subband quantizer steps from the wire and dequantizes
+// with integer math — so excluding this keeps the firmware binary
+// full-integer (no f64 / libm) and byte-identical-behaviour to pre-H.BWC.
+#[cfg(feature = "host")]
 pub fn synthesis_gains(n_levels: u8, sub_lens: &[usize]) -> Vec<f64> {
     const IMP: i64 = 4096;
     let n_sub = sub_lens.len();
@@ -79,6 +85,7 @@ pub fn synthesis_gains(n_levels: u8, sub_lens: &[usize]) -> Vec<f64> {
 /// subbands quantize finer. `q_s = max(1, round(scale * sqrt(maxG / G_s)))`.
 /// `scale == 0` ⇒ all steps 1 (near-lossless / max rate). Monotone: larger
 /// `scale` ⇒ coarser steps ⇒ lower rate.
+#[cfg(feature = "host")]
 pub fn steps_for_scale(scale: f64, gains: &[f64]) -> Vec<i64> {
     let max_g = gains.iter().cloned().fold(1e-9f64, f64::max);
     gains
@@ -116,6 +123,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn synthesis_gains_positive_and_per_subband() {
         // 3-level: 4 subbands. All gains finite + positive.
@@ -124,6 +132,7 @@ mod tests {
         assert!(g.iter().all(|&x| x > 0.0 && x.is_finite()));
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn steps_monotone_in_scale() {
         let g = synthesis_gains(3, &[320, 320, 640, 1280]);

@@ -771,8 +771,9 @@ fn forward_subbands(signal_ch: &[i64], n_levels: u8) -> Vec<Vec<i64>> {
 /// subband's synthesis gain (finer steps where errors amplify most), the
 /// quantized indices are LPC-coded, and the residual Golomb-coded. A single
 /// global `scale` is binary-searched so the packet lands at/under `target_bps`
-/// (the finest quantization meeting the budget). Host-side search; the decode
-/// is integer-only and firmware-capable.
+/// (the finest quantization meeting the budget). Host-only (f64 R-D search);
+/// the DECODE is integer-only and firmware-capable.
+#[cfg(feature = "host")]
 pub fn compress_target_bps(
     signal: &[Vec<i64>],
     target_bps: f64,
