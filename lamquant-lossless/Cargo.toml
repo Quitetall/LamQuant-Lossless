@@ -3,21 +3,15 @@
 # Library name `lamquant_core` kept stable to avoid touching every `use`
 # site across 19 Rust + 22 Python files; the lib rename is a follow-up
 # pass scheduled after the codec is in its own repo.
-name = "lamquant-lossless"
-version = "7.7.0"
-# Not crates.io-publishable yet: it path-deps the sibling lamquant-common
-# crate without a version (crates.io forbids versionless path deps). The
-# Phase-8 release rebuild adds versions + a publish flow; until then
-# publish=false is honest and lets cargo-deny's allow-wildcard-paths accept
-# the internal path deps (the supply-chain bans gate).
-publish = false
+name = "lamquant-lml"
+version = "7.7.1"
 edition = "2021"
 rust-version = "1.81"
-description = "LML — lossless EEG compression codec (Le Gall lifting DWT + LPC + Golomb-Rice)"
-license = "GPL-3.0-or-later"
+description = "LamQuant LML — lossless EEG/biosignal codec (Le Gall 5/3 + LPC + Golomb), archives, NWB/HDF5 export, no_std/MCU-capable. Ships the `lml` CLI/TUI."
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/LamQuant-Lossless"
 homepage = "https://github.com/Quitetall/LamQuant-Lossless"
-readme = "../README.md"
+readme = "README.md"
 categories = ["compression", "science"]
 keywords = ["eeg", "lossless", "codec", "medical", "neuroscience"]
 build = "build.rs"
@@ -35,7 +29,7 @@ crate-type = ["rlib", "cdylib"]
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
-lamquant-ops = { path = "../../crates/lamquant-ops" }
+lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops" }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.
@@ -178,6 +172,7 @@ parquet = [
 # Phase 5.6 — HDF5 export (`lml export -f hdf5`). Requires libhdf5
 # system dev headers; off by default for the static-musl artifact.
 hdf5 = ["host", "dep:hdf5-metno", "dep:ndarray"]
+nwb = ["hdf5"]
 # Phase 4.7 — DICOM Waveform read via `dicom-rs`. Pure-Rust, no
 # system deps. Behind a feature gate because clinical DICOM workflows
 # are a tiny minority of LamQuant users.
@@ -213,12 +208,13 @@ experimental_arithmetic = ["host", "dep:constriction", "dep:probability"]
 # path stays at pre-B1 throughput. Opt-in via this Cargo feature
 # AND `LAMQUANT_TRY_BIT_PACK=1` at runtime.
 experimental_bit_pack = ["host"]
+experimental_basestation = ["host"]
 
 [dependencies]
 # Shared primitives extracted during decomposition (Phase 2). lamquant-core
 # now re-exports `crc32` (and incrementally more) from this crate so both
 # lossless and (future) neural codecs share the implementation.
-lamquant-common = { path = "../crates/lamquant-common", default-features = false }
+lamquant-common = { package = "lmq-common", version = "0.1.0", path = "../crates/lamquant-common", default-features = false }
 # Always required (work in no_std with alloc).
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
@@ -229,10 +225,10 @@ libm = "0.2"
 
 # Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
 # Host feature only; firmware never spawns subprocesses.
-lamquant-ops = { path = "../../crates/lamquant-ops", optional = true }
+lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops", optional = true }
 # Shared history.json reader/writer — see specs/history-schema.json.
 # Same `host`-only gate; firmware doesn't read user history.
-lamquant-history = { path = "../../crates/lamquant-history", optional = true }
+lamquant-history = { version = "0.1.0", path = "../../crates/lamquant-history", optional = true }
 
 # Host-only deps (gated by `host` feature).
 clap = { version = "4", features = ["derive"], optional = true }
@@ -363,7 +359,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = [
 # ADR 0023 Track B5+ — research-grade entropy coders (rANS, range,
 # arithmetic). Backs the constriction-flavoured arithmetic coder in
 # `src/arithmetic.rs` when the `experimental_arithmetic` feature is
-# enabled. BSD-3 license (compatible with our GPL-3.0). ~25 KB binary
+# enabled. BSD-3 license (compatible with our AGPL-3.0). ~25 KB binary
 # add, no transitive heavy deps.
 constriction = { version = "0.4", default-features = false, features = ["std"], optional = true }
 # Continuous distribution helpers (Laplace, etc) consumed by the

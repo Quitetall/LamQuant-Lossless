@@ -17,7 +17,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tempfile = "3"
 
-lamquant-core = { package = "lamquant-lossless", path = ".." }
+lamquant-core = { package = "lamquant-lml", path = ".." }
 
 [[bin]]
 name = "decompress"
