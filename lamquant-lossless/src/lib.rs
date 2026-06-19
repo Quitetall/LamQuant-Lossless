@@ -51,6 +51,7 @@ pub mod arithmetic;
 // constriction dep); firmware fails closed on its payload tag.
 #[cfg(feature = "experimental_arithmetic")]
 pub mod arith_cat;
+pub mod deployment;
 pub mod error;
 pub mod golomb;
 pub mod lifting;
