@@ -42,6 +42,21 @@ pub(crate) const FLAG_BIT_PER_SUBBAND_TAG: u8 = 1 << 0;
 /// Per-subband codec tag emitted when `FLAG_BIT_PER_SUBBAND_TAG` is set.
 pub(crate) const SUBBAND_TAG_GOLOMB: u8 = 0x00;
 pub(crate) const SUBBAND_TAG_BIT_PACK: u8 = 0x01;
+
+/// Track 2 (ADR 0051): flags bit 1 marks a non-lossless "track-2" packet
+/// (near-lossless / rate-controlled lossy). Old readers already fail-closed
+/// on this bit, so they reject a track-2 packet rather than mis-decode it.
+/// When set, the lpc_meta region begins with a 1-byte `mode_id` + mode
+/// parameters (see `MODE_*`), and the wavelet/subband layout is replaced by
+/// the mode-specific payload. Mutually exclusive with `noise_bits` (the
+/// bits-2..7 field is unused — read as 0 — when this flag is set).
+pub(crate) const FLAG_BIT_TRACK2_MODE: u8 = 1 << 1;
+
+/// Track-2 mode ids (first byte of lpc_meta when `FLAG_BIT_TRACK2_MODE`).
+/// `0x01` = bounded-MAE closed-loop DPCM (sample-domain, guarantees
+/// `max|orig − recon| ≤ δ`); δ follows as a u64 LE. Future: `0x02` =
+/// target-BPS coefficient-domain (ADR 0051 track-2 P2).
+pub(crate) const MODE_BOUNDED_MAE: u8 = 0x01;
 /// ADR 0023 Track B5: Witten-Neal-Cleary arithmetic coding with a
 /// static Laplace probability model. Decoder support is always
 /// compiled in on host builds; firmware (no_std) decoder fails
@@ -502,6 +517,206 @@ pub fn compress_with_mode(
     out.extend_from_slice(&lpc_meta);
     out.extend_from_slice(&payload);
     Ok(out)
+}
+
+/// Compress [n_ch][T] → LML1 **bounded-MAE near-lossless** packet (ADR 0051
+/// track 2, mode `MODE_BOUNDED_MAE`).
+///
+/// Guarantees `max|orig − recon| ≤ δ` per sample. Uses closed-loop
+/// sample-domain DPCM ([`lpc::analyze_closed_loop_bounded`]): a per-channel
+/// LPC predictor runs over *reconstructed* samples and the prediction
+/// residual is uniform-quantized with step `q = 2δ+1`. The decoder replays
+/// the identical loop, so the bound is structural (independent of the signal
+/// or coeffs). `δ = 0` is exact lossless. The wavelet/subband path is
+/// bypassed entirely.
+///
+/// Wire: per-window LML1 with `flags = FLAG_BIT_TRACK2_MODE`, `n_levels = 0`.
+/// `lpc_meta = [MODE_BOUNDED_MAE][δ:u64 LE]` then per channel
+/// `[order:u8][coeffs:i32 LE × order]`; `payload` = per-channel
+/// `golomb::encode_dense(indices)`. Decoded by [`decompress`] /
+/// [`decompress_parallel`] (firmware-decodable — integer-only).
+pub fn compress_bounded_mae(
+    signal: &[Vec<i64>],
+    delta: u64,
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+
+    if n_ch == 0 || n_ch > 1024 {
+        return Err(LmlError::InvalidHeader(format!(
+            "n_ch={} out of range 1..=1024",
+            n_ch
+        )));
+    }
+    if t == 0 || t > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader(format!(
+            "T={} out of range 1..={}",
+            t,
+            u16::MAX
+        )));
+    }
+    // All channels must share the window length (header carries one T).
+    for (c, ch) in signal.iter().enumerate() {
+        if ch.len() != t {
+            return Err(LmlError::InvalidHeader(format!(
+                "ragged channels: ch {} has {} samples, expected {}",
+                c,
+                ch.len(),
+                t
+            )));
+        }
+    }
+    // q = 2δ+1 must not overflow i64. δ is an error budget in raw sample
+    // units — anything beyond i32 range is already absurd for real signals;
+    // bound it well below the overflow point and fail-closed otherwise.
+    if delta > (i64::MAX as u64 - 1) / 2 {
+        return Err(LmlError::InvalidHeader(format!(
+            "delta={} exceeds max bounded-MAE budget",
+            delta
+        )));
+    }
+    let q = 2 * delta as i64 + 1;
+
+    let scoped = scope_lpc_mode(mode, lpc_max_order(t));
+
+    // lpc_meta begins with the mode sub-header, then per-channel predictor.
+    let mut lpc_meta = Vec::with_capacity(9 + n_ch * (1 + 16 * 4));
+    lpc_meta.push(MODE_BOUNDED_MAE);
+    lpc_meta.extend_from_slice(&delta.to_le_bytes());
+
+    let mut payload: Vec<u8> = Vec::with_capacity(n_ch * t);
+    for ch in signal.iter() {
+        // Predictor coeffs from open-loop analysis of the raw channel — these
+        // are just predictor taps; the bound holds for any of them. sb_idx=0
+        // only matters for Fixed mode (gives a small order).
+        let (coeffs, _residual, order) =
+            lpc::analyze_with_mode(ch, 0, scoped, BIAS_CTX, None);
+        let indices = lpc::analyze_closed_loop_bounded(ch, &coeffs, order, q);
+
+        // order must fit u8 (scope_lpc_mode caps at lpc_max_order ≤ 16).
+        debug_assert!(order <= u8::MAX as usize);
+        lpc_meta.push(order as u8);
+        for c in &coeffs {
+            lpc_meta.extend_from_slice(&c.to_le_bytes());
+        }
+
+        let golomb_bytes = golomb::encode_dense(&indices)?;
+        payload.extend_from_slice(&golomb_bytes);
+    }
+
+    let flags: u8 = FLAG_BIT_TRACK2_MODE;
+    let n_levels: u8 = 0; // unused in track-2 bounded mode
+    let mut header_var = [0u8; 14];
+    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
+    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
+    header_var[4] = n_levels;
+    header_var[5] = flags;
+    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
+    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+
+    let mut crc_state = CRC32_INIT;
+    crc_state = crc32_update(crc_state, &header_var);
+    crc_state = crc32_update(crc_state, &lpc_meta);
+    crc_state = crc32_update(crc_state, &payload);
+    let crc = crc_state ^ CRC32_INIT;
+
+    let prefix = format!("LML | {}ch | near-lossless | CRC-32\n", n_ch);
+    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(prefix.as_bytes());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&header_var);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&lpc_meta);
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+/// Decode a track-2 packet (lpc_meta begins with a `mode_id`). Shared by the
+/// serial and parallel decoders. `lpc_data` and `payload` are the already
+/// CRC-verified, bounds-checked regions. Integer-only ⇒ firmware-decodable.
+fn decode_track2(
+    n_ch: usize,
+    t: usize,
+    lpc_data: &[u8],
+    payload: &[u8],
+) -> LmlResult<Vec<Vec<i64>>> {
+    if lpc_data.len() < 9 {
+        return Err(LmlError::Truncated {
+            expected: 9,
+            actual: lpc_data.len(),
+            context: "track-2 mode sub-header",
+        });
+    }
+    let mode_id = lpc_data[0];
+    let delta = u64::from_le_bytes([
+        lpc_data[1], lpc_data[2], lpc_data[3], lpc_data[4], lpc_data[5], lpc_data[6],
+        lpc_data[7], lpc_data[8],
+    ]);
+    match mode_id {
+        MODE_BOUNDED_MAE => {
+            if delta > (i64::MAX as u64 - 1) / 2 {
+                return Err(LmlError::InvalidHeader(format!(
+                    "track-2 delta={} exceeds max budget",
+                    delta
+                )));
+            }
+            let q = 2 * delta as i64 + 1;
+            let mut lpc_pos = 9usize;
+            let mut sub_pos = 0usize;
+            let mut signal = vec![vec![0i64; t]; n_ch];
+            for ch in signal.iter_mut() {
+                if lpc_pos >= lpc_data.len() {
+                    return Err(LmlError::Truncated {
+                        expected: lpc_pos + 1,
+                        actual: lpc_data.len(),
+                        context: "track-2 LPC order",
+                    });
+                }
+                let order = lpc_data[lpc_pos] as usize;
+                lpc_pos += 1;
+                let mut coeffs = Vec::with_capacity(order);
+                for _ in 0..order {
+                    if lpc_pos + 4 > lpc_data.len() {
+                        return Err(LmlError::Truncated {
+                            expected: lpc_pos + 4,
+                            actual: lpc_data.len(),
+                            context: "track-2 LPC coefficients",
+                        });
+                    }
+                    coeffs.push(i32::from_le_bytes([
+                        lpc_data[lpc_pos],
+                        lpc_data[lpc_pos + 1],
+                        lpc_data[lpc_pos + 2],
+                        lpc_data[lpc_pos + 3],
+                    ]));
+                    lpc_pos += 4;
+                }
+                if sub_pos > payload.len() {
+                    return Err(LmlError::InvalidHeader(format!(
+                        "track-2 payload cursor {sub_pos} past end {}",
+                        payload.len()
+                    )));
+                }
+                let (indices, consumed) = golomb::decode_dense(&payload[sub_pos..], 0)?;
+                sub_pos += consumed;
+                if indices.len() != t {
+                    return Err(LmlError::InvalidHeader(format!(
+                        "track-2 channel decoded {} samples, expected {}",
+                        indices.len(),
+                        t
+                    )));
+                }
+                *ch = lpc::synthesize_closed_loop_bounded(&indices, &coeffs, order, q);
+            }
+            Ok(signal)
+        }
+        other => Err(LmlError::InvalidHeader(format!(
+            "unknown track-2 mode id 0x{:02X}",
+            other
+        ))),
+    }
 }
 
 /// Convenience wrapper: panics on invalid input. Use only in tests where
@@ -1020,13 +1235,14 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let sub_len = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
     let crc_exp = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
 
-    // ADR 0023 Track B1: bit 0 (`FLAG_BIT_PER_SUBBAND_TAG`) is now
-    // a defined feature flag, not reserved. Bit 1 stays reserved
-    // (`0x02`) — fail-closed on it so a future extension can't slip
-    // through a stale reader.
-    if flags & 0x02 != 0 {
+    // ADR 0023 Track B1: bit 0 (`FLAG_BIT_PER_SUBBAND_TAG`) is a feature
+    // flag. ADR 0051 track 2: bit 1 (`FLAG_BIT_TRACK2_MODE`) marks a
+    // near-lossless / lossy packet — dispatched after CRC verify below. The
+    // two are mutually exclusive (track-2 has no wavelet subbands), so a
+    // packet asserting both is malformed → fail-closed.
+    if (flags & FLAG_BIT_TRACK2_MODE != 0) && (flags & FLAG_BIT_PER_SUBBAND_TAG != 0) {
         return Err(LmlError::InvalidHeader(format!(
-            "LML1 reserved flag bits set (flags=0x{:02X})",
+            "LML1 track-2 + per-subband-tag both set (flags=0x{:02X})",
             flags
         )));
     }
@@ -1071,6 +1287,14 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     // packets (warn-once via SAW_LEGACY_CRC). Both miss → CrcMismatch.
     let payload_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len + sub_len];
     verify_packet_crc(&data[4..18], payload_data, crc_exp)?;
+
+    // ADR 0051 track 2: near-lossless / lossy packet. CRC + size bounds are
+    // verified above; dispatch to the integer-only mode decoder.
+    if flags & FLAG_BIT_TRACK2_MODE != 0 {
+        let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
+        let payload = &data[HEADER_SIZE + lpc_len..HEADER_SIZE + lpc_len + sub_len];
+        return decode_track2(n_ch, t, lpc_data, payload);
+    }
 
     let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
     let mut lpc_pos = 0usize;
@@ -1368,9 +1592,11 @@ pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
 
     // ADR 0023 Track B1: bit 0 (`FLAG_BIT_PER_SUBBAND_TAG`) is now
     // a defined feature flag. Bit 1 stays reserved.
-    if flags & 0x02 != 0 {
+    // ADR 0051 track 2: bit 1 is the track-2 mode flag (dispatched after
+    // CRC verify below); mutually exclusive with the per-subband-tag framing.
+    if (flags & FLAG_BIT_TRACK2_MODE != 0) && (flags & FLAG_BIT_PER_SUBBAND_TAG != 0) {
         return Err(LmlError::InvalidHeader(format!(
-            "LML1 reserved flag bits set (flags=0x{:02X})",
+            "LML1 track-2 + per-subband-tag both set (flags=0x{:02X})",
             flags
         )));
     }
@@ -1409,6 +1635,14 @@ pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     // the encoder still writes the modern header+payload scope.
     let payload_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len + sub_len];
     verify_packet_crc(&data[4..18], payload_data, crc_exp)?;
+
+    // ADR 0051 track 2: near-lossless / lossy packet. CRC + size bounds are
+    // verified above; dispatch to the integer-only mode decoder.
+    if flags & FLAG_BIT_TRACK2_MODE != 0 {
+        let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
+        let payload = &data[HEADER_SIZE + lpc_len..HEADER_SIZE + lpc_len + sub_len];
+        return decode_track2(n_ch, t, lpc_data, payload);
+    }
 
     let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
     let mut lpc_pos = 0usize;

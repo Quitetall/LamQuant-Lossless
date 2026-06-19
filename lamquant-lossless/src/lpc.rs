@@ -587,6 +587,80 @@ pub fn synthesize(residual: &[i64], coeffs: &[i32], order: usize, ctx_len: usize
     signal
 }
 
+/// Round `e` to the nearest multiple of `q` and return that multiple's
+/// index (ties away from zero), integer-only. For `q = 2δ+1` the residual
+/// `|e − idx·q| ≤ q/2 = δ` — the bound the closed-loop near-lossless mode
+/// relies on. `q` must be ≥ 1.
+#[inline]
+fn round_div_nearest(e: i64, q: i64) -> i64 {
+    debug_assert!(q >= 1);
+    let half = q / 2;
+    if e >= 0 {
+        (e + half) / q
+    } else {
+        -((-e + half) / q)
+    }
+}
+
+/// Closed-loop bounded-MAE DPCM analysis (Track 2 near-lossless encode).
+///
+/// Predicts each sample from already-RECONSTRUCTED samples (closed loop),
+/// quantizes the prediction residual with uniform step `q = 2δ+1`, and
+/// returns the quantizer indices. Because the decoder
+/// ([`synthesize_closed_loop_bounded`]) replays the identical loop, the
+/// per-sample reconstruction error is `|orig − recon| ≤ q/2 = δ` by
+/// construction — independent of `coeffs` quality (coeffs only affect how
+/// small the indices, hence the compressed size, get). `q = 1` (δ = 0) is
+/// exact lossless. `coeffs` are Q27, same sign convention as [`analyze`]
+/// / [`synthesize`].
+pub fn analyze_closed_loop_bounded(
+    signal: &[i64],
+    coeffs: &[i32],
+    order: usize,
+    q: i64,
+) -> Vec<i64> {
+    let t = signal.len();
+    let mut recon = vec![0i64; t];
+    let mut idx = vec![0i64; t];
+    for n in 0..t {
+        let mut pred = 0i64;
+        let k_max = order.min(n).min(coeffs.len());
+        for k in 0..k_max {
+            pred += coeffs[k] as i64 * recon[n - 1 - k];
+        }
+        let p = pred >> Q_LPC;
+        let e = signal[n] - p;
+        let i = round_div_nearest(e, q);
+        idx[n] = i;
+        recon[n] = p + i * q;
+    }
+    idx
+}
+
+/// Closed-loop bounded-MAE DPCM synthesis (Track 2 near-lossless decode).
+///
+/// Exact inverse of [`analyze_closed_loop_bounded`] for the same
+/// `(coeffs, order, q)` — runs the identical prediction loop and
+/// dequantizes each index. Integer-only ⇒ firmware-decodable.
+pub fn synthesize_closed_loop_bounded(
+    indices: &[i64],
+    coeffs: &[i32],
+    order: usize,
+    q: i64,
+) -> Vec<i64> {
+    let t = indices.len();
+    let mut recon = vec![0i64; t];
+    for n in 0..t {
+        let mut pred = 0i64;
+        let k_max = order.min(n).min(coeffs.len());
+        for k in 0..k_max {
+            pred += coeffs[k] as i64 * recon[n - 1 - k];
+        }
+        recon[n] = (pred >> Q_LPC) + indices[n] * q;
+    }
+    recon
+}
+
 /// Block-floating-point integer Levinson — no FPU, no f64. Targets
 /// f64-class precision by storing reflection coefficients in i64 Q63
 /// and accumulating in i128. Final coefficients down-shifted to Q27.
@@ -864,6 +938,50 @@ mod tests {
             LpcMode::Anytime { deadline, .. } => assert!(deadline.is_none()),
             _ => panic!("default LpcMode must be Anytime"),
         }
+    }
+
+    #[test]
+    fn closed_loop_bounded_respects_delta() {
+        // Track 2 / bounded-MAE keystone: closed-loop DPCM must guarantee
+        // max|orig - recon| <= delta for ANY predictor coeffs, and reduce
+        // to exact reconstruction at delta = 0. The bound is structural
+        // (decoder replays the identical loop), independent of coeff quality.
+        for delta in [0i64, 1, 3, 7, 15, 50, 255] {
+            let q = 2 * delta + 1;
+            for t in [1usize, 2, 5, 50, 313, 1250] {
+                // A few signal shapes incl. large dynamic range.
+                let signal: Vec<i64> = (0..t)
+                    .map(|i| ((i as i64 * 47) % 6000 - 3000) + ((i as i64 % 7) * 211))
+                    .collect();
+                let (coeffs, _r, order) = analyze_adaptive(&signal, 8, 16);
+                let idx = analyze_closed_loop_bounded(&signal, &coeffs, order, q);
+                assert_eq!(idx.len(), t);
+                let recon = synthesize_closed_loop_bounded(&idx, &coeffs, order, q);
+                assert_eq!(recon.len(), t, "recon length mismatch");
+                let mae = signal
+                    .iter()
+                    .zip(&recon)
+                    .map(|(a, b)| (a - b).abs())
+                    .max()
+                    .unwrap_or(0);
+                assert!(mae <= delta, "delta={} t={} mae={} EXCEEDED", delta, t, mae);
+                if delta == 0 {
+                    assert_eq!(signal, recon, "delta=0 must be byte-exact (t={})", t);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closed_loop_bounded_order_zero_is_pure_quant() {
+        // order=0 → no prediction, pure uniform quantization; still bounded.
+        let signal: Vec<i64> = (0..200).map(|i| (i as i64 * 123) % 9001 - 4500).collect();
+        let delta = 10i64;
+        let q = 2 * delta + 1;
+        let idx = analyze_closed_loop_bounded(&signal, &[], 0, q);
+        let recon = synthesize_closed_loop_bounded(&idx, &[], 0, q);
+        let mae = signal.iter().zip(&recon).map(|(a, b)| (a - b).abs()).max().unwrap();
+        assert!(mae <= delta, "order-0 mae={} > delta={}", mae, delta);
     }
 
     #[test]
