@@ -3,13 +3,13 @@ name = "lamquant-common"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
-description = "LamQuant shared primitives — CRC-32 (ISO 3309), path helpers, and non-EDF signal ingest — shared by the LamQuant EEG codecs. no_std + alloc."
+description = "LamQuant Codec shared primitives CRC-32 (ISO 3309), path helpers, and non-EDF signal ingest shared by the LamQuant EEG codecs. no_std + alloc."
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/LamQuant-Lossless"
 homepage = "https://github.com/Quitetall/LamQuant-Lossless"
 readme = "README.md"
 categories = ["compression", "science"]
-keywords = ["eeg", "edf", "lma", "biosignal"]
+keywords = ["eeg", "edf", "biosignal"]
 
 [lib]
 name = "lamquant_common"
