@@ -214,7 +214,7 @@ experimental_basestation = ["host"]
 # Shared primitives extracted during decomposition (Phase 2). lamquant-core
 # now re-exports `crc32` (and incrementally more) from this crate so both
 # lossless and (future) neural codecs share the implementation.
-lamquant-common = { package = "lmq-common", version = "0.1.0", path = "../crates/lamquant-common", default-features = false }
+lamquant-common = { version = "0.1.0", path = "../crates/lamquant-common", default-features = false }
 # Always required (work in no_std with alloc).
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
