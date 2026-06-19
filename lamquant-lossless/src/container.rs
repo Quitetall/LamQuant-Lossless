@@ -2,6 +2,7 @@
 //!
 //! Spec: specs/lml-format-v1.md Section 2
 
+use crate::deployment::LosslessMode;
 use crate::error::{LmlError, LmlResult};
 use crate::lml::{self, MAGIC};
 use crate::lpc::LpcMode;
@@ -14,6 +15,54 @@ const VERSION_MINOR: u8 = 0;
 /// table at EOF. Old readers ignore the flag and silently skip the
 /// footer; new readers consult it for O(log n) random access.
 const FLAG_HAS_FOOTER: u8 = 0b0000_0001;
+
+fn lossless_mode_for_lpc_mode(mode: LpcMode) -> LosslessMode {
+    match mode {
+        LpcMode::Fixed => LosslessMode::Mcu,
+        LpcMode::Adaptive { .. } | LpcMode::Anytime { .. } => LosslessMode::Basestation,
+    }
+}
+
+fn metadata_with_codec_mode(
+    metadata_json: &str,
+    lpc_mode: LpcMode,
+    delta: Option<u64>,
+    target_bps: Option<f64>,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(metadata_json) else {
+        return metadata_json.to_owned();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return metadata_json.to_owned();
+    };
+    if let Some(tb) = target_bps {
+        object.insert(
+            "codec_mode".to_owned(),
+            serde_json::Value::String("target_bps_lossy".to_owned()),
+        );
+        object.insert("target_bps".to_owned(), serde_json::json!(tb));
+    } else if let Some(d) = delta {
+        object.insert(
+            "codec_mode".to_owned(),
+            serde_json::Value::String("bounded_mae_near_lossless".to_owned()),
+        );
+        object.insert("max_error".to_owned(), serde_json::json!(d));
+    } else {
+        object.insert(
+            "codec_mode".to_owned(),
+            serde_json::Value::String("lossless".to_owned()),
+        );
+        object.insert(
+            "lossless_mode".to_owned(),
+            serde_json::Value::String(lossless_mode_for_lpc_mode(lpc_mode).as_str().to_owned()),
+        );
+    }
+    object.insert(
+        "lpc_mode".to_owned(),
+        serde_json::Value::String(format!("{lpc_mode:?}")),
+    );
+    serde_json::to_string(&value).unwrap_or_else(|_| metadata_json.to_owned())
+}
 
 /// Write a complete LML v1 container file (default LPC mode).
 ///
@@ -338,6 +387,7 @@ fn encode_into<W: std::io::Write + ?Sized>(
         })?
         / actual_window;
     let n_windows = n_windows_raw.max(1);
+    let metadata_json = metadata_with_codec_mode(metadata_json, lpc_mode, delta, target_bps);
     let meta_bytes = metadata_json.as_bytes();
     let sample_rate_mhz = (sample_rate * 1000.0) as u32;
 
@@ -880,9 +930,7 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
     // catches window_size == 0, which forces max_samples == 0 < total.)
     let max_samples = (n_windows as u64)
         .checked_mul(window_size as u64)
-        .ok_or_else(|| {
-            LmlError::InvalidHeader("n_windows * window_size overflows u64".into())
-        })?;
+        .ok_or_else(|| LmlError::InvalidHeader("n_windows * window_size overflows u64".into()))?;
     if total_samples as u64 > max_samples {
         return Err(LmlError::InvalidHeader(format!(
             "total_samples {total_samples} exceeds n_windows*window_size {max_samples}"
@@ -1038,7 +1086,12 @@ mod tests {
         )
         .unwrap();
         let (recovered, meta) = read_from(&mut std::io::Cursor::new(&sink)).unwrap();
-        assert_eq!(meta, "{\"k\":1}");
+        // Metadata is augmented with the self-describing codec_mode stamp
+        // (deployment tier), but the caller's fields are preserved.
+        assert!(
+            meta.contains("\"k\":1") && meta.contains("\"codec_mode\""),
+            "metadata must preserve caller fields + carry codec_mode: {meta}"
+        );
         for ch in 0..3 {
             assert_eq!(recovered[ch], sig[ch], "channel {ch} drift");
         }
@@ -1075,7 +1128,10 @@ mod tests {
         let sig = synth_signal(2, 256, 9);
         let mut sink: Vec<u8> = Vec::new();
         write_into(&mut sink, &sig, 250.0, 128, 0, "{}", LpcMode::default()).unwrap();
-        assert!(read_bytes(&sink).is_ok(), "unmutated container should decode");
+        assert!(
+            read_bytes(&sink).is_ok(),
+            "unmutated container should decode"
+        );
         // total_samples is the u32 at header bytes [10..14] (32-byte header).
         sink[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
         let r = read_bytes(&sink);
@@ -1108,7 +1164,10 @@ mod tests {
         );
         let mut cursor = std::io::Cursor::new(&sink);
         let (recovered, meta) = read_from(&mut cursor).unwrap();
-        assert_eq!(meta, "{\"src\":\"test\"}");
+        assert!(
+            meta.contains("\"src\":\"test\"") && meta.contains("\"codec_mode\""),
+            "metadata must preserve caller fields + carry codec_mode: {meta}"
+        );
         for ch in 0..3 {
             assert_eq!(recovered[ch], sig[ch], "channel {ch} drift");
         }
@@ -1160,7 +1219,11 @@ mod tests {
         assert_eq!(stats.n_windows, 2);
 
         let (recovered, meta) = read_file(tmp.path()).unwrap();
-        assert_eq!(meta, "{}");
+        // "{}" in → augmented with the self-describing lossless codec_mode stamp.
+        assert!(
+            meta.contains("\"codec_mode\":\"lossless\""),
+            "metadata must carry the codec_mode stamp: {meta}"
+        );
         assert_eq!(recovered.len(), 4);
         for ch in 0..4 {
             assert_eq!(recovered[ch], sig[ch], "channel {} drift", ch);
@@ -1304,7 +1367,14 @@ mod tests {
         let meta = r#"{"patient":"X","sample_rate":250,"channels":["FP1","FP2"]}"#;
         write_file(tmp.path(), &sig, 250.0, 128, 0, meta).unwrap();
         let (_, recovered_meta) = read_file(tmp.path()).unwrap();
-        assert_eq!(recovered_meta, meta);
+        // Caller metadata fields are preserved verbatim; the container also
+        // stamps the self-describing codec_mode (deployment tier) alongside.
+        assert!(
+            recovered_meta.contains(r#""patient":"X""#)
+                && recovered_meta.contains(r#""channels":["FP1","FP2"]"#)
+                && recovered_meta.contains("\"codec_mode\""),
+            "metadata must preserve caller fields + carry codec_mode: {recovered_meta}"
+        );
     }
 
     #[test]

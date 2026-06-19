@@ -236,7 +236,14 @@ mod tests {
             .then(DecompressStage);
         let decoded = chain.process(bundle).unwrap();
         assert_eq!(decoded.signal, original);
-        assert_eq!(decoded.metadata_json, "{\"src\":\"unit-test\"}");
+        // Metadata is augmented with the self-describing codec_mode stamp
+        // (deployment tier); caller fields are preserved.
+        assert!(
+            decoded.metadata_json.contains("\"src\":\"unit-test\"")
+                && decoded.metadata_json.contains("\"codec_mode\""),
+            "metadata must preserve caller fields + carry codec_mode: {}",
+            decoded.metadata_json
+        );
     }
 
     #[test]
