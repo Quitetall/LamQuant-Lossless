@@ -475,7 +475,7 @@ impl LamQuantConfig {
         use crate::backend::{set_global_backend, ComputeBackend};
         match self.compute.backend.as_str() {
             "firmware" => set_global_backend(ComputeBackend::Firmware),
-            #[cfg(feature = "host")]
+            #[cfg(feature = "tui")]
             "desktop" => set_global_backend(ComputeBackend::Desktop),
             other => {
                 tracing::warn!(

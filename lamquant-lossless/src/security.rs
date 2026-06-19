@@ -128,7 +128,7 @@ impl Drop for Key {
 /// OWASP-recommended defaults: m=64 MiB, t=3, p=1. Operators can
 /// override via `--argon2-params m:t:p` when they need faster decrypt
 /// on low-end hardware (at the cost of brute-force resistance).
-#[cfg(feature = "host")]
+#[cfg(feature = "security")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argon2Params {
     /// Memory cost in KiB. OWASP default = 65536 (64 MiB).
@@ -139,7 +139,7 @@ pub struct Argon2Params {
     pub p_cost: u32,
 }
 
-#[cfg(feature = "host")]
+#[cfg(feature = "security")]
 impl Default for Argon2Params {
     fn default() -> Self {
         Argon2Params {
@@ -162,14 +162,14 @@ impl Default for Argon2Params {
 /// 30      1      p_cost (u8, Argon2 parallelism)
 /// 31      1      reserved (0)
 /// ```
-#[cfg(feature = "host")]
+#[cfg(feature = "security")]
 #[derive(Debug)]
 pub struct LmcryptHeader {
     pub salt: [u8; 16],
     pub params: Argon2Params,
 }
 
-#[cfg(feature = "host")]
+#[cfg(feature = "security")]
 impl LmcryptHeader {
     /// Magic + version + params length. Used by callers to size buffers.
     pub const SIZE: usize = 32;
@@ -231,7 +231,7 @@ impl LmcryptHeader {
     }
 }
 
-#[cfg(feature = "host")]
+#[cfg(feature = "security")]
 impl Key {
     /// Derive a 32-byte AES-256 key from a password via Argon2id.
     ///

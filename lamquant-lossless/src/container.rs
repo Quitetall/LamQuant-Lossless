@@ -427,7 +427,7 @@ fn encode_into<W: std::io::Write + ?Sized>(
                 crate::backend::ComputeBackend::Firmware => {
                     lml::compress_with_mode(&window, noise_bits, lpc_mode)?
                 }
-                #[cfg(feature = "host")]
+                #[cfg(feature = "archive")]
                 crate::backend::ComputeBackend::Desktop => {
                     lml::compress_with_mode_parallel(&window, noise_bits, lpc_mode)?
                 }

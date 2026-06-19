@@ -201,7 +201,7 @@ fn experimental_arithmetic_enabled() -> bool {
 /// `LAMQUANT_TRY_EXTENDED_LPC=1`. AIC self-throttles when the
 /// extra coefficients don't pay off, so the worst case is "same
 /// order picked as before".
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 fn experimental_extended_lpc_enabled() -> bool {
     std::env::var("LAMQUANT_TRY_EXTENDED_LPC")
         .map(|v| v == "1")
@@ -399,7 +399,7 @@ fn lpc_max_order(subband_len: usize) -> usize {
 /// the higher `EXTENDED_LPC_ORDER_HARD_CAP`. AIC byte-cost search
 /// inside `lpc::analyze_with_mode` picks the actual order.
 #[inline]
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 fn lpc_max_order_extended(subband_len: usize) -> usize {
     (subband_len / 8).min(EXTENDED_LPC_ORDER_HARD_CAP)
 }
@@ -534,7 +534,7 @@ pub fn compress_with_mode(
     };
     // ADR 0023 Track B6: env-var-gated extended LPC order cap.
     let try_extended_lpc = {
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         {
             experimental_extended_lpc_enabled()
         }
@@ -773,7 +773,7 @@ fn forward_subbands(signal_ch: &[i64], n_levels: u8) -> Vec<Vec<i64>> {
 /// global `scale` is binary-searched so the packet lands at/under `target_bps`
 /// (the finest quantization meeting the budget). Host-only (f64 R-D search);
 /// the DECODE is integer-only and firmware-capable.
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub fn compress_target_bps(
     signal: &[Vec<i64>],
     target_bps: f64,
@@ -1252,7 +1252,7 @@ fn encode_one_channel(
         // Track B6 (opt-in): swap the ceiling from 16 → 32 so the
         // AIC walk explores deeper. Default off → byte-equal to
         // the pre-B6 path.
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         let burg_ceiling = if try_extended_lpc {
             lpc_max_order_extended(sub.len())
         } else {
@@ -1411,7 +1411,7 @@ fn encode_one_channel(
 /// Returns identical bytes to `compress_with_mode`; the only
 /// difference is wall-clock time on multi-channel inputs (typical
 /// clinical EEG = 8-24 channels = 4-12× speedup on a 16-core host).
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub fn compress_with_mode_parallel(
     signal: &[Vec<i64>],
     noise_bits: u8,
@@ -1896,7 +1896,7 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
 /// n_levels=0 edge case). Extracted so the parallel decoder can
 /// dispatch this work across rayon workers while the byte-equal
 /// invariant is preserved by construction.
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 fn synthesize_channel_signal(
     per_subband: Vec<(Vec<i32>, Vec<i64>)>,
     n_levels: u8,
@@ -1941,7 +1941,7 @@ fn synthesize_channel_signal(
 /// The byte-equal cross-backend gate (`tests/byte_equal_backends.rs`)
 /// proves the parallel output matches the serial path for every
 /// fixture.
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     use rayon::prelude::*;
 
@@ -2460,7 +2460,7 @@ mod tests {
         packet[magic_pos + 8] = 4; // n_levels = 4, outside the defined 0..=3 range
         let r = decompress(&packet);
         assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "serial: {r:?}");
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         {
             let r = decompress_parallel(&packet);
             assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "parallel: {r:?}");

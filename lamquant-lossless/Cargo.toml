@@ -99,31 +99,54 @@ required-features = ["host"]
 # `cargo install --path /path/to/LamQuant/lamquant`.
 
 [features]
-# Default = full host build (CLI, TUI, file I/O).
+# Default = full host build (CLI, TUI, file I/O, security).
 default = ["host"]
-# Core DSP only — no_std + alloc. Pure math: lifting, lpc, golomb, rans, crc32, lml.
+
+# ── Level 0: no_std DSP core (firmware / embedded) ──────────────────────────
+# Pure math: lifting, lpc, golomb, rans, crc32, lml wire format.
 # This is what lamquant-firmware uses on RP2350.
 std = []
-# Host build: file I/O, archives, EDF, CLI, TUI, parallel I/O.
-host = [
+
+# ── Level 1: archive — file I/O + LMA/EDF/container r/w ────────────────────
+# Enables: lma, container, edf, io, offset_table, range, stream, source,
+#          codec_stages, pipeline, backend::Desktop (rayon parallel path).
+# Use this for OS plugins and 3rd-party readers (e.g. lml-os/lmafs).
+archive = [
     "std",
     "lamquant-common/host",
     "base64/std",
     "sha2/std",
-    "dep:clap",
-    "dep:clap_complete",
-    "dep:clap_mangen",
+    "dep:serde",
+    "dep:serde_json",
     "dep:rayon",
     "dep:walkdir",
     "dep:zstd",
     "dep:globset",
     "dep:tempfile",
     "dep:filetime",
+]
+
+# ── Level 2: cli — archive + command-line interface ──────────────────────────
+# Enables: clap, shell completions, man pages, progress bars, structured
+#          logging. Use this for scripting or embedding lml operations without
+#          the interactive TUI.
+cli = [
+    "archive",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:clap_mangen",
+    "dep:indicatif",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+
+# ── Level 3: tui — cli + interactive TUI panels ──────────────────────────────
+# Enables: ratatui widget stack, IPC event bus (lamquant-ops), user history,
+#          PCCP YAML registry parsing.
+tui = [
+    "cli",
     "dep:ratatui",
     "dep:crossterm",
-    "dep:indicatif",
-    "dep:serde_json",
-    "dep:serde",
     "dep:serde_yaml",
     "dep:lamquant-ops",
     "dep:lamquant-history",
@@ -134,12 +157,13 @@ host = [
     "dep:tui-tree-widget",
     "dep:tui-widget-list",
     "dep:tui-piechart",
-    "dep:tracing",
-    "dep:tracing-subscriber",
-    # Phase 7 — encryption + signing primitives. RustCrypto crates,
-    # pure-Rust, no_std-compatible, tiny footprint. Always bundled into
-    # the host build so `lml encrypt` / `lml sign` are available on
-    # every install without a feature flag dance.
+]
+
+# ── security — archive + encryption / signing primitives ────────────────────
+# Enables: lml encrypt, lml decrypt, lml sign, lml verify-signature.
+# RustCrypto crates — pure-Rust, no system deps.
+security = [
+    "archive",
     "dep:aes-gcm",
     "dep:hmac",
     "dep:zeroize",
@@ -147,52 +171,31 @@ host = [
     "dep:rpassword",
     "dep:getrandom",
 ]
-# Phase 6 — async + network surface. tokio runtime + reqwest HTTP +
-# notify filesystem watcher. Heavy footprint; gate behind explicit
-# `async` feature so the lossless codec build path stays minimal.
-async = [
-    "host",
-    "dep:tokio",
-    "dep:reqwest",
-    "dep:notify",
-]
-# Phase 7.3 — OS keyring lookup for AES key material. Adds the
-# `keyring` crate which on Linux pulls in libdbus + libsecret. macOS
-# and Windows use their native APIs (no extra system deps). Off by
-# default so the static-musl artifact stays clean.
+
+# ── host: full lml CLI + TUI + security (backward-compat alias) ─────────────
+# Enables everything. cargo install lamquant-lml gives you lml with all
+# subcommands including encrypt/sign and the interactive TUI.
+host = ["tui", "security"]
+
+# ── Optional heavy extensions ────────────────────────────────────────────────
+# Phase 6 — async + network. tokio + reqwest + notify filesystem watcher.
+async = ["host", "dep:tokio", "dep:reqwest", "dep:notify"]
+# Phase 7.3 — OS keyring. libdbus+libsecret on Linux, native APIs elsewhere.
 keyring = ["host", "dep:keyring"]
-# Phase 5.4 — Parquet export (`lml export -f parquet`). Pulls in the
-# Apache Arrow / parquet crate stack (~50 crates). Off by default.
-parquet = [
-    "host",
-    "dep:parquet",
-    "dep:arrow-array",
-    "dep:arrow-schema",
-]
-# Phase 5.6 — HDF5 export (`lml export -f hdf5`). Requires libhdf5
-# system dev headers; off by default for the static-musl artifact.
+# Phase 5.4 — Parquet export. Arrow/parquet stack (~50 crates).
+parquet = ["host", "dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
+# Phase 5.6 — HDF5 export. Requires libhdf5 system headers.
 hdf5 = ["host", "dep:hdf5-metno", "dep:ndarray"]
 nwb = ["hdf5"]
-# Phase 4.7 — DICOM Waveform read via `dicom-rs`. Pure-Rust, no
-# system deps. Behind a feature gate because clinical DICOM workflows
-# are a tiny minority of LamQuant users.
-dicom = ["host", "dep:dicom-object", "dep:dicom-core"]
-# Phase 6.2 / 6.3 / 6.7 — S3 read/write/ETag via aws-sdk-s3. Behind
-# its own feature gate because the AWS SDK is ~100 transitive crates.
-# Implies `async` (uses the same tokio runtime as `lml watch`).
+# Phase 4.7 — DICOM Waveform read. Pure-Rust, no system deps.
+dicom = ["archive", "dep:dicom-object", "dep:dicom-core"]
+# Phase 6.2/6.3/6.7 — S3 read/write/ETag via aws-sdk-s3.
 s3 = ["async", "dep:aws-config", "dep:aws-sdk-s3"]
 python = ["host", "dep:pyo3", "dep:numpy"]
 ffi = ["host"]
 wasm = ["std", "dep:wasm-bindgen"]
-# ADR 0023 Track B5+: replace the hand-rolled WNC arithmetic
-# coder in `arithmetic.rs` with a constriction-backed range
-# coder. constriction is a research-grade entropy-coder crate
-# (BSD-3) built specifically for ML compression — rANS, range
-# coder, arithmetic, and adaptive models. We use its range coder
-# + LeakyQuantizer<Laplace> here. The crate is opt-in to keep
-# default builds dependency-clean; activate at compile time via
-# `--features experimental_arithmetic`. Runtime opt-in via the
-# `LAMQUANT_TRY_ARITHMETIC=1` env var still applies on top.
+# ADR 0023 Track B5+: constriction-backed rANS/range/arithmetic coder.
+# Runtime opt-in via LAMQUANT_TRY_ARITHMETIC=1.
 experimental_arithmetic = ["host", "dep:constriction", "dep:probability"]
 # ADR 0024 Phase 4 — LSL CLI subcommands. Direct cyclic dep on
 # `lamquant-lsl` (which depends on lamquant-core) is not possible.

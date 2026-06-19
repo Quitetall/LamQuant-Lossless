@@ -48,7 +48,7 @@ pub enum ComputeBackend {
     /// decompress. Same wire-format output as `Firmware` by contract.
     /// Targets x86_64 / aarch64 desktops, laptops, servers,
     /// basestations.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "archive")]
     Desktop,
 }
 
@@ -57,7 +57,7 @@ impl Default for ComputeBackend {
     /// builds (no `host` feature) default to `Firmware`. Callers can
     /// override globally via `set_global_backend()`.
     fn default() -> Self {
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         {
             ComputeBackend::Desktop
         }
@@ -84,7 +84,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 const BACKEND_UNSET: u8 = 0;
 const BACKEND_FIRMWARE: u8 = 1;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 const BACKEND_DESKTOP: u8 = 2;
 
 static GLOBAL_BACKEND: AtomicU8 = AtomicU8::new(BACKEND_UNSET);
@@ -95,7 +95,7 @@ static GLOBAL_BACKEND: AtomicU8 = AtomicU8::new(BACKEND_UNSET);
 pub fn set_global_backend(backend: ComputeBackend) {
     let v = match backend {
         ComputeBackend::Firmware => BACKEND_FIRMWARE,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         ComputeBackend::Desktop => BACKEND_DESKTOP,
     };
     GLOBAL_BACKEND.store(v, Ordering::Relaxed);
@@ -107,7 +107,7 @@ pub fn set_global_backend(backend: ComputeBackend) {
 pub fn global_backend() -> ComputeBackend {
     match GLOBAL_BACKEND.load(Ordering::Relaxed) {
         BACKEND_FIRMWARE => ComputeBackend::Firmware,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         BACKEND_DESKTOP => ComputeBackend::Desktop,
         _ => ComputeBackend::default(),
     }
@@ -122,9 +122,9 @@ impl ComputeBackend {
     pub fn parse(s: &str) -> Result<Self, &'static str> {
         match s {
             "firmware" => Ok(ComputeBackend::Firmware),
-            #[cfg(feature = "host")]
+            #[cfg(feature = "archive")]
             "desktop" => Ok(ComputeBackend::Desktop),
-            #[cfg(feature = "host")]
+            #[cfg(feature = "archive")]
             _ => Err("backend must be `firmware` or `desktop`"),
             #[cfg(not(feature = "host"))]
             _ => Err("backend must be `firmware` (only variant on this build)"),
@@ -135,7 +135,7 @@ impl ComputeBackend {
     pub fn name(&self) -> &'static str {
         match self {
             ComputeBackend::Firmware => "firmware",
-            #[cfg(feature = "host")]
+            #[cfg(feature = "archive")]
             ComputeBackend::Desktop => "desktop",
         }
     }
@@ -151,7 +151,7 @@ pub fn compress_with_backend(
 ) -> LmlResult<Vec<u8>> {
     match backend {
         ComputeBackend::Firmware => lml::compress_with_mode(signal, noise_bits, mode),
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         ComputeBackend::Desktop => {
             // Host parallel path: rayon over channels. Output is
             // byte-identical to the firmware path; the `byte_equal_
@@ -172,7 +172,7 @@ pub fn decompress_with_backend(
 ) -> LmlResult<Vec<Vec<i64>>> {
     match backend {
         ComputeBackend::Firmware => lml::decompress(data),
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         ComputeBackend::Desktop => {
             // Host parallel decompress: sequential parse phase
             // (cursor through golomb-encoded payload) + parallel
@@ -193,7 +193,7 @@ mod tests {
         // Host builds default to Desktop (perf path), firmware to
         // Firmware (the only variant present). Matches the manual
         // `impl Default`.
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         assert_eq!(ComputeBackend::default(), ComputeBackend::Desktop);
         #[cfg(not(feature = "host"))]
         assert_eq!(ComputeBackend::default(), ComputeBackend::Firmware);
@@ -206,7 +206,7 @@ mod tests {
         // build.
         set_global_backend(ComputeBackend::Firmware);
         assert_eq!(global_backend(), ComputeBackend::Firmware);
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         {
             set_global_backend(ComputeBackend::Desktop);
             assert_eq!(global_backend(), ComputeBackend::Desktop);
@@ -225,7 +225,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "host")]
+    #[cfg(feature = "archive")]
     #[test]
     fn parse_desktop_ok_on_host() {
         assert_eq!(
@@ -251,7 +251,7 @@ mod tests {
             ComputeBackend::parse(ComputeBackend::Firmware.name()),
             Ok(ComputeBackend::Firmware)
         );
-        #[cfg(feature = "host")]
+        #[cfg(feature = "archive")]
         {
             assert_eq!(
                 ComputeBackend::parse(ComputeBackend::Desktop.name()),

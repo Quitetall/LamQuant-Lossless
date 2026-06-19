@@ -62,43 +62,48 @@ pub mod quant;
 pub mod rans;
 pub mod zrle;
 
-// ─── Host-only (require std + heavy deps) ─────────────────────────
+// ─── archive: file I/O + LMA/EDF/container r/w ───────────────────
+// Enabled by: archive, cli, tui, security, host (all superset features).
 
 #[cfg(feature = "async")]
 pub mod async_io;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod codec_stages;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod container;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod edf;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
 // Keeps `lamquant_core::ingest::*` callable from existing code (lma.rs,
 // container, downstream tests).
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub use lamquant_common::ingest;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod io;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod lma;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod offset_table;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub use lamquant_common::paths;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod pipeline;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod range;
-#[cfg(feature = "host")]
-pub mod security;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod source;
-#[cfg(feature = "host")]
+#[cfg(feature = "archive")]
 pub mod stream;
-#[cfg(feature = "host")]
+
+// ─── security: encryption / signing primitives ────────────────────
+#[cfg(feature = "security")]
+pub mod security;
+
+// ─── tui: interactive TUI panels ──────────────────────────────────
+#[cfg(feature = "tui")]
 pub mod tui;
-#[cfg(feature = "host")]
+#[cfg(feature = "tui")]
 pub mod tui_experimental;
 
 #[cfg(feature = "ffi")]
