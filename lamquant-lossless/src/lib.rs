@@ -46,6 +46,11 @@ pub use lamquant_common::crc32;
 // to the lossless codec hot path or the firmware binary.
 #[cfg(feature = "experimental_arithmetic")]
 pub mod arithmetic;
+// ADR 0051 track 2 P3.5: empirical-categorical range coder (the real lossy
+// entropy gap-closer). Same opt-in feature as `arithmetic` (shares the
+// constriction dep); firmware fails closed on its payload tag.
+#[cfg(feature = "experimental_arithmetic")]
+pub mod arith_cat;
 pub mod error;
 pub mod golomb;
 pub mod lifting;

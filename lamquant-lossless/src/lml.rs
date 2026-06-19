@@ -72,22 +72,36 @@ pub(crate) const MODE_TARGET_BPS: u8 = 0x02;
 /// the encoder can keep whichever is smaller per subband.
 const PAYLOAD_CODER_GOLOMB: u8 = 0x00;
 const PAYLOAD_CODER_ZRLE: u8 = 0x01;
+/// Empirical-categorical range coder (P3.5). Opt-in `experimental_arithmetic`
+/// build only; firmware / default builds fail closed when decoding this tag.
+const PAYLOAD_CODER_ARITHMETIC: u8 = 0x02;
 
 /// Encode one track-2 subband residual, keeping the smaller of Golomb-Rice and
 /// zero-run-length (P3). Output is `[tag][coded]`. zrle wins on the zero-heavy
 /// heavily-quantized low-BPS streams (Golomb's 1-bit/symbol floor); Golomb wins
 /// on dense streams. Never worse than min(golomb, zrle) + 1 tag byte.
 fn encode_subband_payload(values: &[i64]) -> LmlResult<Vec<u8>> {
-    let g = golomb::encode_dense(values)?;
+    let mut best_tag = PAYLOAD_CODER_GOLOMB;
+    let mut best = golomb::encode_dense(values)?;
     let z = zrle::encode_dense(values)?;
-    let mut out = Vec::with_capacity(1 + g.len().min(z.len()));
-    if z.len() < g.len() {
-        out.push(PAYLOAD_CODER_ZRLE);
-        out.extend_from_slice(&z);
-    } else {
-        out.push(PAYLOAD_CODER_GOLOMB);
-        out.extend_from_slice(&g);
+    if z.len() < best.len() {
+        best_tag = PAYLOAD_CODER_ZRLE;
+        best = z;
     }
+    // P3.5: empirical-categorical range coder (opt-in build). Falls back
+    // silently if its alphabet is too wide (Err) or it doesn't win.
+    #[cfg(feature = "experimental_arithmetic")]
+    {
+        if let Ok(a) = crate::arith_cat::encode_dense(values) {
+            if a.len() < best.len() {
+                best_tag = PAYLOAD_CODER_ARITHMETIC;
+                best = a;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(1 + best.len());
+    out.push(best_tag);
+    out.extend_from_slice(&best);
     Ok(out)
 }
 
@@ -105,6 +119,20 @@ fn decode_subband_payload(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, us
     let (vals, consumed) = match tag {
         PAYLOAD_CODER_GOLOMB => golomb::decode_dense(data, offset + 1)?,
         PAYLOAD_CODER_ZRLE => zrle::decode_dense(data, offset + 1)?,
+        PAYLOAD_CODER_ARITHMETIC => {
+            #[cfg(feature = "experimental_arithmetic")]
+            {
+                crate::arith_cat::decode_dense(data, offset + 1)?
+            }
+            #[cfg(not(feature = "experimental_arithmetic"))]
+            {
+                return Err(LmlError::InvalidHeader(
+                    "payload coder 0x02 (arithmetic) requires an experimental_arithmetic \
+                     build; this reader fails closed"
+                        .into(),
+                ));
+            }
+        }
         other => {
             return Err(LmlError::InvalidHeader(format!(
                 "unknown track-2 payload coder tag 0x{:02X}",
