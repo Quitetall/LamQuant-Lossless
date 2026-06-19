@@ -1,15 +1,10 @@
 # lamquant-py
 
-Python bindings for the LamQuant LML lossless EEG codec, built with PyO3 + maturin.
-
-This crate is a thin cdylib wrapper over `lamquant-lml` (package alias `lamquant-core`). It exposes the same Golomb, rANS, LML packet, container, LMA archive, and LMQC APIs that the training dataloader and notebooks use.
+PyO3 + maturin bindings for `lamquant-lml`. Exposes Golomb, rANS, LML packet, container, LMA archive, and LMQC APIs as a native Python extension (`import lamquant_core`).
 
 ## Build
 
 ```bash
-# From codec-lossless/lamquant-py/
-maturin develop --release
-# Or from meta-repo root:
 maturin develop --release -m codec-lossless/lamquant-py/Cargo.toml
 ```
 
@@ -18,22 +13,16 @@ maturin develop --release -m codec-lossless/lamquant-py/Cargo.toml
 ```python
 import lamquant_core
 
-# Compress/decompress LML packet
+# Round-trip a packet
 data = lamquant_core.lml_compress([[1, 2, 3], [4, 5, 6]], noise_bits=0)
 signal = lamquant_core.lml_decompress(data)
 
-# Read a file from an LMA archive without unpacking
-entry = lamquant_core.lma_read_entry("/data/corpus.lma", "recording.lml")
-signal, meta = lamquant_core.container_read_bytes(entry)
+# Read one entry from an LMA archive without extracting
+raw = lamquant_core.lma_read_entry("/data/corpus.lma", "recording.lml")
+signal, meta = lamquant_core.container_read_bytes(raw)
 
-# Fast window-level random access
-window, meta, n_windows = lamquant_core.container_read_window_np(entry, window_idx=0)
+# Random-access a single window (peak RSS = one window, not full file)
+window, meta, n_windows = lamquant_core.container_read_window_np(raw, window_idx=0)
 ```
 
-## Cross-language parity tests
-
-Tests that verify Python-visible behaviour matches the Rust source of truth live here (not in `lamquant-lml`). Run with:
-
-```bash
-maturin develop && pytest tests/
-```
+Python-to-Rust parity tests live here (`tests/`), not in `lamquant-lml`. Rust is the source of truth.
