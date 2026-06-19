@@ -1,9 +1,9 @@
-# LamQuant Lossless
+# lml
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20484969.svg)](https://doi.org/10.5281/zenodo.20484969)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-Bit-exact lossless EEG compression codec. Real-time, integer-only, deployable on x86 / ARM / RISC-V without floating-point hardware. Paper submitted to *IEEE Journal of Biomedical and Health Informatics* (2026).
+`lml` is the CLI + TUI for LamQuant lossless EEG compression. Bare `lml` opens the TUI; `lml <subcommand>` runs scriptable CLI workflows. Default compression is MCU-safe, integer-only, and bit-exact. Basestation lossless mode is opt-in behind experimental Cargo features.
 
 **Cite:** archived at Zenodo: [`10.5281/zenodo.20484969`](https://doi.org/10.5281/zenodo.20484969) (see [`CITATION.cff`](CITATION.cff)).
 
@@ -25,21 +25,32 @@ anytime adaptive w/ bias cancellation) → Golomb-Rice entropy → LML container
 
 All stages are integer-only (`i32` / `i64`). Wire format is platform-independent. Two backends (`Firmware` no_std + `Desktop` with rayon) produce byte-identical output, gated by `tests/byte_equal_backends.rs`.
 
+## Lossless deployment modes
+
+```bash
+lml encode in.edf -o out.lma
+lml encode in.edf -o out.lma --lossless-mode mcu
+cargo build -p lml --features experimental_basestation
+lml encode in.edf -o out.lma --lossless-mode basestation
+```
+
+`mcu` is default and uses the bounded integer profile. `basestation` remains bit-exact but may use host-only, computationally expensive compression paths as they land. Near-lossless `--max-error` and lossy H.BWC `--target-bps` are separate modes, not lossless deployment modes.
+
+Host export supports HDF5 with `--features hdf5` and NWB-like HDF5 `ElectricalSeries` with `--features nwb`:
+
+```bash
+lml export out.lma --format hdf5 -o out.h5 --lossless-mode mcu
+lml export out.lma --format nwb -o out.nwb --lossless-mode mcu
+```
+
 ## Workspace layout
 
 | Crate | Purpose |
 |---|---|
 | `crates/lamquant-common/` | Shared primitives (CRC-32, EDF reader, LMA archive, path helpers, ingest) — both lossless and (private) neural codecs depend on this |
-| `lamquant-lossless/` | Codec library + CLI binaries (`lml`, `lamquant`) |
-| `lamquant-firmware/` | RP2350 bare-metal bin (riscv32imac-unknown-none-elf, no_std + alloc-free hot path) |
-| `lamquant-weights/` | LUTs as data (alloc-free) |
-| `crates/lamquant-ops/` | Op runner / launcher / transport (shared by CLI, TUI, Python) |
+| `lamquant-lossless/` | `lml` crate: codec library + CLI/TUI binary |
 | `crates/lmafs/` | FUSE filesystem over `.lma` archives |
-| `crates/lamquant-history/` | TUI session history reader/writer |
-| `crates/lamquant-ipc-types/` | MCU↔host IPC protocol (postcard-encoded envelopes) |
-| `crates/lamquant-lsl/` | Lab Streaming Layer integration (opt-in, requires liblsl) |
 | `reference_implementations/python_codec/` | Python wheel `lamquant-codec` (PyO3 bindings) |
-| `reference_implementations/c_firmware/` | C parity reference for firmware build |
 
 ## Quick start
 
@@ -47,8 +58,8 @@ All stages are integer-only (`i32` / `i64`). Wire format is platform-independent
 
 ```bash
 cargo install --path lamquant-lossless --bin lml
-lml encode in.edf out.lml
-lml decode out.lml restored.edf
+lml encode in.edf -o out.lma
+lml extract out.lma -o restored/
 diff in.edf restored.edf  # byte-identical
 ```
 
@@ -101,7 +112,7 @@ This repository is one repo in an 8-product Unix decomposition of LamQuant:
 
 ## License
 
-GNU GENERAL PUBLIC LICENSE v3 (see `LICENSE.md`). Patent grant per GPLv3 §11 covers `US Patent Pending #64/032,641`.
+GNU AFFERO GENERAL PUBLIC LICENSE v3 or later (see `LICENSE.md`). The repository carries the AGPLv3 network-source obligation and patent grant terms for `US Patent Pending #64/032,641`.
 
 ## Cite
 

@@ -21,11 +21,11 @@ use super::panels::browse_results::BrowseResultsPanel;
 use super::panels::dialog::DialogPanel;
 use super::panels::file_browser::FileBrowserPanel;
 use super::panels::input::InputPanel;
+use super::panels::lossless_prompt::LosslessPromptPanel;
 use super::panels::main_hub::{HubTile, MainHubPanel};
 use super::panels::menu::{MenuItem, MenuPanel};
 use super::panels::output::OutputPanel;
 use super::panels::preflight::PreflightPanel;
-use super::panels::lossless_prompt::LosslessPromptPanel;
 use super::panels::resume::{ResumeAction, ResumePanel};
 use super::panels::root_warn::RootWarnPanel;
 use super::panels::settings::SettingsPanel;
@@ -184,14 +184,12 @@ impl App {
             router::SCREEN_MAIN.to_string(),
             Box::new(MainHubPanel::new(
                 router::SCREEN_MAIN,
-                vec![
-                    HubTile::new(
-                        "1",
-                        "Codec Hub",
-                        "Compress · decompress · browse · verify",
-                        router::SCREEN_CODEC_HUB,
-                    ),
-                ],
+                vec![HubTile::new(
+                    "1",
+                    "Codec Hub",
+                    "Compress · decompress · browse · verify",
+                    router::SCREEN_CODEC_HUB,
+                )],
                 vec![
                     HubTile::new(
                         "N",
@@ -264,8 +262,10 @@ impl App {
         // the help panel can be populated from settings panel state.
 
         // Help, Train/Eagle/Setup as info_text.
-        self.panels
-            .insert(router::SCREEN_HELP.to_string(), Box::new(DialogPanel::help()));
+        self.panels.insert(
+            router::SCREEN_HELP.to_string(),
+            Box::new(DialogPanel::help()),
+        );
         self.panels.insert(
             router::SCREEN_PEERS.to_string(),
             Box::new(super::panels::peers::PeersPanel::new()),
@@ -585,9 +585,7 @@ impl App {
             SCREEN_ROOT_WARN => self.root_warn_panel.handle_event(key, &self.state),
             SCREEN_BROWSE_RESULTS => self.browse_panel.handle_event(key, &self.state),
             SCREEN_TUTORIAL => self.tutorial_panel.handle_event(key, &self.state),
-            SCREEN_LOSSLESS_PROMPT => {
-                self.lossless_prompt_panel.handle_event(key, &self.state)
-            }
+            SCREEN_LOSSLESS_PROMPT => self.lossless_prompt_panel.handle_event(key, &self.state),
             SCREEN_SYSCHECK => self.syscheck_panel.handle_event(key, &self.state),
             SCREEN_RESUME => self.resume_panel.handle_event(key, &self.state),
             SCREEN_SPLASH => self.splash_panel.handle_event(key, &self.state),
@@ -915,7 +913,7 @@ impl App {
         // bytes labelled "LMQ Neural" -- contract violation).
         if matches!(op_id, "encode_neural" | "decode_neural") {
             self.state.set_status(
-                "LMQ Neural codec not built in this release — use Lossless mode for now."
+                "LMQ neural codec not installed. Install LamQuant Neural/LMQ to use neural mode."
                     .to_string(),
             );
             return;
@@ -1460,7 +1458,7 @@ impl App {
             logo_lines.push(Line::from(vec![
                 Span::raw("       "),
                 Span::styled(
-                    "Neural EEG Codec  ·  Gen 7.7  ·  GPL-3.0-or-later  ·  OpenHuman.tech",
+                    "Neural EEG Codec  ·  Gen 7.7  ·  AGPL-3.0-or-later  ·  OpenHuman.tech",
                     theme::dim(),
                 ),
             ]));
@@ -1484,9 +1482,7 @@ impl App {
             SCREEN_ROOT_WARN => self.root_warn_panel.render(state, f, chunks[1]),
             SCREEN_BROWSE_RESULTS => self.browse_panel.render(state, f, chunks[1]),
             SCREEN_TUTORIAL => self.tutorial_panel.render(state, f, chunks[1]),
-            SCREEN_LOSSLESS_PROMPT => {
-                self.lossless_prompt_panel.render(state, f, chunks[1])
-            }
+            SCREEN_LOSSLESS_PROMPT => self.lossless_prompt_panel.render(state, f, chunks[1]),
             SCREEN_SYSCHECK => self.syscheck_panel.render(state, f, chunks[1]),
             SCREEN_RESUME => self.resume_panel.render(state, f, chunks[1]),
             SCREEN_SPLASH => self.splash_panel.render(state, f, chunks[1]),
@@ -1577,7 +1573,7 @@ impl App {
             Line::from(Span::styled(" EEG codec + tools.", theme::dim())),
             Line::from(Span::styled(" Encode · validate · train", theme::dim())),
             Line::from(Span::styled(" firmware · visualize.", theme::dim())),
-            Line::from(Span::styled(" GPL-3.0-or-later", theme::dim())),
+            Line::from(Span::styled(" AGPL-3.0-or-later", theme::dim())),
         ];
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -1878,9 +1874,7 @@ impl App {
         }
         let ctx = if is_running {
             match op {
-                "encode" | "encode_neural" | "encode_lma" | "encode_lml_siblings" => {
-                    Ctx::Encode
-                }
+                "encode" | "encode_neural" | "encode_lma" | "encode_lml_siblings" => Ctx::Encode,
                 "decode" | "decode_neural" => Ctx::Decode,
                 _ => Ctx::Idle,
             }
@@ -2322,4 +2316,3 @@ mod app_tests {
         );
     }
 }
-

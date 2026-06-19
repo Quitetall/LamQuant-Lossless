@@ -7,7 +7,7 @@ name = "lamquant-core"
 version = "0.2.0"
 description = "LML lossless EEG codec — Rust acceleration for lamquant-codec"
 requires-python = ">=3.10"
-license = {text = "GPL-3.0-or-later"}
+license = {text = "AGPL-3.0-or-later"}
 keywords = ["eeg", "lossless", "compression", "codec"]
 classifiers = [
     "Development Status :: 4 - Beta",

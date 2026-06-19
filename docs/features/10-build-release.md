@@ -89,7 +89,7 @@ audits and known-CVE matching. Tooling: `syft`, `grype`, `cyclonedx-cli`.
 `deny.toml` policy explicitly:
 
 - Allowed licenses: MIT, Apache-2.0, BSD-3-Clause, etc.
-- Banned: GPL family (incompatible with the project's MIT licensing)
+- Banned: licenses incompatible with AGPL-3.0-or-later distribution
 - Sources: crates.io + known-good mirrors only
 
 A failure in either lane blocks merge. Audit-2026-05-11 hardened this
@@ -224,7 +224,7 @@ packagers can pick a smaller subset.
 
 | Path | What's there |
 |---|---|
-| `lamquant-core/` | Library + `lml` / `lamquant` binaries |
+| `lamquant-lossless/` | `lml` library crate + CLI/TUI binary |
 | `crates/lmafs/` | FUSE filesystem ([OS Integration](./07-os-integration.md)) |
 | `crates/lamquant-history/` | Append-only event log helpers |
 | `crates/lamquant-ops/` | `OpEvent` wire format (for `--emit-json-events`) |

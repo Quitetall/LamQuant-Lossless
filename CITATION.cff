@@ -8,7 +8,7 @@ authors:
     orcid: "https://orcid.org/0009-0001-5463-2324"
     affiliation: "OpenHuman Technologies LLC, Florida, USA"
     email: briankhanglam@usf.edu
-license: GPL-3.0-or-later
+license: AGPL-3.0-or-later
 doi: 10.5281/zenodo.20484969
 repository-code: "https://github.com/Quitetall/LamQuant-Lossless"
 identifiers:

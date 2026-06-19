@@ -1177,7 +1177,7 @@ fn encode_edf_to_lml(
         .map_err(|e| format!("zstd compress EDF header: {}", e))?;
     let hdr_b64 = b64.encode(&hdr_compressed);
 
-    let encoder_version = format!("lamquant-core/{}", env!("CARGO_PKG_VERSION"));
+    let encoder_version = format!("lml/{}", env!("CARGO_PKG_VERSION"));
 
     let mut non_eeg_json = String::from("{");
     for (i, (ch_idx, ch_bytes)) in edf_data.non_eeg_data.iter().enumerate() {

@@ -177,7 +177,7 @@ runbook) and ≈26 s of wall clock to run the 129 M-cycle sim.
 
 ## License + Patent
 
-Source code: permissive open-source (license file in repository).
+Source code: AGPL-3.0-or-later (license file in repository).
 Patent disclosure: Patent Pending US #64/032,641 (commercial
 implementation rights only; academic and derivative research are
 unaffected).

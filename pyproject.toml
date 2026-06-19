@@ -7,14 +7,14 @@ name = "lamquant-codec"
 version = "7.7.0"
 description = "LML lossless EEG compression codec + LMQ neural codec"
 readme = "README.md"
-license = {text = "GPL-3.0-or-later"}
+license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.10"
 keywords = ["eeg", "lossless", "compression", "codec", "medical", "neuroscience"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
 ]
 # Core: lossless codec works with numpy + scipy only.
@@ -28,8 +28,8 @@ dependencies = [
 
 [project.scripts]
 # `lamquant` (no entry here) is the Rust TUI launcher binary
-# (lamquant-core/src/bin/lamquant.rs, installed to ~/.cargo/bin/
-# via `cargo install --path lamquant-core`). Adding a Python
+# (`lamquant-lossless/src/bin/lml.rs`, installed to ~/.cargo/bin/
+# via `cargo install --path lamquant-lossless`). Adding a Python
 # console-script with the same name shadows the Rust binary on
 # PATH (pip puts ~/.local/bin/ ahead of ~/.cargo/bin/) and breaks
 # the "lamquant <no args> → TUI" contract. Python codec CLI users
@@ -52,8 +52,8 @@ neural = [
 ]
 # MNE-Python integration
 mne = ["mne>=1.5"]
-# Rust acceleration (lamquant-core, built separately via maturin)
-rust = ["lamquant-core>=0.2.0"]
+# Rust acceleration (`lml`, built separately via maturin)
+rust = ["lml>=7.7.0"]
 # Development
 test = [
     "pytest>=7.4",
@@ -83,7 +83,7 @@ all = [
 #
 # lamquant_codec moved to reference_implementations/python_codec/
 # 2026-05-18 — it's the Python reference implementation now, not the
-# canonical codec (the Rust `lamquant-core` is). `where = [..., ".",
+# canonical codec (the Rust `lml` crate is). `where = [..., ".",
 # "reference_implementations/python_codec"]` keeps both `tools/` (at
 # the repo root) and `lamquant_codec/` (under
 # reference_implementations/) discoverable. The `include`/`exclude`

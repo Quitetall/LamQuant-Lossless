@@ -28,7 +28,7 @@
 //!   - R30 unsupported sample-bit-depths refused explicitly
 
 use crate::error::{LmlError, LmlResult};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;

@@ -8,6 +8,7 @@
 //! lml — LamQuant Lossless EEG codec CLI.
 
 use clap::{Parser, Subcommand};
+use lamquant_core::deployment::LosslessMode;
 use lamquant_core::{container, edf, lma, lml, tui};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -207,7 +208,11 @@ SOURCE FORMATS:
         /// Track-2 bounded-MAE near-lossless: guarantee max|orig-recon| <= δ
         /// (ADR 0051). Single-file → bare `.lml` via closed-loop DPCM.
         /// Mutually exclusive with `--noise-bits`.
-        #[arg(long = "max-error", value_name = "DELTA", conflicts_with = "noise_bits")]
+        #[arg(
+            long = "max-error",
+            value_name = "DELTA",
+            conflicts_with = "noise_bits"
+        )]
         max_error: Option<u64>,
         /// Track-2 target-BPS rate-controlled lossy: minimize distortion s.t.
         /// bits-per-sample <= X (ADR 0051, the H.BWC WP tier). Single-file →
@@ -219,6 +224,10 @@ SOURCE FORMATS:
             conflicts_with = "max_error"
         )]
         target_bps: Option<f64>,
+        /// Explicit lossless deployment mode. Omitted = MCU-safe integer mode.
+        /// `basestation` requires `--features experimental_basestation`.
+        #[arg(long = "lossless-mode", value_name = "MODE", value_parser = ["mcu", "basestation"])]
+        lossless_mode: Option<String>,
         /// Samples per compression window
         #[arg(long, default_value = "2500")]
         window_size: usize,
@@ -306,7 +315,7 @@ SOURCE FORMATS:
         ///   * anytime  — fixed first, upgrade to adaptive if budget
         ///     allows (default; equivalent to adaptive on batch CLI
         ///     which has no deadline)
-        #[arg(long = "lpc-mode", default_value = "anytime", value_parser = ["adaptive", "fixed", "anytime"])]
+        #[arg(long = "lpc-mode", default_value = "auto", value_parser = ["auto", "adaptive", "fixed", "anytime"])]
         lpc_mode: String,
         /// Abort the batch on first failure. Default = continue
         /// (Phase 1.7 `--continue-on-error` is implicit; failures are
@@ -432,6 +441,9 @@ SOURCE FORMATS:
         /// Output format: csv, npy, raw, mat, bids
         #[arg(short, long, default_value = "csv")]
         format: String,
+        /// Export metadata deployment mode. Omitted = preserve archive metadata or MCU.
+        #[arg(long = "lossless-mode", value_name = "MODE", value_parser = ["mcu", "basestation"])]
+        lossless_mode: Option<String>,
     },
     /// Compare two LML files sample-by-sample
     Diff {
@@ -1069,6 +1081,48 @@ fn parse_lpc_mode(s: &str) -> lamquant_core::lpc::LpcMode {
     }
 }
 
+fn parse_lossless_mode(mode: Option<&str>) -> Result<LosslessMode, String> {
+    match mode.unwrap_or("mcu") {
+        "mcu" => Ok(LosslessMode::Mcu),
+        "basestation" => {
+            if cfg!(feature = "experimental_basestation") {
+                Ok(LosslessMode::Basestation)
+            } else {
+                Err("basestation lossless mode requires building lml with `--features experimental_basestation`".to_owned())
+            }
+        }
+        other => Err(format!("unknown lossless mode `{other}`")),
+    }
+}
+
+fn resolve_lpc_mode(
+    lossless_mode: LosslessMode,
+    lpc_mode: &str,
+) -> Result<lamquant_core::lpc::LpcMode, String> {
+    match (lossless_mode, lpc_mode) {
+        (LosslessMode::Mcu, "auto" | "fixed") => Ok(LosslessMode::Mcu.default_lpc_mode()),
+        (LosslessMode::Mcu, other) => Err(format!(
+            "MCU lossless mode only permits --lpc-mode fixed/auto; got `{other}`"
+        )),
+        (LosslessMode::Basestation, "auto") => Ok(LosslessMode::Basestation.default_lpc_mode()),
+        (LosslessMode::Basestation, other) => Ok(parse_lpc_mode(other)),
+    }
+}
+
+fn reject_explicit_lossless_with_non_lossless(
+    lossless_mode: Option<&str>,
+    max_error: Option<u64>,
+    target_bps: Option<f64>,
+) -> Result<(), String> {
+    if lossless_mode.is_some() && target_bps.is_some() {
+        return Err("--lossless-mode cannot be combined with --target-bps".to_owned());
+    }
+    if lossless_mode.is_some() && max_error.unwrap_or(0) > 0 {
+        return Err("--lossless-mode cannot be combined with --max-error > 0".to_owned());
+    }
+    Ok(())
+}
+
 /// Find every sibling sidecar file next to a given EDF — anything in
 /// the same directory whose basename starts with the EDF's stem
 /// followed by either `.` (extension separator) or `_` (`_summary.
@@ -1415,6 +1469,7 @@ fn main() {
                 noise_bits,
                 max_error,
                 target_bps,
+                lossless_mode,
                 window_size,
                 threads,
                 recursive,
@@ -1430,43 +1485,56 @@ fn main() {
                 fail_fast,
                 continue_on_error: _,
             } => {
-                // ADR 0051 track 2: bounded-MAE near-lossless. Self-contained
-                // single-file path → bare `.lml` via closed-loop DPCM, bypasses
-                // the batch/bundle machinery (the lossy `.lml` has no `.lma`
-                // sibling-envelope semantics). For the H.BWC working-point
-                // bench + clinical near-lossless use.
-                if let Some(tb) = target_bps {
-                    cmd_encode_target_bps(
-                        &input,
-                        output.as_deref(),
-                        tb,
-                        window_size,
-                        parse_lpc_mode(&lpc_mode),
-                        verify,
-                    )
-                } else if let Some(delta) = max_error {
-                    cmd_encode_bounded_mae(
-                        &input,
-                        output.as_deref(),
-                        delta,
-                        window_size,
-                        parse_lpc_mode(&lpc_mode),
-                        verify,
-                    )
-                // `--lml-siblings` is the TUI's "LML + copy siblings"
-                // mode -- walk the source tree, encode every EDF to
-                // .lml, copy every non-EEG file verbatim into the
-                // mirrored output. Diverges from --no-bundle in
-                // scope: --no-bundle handles stem-bound sidecars per
-                // EDF; --lml-siblings handles the entire tree (every
-                // file, every sub-directory). Implementation lives
-                // in lma::pack_lml_with_siblings.
-                } else if lml_siblings {
-                    // Pre-flight: --lml-siblings demands an explicit
-                    // -o because it writes into a directory, not a
-                    // single file. Same shape as the --lma branch
-                    // already enforces.
-                    match output.as_deref() {
+                if let Err(e) = reject_explicit_lossless_with_non_lossless(
+                    lossless_mode.as_deref(),
+                    max_error,
+                    target_bps,
+                ) {
+                    Err(e.into())
+                } else {
+                    match parse_lossless_mode(lossless_mode.as_deref()) {
+                        Err(e) => Err(e.into()),
+                        Ok(selected_lossless_mode) => {
+                            match resolve_lpc_mode(selected_lossless_mode, &lpc_mode) {
+                                Err(e) => Err(e.into()),
+                                Ok(selected_lpc_mode) => {
+                                    // ADR 0051 track 2: bounded-MAE near-lossless. Self-contained
+                                    // single-file path → bare `.lml` via closed-loop DPCM, bypasses
+                                    // the batch/bundle machinery (the lossy `.lml` has no `.lma`
+                                    // sibling-envelope semantics). For the H.BWC working-point
+                                    // bench + clinical near-lossless use.
+                                    if let Some(tb) = target_bps {
+                                        cmd_encode_target_bps(
+                                            &input,
+                                            output.as_deref(),
+                                            tb,
+                                            window_size,
+                                            parse_lpc_mode(&lpc_mode),
+                                            verify,
+                                        )
+                                    } else if let Some(delta) = max_error {
+                                        cmd_encode_bounded_mae(
+                                            &input,
+                                            output.as_deref(),
+                                            delta,
+                                            window_size,
+                                            parse_lpc_mode(&lpc_mode),
+                                            verify,
+                                        )
+                                    // `--lml-siblings` is the TUI's "LML + copy siblings"
+                                    // mode -- walk the source tree, encode every EDF to
+                                    // .lml, copy every non-EEG file verbatim into the
+                                    // mirrored output. Diverges from --no-bundle in
+                                    // scope: --no-bundle handles stem-bound sidecars per
+                                    // EDF; --lml-siblings handles the entire tree (every
+                                    // file, every sub-directory). Implementation lives
+                                    // in lma::pack_lml_with_siblings.
+                                    } else if lml_siblings {
+                                        // Pre-flight: --lml-siblings demands an explicit
+                                        // -o because it writes into a directory, not a
+                                        // single file. Same shape as the --lma branch
+                                        // already enforces.
+                                        match output.as_deref() {
                         None => Err::<(), Box<dyn std::error::Error + Send + Sync>>(
                             "--lml-siblings requires an explicit -o <output_dir>".into(),
                         ),
@@ -1488,69 +1556,76 @@ fn main() {
                             }
                         },
                     }
-                } else {
-                // Data-loss footgun guard. `--no-bundle` (alias
-                // `--bare-lml`) emits raw `.lml` without the per-
-                // recording `.lma` envelope. Sidecars are mirror-copied
-                // next to the `.lml` (the encoder never silently drops
-                // them) BUT the operator who moves only the `.lml` to a
-                // new location, or deletes the source dir after
-                // verifying signal parity, will lose every sibling
-                // file. This is the failure mode that cost one full
-                // TUEG migration cycle. We refuse to be silent about
-                // it: every invocation of `--no-bundle` prints a loud
-                // warning unless paired with `--i-understand-data-loss`.
-                // Tier 3 audit (O2): --no-bundle is now a HARD GATE.
-                // The pre-fix code printed a loud stderr warning and
-                // then proceeded with encoding either way -- but
-                // `2>/dev/null` silences the warning, the exit code
-                // stayed 0, and downstream automation never knew the
-                // data-loss path was taken. CLAUDE.md / Bible R5 (no
-                // silent fallback): require `--i-understand-data-loss`
-                // as a hard pre-condition. Exit code 2 if missing.
-                if no_bundle && !i_understand_data_loss {
-                    eprintln!();
-                    eprintln!("  ============================================================");
-                    eprintln!("  ERROR: --no-bundle / --bare-lml refuses to run without ");
-                    eprintln!("         --i-understand-data-loss");
-                    eprintln!("  ============================================================");
-                    eprintln!("  Bare `.lml` output drops the per-recording `.lma` envelope.");
-                    eprintln!("  Sidecar files (.tse, .csv_bi, .lbl_bi, _summary.txt, etc.)");
-                    eprintln!("  are mirror-copied next to the `.lml` so they are NOT");
-                    eprintln!("  silently lost in this run -- but if you later move the");
-                    eprintln!("  `.lml` to a different directory, or delete the source");
-                    eprintln!("  directory after verifying signal parity, every sidecar");
-                    eprintln!("  will go with it. There is no second chance.");
-                    eprintln!();
-                    eprintln!("  Default behaviour (no `--no-bundle` flag) produces a per-");
-                    eprintln!("  recording `.lma` archive that bundles `.lml` + every");
-                    eprintln!("  sibling. The archive travels as one file; sidecars cannot");
-                    eprintln!("  be left behind by accident.");
-                    eprintln!();
-                    eprintln!("  Re-run with `--i-understand-data-loss` to acknowledge the");
-                    eprintln!("  failure mode and proceed. The flag is intentionally verbose.");
-                    eprintln!("  ============================================================");
-                    eprintln!();
-                    std::process::exit(2);
-                }
-                cmd_encode(
-                    &input,
-                    output.as_deref(),
-                    verify,
-                    cross_validate,
-                    noise_bits,
-                    window_size,
-                    threads,
-                    recursive,
-                    skip_existing,
-                    dry_run,
-                    lma,
-                    no_bundle,
-                    parse_lpc_mode(&lpc_mode),
-                    fail_fast,
-                    &include_globs,
-                    &exclude_globs,
-                )
+                                    } else {
+                                        // Data-loss footgun guard. `--no-bundle` (alias
+                                        // `--bare-lml`) emits raw `.lml` without the per-
+                                        // recording `.lma` envelope. Sidecars are mirror-copied
+                                        // next to the `.lml` (the encoder never silently drops
+                                        // them) BUT the operator who moves only the `.lml` to a
+                                        // new location, or deletes the source dir after
+                                        // verifying signal parity, will lose every sibling
+                                        // file. This is the failure mode that cost one full
+                                        // TUEG migration cycle. We refuse to be silent about
+                                        // it: every invocation of `--no-bundle` prints a loud
+                                        // warning unless paired with `--i-understand-data-loss`.
+                                        // Tier 3 audit (O2): --no-bundle is now a HARD GATE.
+                                        // The pre-fix code printed a loud stderr warning and
+                                        // then proceeded with encoding either way -- but
+                                        // `2>/dev/null` silences the warning, the exit code
+                                        // stayed 0, and downstream automation never knew the
+                                        // data-loss path was taken. CLAUDE.md / Bible R5 (no
+                                        // silent fallback): require `--i-understand-data-loss`
+                                        // as a hard pre-condition. Exit code 2 if missing.
+                                        if no_bundle && !i_understand_data_loss {
+                                            eprintln!();
+                                            eprintln!("  ============================================================");
+                                            eprintln!("  ERROR: --no-bundle / --bare-lml refuses to run without ");
+                                            eprintln!("         --i-understand-data-loss");
+                                            eprintln!("  ============================================================");
+                                            eprintln!("  Bare `.lml` output drops the per-recording `.lma` envelope.");
+                                            eprintln!("  Sidecar files (.tse, .csv_bi, .lbl_bi, _summary.txt, etc.)");
+                                            eprintln!("  are mirror-copied next to the `.lml` so they are NOT");
+                                            eprintln!("  silently lost in this run -- but if you later move the");
+                                            eprintln!("  `.lml` to a different directory, or delete the source");
+                                            eprintln!("  directory after verifying signal parity, every sidecar");
+                                            eprintln!(
+                                                "  will go with it. There is no second chance."
+                                            );
+                                            eprintln!();
+                                            eprintln!("  Default behaviour (no `--no-bundle` flag) produces a per-");
+                                            eprintln!("  recording `.lma` archive that bundles `.lml` + every");
+                                            eprintln!("  sibling. The archive travels as one file; sidecars cannot");
+                                            eprintln!("  be left behind by accident.");
+                                            eprintln!();
+                                            eprintln!("  Re-run with `--i-understand-data-loss` to acknowledge the");
+                                            eprintln!("  failure mode and proceed. The flag is intentionally verbose.");
+                                            eprintln!("  ============================================================");
+                                            eprintln!();
+                                            std::process::exit(2);
+                                        }
+                                        cmd_encode(
+                                            &input,
+                                            output.as_deref(),
+                                            verify,
+                                            cross_validate,
+                                            noise_bits,
+                                            window_size,
+                                            threads,
+                                            recursive,
+                                            skip_existing,
+                                            dry_run,
+                                            lma,
+                                            no_bundle,
+                                            selected_lpc_mode,
+                                            fail_fast,
+                                            &include_globs,
+                                            &exclude_globs,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Commands::Decode {
@@ -1594,7 +1669,8 @@ fn main() {
                 input,
                 output,
                 format,
-            } => cmd_export(&input, output.as_deref(), &format),
+                lossless_mode,
+            } => cmd_export(&input, output.as_deref(), &format, lossless_mode.as_deref()),
             Commands::Diff { a, b } => cmd_diff(&a, &b),
             Commands::Recover { input, output } => cmd_recover(&input, &output),
             Commands::Bench { input } => cmd_bench(&input),
@@ -1992,7 +2068,7 @@ fn encode_one_brainvision(
         "{{\"source_file\":\"{}\",\"format\":\"BRAINVISION\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
          \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
-         \"encoder\":\"lamquant-core/{}\",\"noise_bits\":{}}}",
+         \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
         bundle
             .metadata
             .source_file
@@ -2200,7 +2276,7 @@ fn encode_one_raw(
         "{{\"source_file\":\"{}\",\"format\":\"RAW\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
          \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
-         \"encoder\":\"lamquant-core/{}\",\"noise_bits\":{}}}",
+         \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
         bundle
             .metadata
             .source_file
@@ -2392,7 +2468,7 @@ fn encode_one_cnt(
     let metadata_json = format!(
         "{{\"source_file\":\"{}\",\"format\":\"CNT\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\
-         \"signal_sha256\":\"{}\",\"encoder\":\"lamquant-core/{}\",\"noise_bits\":{}}}",
+         \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
         bundle
             .metadata
             .source_file
@@ -2556,7 +2632,7 @@ fn encode_one_dicom(
     let metadata_json = format!(
         "{{\"source_file\":\"{}\",\"format\":\"DICOM_WAVEFORM\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\
-         \"signal_sha256\":\"{}\",\"encoder\":\"lamquant-core/{}\",\"noise_bits\":{}}}",
+         \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
         bundle
             .metadata
             .source_file
@@ -2723,7 +2799,7 @@ fn encode_one_eeglab(
     let metadata_json = format!(
         "{{\"source_file\":\"{}\",\"format\":\"{}\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\"eeglab_dtype\":\"{}\",\
-         \"signal_sha256\":\"{}\",\"encoder\":\"lamquant-core/{}\",\"noise_bits\":{}}}",
+         \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
         bundle
             .metadata
             .source_file
@@ -2968,7 +3044,7 @@ fn encode_one(
         .map_err(|e| format!("zstd compress EDF header: {e}"))?;
     let hdr_b64 = b64.encode(&hdr_compressed);
 
-    let encoder_version = format!("lamquant-core/{}", env!("CARGO_PKG_VERSION"));
+    let encoder_version = format!("lml/{}", env!("CARGO_PKG_VERSION"));
 
     // Zstd-compress non-EEG channel data
     let mut non_eeg_json = String::from("{");
@@ -3679,11 +3755,7 @@ fn cmd_encode(
                         return;
                     }
                     Err(e) => {
-                        eprintln!(
-                            "  FAIL pre-create check {}: {}",
-                            out.display(),
-                            e
-                        );
+                        eprintln!("  FAIL pre-create check {}: {}", out.display(), e);
                         failed.fetch_add(1, Ordering::Relaxed);
                         done.fetch_add(1, Ordering::Relaxed);
                         return;
@@ -4765,8 +4837,9 @@ fn cmd_decode(
         let mut reader = LmlReader::open(&lmls[0])?;
         let n_ch = reader.header().n_channels;
         let total_samples = reader.header().total_samples;
-        let mut channels: Vec<Vec<i32>> =
-            (0..n_ch).map(|_| Vec::with_capacity(total_samples)).collect();
+        let mut channels: Vec<Vec<i32>> = (0..n_ch)
+            .map(|_| Vec::with_capacity(total_samples))
+            .collect();
         while let Some(window) = reader.next_window() {
             let w = window?;
             for (ch_idx, samples) in w.iter().enumerate() {
@@ -4810,9 +4883,7 @@ fn cmd_decode(
             )
             .into());
         }
-        if let (Ok(in_canon), Ok(out_canon)) =
-            (lmls[0].canonicalize(), out_path.canonicalize())
-        {
+        if let (Ok(in_canon), Ok(out_canon)) = (lmls[0].canonicalize(), out_path.canonicalize()) {
             if in_canon == out_canon {
                 return Err(format!(
                     "cmd_decode: canonical output {} equals input; refusing",
@@ -5000,11 +5071,7 @@ fn cmd_decode(
                     return;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  FAIL pre-create check {}: {}",
-                        out.display(),
-                        e
-                    );
+                    eprintln!("  FAIL pre-create check {}: {}", out.display(), e);
                     failed.fetch_add(1, Ordering::Relaxed);
                     done.fetch_add(1, Ordering::Relaxed);
                     return;
@@ -5304,10 +5371,7 @@ fn cmd_info(input: &Path) -> R {
                     n_seek_windows, n_win
                 );
             } else {
-                println!(
-                    "Seek table: {} entries (LMLFOOT1 magic OK)",
-                    n_seek_windows
-                );
+                println!("Seek table: {} entries (LMLFOOT1 magic OK)", n_seek_windows);
             }
         } else {
             println!(
@@ -5397,10 +5461,8 @@ fn cmd_verify(input: &Path, recursive: bool, explain: bool) -> R {
             // e.to_str())` returned None and the entry was skipped
             // with no warning; total count under-reported).
             let ext = entry.path().extension();
-            let is_lml =
-                ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lml")));
-            let is_lma =
-                ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lma")));
+            let is_lml = ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lml")));
+            let is_lma = ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lma")));
             if is_lml || is_lma {
                 f.push(entry.path().to_path_buf());
             }
@@ -5907,7 +5969,7 @@ fn cmd_roundtrip(
         failed,
         errored,
         elapsed_ms_total,
-        encoder_version: format!("lamquant-core/{}", env!("CARGO_PKG_VERSION")),
+        encoder_version: format!("lml/{}", env!("CARGO_PKG_VERSION")),
         results,
     };
     // Tier 3 audit (O12): hard-Err on serialize failure instead of
@@ -5933,7 +5995,11 @@ fn cmd_roundtrip(
             std::fs::write(&tmp, &json)?;
             std::fs::rename(&tmp, p).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
-                format!("cmd_roundtrip: atomic rename of {} failed: {}", p.display(), e)
+                format!(
+                    "cmd_roundtrip: atomic rename of {} failed: {}",
+                    p.display(),
+                    e
+                )
             })?;
         }
         None => println!("{}", json),
@@ -6259,7 +6325,11 @@ fn read_lml_header_info(
 
 // ── Feature 7: export ──
 
-fn cmd_export(input: &Path, output: Option<&Path>, format: &str) -> R {
+fn cmd_export(input: &Path, output: Option<&Path>, format: &str, lossless_mode: Option<&str>) -> R {
+    let export_mode = parse_lossless_mode(lossless_mode)
+        .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+    #[cfg(not(any(feature = "hdf5", feature = "nwb")))]
+    let _ = export_mode;
     // Tier 3 audit (O4): refuse output==input across all formats.
     // Every export arm uses `input.with_extension(target_ext)` as
     // the default output path; if input is already named with the
@@ -6477,10 +6547,25 @@ fn cmd_export(input: &Path, output: Option<&Path>, format: &str) -> R {
             let out_path = output
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| input.with_extension("h5"));
-            write_hdf5(&out_path, &signal, n_ch, t)?;
+            write_hdf5(&out_path, &signal, n_ch, t, export_mode)?;
             println!(
-                "Exported: {} (HDF5 /signal dataset int64, shape [{}, {}])",
+                "Exported: {} (HDF5 /signal dataset int64, mode {}, shape [{}, {}])",
                 out_path.display(),
+                export_mode.as_str(),
+                n_ch,
+                t
+            );
+        }
+        #[cfg(feature = "nwb")]
+        "nwb" => {
+            let out_path = output
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| input.with_extension("nwb"));
+            write_nwb(&out_path, &signal, n_ch, t, export_mode)?;
+            println!(
+                "Exported: {} (NWB-like HDF5 ElectricalSeries, mode {}, shape [{}, {}])",
+                out_path.display(),
+                export_mode.as_str(),
                 n_ch,
                 t
             );
@@ -6488,7 +6573,7 @@ fn cmd_export(input: &Path, output: Option<&Path>, format: &str) -> R {
         _ => {
             return Err(format!(
                 "Unknown format: {} (supported: csv, npy, raw, mat, bids; \
-                 build with --features parquet or hdf5 for those)",
+                 build with --features parquet, hdf5, or nwb for those)",
                 format
             )
             .into());
@@ -6601,18 +6686,12 @@ fn write_mat_v5(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize, name: &
         )
         .into());
     }
-    let n_elems = n_ch.checked_mul(t).ok_or_else(|| {
-        format!(
-            "write_mat_v5: n_elems = {} × {} overflows usize",
-            n_ch, t
-        )
-    })?;
-    let data_bytes = n_elems.checked_mul(8).ok_or_else(|| {
-        format!(
-            "write_mat_v5: data_bytes = {} × 8 overflows usize",
-            n_elems
-        )
-    })?;
+    let n_elems = n_ch
+        .checked_mul(t)
+        .ok_or_else(|| format!("write_mat_v5: n_elems = {} × {} overflows usize", n_ch, t))?;
+    let data_bytes = n_elems
+        .checked_mul(8)
+        .ok_or_else(|| format!("write_mat_v5: data_bytes = {} × 8 overflows usize", n_elems))?;
     if data_bytes > u32::MAX as usize {
         return Err(format!(
             "write_mat_v5: data_bytes {} exceeds MAT-v5 u32 element-size cap ({}); \
@@ -6671,7 +6750,7 @@ fn write_mat_v5(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize, name: &
     // 128-byte header.
     let mut hdr = Vec::with_capacity(128);
     let descr = format!(
-        "MATLAB 5.0 MAT-file, Platform: lamquant-core/{}, n_channels={}, n_samples={}",
+        "MATLAB 5.0 MAT-file, Platform: lml/{}, n_channels={}, n_samples={}",
         env!("CARGO_PKG_VERSION"),
         n_ch,
         t
@@ -6728,7 +6807,7 @@ fn write_bids_skeleton(
     // ── dataset_description.json ──
     let dd = format!(
         "{{\"Name\":\"lamquant export\",\"BIDSVersion\":\"1.8.0\",\
-         \"DatasetType\":\"raw\",\"GeneratedBy\":[{{\"Name\":\"lamquant-core\",\
+         \"DatasetType\":\"raw\",\"GeneratedBy\":[{{\"Name\":\"lml\",\
          \"Version\":\"{}\"}}]}}",
         env!("CARGO_PKG_VERSION")
     );
@@ -6825,9 +6904,7 @@ fn write_bids_skeleton(
         "{{\"TaskName\":\"rest\",\"SamplingFrequency\":{},\"EEGReference\":\"unknown\",\
          \"PowerLineFrequency\":50,\"SoftwareFilters\":\"n/a\",\"EEGChannelCount\":{},\
          \"RecordingDuration\":{}}}",
-        safe_sample_rate,
-        n_ch,
-        recording_duration,
+        safe_sample_rate, n_ch, recording_duration,
     );
     std::fs::write(sub_dir.join("sub-01_task-rest_eeg.json"), sidecar)?;
 
@@ -6877,10 +6954,14 @@ fn write_parquet(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize) -> R {
 /// Phase 5.6 — HDF5 export. Writes a single `/signal` 2-D int64
 /// dataset shaped `[n_ch, t]`, mirroring the NPY export layout.
 #[cfg(feature = "hdf5")]
-fn write_hdf5(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize) -> R {
+fn write_hdf5(
+    path: &Path,
+    signal: &[Vec<i64>],
+    n_ch: usize,
+    t: usize,
+    lossless_mode: LosslessMode,
+) -> R {
     use hdf5_metno::File;
-    // Flatten signal row-major (channel-major) so HDF5 sees a clean
-    // 2-D dataset that maps directly to numpy h5py.
     let mut flat: Vec<i64> = Vec::with_capacity(n_ch * t);
     for ch in signal {
         flat.extend_from_slice(ch);
@@ -6888,6 +6969,41 @@ fn write_hdf5(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize) -> R {
     let f = File::create(path)?;
     let arr = ndarray::Array2::from_shape_vec((n_ch, t), flat)?;
     f.new_dataset_builder().with_data(&arr).create("signal")?;
+    f.new_dataset_builder()
+        .with_data(lossless_mode.as_str().as_bytes())
+        .create("lossless_mode")?;
+    Ok(())
+}
+
+#[cfg(feature = "nwb")]
+fn write_nwb(
+    path: &Path,
+    signal: &[Vec<i64>],
+    n_ch: usize,
+    t: usize,
+    lossless_mode: LosslessMode,
+) -> R {
+    use hdf5_metno::File;
+    let mut flat: Vec<i64> = Vec::with_capacity(n_ch * t);
+    for ch in signal {
+        flat.extend_from_slice(ch);
+    }
+    let f = File::create(path)?;
+    let acquisition = f.create_group("acquisition")?;
+    let series = acquisition.create_group("ElectricalSeries")?;
+    let arr = ndarray::Array2::from_shape_vec((n_ch, t), flat)?;
+    series
+        .new_dataset_builder()
+        .with_data(&arr)
+        .create("data")?;
+    series
+        .new_dataset_builder()
+        .with_data(lossless_mode.as_str().as_bytes())
+        .create("lossless_mode")?;
+    series
+        .new_dataset_builder()
+        .with_data(b"lml")
+        .create("source_codec")?;
     Ok(())
 }
 
@@ -6919,11 +7035,7 @@ fn cmd_diff(a_path: &Path, b_path: &Path) -> R {
         .into());
     }
     if t_a != t_b {
-        return Err(format!(
-            "DIFFERENT: sample count mismatch ({} vs {})",
-            t_a, t_b
-        )
-        .into());
+        return Err(format!("DIFFERENT: sample count mismatch ({} vs {})", t_a, t_b).into());
     }
 
     let n_ch = n_ch_a;
@@ -6984,7 +7096,10 @@ fn cmd_diff(a_path: &Path, b_path: &Path) -> R {
     } else {
         let mut msg = format!("Result: {} samples differ", total_diffs);
         if let Some((ch, s, va, vb)) = first_diff {
-            msg.push_str(&format!(" (first diff: ch={} sample={} A={} B={})", ch, s, va, vb));
+            msg.push_str(&format!(
+                " (first diff: ch={} sample={} A={} B={})",
+                ch, s, va, vb
+            ));
         }
         Err(msg.into())
     }
@@ -7185,7 +7300,14 @@ fn cmd_recover(input: &Path, output: &Path) -> R {
         .map(|ch| ch[..max_populated.min(ch.len())].to_vec())
         .collect();
 
-    container::write_file(output, &trimmed, sample_rate, hdr.window_size, 0, &hdr.metadata)?;
+    container::write_file(
+        output,
+        &trimmed,
+        sample_rate,
+        hdr.window_size,
+        0,
+        &hdr.metadata,
+    )?;
 
     println!("Recovered {}/{} windows", good_windows, hdr.n_windows);
     if !bad_windows.is_empty() {
@@ -7369,7 +7491,11 @@ fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
             // (theoretically) overlong UTF-8 encodings of NUL (0xC0 0x80).
             // Debug-format the path on rejection so the embedded
             // control byte doesn't break the stderr line format.
-            if entry.path.bytes().any(|b| b == b'\t' || b == b'\n' || b == b'\r' || b == 0) {
+            if entry
+                .path
+                .bytes()
+                .any(|b| b == b'\t' || b == b'\n' || b == b'\r' || b == 0)
+            {
                 return Err(format!(
                     "entry path {:?} contains control byte (tab/newline/null) -- \
                      would corrupt --long wire format",
@@ -7379,11 +7505,7 @@ fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
             }
             println!(
                 "{}\t{}\t{}\t{}\t{}",
-                entry.original_size,
-                entry.compressed_size,
-                method_str,
-                entry.sha256,
-                entry.path,
+                entry.original_size, entry.compressed_size, method_str, entry.sha256, entry.path,
             );
         }
         return Ok(());
@@ -8005,9 +8127,10 @@ fn cmd_verify_archive(input: &Path) -> R {
                             Some(format!("  FAIL: {} — SHA-256 mismatch", entry.path))
                         }
                     }
-                    Err(e) => {
-                        Some(format!("  FAIL: {} — zstd decompress error: {}", entry.path, e))
-                    }
+                    Err(e) => Some(format!(
+                        "  FAIL: {} — zstd decompress error: {}",
+                        entry.path, e
+                    )),
                 },
                 lma::Method::Store => {
                     let hash = format!("{:x}", Sha256::digest(&payload));
@@ -8181,7 +8304,11 @@ fn cmd_encode_target_bps(
                 den += (*a as f64 - mean) * (*a as f64 - mean);
             }
         }
-        let prd = if den == 0.0 { 0.0 } else { 100.0 * (num / den).sqrt() };
+        let prd = if den == 0.0 {
+            0.0
+        } else {
+            100.0 * (num / den).sqrt()
+        };
         println!(
             "target-BPS: {} ({}ch x {}) target={:.3} -> {} bytes, {:.4} BPS, PRD {:.3}%",
             out_path.display(),
@@ -9854,4 +9981,49 @@ fn cmd_notify(
     rt.block_on(async move { post_webhook(&url_owned, &payload, max_retries).await })?;
     println!("notify: POSTed to {url} (op_id={op_id_owned}, op={op}, bytes={bytes})");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_lossless_mode_is_mcu_when_flag_missing() {
+        assert_eq!(parse_lossless_mode(None).unwrap(), LosslessMode::Mcu);
+    }
+
+    #[test]
+    fn mcu_mode_resolves_to_fixed_lpc_when_auto() {
+        assert!(matches!(
+            resolve_lpc_mode(LosslessMode::Mcu, "auto").unwrap(),
+            lamquant_core::lpc::LpcMode::Fixed
+        ));
+    }
+
+    #[test]
+    fn mcu_mode_rejects_adaptive_lpc() {
+        let err = resolve_lpc_mode(LosslessMode::Mcu, "adaptive").unwrap_err();
+        assert!(err.contains("MCU lossless mode only permits"));
+    }
+
+    #[test]
+    fn explicit_lossless_mode_rejects_target_bps() {
+        let err =
+            reject_explicit_lossless_with_non_lossless(Some("mcu"), None, Some(3.0)).unwrap_err();
+        assert!(err.contains("--target-bps"));
+    }
+
+    #[test]
+    fn explicit_lossless_mode_rejects_max_error() {
+        let err =
+            reject_explicit_lossless_with_non_lossless(Some("mcu"), Some(1), None).unwrap_err();
+        assert!(err.contains("--max-error"));
+    }
+
+    #[cfg(not(feature = "experimental_basestation"))]
+    #[test]
+    fn basestation_requires_experimental_feature() {
+        let err = parse_lossless_mode(Some("basestation")).unwrap_err();
+        assert!(err.contains("experimental_basestation"));
+    }
 }
