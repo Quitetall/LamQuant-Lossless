@@ -1,8 +1,7 @@
 # LamQuant Lossless (.lml)
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20484969.svg)](https://doi.org/10.5281/zenodo.20484969)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20484969.svg)](https://doi.org/10.5281/zenodo.20484969) 
 
 `lml` is the CLI + TUI for LamQuant lossless EEG compression. Bare `lml` opens the TUI; `lml <subcommand>` runs scriptable CLI workflows. Default compression is MCU-safe, integer-only, and bit-exact. Basestation lossless mode is opt-in behind experimental Cargo features.
 
