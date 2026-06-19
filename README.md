@@ -8,7 +8,7 @@
 
 **Cite:** archived at Zenodo: [`10.5281/zenodo.20484969`](https://doi.org/10.5281/zenodo.20484969) (see [`CITATION.cff`](CITATION.cff)).
 
-**API reference:** [API.md](API.md): Full `lml` CLI, `.lml`/`.lma` wire formats, Rust crates + Python bindings. Authoritative for the LML/LMA format contract.
+**API reference:** [API.md](API.md): Full `lml` CLI, `.lml`/`.lma` wire formats, Rust crates + Python bindings. Contain LML/LMA format contract.
 
 **Headline numbers (paper, full evidence in [Eagle](https://github.com/Quitetall/Eagle)):**
 - TUEG v2.0.2 (1.76 TB, 70,831 EDF files): **2.287:1** compression ratio
