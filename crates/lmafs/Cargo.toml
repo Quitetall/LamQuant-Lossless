@@ -3,7 +3,7 @@ name = "lmafs"
 version = "1.1.0"
 edition = "2021"
 authors = ["QuiteTall <briankhanglam@gmail.com>"]
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 description = "FUSE filesystem that mounts a LamQuant .lma archive as a read-only directory. Lets Dolphin / Nautilus / Thunar / file manager open the archive as if it were a regular dir."
 repository = "https://github.com/Quitetall/LamQuant"
 
@@ -12,7 +12,7 @@ name = "lmafs"
 path = "src/main.rs"
 
 [dependencies]
-lamquant-core = { package = "lamquant-lossless", path = "../../lamquant-lossless", features = ["host"] }
+lamquant-core = { package = "lamquant-lml", version = "7.7.1", path = "../../lamquant-lossless", features = ["host"] }
 fuser = "0.14"
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
