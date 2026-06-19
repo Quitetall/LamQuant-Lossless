@@ -91,7 +91,7 @@ cargo build -p lamquant-firmware --no-default-features             # firmware no
 
 ## Reproducibility
 
-Paper bench numbers, Verilator RTL harness, MNE/pyedflib cross-validation, and per-corpus evidence JSON live in the separate **Eagle** repository: https://github.com/Quitetall/Eagle
+Paper bench numbers, Verilator RTL harness, MNE/pyedflib cross-validation, and per-corpus evidence JSON live in the separate **Eagle** repository: https://github.com/Quitetall/LQS-Eagle
 
 The IEEE JBHI manuscript source lives at `docs/paper/lamquant_lossless.tex`. Rebuild the submission bundle with:
 
@@ -101,15 +101,7 @@ bash tools/build_submission.sh   # → outputs/submission/manuscript.pdf (12 pp,
 
 ## Architecture
 
-This repository is one repo in an 8-product Unix decomposition of LamQuant:
-
-| Public | Private (for now) |
-|---|---|
-| **LamQuant-Lossless** (this repo) | LamQuant (monorepo source of truth) |
-| Eagle (validation) | LamQuant-Neural (SNN/TNN models) |
-| LamQuant-Firmware (planned formal split) | LamQuant-Codec (turnkey integration) |
-| BLUT (training orchestrator) | |
-| LamQuant-Vision (LSL + viz) | |
+This repository is dependent on the LamQuant-Common, LamQuant-Ops, and LamQuant-History crates.
 
 ## License
 
