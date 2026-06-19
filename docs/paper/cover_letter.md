@@ -47,7 +47,7 @@ The author defers selection of an additional comparator AE from the current TBio
 
 ## Conflict of interest
 
-The author is the founder of OpenHuman Technologies LLC and has filed a (provisional) patent application related to the codec (Patent Pending US #64/032,641). The source code is released open-source under the GNU General Public License version 3 (GPLv3). Section 11 of GPLv3 conveys an **automatic, irrevocable patent license** from every contributor to every downstream user of the licensed implementation, covering any claims that read on the released code. This is materially stronger than a unilateral non-enforcement commitment: every user of the GPLv3-licensed implementation already holds an irrevocable patent license for the act of using, modifying, and redistributing that implementation, by operation of the license terms.
+The author is the founder of OpenHuman Technologies LLC and has filed a (provisional) patent application related to the codec (Patent Pending US #64/032,641). The source code is released open-source under the GNU Affero General Public License version 3 or later (AGPLv3-or-later). Section 11 of AGPLv3 conveys an **automatic, irrevocable patent license** from every contributor to every downstream user of the licensed implementation, covering any claims that read on the released code. This is materially stronger than a unilateral non-enforcement commitment: every user of the AGPLv3-licensed implementation already holds an irrevocable patent license for the act of using, modifying, and redistributing that implementation, by operation of the license terms.
 
 ## Funding
 

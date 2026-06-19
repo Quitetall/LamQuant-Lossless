@@ -1237,7 +1237,7 @@ impl OutputPanel {
         let footer = Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                format!("codec={}  build=lamquant-core", env!("CARGO_PKG_VERSION"),),
+                format!("codec={}  build=lml", env!("CARGO_PKG_VERSION"),),
                 theme::dim(),
             ),
         ]);
