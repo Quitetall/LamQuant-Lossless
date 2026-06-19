@@ -1,0 +1,23 @@
+[package]
+name = "lamquant-py"
+version = "7.7.1"
+edition = "2021"
+rust-version = "1.81"
+authors = ["QuiteTall <briankhanglam@gmail.com>"]
+description = "Python bindings for the LamQuant LML lossless EEG codec (PyO3 + maturin)."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+homepage = "https://github.com/Quitetall/LamQuant-Lossless"
+readme = "README.md"
+keywords = ["eeg", "lossless", "codec", "python", "pyo3"]
+categories = ["science", "encoding"]
+publish = false
+
+[lib]
+name = "lamquant_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+lml = { package = "lamquant-lml", version = "7.7.1", path = "../lamquant-lossless", features = ["archive"] }
+pyo3 = { version = "0.25", features = ["extension-module"] }
+numpy = "0.25"

@@ -3293,12 +3293,10 @@ dependencies = [
  "loom",
  "ndarray",
  "notify",
- "numpy",
  "parquet",
  "probability",
  "proptest",
  "pulp",
- "pyo3",
  "ratatui",
  "ratatui-textarea",
  "rayon",
@@ -3333,6 +3331,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "lamquant-py"
+version = "7.7.1"
+dependencies = [
+ "lamquant-lml",
+ "numpy",
+ "pyo3",
 ]
 
 [[package]]

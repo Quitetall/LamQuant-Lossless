@@ -24,7 +24,7 @@ name = "lamquant_core"
 # wheel with no .so), so declare it explicitly. cdylib is an additive
 # output: the default rlib build (firmware, no python feature) is
 # unaffected; the .so is only produced when maturin/--crate-type asks.
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
@@ -191,7 +191,6 @@ nwb = ["hdf5"]
 dicom = ["archive", "dep:dicom-object", "dep:dicom-core"]
 # Phase 6.2/6.3/6.7 — S3 read/write/ETag via aws-sdk-s3.
 s3 = ["async", "dep:aws-config", "dep:aws-sdk-s3"]
-python = ["host", "dep:pyo3", "dep:numpy"]
 ffi = ["host"]
 wasm = ["std", "dep:wasm-bindgen"]
 # ADR 0023 Track B5+: constriction-backed rANS/range/arithmetic coder.
@@ -285,8 +284,6 @@ tracing = { version = "0.1.40", optional = true }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"], optional = true }
 
 # Bindings.
-pyo3 = { version = "0.25", features = ["extension-module"], optional = true }
-numpy = { version = "0.25", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
 # ─── Phase 7 — Security primitives (RustCrypto, pure-Rust) ───

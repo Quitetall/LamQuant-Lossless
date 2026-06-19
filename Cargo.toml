@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lamquant-common",
     "lamquant-lossless",
+    "lamquant-py",
 ]
 # Firmware + weights moved to the LamQuant-Firmware submodule (ADR 0026
 # phase B.1, 2026-05-30). lamquant-lsl moved to the Vision submodule
@@ -12,6 +13,7 @@ members = [
 default-members = [
     "crates/lamquant-common",
     "lamquant-lossless",
+    "lamquant-py",
 ]
 # Fuzz harness uses libfuzzer-sys + nightly toolchain; lives outside
 # the host workspace so `cargo build` from root doesn't pull in nightly
