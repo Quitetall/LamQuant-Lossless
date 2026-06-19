@@ -1,7 +1,7 @@
-# lmq-common
+# lamquant-common
 
 Shared primitives for the LamQuant codec family — used by the lossless codec
-(`lamquant-lml`) and the neural codec (`lmq-codec`).
+(`lamquant-lml`) and the neural codec (`lamquant-lmq`).
 
 `no_std` + `alloc` by default; the `host` feature adds std-only helpers.
 

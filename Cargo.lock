@@ -3254,6 +3254,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
+name = "lamquant-common"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lamquant-history"
 version = "0.1.0"
 dependencies = [
@@ -3293,10 +3301,10 @@ dependencies = [
  "indicatif",
  "insta",
  "keyring",
+ "lamquant-common",
  "lamquant-history",
  "lamquant-ops",
  "libm",
- "lmq-common",
  "loom",
  "ndarray",
  "notify",
@@ -3476,14 +3484,6 @@ dependencies = [
  "libc",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "lmq-common"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
