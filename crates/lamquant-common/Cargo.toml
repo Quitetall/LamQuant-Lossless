@@ -1,6 +1,6 @@
 [package]
 name = "lamquant-common"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.81"
 description = "LamQuant Codec shared primitives CRC-32 (ISO 3309), path helpers, and non-EDF signal ingest shared by the LamQuant EEG codecs. no_std + alloc."

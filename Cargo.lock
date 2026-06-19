@@ -3240,7 +3240,7 @@ checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
 name = "lamquant-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -3256,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "lamquant-lml"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "lamquant-py"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "lamquant-lml",
  "numpy",
