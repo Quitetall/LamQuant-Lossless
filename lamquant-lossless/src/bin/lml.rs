@@ -204,6 +204,11 @@ SOURCE FORMATS:
         /// Strip N least-significant bits (0 = lossless)
         #[arg(long, default_value = "0")]
         noise_bits: u8,
+        /// Track-2 bounded-MAE near-lossless: guarantee max|orig-recon| <= δ
+        /// (ADR 0051). Single-file → bare `.lml` via closed-loop DPCM.
+        /// Mutually exclusive with `--noise-bits`.
+        #[arg(long = "max-error", value_name = "DELTA", conflicts_with = "noise_bits")]
+        max_error: Option<u64>,
         /// Samples per compression window
         #[arg(long, default_value = "2500")]
         window_size: usize,
@@ -1398,6 +1403,7 @@ fn main() {
                 verify,
                 cross_validate,
                 noise_bits,
+                max_error,
                 window_size,
                 threads,
                 recursive,
@@ -1413,6 +1419,20 @@ fn main() {
                 fail_fast,
                 continue_on_error: _,
             } => {
+                // ADR 0051 track 2: bounded-MAE near-lossless. Self-contained
+                // single-file path → bare `.lml` via closed-loop DPCM, bypasses
+                // the batch/bundle machinery (the lossy `.lml` has no `.lma`
+                // sibling-envelope semantics). For the H.BWC working-point
+                // bench + clinical near-lossless use.
+                if let Some(delta) = max_error {
+                    cmd_encode_bounded_mae(
+                        &input,
+                        output.as_deref(),
+                        delta,
+                        window_size,
+                        parse_lpc_mode(&lpc_mode),
+                        verify,
+                    )
                 // `--lml-siblings` is the TUI's "LML + copy siblings"
                 // mode -- walk the source tree, encode every EDF to
                 // .lml, copy every non-EEG file verbatim into the
@@ -1421,7 +1441,7 @@ fn main() {
                 // EDF; --lml-siblings handles the entire tree (every
                 // file, every sub-directory). Implementation lives
                 // in lma::pack_lml_with_siblings.
-                if lml_siblings {
+                } else if lml_siblings {
                     // Pre-flight: --lml-siblings demands an explicit
                     // -o because it writes into a directory, not a
                     // single file. Same shape as the --lma branch
@@ -8017,6 +8037,85 @@ fn cmd_verify_archive(input: &Path) -> R {
         println!("  INTEGRITY OK — archive is valid.");
         Ok(())
     }
+}
+
+/// ADR 0051 track 2: encode a single EDF/BDF to a bare bounded-MAE `.lml`
+/// (closed-loop DPCM, guarantees max|orig-recon| <= delta). Self-contained —
+/// bypasses the batch/bundle path; the lossy stream has no per-recording
+/// `.lma` sibling-envelope semantics. For the H.BWC working-point bench +
+/// clinical near-lossless. Prints BPS (and, with --verify, the measured MAE).
+fn cmd_encode_bounded_mae(
+    input: &Path,
+    output: Option<&Path>,
+    delta: u64,
+    window_size: usize,
+    mode: lamquant_core::lpc::LpcMode,
+    verify: bool,
+) -> R {
+    if input.is_dir() {
+        return Err("--max-error expects a single EDF/BDF file, not a directory".into());
+    }
+    let edf = edf::read_edf(input)?;
+    let out_path = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| input.with_extension("lml"));
+    // Produce a standard .lml container (per-window bounded-MAE payloads) so
+    // decode / export / info all work on the output.
+    let stats = container::write_file_bounded_mae(
+        &out_path,
+        &edf.signal,
+        edf.sample_rate,
+        window_size,
+        delta,
+        "{}",
+        mode,
+    )?;
+
+    let nm = (stats.n_channels * stats.total_samples).max(1);
+    let bps = stats.compressed_size as f64 * 8.0 / nm as f64;
+
+    if verify {
+        // Re-read through the container and confirm the guarantee held.
+        let (recon, _meta) = container::read_file(&out_path)?;
+        let mut mae = 0i64;
+        for (o, r) in edf.signal.iter().zip(recon.iter()) {
+            for (a, b) in o.iter().zip(r.iter()) {
+                let d = (a - b).abs();
+                if d > mae {
+                    mae = d;
+                }
+            }
+        }
+        if mae > delta as i64 {
+            return Err(format!(
+                "bounded-MAE VIOLATED: measured MAE {} > delta {}",
+                mae, delta
+            )
+            .into());
+        }
+        println!(
+            "bounded-MAE: {} ({}ch x {}) delta={} -> {} bytes, {:.4} BPS, measured MAE {} (<= {})",
+            out_path.display(),
+            stats.n_channels,
+            stats.total_samples,
+            delta,
+            stats.compressed_size,
+            bps,
+            mae,
+            delta
+        );
+    } else {
+        println!(
+            "bounded-MAE: {} ({}ch x {}) delta={} -> {} bytes, {:.4} BPS",
+            out_path.display(),
+            stats.n_channels,
+            stats.total_samples,
+            delta,
+            stats.compressed_size,
+            bps
+        );
+    }
+    Ok(())
 }
 
 fn cmd_bench(input: &Path) -> R {
