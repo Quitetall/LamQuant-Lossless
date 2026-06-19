@@ -1,6 +1,6 @@
 # lamquant-lossless
 
-Lossless EEG/biosignal codec in pure Rust. Integer Le Gall 5/3 lifting, per-subband LPC, adaptive Golomb-Rice entropy coding, bit-exact EDF/BDF round-trip. The same library crate (`lamquant_core`) builds for desktop (AVX2 SIMD parallel path) and bare-metal MCU (`no_std` + `alloc`; RP2350, ESP32-P4, STM32N6).
+Lossless EEG/biosignal codec in pure Rust. Integer Le Gall 5/3 lifting, per-subband LPC, adaptive Golomb-Rice entropy coding, bit-exact EDF/BDF round-trip. The same library crate (`lamquant_core`) builds for desktop (AVX2 SIMD parallel path) and bare-metal MCU (`no_std` + `alloc`; RP2350, ESP32-P4, STM32N6). Measured at **116× real-time on RP2350 RISC-V silicon** @ 150 MHz (86.3 ms/window, 0.60 Msa/s, 21 ch × 250 Hz); Verilator RTL sim: 119× / 83.7 ms.
 
 Ships the `lml` CLI and TUI (`cargo build` default).
 
