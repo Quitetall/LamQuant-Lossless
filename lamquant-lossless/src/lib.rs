@@ -52,6 +52,7 @@ pub mod lifting;
 pub mod lml;
 pub mod lmqc;
 pub mod lpc;
+pub mod quant;
 pub mod rans;
 
 // ─── Host-only (require std + heavy deps) ─────────────────────────
