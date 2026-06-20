@@ -7,8 +7,8 @@
 //! Unlike bounded-MAE there is no hard error bound — this minimizes distortion
 //! subject to a RATE ceiling (the H.BWC WP1..WP8 competition tier).
 
-use lamquant_core::lml::{compress_target_bps, decompress};
-use lamquant_core::lpc::LpcMode;
+use lamquant_lossless_core::lml::{compress_target_bps, decompress};
+use lamquant_lossless_core::lpc::LpcMode;
 
 fn make_signal(n_ch: usize, t: usize, seed: i64) -> Vec<Vec<i64>> {
     (0..n_ch)

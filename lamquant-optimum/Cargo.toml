@@ -1,0 +1,41 @@
+[package]
+# ADR 0052 Tier 3 ("Optimum") + ADR 0054 (the H.BWC warplan): the LMO codec —
+# deterministic, max-compression-ratio, float-allowed, NOT MCU-decodable.
+# Skeleton only at Phase 1; the LMO wire format + Codec trait + PCRD/transform
+# attack land in warplan Phases 2-4. Depends on -core for the shared input
+# abstraction; NEVER pulled into the firmware (riscv32) dependency graph via its
+# `encode` feature, so its float/heavy DSP cannot threaten the lossless floor.
+name = "lamquant-optimum"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.81"
+description = "LamQuant Optimum (LMO) — deterministic max-ratio lossless/near-lossless codec, host-only encode, no_std-capable decode. The H.BWC ratio attack (ADR 0052/0054)."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+
+[lib]
+name = "lamquant_optimum"
+crate-type = ["rlib"]
+
+[features]
+# Default = the no_std-capable LMO DECODER (the module Desktop ships standard
+# and Firmware can optionally install — ADR 0052). Pure decode, no float-heavy
+# encode machinery, so it can compile for the MCU when explicitly opted in.
+default = ["decode"]
+
+# LMO decoder. no_std-capable: reconstructs an LMO stream back to the shared
+# signal abstraction. Heavy (soft-float) on an MCU, hence "optional, only if
+# you really need it" in the firmware build.
+decode = []
+
+# LMO encoder: the deterministic max-CR analysis (deeper transform, Lagrangian
+# PCRD allocation, context entropy, long-lag predictors). std + float. NEVER
+# enabled in the firmware graph.
+encode = ["std", "decode"]
+
+# Host std (f64, std::io). Implied by `encode`.
+std = ["lamquant-lossless-core/std"]
+
+[dependencies]
+# The shared input abstraction + the Codec trait live in -core (ADR 0052).
+lamquant-lossless-core = { version = "0.9.3", path = "../lamquant-lossless-core", default-features = false }

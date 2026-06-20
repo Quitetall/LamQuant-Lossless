@@ -61,7 +61,7 @@ impl Default for ComputeBackend {
         {
             ComputeBackend::Desktop
         }
-        #[cfg(not(feature = "host"))]
+        #[cfg(not(feature = "archive"))]
         {
             ComputeBackend::Firmware
         }
@@ -126,7 +126,7 @@ impl ComputeBackend {
             "desktop" => Ok(ComputeBackend::Desktop),
             #[cfg(feature = "archive")]
             _ => Err("backend must be `firmware` or `desktop`"),
-            #[cfg(not(feature = "host"))]
+            #[cfg(not(feature = "archive"))]
             _ => Err("backend must be `firmware` (only variant on this build)"),
         }
     }
@@ -195,7 +195,7 @@ mod tests {
         // `impl Default`.
         #[cfg(feature = "archive")]
         assert_eq!(ComputeBackend::default(), ComputeBackend::Desktop);
-        #[cfg(not(feature = "host"))]
+        #[cfg(not(feature = "archive"))]
         assert_eq!(ComputeBackend::default(), ComputeBackend::Firmware);
     }
 

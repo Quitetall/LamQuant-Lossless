@@ -8,11 +8,11 @@
 //! The codec is lossless on integer inputs in `[-2^(bits-1), 2^(bits-1))`,
 //! so the property is exact equality — not statistical similarity.
 
-#![cfg(feature = "host")]
+#![cfg(feature = "std")]
 
 use std::io::Cursor;
 
-use lamquant_core::lml;
+use lamquant_lossless_core::lml;
 use proptest::prelude::*;
 
 /// Quantize an i64 sample to a given bit depth `[-2^(bits-1), 2^(bits-1))`.

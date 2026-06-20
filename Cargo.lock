@@ -3297,7 +3297,6 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
- "constriction",
  "criterion",
  "crossterm 0.28.1",
  "dicom-core",
@@ -3316,13 +3315,12 @@ dependencies = [
  "keyring",
  "lamquant-common",
  "lamquant-history",
+ "lamquant-lossless-core",
  "lamquant-ops",
- "libm",
  "loom",
  "ndarray 0.16.1",
  "notify",
  "parquet",
- "probability",
  "proptest",
  "pulp",
  "ratatui",
@@ -3353,12 +3351,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "lamquant-lossless-core"
+version = "0.9.3"
+dependencies = [
+ "constriction",
+ "lamquant-common",
+ "libm",
+ "probability",
+ "proptest",
+ "rayon",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "lamquant-ops"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "lamquant-optimum"
+version = "0.0.1"
+dependencies = [
+ "lamquant-lossless-core",
 ]
 
 [[package]]

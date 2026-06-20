@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/lamquant-common",
+    "lamquant-lossless-core",
+    "lamquant-optimum",
     "lamquant-lossless",
     "lamquant-py",
 ]
@@ -12,6 +14,8 @@ members = [
 # This workspace is now host codec-only.
 default-members = [
     "crates/lamquant-common",
+    "lamquant-lossless-core",
+    "lamquant-optimum",
     "lamquant-lossless",
     "lamquant-py",
 ]

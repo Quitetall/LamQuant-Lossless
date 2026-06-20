@@ -538,7 +538,7 @@ pub fn compress_with_mode(
         {
             experimental_extended_lpc_enabled()
         }
-        #[cfg(not(feature = "host"))]
+        #[cfg(not(feature = "archive"))]
         {
             false
         }
@@ -1258,7 +1258,7 @@ fn encode_one_channel(
         } else {
             lpc_max_order(sub.len())
         };
-        #[cfg(not(feature = "host"))]
+        #[cfg(not(feature = "archive"))]
         let burg_ceiling = {
             let _ = try_extended_lpc;
             lpc_max_order(sub.len())
@@ -2281,11 +2281,26 @@ mod tests {
 
     #[test]
     fn decompress_from_handles_partial_reads() {
-        // The `io::ByteAtATime` adapter forces one-byte-per-read; the
-        // generic decompress_from must still recover the full signal.
+        // A one-byte-per-read adapter forces caller loops; the generic
+        // decompress_from must still recover the full signal. (Inlined here
+        // when lml moved to -core; the facade's `io::tests::ByteAtATime` is
+        // no longer reachable from this crate.)
+        struct ByteAtATime<'a> {
+            src: &'a [u8],
+        }
+        impl<'a> std::io::Read for ByteAtATime<'a> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.src.is_empty() || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.src[0];
+                self.src = &self.src[1..];
+                Ok(1)
+            }
+        }
         let signal = vec![vec![42i64; 128]];
         let bytes = compress(&signal, 0).unwrap();
-        let mut src = crate::io::tests::ByteAtATime::new(&bytes);
+        let mut src = ByteAtATime { src: &bytes };
         let recovered = decompress_from(&mut src).unwrap();
         assert_eq!(signal, recovered);
     }

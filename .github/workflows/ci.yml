@@ -55,10 +55,12 @@ jobs:
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
     # 0026 phase B.1), but the no_std build path it depends on lives HERE:
-    # lamquant-lossless --no-default-features is the pure core codec
-    # (lifting, lpc, golomb, rans, crc32, lml) that the MCU links. This
-    # lane keeps that core no_std-clean so a new host-only module can't
-    # silently break the firmware build downstream.
+    # `lamquant-lossless-core` (ADR 0052 Tier 1) is the pure integer codec
+    # (lifting, lpc, golomb, rans, crc32, lml) that the MCU links. This lane
+    # keeps that core no_std-clean so a new host-only module — or a stray
+    # dep from the float Optimum crate — can't silently break the firmware
+    # build downstream. (The structural guarantee: `lamquant-optimum`'s
+    # `encode` feature is NEVER in this build's dependency graph.)
     name: Core no_std (riscv32imac)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -75,8 +77,13 @@ jobs:
             ~/.cargo/git
             target
           key: core-no_std-${{ hashFiles('Cargo.lock') }}
-      - name: cargo build -p lamquant-lossless --no-default-features
-        run: cargo build -p lamquant-lossless --no-default-features --target riscv32imac-unknown-none-elf
+      - name: cargo build -p lamquant-lossless-core --no-default-features
+        run: cargo build -p lamquant-lossless-core --no-default-features --target riscv32imac-unknown-none-elf
+      # Belt-and-suspenders: the optimum DECODE module must also stay no_std-clean
+      # (it is the optional firmware LMO-decode module). Its `encode` feature must
+      # never appear here.
+      - name: cargo build -p lamquant-optimum (decode, no_std)
+        run: cargo build -p lamquant-optimum --no-default-features --features decode --target riscv32imac-unknown-none-elf
 
   pytest-fast:
     name: Pytest fast tier

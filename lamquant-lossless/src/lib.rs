@@ -32,35 +32,19 @@
 
 extern crate alloc;
 
-// ─── Core (always available, no_std + alloc) ──────────────────────
-
-pub mod backend;
-pub mod bit_pack;
-pub mod codec_errors;
-// Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
-// Keeps the public `lamquant_core::crc32` path stable for firmware + lsl + lmafs.
-pub use lamquant_common::crc32;
-// ADR 0023 Track B5+: arithmetic coding is opt-in via the
-// `experimental_arithmetic` Cargo feature. Default-builds skip
-// the module entirely, so the constriction dep adds no surface
-// to the lossless codec hot path or the firmware binary.
+// ─── Core codec (ADR 0052 Tier 1) ─────────────────────────────────
+// The no_std integer LML codec now lives in `lamquant-lossless-core`. It is
+// re-exported here so the historical `lamquant_core::{lml, lpc, golomb, ...}`
+// paths stay byte-for-byte stable for firmware, lamquant-lsl, the Python
+// extension, and every test — none of those call sites change.
+pub use lamquant_lossless_core::{
+    backend, bit_pack, codec_errors, crc32, deployment, error, golomb, lifting,
+    lml, lmqc, lpc, quant, rans, zrle,
+};
+// ADR 0023 Track B5+ / ADR 0051 P3.5: arithmetic + empirical-categorical range
+// coders are opt-in via `experimental_arithmetic` (re-exported from core).
 #[cfg(feature = "experimental_arithmetic")]
-pub mod arithmetic;
-// ADR 0051 track 2 P3.5: empirical-categorical range coder (the real lossy
-// entropy gap-closer). Same opt-in feature as `arithmetic` (shares the
-// constriction dep); firmware fails closed on its payload tag.
-#[cfg(feature = "experimental_arithmetic")]
-pub mod arith_cat;
-pub mod deployment;
-pub mod error;
-pub mod golomb;
-pub mod lifting;
-pub mod lml;
-pub mod lmqc;
-pub mod lpc;
-pub mod quant;
-pub mod rans;
-pub mod zrle;
+pub use lamquant_lossless_core::{arith_cat, arithmetic};
 
 // ─── archive: file I/O + LMA/EDF/container r/w ───────────────────
 // Enabled by: archive, cli, tui, security, host (all superset features).

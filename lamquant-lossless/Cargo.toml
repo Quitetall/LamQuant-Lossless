@@ -103,9 +103,10 @@ required-features = ["host"]
 default = ["host"]
 
 # ── Level 0: no_std DSP core (firmware / embedded) ──────────────────────────
-# Pure math: lifting, lpc, golomb, rans, crc32, lml wire format.
-# This is what lamquant-firmware uses on RP2350.
-std = []
+# The codec core now lives in `lamquant-lossless-core`; `std` turns on its
+# host-side encode helpers (f64 RD search, std::io sinks). Firmware depends on
+# `lamquant-lossless-core` DIRECTLY (not this facade), so this is the host path.
+std = ["lamquant-lossless-core/std"]
 
 # ── Level 1: archive — file I/O + LMA/EDF/container r/w ────────────────────
 # Enables: lma, container, edf, io, offset_table, range, stream, source,
@@ -113,6 +114,8 @@ std = []
 # Use this for OS plugins and 3rd-party readers (e.g. lml-os/lmafs).
 archive = [
     "std",
+    # Enables the core's rayon parallel (Desktop) encode/decode path.
+    "lamquant-lossless-core/archive",
     "lamquant-common/host",
     "base64/std",
     "sha2/std",
@@ -195,7 +198,7 @@ ffi = ["host"]
 wasm = ["std", "dep:wasm-bindgen"]
 # ADR 0023 Track B5+: constriction-backed rANS/range/arithmetic coder.
 # Runtime opt-in via LAMQUANT_TRY_ARITHMETIC=1.
-experimental_arithmetic = ["host", "dep:constriction", "dep:probability"]
+experimental_arithmetic = ["host", "lamquant-lossless-core/experimental_arithmetic"]
 # ADR 0024 Phase 4 — LSL CLI subcommands. Direct cyclic dep on
 # `lamquant-lsl` (which depends on lamquant-core) is not possible.
 # Phase 4 will land a separate `crates/lamquant-cli/` crate that
@@ -209,7 +212,7 @@ experimental_arithmetic = ["host", "dep:constriction", "dep:probability"]
 # multi-channel data. Off by default so the lossless codec hot
 # path stays at pre-B1 throughput. Opt-in via this Cargo feature
 # AND `LAMQUANT_TRY_BIT_PACK=1` at runtime.
-experimental_bit_pack = ["host"]
+experimental_bit_pack = ["host", "lamquant-lossless-core/experimental_bit_pack"]
 experimental_basestation = ["host"]
 
 [dependencies]
@@ -217,13 +220,14 @@ experimental_basestation = ["host"]
 # now re-exports `crc32` (and incrementally more) from this crate so both
 # lossless and (future) neural codecs share the implementation.
 lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", default-features = false }
-# Always required (work in no_std with alloc).
+# ADR 0052 Tier 1: the no_std integer LML codec. This facade re-exports its
+# modules (lml, lpc, golomb, ...) under the stable `lamquant_core::*` paths.
+# default-features = false so a no_std facade build stays no_std; the facade's
+# own `std`/`archive`/`experimental_*` features turn on the matching core ones.
+lamquant-lossless-core = { version = "0.9.3", path = "../lamquant-lossless-core", default-features = false }
+# Used by the facade's container/lma/security/config (SHA-256, base64).
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
-# `libm` supplies `log` for the adaptive-LPC AIC/MDL penalty in no_std
-# builds — `f64::ln()` is std-only and would break the firmware path.
-# Tiny, header-equivalent footprint on the embedded target.
-libm = "0.2"
 
 # Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
 # Host feature only; firmware never spawns subprocesses.
@@ -356,13 +360,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = [
     "rustls",
     "behavior-version-latest",
 ], optional = true }
-# ADR 0023 Track B5+ — research-grade entropy coders (rANS, range,
-# arithmetic). Backs the constriction-flavoured arithmetic coder in
-# `src/arithmetic.rs` when the `experimental_arithmetic` feature is
-# enabled. BSD-3 license (compatible with our AGPL-3.0). ~25 KB binary
-# add, no transitive heavy deps.
-constriction = { version = "0.4", default-features = false, features = ["std"], optional = true }
-# Continuous distribution helpers (Laplace, etc) consumed by the
-# constriction LeakyQuantizer. Used only when
-# `experimental_arithmetic` is enabled.
-probability = { version = "0.20", optional = true }
+# NOTE: the constriction + probability deps (and src/arithmetic.rs,
+# src/arith_cat.rs) moved to `lamquant-lossless-core` with the codec split
+# (ADR 0052). The facade reaches them via
+# `experimental_arithmetic = ["lamquant-lossless-core/experimental_arithmetic"]`.
