@@ -3317,6 +3317,7 @@ dependencies = [
  "lamquant-history",
  "lamquant-lossless-core",
  "lamquant-ops",
+ "lamquant-optimum",
  "loom",
  "ndarray 0.16.1",
  "notify",

@@ -38,13 +38,29 @@ extern crate alloc;
 // paths stay byte-for-byte stable for firmware, lamquant-lsl, the Python
 // extension, and every test — none of those call sites change.
 pub use lamquant_lossless_core::{
-    backend, bit_pack, codec_errors, crc32, deployment, error, golomb, lifting,
+    backend, bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting,
     lml, lmqc, lpc, quant, rans, zrle,
 };
 // ADR 0023 Track B5+ / ADR 0051 P3.5: arithmetic + empirical-categorical range
 // coders are opt-in via `experimental_arithmetic` (re-exported from core).
 #[cfg(feature = "experimental_arithmetic")]
 pub use lamquant_lossless_core::{arith_cat, arithmetic};
+
+// ─── Optimum / LMO (ADR 0052 Tier 3, ADR 0054) ────────────────────
+// This facade IS the Desktop profile: it ships the LMO encoder + decoder as
+// standard. Re-exported as `lamquant_core::optimum`. The `encode` half is
+// gated on `archive` (it needs the core RD search), matching where the host
+// codec capabilities already live.
+pub use lamquant_optimum as optimum;
+
+/// Universal magic-dispatch decode (the Desktop full dispatch): routes an LML
+/// stream to the integer floor and an LMO stream to the Optimum decoder. Unlike
+/// [`codec::decode`] (the Firmware/core view, which returns
+/// `OptimumNotInstalled` for LMO), this resolves both formats because the
+/// facade always links the LMO decoder.
+pub fn decode(bytes: &[u8]) -> Result<codec::Signal, codec::CodecError> {
+    optimum::decode_any(bytes)
+}
 
 // ─── archive: file I/O + LMA/EDF/container r/w ───────────────────
 // Enabled by: archive, cli, tui, security, host (all superset features).

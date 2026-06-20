@@ -29,6 +29,9 @@ extern crate alloc;
 
 pub mod backend;
 pub mod bit_pack;
+// The shared codec seam (ADR 0052): Format/Mode/Codec trait + universal
+// magic-dispatch decode. The LML half lives here; LMO is in `lamquant-optimum`.
+pub mod codec;
 pub mod codec_errors;
 // Re-exported from lamquant-common (8-repo decomposition, Phase 2). Keeps the
 // public `crc32` path stable for firmware + lsl + lmafs (via the facade).

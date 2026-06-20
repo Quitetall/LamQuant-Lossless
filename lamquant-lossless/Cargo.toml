@@ -116,6 +116,9 @@ archive = [
     "std",
     # Enables the core's rayon parallel (Desktop) encode/decode path.
     "lamquant-lossless-core/archive",
+    # Desktop ships the LMO encoder as standard (ADR 0052). `encode` pulls
+    # core's `archive` RD search, already enabled on this line.
+    "lamquant-optimum/encode",
     "lamquant-common/host",
     "base64/std",
     "sha2/std",
@@ -225,6 +228,12 @@ lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", defau
 # default-features = false so a no_std facade build stays no_std; the facade's
 # own `std`/`archive`/`experimental_*` features turn on the matching core ones.
 lamquant-lossless-core = { version = "0.9.3", path = "../lamquant-lossless-core", default-features = false }
+# ADR 0052 Tier 3 / ADR 0054: the Optimum (LMO) codec. The facade IS the Desktop
+# profile, so it links the LMO DECODER always (no_std-capable, cheap) and turns
+# on the host LMO ENCODER under the facade's `archive` feature (which already
+# pulls core's RD-search `archive` path that LMO encode needs). Re-exported as
+# `lamquant_core::optimum`.
+lamquant-optimum = { version = "0.0.1", path = "../lamquant-optimum", default-features = false, features = ["decode"] }
 # Used by the facade's container/lma/security/config (SHA-256, base64).
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
