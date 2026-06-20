@@ -26,11 +26,12 @@ crate-type = ["rlib"]
 # Default = the fast path on (this crate's whole reason to exist).
 default = ["fast"]
 
-# The Desktop fast path: rayon parallel encode/decode (the MCU tier's `archive`
-# path). `archive` implies `std` in `-mcu`.
-fast = ["lamquant-lml-mcu/archive"]
+# The Desktop fast path: rayon-parallel encode/decode orchestrators (ADR 0058
+# carve-full — this crate now OWNS the parallel code; it pulls rayon directly,
+# not via the MCU tier). Implies `std` (rayon is std-only).
+fast = ["std", "dep:rayon"]
 
-# Host std without the parallel path (e.g. for a SIMD-only future build).
+# Host std (f64 helpers / std::io via the MCU tier).
 std = ["lamquant-lml-mcu/std"]
 
 # Experimental coder pass-throughs (mirror the MCU tier's opt-ins).
@@ -38,6 +39,13 @@ experimental_arithmetic = ["fast", "lamquant-lml-mcu/experimental_arithmetic"]
 experimental_bit_pack = ["fast", "lamquant-lml-mcu/experimental_bit_pack"]
 
 [dependencies]
-# The Desktop tier builds ON the MCU tier (the shared codec + seam); it adds the
-# host execution profile, not a second codec.
+# The Desktop tier builds ON the MCU tier (the shared codec + primitives); it
+# adds the host parallel execution profile, not a second codec.
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
+# Owned by this tier (ADR 0058 carve-full): rayon per-channel parallelism.
+rayon = { version = "1", optional = true }
+
+[dev-dependencies]
+# byte_equal_backends.rs (moved here in the ADR 0058 carve-full) hashes encoded
+# bytes for the golden Firmware-vs-Desktop table.
+sha2 = "0.10"

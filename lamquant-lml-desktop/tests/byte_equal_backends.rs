@@ -1,3 +1,4 @@
+#![cfg(feature = "fast")]
 //! Byte-equal cross-backend conformance.
 //!
 //! Pins the invariant `Scalar.encode(x) == Vectorized.encode(x)` for
@@ -32,10 +33,10 @@
 //! same gate without compiling Rust, mirror the table into
 //! `specs/conformance/byte_equal_v1.json` at that time.
 
-use lamquant_lml_mcu::backend::{
+use lamquant_lml_desktop::backend::{
     compress_with_backend, decompress_with_backend, ComputeBackend,
 };
-use lamquant_lml_mcu::lpc::LpcMode;
+use lamquant_lml_desktop::lpc::LpcMode;
 use sha2::{Digest, Sha256};
 
 /// xorshift64 — deterministic across machines + architectures.
@@ -210,7 +211,7 @@ fn firmware_backend_matches_golden_shas() {
 /// every golden vector. When real SIMD lands in the `Desktop`
 /// backend, this test will fail the moment outputs diverge.
 #[test]
-#[cfg(feature = "archive")]
+#[cfg(feature = "fast")]
 fn desktop_backend_matches_firmware_bytes() {
     let mut failures = Vec::new();
     for v in GOLDEN_VECTORS {
@@ -251,7 +252,7 @@ fn desktop_backend_matches_firmware_bytes() {
 /// into both backends' decompressor, assert identical recovered
 /// signal. This sister test catches drift in the decoder hot path.
 #[test]
-#[cfg(feature = "archive")]
+#[cfg(feature = "fast")]
 fn desktop_backend_decode_matches_firmware() {
     for v in GOLDEN_VECTORS {
         let signal = synth_signal(v.n_ch, v.t, v.seed);

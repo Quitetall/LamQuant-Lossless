@@ -114,13 +114,12 @@ std = ["lamquant-lml-mcu/std"]
 # Use this for OS plugins and 3rd-party readers (e.g. lml-os/lmafs).
 archive = [
     "std",
-    # Enables the MCU tier's rayon parallel (Desktop) encode/decode path.
-    "lamquant-lml-mcu/archive",
-    # Link the Desktop tier crate + turn on its fast path (ADR 0056).
+    # Link the Desktop tier crate + turn on its rayon parallel path (ADR 0058
+    # carve-full: the Desktop tier now OWNS the parallel encode/decode). `fast`
+    # implies `std`.
     "dep:lamquant-lml-desktop",
     "lamquant-lml-desktop/fast",
-    # Desktop ships the LMO encoder as standard (ADR 0052). `encode` pulls
-    # the MCU tier's `archive` RD search, already enabled on this line.
+    # Desktop ships the LMO encoder as standard (ADR 0052).
     "lamquant-lml-optimum/encode",
     "lamquant-common/host",
     "base64/std",

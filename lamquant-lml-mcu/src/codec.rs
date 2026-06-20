@@ -133,12 +133,12 @@ impl Codec for LmlCodec {
                 lml::compress_bounded_mae(signal, delta, lpc::LpcMode::default()).map_err(Into::into)
             }
             Mode::TargetBps(bps) => {
-                #[cfg(feature = "archive")]
+                #[cfg(feature = "std")]
                 {
                     lml::compress_target_bps(signal, bps, lpc::LpcMode::default())
                         .map_err(Into::into)
                 }
-                #[cfg(not(feature = "archive"))]
+                #[cfg(not(feature = "std"))]
                 {
                     let _ = bps;
                     Err(CodecError::ModeUnsupported)

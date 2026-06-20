@@ -38,8 +38,8 @@ extern crate alloc;
 // paths stay byte-for-byte stable for firmware, lamquant-lsl, the Python
 // extension, and every test — none of those call sites change.
 pub use lamquant_lml_mcu::{
-    backend, bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting,
-    lml, lmqc, lpc, quant, rans, zrle,
+    bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting, lml, lmqc, lpc,
+    quant, rans, zrle,
 };
 // ADR 0023 Track B5+ / ADR 0051 P3.5: arithmetic + empirical-categorical range
 // coders are opt-in via `experimental_arithmetic` (re-exported from core).
@@ -54,6 +54,16 @@ pub use lamquant_lml_mcu::{arith_cat, arithmetic};
 // the no_std facade build omits it).
 #[cfg(feature = "archive")]
 pub use lamquant_lml_desktop as desktop;
+
+// ADR 0058 carve-full: the `ComputeBackend` selector + the rayon parallel
+// encode/decode now live in the Desktop tier. Re-exported at the stable
+// `lamquant_core::backend` path (used by `container`, the `lml` CLI's
+// `--backend` flag, …) and the parallel entry points the container hot path
+// calls. Firmware (no `archive`) never selects a backend — it runs scalar.
+#[cfg(feature = "archive")]
+pub use lamquant_lml_desktop::backend;
+#[cfg(feature = "archive")]
+pub use lamquant_lml_desktop::{compress_with_mode_parallel, decompress_parallel};
 
 // The Optimum (LMO) tier. Re-exported as `lamquant_core::optimum`; it ships the
 // LMO decoder always and the encoder under `archive` (which needs the MCU tier's

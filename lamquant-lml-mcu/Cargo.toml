@@ -20,32 +20,28 @@ name = "lamquant_lml_mcu"
 crate-type = ["rlib"]
 
 [features]
-# Default = full host codec (std + rayon), matching the facade's old
-# `default = ["host"]` so a bare `cargo test -p lamquant-lossless-core` exercises
-# the whole suite. The firmware / no_std floor is validated explicitly with
-# `--no-default-features --target riscv32imac-unknown-none-elf` (the CI gate).
-default = ["archive"]
+# Default = the host scalar codec (`std`: f64 RD search / target-BPS, extended
+# LPC, blockfloat, std::io sinks). A bare `cargo test -p lamquant-lml-mcu`
+# exercises the whole suite; the firmware / no_std floor is validated explicitly
+# with `--no-default-features --target riscv32imac-unknown-none-elf` (CI gate).
+#
+# ADR 0058 carve-full: the rayon parallel path (the old `archive` feature) moved
+# wholesale to the Desktop tier `lamquant-lml-desktop`, so this crate carries no
+# rayon and no `archive` feature anymore — it is the pure scalar codec.
+default = ["std"]
 
-# Host codec capabilities: enables `std` (f64 RD search, std::io sinks,
-# env-var opt-ins like LAMQUANT_TRY_EXTENDED_LPC, Anytime LPC, blockfloat bench).
+# Host codec capabilities: f64 RD search (target-BPS), env-var opt-ins like
+# LAMQUANT_TRY_EXTENDED_LPC, Anytime LPC, blockfloat bench, std::io sinks.
 std = []
-
-# Host parallel encode/decode (the `Desktop` backend: rayon over channels).
-# NOTE: this feature is named `archive` ONLY so the moved codec modules keep
-# their existing `#[cfg(feature = "archive")]` gates byte-for-byte (protecting
-# the byte-equal golden vectors). The actual file-archive layer (LMA/EDF/
-# container) lives in the facade crate `lamquant-lml`, not here.
-archive = ["std", "dep:rayon"]
 
 # ADR 0023 Track B5+ / ADR 0051 P3.5: constriction-backed arithmetic +
 # empirical-categorical range coders (arith_cat). Runtime opt-in via
-# LAMQUANT_TRY_ARITHMETIC=1. (Slated to move to `lamquant-optimum` in a later
-# warplan phase; kept here now so `lml.rs`'s keep-best calls are unchanged.)
-experimental_arithmetic = ["archive", "dep:constriction", "dep:probability"]
+# LAMQUANT_TRY_ARITHMETIC=1.
+experimental_arithmetic = ["std", "dep:constriction", "dep:probability"]
 
 # ADR 0023 Track B1: bit-packed-residual candidate. Opt-in via this feature
 # AND LAMQUANT_TRY_BIT_PACK=1 at runtime.
-experimental_bit_pack = ["archive"]
+experimental_bit_pack = ["std"]
 
 [dependencies]
 # Shared no_std CRC-32 (re-exported as `lamquant_lml_mcu::crc32`).
@@ -54,8 +50,8 @@ lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", defau
 # (`f64::ln()` is std-only and would break the firmware path).
 libm = "0.2"
 
-# Host parallel path (the Desktop backend). Optional; pulled by `archive`.
-rayon = { version = "1", optional = true }
+# (rayon removed — ADR 0058 carve-full moved the parallel path to the Desktop
+# tier `lamquant-lml-desktop`, which owns the rayon dependency now.)
 
 # Research-grade entropy coders (rANS/range/arithmetic) backing
 # src/arithmetic.rs + src/arith_cat.rs when `experimental_arithmetic` is on.

@@ -31,9 +31,9 @@ decode = []
 # LMO encoder: the deterministic max-CR analysis (deeper transform, Lagrangian
 # PCRD allocation, context entropy, long-lag predictors). std + float. NEVER
 # enabled in the firmware graph. Pulls the core `archive` feature so the host
-# RD search (`lml::compress_target_bps`, archive-gated) is reachable for the
-# `Mode::TargetBps` (WP1-WP8) path.
-encode = ["std", "decode", "lamquant-lml-mcu/archive"]
+# RD search (`lml::compress_target_bps`, now std-gated after ADR 0058) is
+# reachable for the `Mode::TargetBps` (WP1-WP8) path via `std`.
+encode = ["std", "decode"]
 
 # Host std (f64, std::io). Implied by `encode`.
 std = ["lamquant-lml-mcu/std"]

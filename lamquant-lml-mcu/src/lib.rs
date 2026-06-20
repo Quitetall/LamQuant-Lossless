@@ -28,7 +28,6 @@
 
 extern crate alloc;
 
-pub mod backend;
 pub mod bit_pack;
 // The shared codec seam (ADR 0052): Format/Mode/Codec trait + universal
 // magic-dispatch decode. The LML half lives here; LMO is in `lamquant-optimum`.

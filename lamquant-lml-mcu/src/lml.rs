@@ -201,7 +201,7 @@ fn experimental_arithmetic_enabled() -> bool {
 /// `LAMQUANT_TRY_EXTENDED_LPC=1`. AIC self-throttles when the
 /// extra coefficients don't pay off, so the worst case is "same
 /// order picked as before".
-#[cfg(feature = "archive")]
+#[cfg(feature = "std")]
 fn experimental_extended_lpc_enabled() -> bool {
     std::env::var("LAMQUANT_TRY_EXTENDED_LPC")
         .map(|v| v == "1")
@@ -399,7 +399,7 @@ fn lpc_max_order(subband_len: usize) -> usize {
 /// the higher `EXTENDED_LPC_ORDER_HARD_CAP`. AIC byte-cost search
 /// inside `lpc::analyze_with_mode` picks the actual order.
 #[inline]
-#[cfg(feature = "archive")]
+#[cfg(feature = "std")]
 fn lpc_max_order_extended(subband_len: usize) -> usize {
     (subband_len / 8).min(EXTENDED_LPC_ORDER_HARD_CAP)
 }
@@ -440,27 +440,32 @@ pub fn compress(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<Vec<u8>> {
     compress_with_mode(signal, noise_bits, lpc::LpcMode::default())
 }
 
-/// Compress [n_ch][T] signal → LML1 packet bytes with explicit LPC mode.
-///
-/// `mode` controls the speed / CR trade-off the encoder makes per
-/// subband. See [`lpc::LpcMode`] for semantics:
-/// * `Fixed` — fastest, slightly worse CR
-/// * `Adaptive` — best CR, variable CPU
-/// * `Anytime` — fixed first then adaptive if deadline allows (default)
-///
-/// Returns `Err(LmlError::InvalidHeader)` on out-of-range dimensions —
-/// FFI/WASM consumers cannot recover from a process-wide panic, so the
-/// previous `assert!`-based validation was hostile to those callers.
-/// Audit-2026-05-11 Fix-C3.
-pub fn compress_with_mode(
-    signal: &[Vec<i64>],
-    noise_bits: u8,
-    mode: lpc::LpcMode,
-) -> LmlResult<Vec<u8>> {
+// ─── Shared encode primitives (ADR 0058 carve-full) ───────────────────────
+// The MCU tier owns the per-channel codec + LML packet assembly. The Desktop
+// tier (`lamquant-lml-desktop`) builds a *parallel* orchestrator over these
+// SAME primitives, so its output is byte-identical to the serial path below by
+// construction — the only difference is `map` vs `into_par_iter().map`. These
+// are #[doc(hidden)]: a workspace-internal seam, not a stable public API.
+
+/// Validated, noise-stripped encode inputs. `signal` borrows the caller's slice
+/// when `noise_bits == 0` (no clone on the hot path) via `Cow`.
+#[doc(hidden)]
+pub struct EncodePrep<'a> {
+    pub n_ch: usize,
+    pub t: usize,
+    pub n_levels: u8,
+    /// (try_arithmetic, try_bit_pack, try_extended_lpc)
+    pub flags: (bool, bool, bool),
+    pub signal: alloc::borrow::Cow<'a, [Vec<i64>]>,
+}
+
+/// Validate dimensions, strip `noise_bits`, resolve level depth + the
+/// experimental encoder flags. Shared by the serial (MCU) and parallel (Desktop)
+/// orchestrators so both agree on header fields and candidate selection.
+#[doc(hidden)]
+pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePrep<'_>> {
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
-
-    // Validate u16 header field limits — return Err instead of panicking.
     if n_ch == 0 || n_ch > 1024 {
         return Err(LmlError::InvalidHeader(format!(
             "n_ch={} out of range 1..=1024",
@@ -474,44 +479,22 @@ pub fn compress_with_mode(
             u16::MAX
         )));
     }
-    // noise_bits is stored as a u6 in flag bits 2-7 (max 63 on the wire),
-    // but the practical / Python clamp is 32. Keep both implementations aligned.
     if noise_bits > 32 {
         return Err(LmlError::InvalidHeader(format!(
             "noise_bits={} exceeds max 32",
             noise_bits
         )));
     }
-
-    // Noise stripping: shift in-place if needed, otherwise borrow
-    let owned_signal: Vec<Vec<i64>>;
-    let signal_ref: &[Vec<i64>] = if noise_bits > 0 {
-        owned_signal = signal
-            .iter()
-            .map(|ch| ch.iter().map(|&v| v >> noise_bits).collect())
-            .collect();
-        &owned_signal
+    let signal = if noise_bits > 0 {
+        alloc::borrow::Cow::Owned(
+            signal
+                .iter()
+                .map(|ch| ch.iter().map(|&v| v >> noise_bits).collect())
+                .collect(),
+        )
     } else {
-        signal
+        alloc::borrow::Cow::Borrowed(signal)
     };
-
-    let n_levels = compute_n_levels(t);
-
-    // Pre-allocate output buffers
-    let mut lpc_meta = Vec::with_capacity(n_ch * 4 * 40);
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let mut per_channel_results: Vec<ChannelEncodeOutput> = Vec::with_capacity(n_ch);
-    #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
-    let mut payload: Vec<u8> = Vec::with_capacity(n_ch * t * 4);
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let mut total_n_subbands: usize = 0;
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let mut total_bp_savings: usize = 0;
-
-    // ADR 0023 Track B5+: env-var-gated experimental arithmetic coder
-    // candidate. Cargo-feature-gated too: when `experimental_arithmetic`
-    // isn't compiled in, the candidate is permanently off regardless
-    // of the env var.
     let try_arithmetic = {
         #[cfg(feature = "experimental_arithmetic")]
         {
@@ -532,67 +515,68 @@ pub fn compress_with_mode(
             false
         }
     };
-    // ADR 0023 Track B6: env-var-gated extended LPC order cap.
     let try_extended_lpc = {
-        #[cfg(feature = "archive")]
+        #[cfg(feature = "std")]
         {
             experimental_extended_lpc_enabled()
         }
-        #[cfg(not(feature = "archive"))]
+        #[cfg(not(feature = "std"))]
         {
             false
         }
     };
+    let n_levels = compute_n_levels(t);
+    Ok(EncodePrep {
+        n_ch,
+        t,
+        n_levels,
+        flags: (try_arithmetic, try_bit_pack, try_extended_lpc),
+        signal,
+    })
+}
+
+/// Concatenate per-channel `lpc_meta`, assemble the `payload`, and return the
+/// `any_bit_pack_wins_global` flag selecting tagged framing. Encapsulates the
+/// experimental-feature branching so the orchestrators stay shape-agnostic.
+#[doc(hidden)]
+pub fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u8>, bool) {
+    let lpc_meta_total: usize = per_channel.iter().map(|c| c.meta.len()).sum();
+    let mut lpc_meta = Vec::with_capacity(lpc_meta_total);
+    for c in per_channel {
+        lpc_meta.extend_from_slice(&c.meta);
+    }
     #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
     {
-        for ch_idx in 0..n_ch {
-            let ch_out = encode_one_channel(
-                &signal_ref[ch_idx],
-                n_levels,
-                mode,
-                try_arithmetic,
-                try_bit_pack,
-                try_extended_lpc,
-            )?;
-            lpc_meta.extend_from_slice(&ch_out.meta);
-            total_n_subbands += ch_out.n_subbands;
-            total_bp_savings += ch_out.bp_savings;
-            per_channel_results.push(ch_out);
-        }
+        let total_n_subbands: usize = per_channel.iter().map(|c| c.n_subbands).sum();
+        let total_bp_savings: usize = per_channel.iter().map(|c| c.bp_savings).sum();
+        let wins = total_bp_savings > total_n_subbands;
+        let payload = assemble_payload(per_channel, wins);
+        (lpc_meta, payload, wins)
     }
     #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
     {
-        for ch_idx in 0..n_ch {
-            let ch_out = encode_one_channel(
-                &signal_ref[ch_idx],
-                n_levels,
-                mode,
-                try_arithmetic,
-                try_bit_pack,
-                try_extended_lpc,
-            )?;
-            lpc_meta.extend_from_slice(&ch_out.meta);
-            payload.extend_from_slice(&ch_out.payload);
+        let total: usize = per_channel.iter().map(|c| c.payload.len()).sum();
+        let mut payload = Vec::with_capacity(total);
+        for c in per_channel {
+            payload.extend_from_slice(&c.payload);
         }
+        (lpc_meta, payload, false)
     }
+}
 
-    // ADR 0023 Track B1: switch to tagged framing only when the
-    // bit-pack savings exceed the 1-byte-per-subband tag overhead.
-    // Strict `>` so a break-even doesn't churn the wire format.
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let any_bit_pack_wins_global = total_bp_savings > total_n_subbands;
-    #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
-    let any_bit_pack_wins_global = false;
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let payload = assemble_payload(&per_channel_results, any_bit_pack_wins_global);
-
-    // Build the 14-byte variable header region (everything between magic
-    // and the CRC field) so we can stream it through CRC and serialise it
-    // to the output. CRC must cover this region — without it, a one-byte
-    // flip in n_ch / t / n_levels / flags / lpc_len / sub_len escapes
-    // detection (the test `test_exits_nonzero_on_corrupted_lml` regressed
-    // on this). Magic is constant so it does not need CRC; the CRC field
-    // itself is excluded to avoid self-reference.
+/// Build the framed LML1 packet (ASCII prefix + magic + 14-byte header + CRC-32
+/// + lpc_meta + payload) from finalized channel bytes. Byte-identical regardless
+/// of which orchestrator (serial/parallel) produced the inputs.
+#[doc(hidden)]
+pub fn assemble_lml_packet(
+    n_ch: usize,
+    t: usize,
+    n_levels: u8,
+    noise_bits: u8,
+    any_bit_pack_wins_global: bool,
+    lpc_meta: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
     let mut flags: u8 = (noise_bits & 0x3F) << 2;
     if any_bit_pack_wins_global {
         flags |= FLAG_BIT_PER_SUBBAND_TAG;
@@ -605,16 +589,14 @@ pub fn compress_with_mode(
     header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
     header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
 
-    // Streaming CRC over: header_var || lpc_meta || payload.
     let mut crc_state = CRC32_INIT;
     crc_state = crc32_update(crc_state, &header_var);
-    crc_state = crc32_update(crc_state, &lpc_meta);
-    crc_state = crc32_update(crc_state, &payload);
+    crc_state = crc32_update(crc_state, lpc_meta);
+    crc_state = crc32_update(crc_state, payload);
     let crc = crc_state ^ CRC32_INIT;
 
-    // Assemble
-    let mode = if noise_bits == 0 { "lossless" } else { "noise" };
-    let prefix = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode);
+    let mode_label = if noise_bits == 0 { "lossless" } else { "noise" };
+    let prefix = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode_label);
 
     let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
     let mut out = Vec::with_capacity(total);
@@ -622,9 +604,50 @@ pub fn compress_with_mode(
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&header_var);
     out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&lpc_meta);
-    out.extend_from_slice(&payload);
-    Ok(out)
+    out.extend_from_slice(lpc_meta);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Compress [n_ch][T] signal → LML1 packet bytes with explicit LPC mode.
+///
+/// `mode` controls the speed / CR trade-off the encoder makes per
+/// subband. See [`lpc::LpcMode`] for semantics:
+/// * `Fixed` — fastest, slightly worse CR
+/// * `Adaptive` — best CR, variable CPU
+/// * `Anytime` — fixed first then adaptive if deadline allows (default)
+///
+/// Returns `Err(LmlError::InvalidHeader)` on out-of-range dimensions —
+/// FFI/WASM consumers cannot recover from a process-wide panic, so the
+/// previous `assert!`-based validation was hostile to those callers.
+/// Audit-2026-05-11 Fix-C3.
+pub fn compress_with_mode(
+    signal: &[Vec<i64>],
+    noise_bits: u8,
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let prep = prepare_encode(signal, noise_bits)?;
+    let mut per_channel = Vec::with_capacity(prep.n_ch);
+    for ch_idx in 0..prep.n_ch {
+        per_channel.push(encode_one_channel(
+            &prep.signal[ch_idx],
+            prep.n_levels,
+            mode,
+            prep.flags.0,
+            prep.flags.1,
+            prep.flags.2,
+        )?);
+    }
+    let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
+    Ok(assemble_lml_packet(
+        prep.n_ch,
+        prep.t,
+        prep.n_levels,
+        noise_bits,
+        wins,
+        &lpc_meta,
+        &payload,
+    ))
 }
 
 /// Compress [n_ch][T] → LML1 **bounded-MAE near-lossless** packet (ADR 0051
@@ -773,7 +796,7 @@ fn forward_subbands(signal_ch: &[i64], n_levels: u8) -> Vec<Vec<i64>> {
 /// global `scale` is binary-searched so the packet lands at/under `target_bps`
 /// (the finest quantization meeting the budget). Host-only (f64 R-D search);
 /// the DECODE is integer-only and firmware-capable.
-#[cfg(feature = "archive")]
+#[cfg(feature = "std")]
 pub fn compress_target_bps(
     signal: &[Vec<i64>],
     target_bps: f64,
@@ -1118,7 +1141,8 @@ pub(crate) fn compress_or_panic(signal: &[Vec<i64>], noise_bits: u8) -> Vec<u8> 
 /// encoders MUST agree on this number — otherwise the same input
 /// produces different `n_levels` in the header and the byte-equal
 /// invariant breaks.
-fn compute_n_levels(t: usize) -> u8 {
+#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
+pub fn compute_n_levels(t: usize) -> u8 {
     let mut n_levels: u8 = 3;
     while (t as u64) < 4 * (1u64 << n_levels) && n_levels > 0 {
         n_levels -= 1;
@@ -1153,8 +1177,13 @@ struct SubbandResult {
 /// allocations) so rayon's `collect` on `Vec<ChannelEncodeOutput>`
 /// moves only ~48 bytes of header per channel — matching the pre-B1
 /// throughput on multi-channel desktop-parallel encode.
+// #[doc(hidden)] pub (ADR 0058 carve-full): an opaque per-channel encode result.
+// The Desktop tier names this type (`Vec<ChannelEncodeOutput>`) but never reads
+// its fields — it goes straight back into `finalize_channels`. Fields stay
+// private so the wire-assembly logic remains owned by this crate.
 #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-struct ChannelEncodeOutput {
+#[doc(hidden)]
+pub struct ChannelEncodeOutput {
     meta: Vec<u8>,
     subbands: Vec<SubbandResult>,
     n_subbands: usize,
@@ -1162,7 +1191,8 @@ struct ChannelEncodeOutput {
 }
 
 #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
-struct ChannelEncodeOutput {
+#[doc(hidden)]
+pub struct ChannelEncodeOutput {
     meta: Vec<u8>,
     payload: Vec<u8>,
 }
@@ -1209,7 +1239,8 @@ fn assemble_payload(per_channel: &[ChannelEncodeOutput], use_tagged: bool) -> Ve
     payload
 }
 
-fn encode_one_channel(
+#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
+pub fn encode_one_channel(
     signal_ch: &[i64],
     n_levels: u8,
     mode: lpc::LpcMode,
@@ -1252,13 +1283,13 @@ fn encode_one_channel(
         // Track B6 (opt-in): swap the ceiling from 16 → 32 so the
         // AIC walk explores deeper. Default off → byte-equal to
         // the pre-B6 path.
-        #[cfg(feature = "archive")]
+        #[cfg(feature = "std")]
         let burg_ceiling = if try_extended_lpc {
             lpc_max_order_extended(sub.len())
         } else {
             lpc_max_order(sub.len())
         };
-        #[cfg(not(feature = "archive"))]
+        #[cfg(not(feature = "std"))]
         let burg_ceiling = {
             let _ = try_extended_lpc;
             lpc_max_order(sub.len())
@@ -1411,136 +1442,6 @@ fn encode_one_channel(
 /// Returns identical bytes to `compress_with_mode`; the only
 /// difference is wall-clock time on multi-channel inputs (typical
 /// clinical EEG = 8-24 channels = 4-12× speedup on a 16-core host).
-#[cfg(feature = "archive")]
-pub fn compress_with_mode_parallel(
-    signal: &[Vec<i64>],
-    noise_bits: u8,
-    mode: lpc::LpcMode,
-) -> LmlResult<Vec<u8>> {
-    use rayon::prelude::*;
-
-    let n_ch = signal.len();
-    let t = if n_ch > 0 { signal[0].len() } else { 0 };
-
-    if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(format!(
-            "n_ch={} out of range 1..=1024",
-            n_ch
-        )));
-    }
-    if t == 0 || t > u16::MAX as usize {
-        return Err(LmlError::InvalidHeader(format!(
-            "T={} out of range 1..={}",
-            t,
-            u16::MAX
-        )));
-    }
-    if noise_bits > 32 {
-        return Err(LmlError::InvalidHeader(format!(
-            "noise_bits={} exceeds max 32",
-            noise_bits
-        )));
-    }
-
-    let owned_signal: Vec<Vec<i64>>;
-    let signal_ref: &[Vec<i64>] = if noise_bits > 0 {
-        owned_signal = signal
-            .iter()
-            .map(|ch| ch.iter().map(|&v| v >> noise_bits).collect())
-            .collect();
-        &owned_signal
-    } else {
-        signal
-    };
-
-    let n_levels = compute_n_levels(t);
-
-    // Parallel per-channel encode. Output order is preserved because
-    // `par_iter().map(...).collect::<Result<Vec<_>>>()` keeps the
-    // input order. `collect::<Result<...>>()` short-circuits on the
-    // first Err -- rayon stops scheduling new work on the channels
-    // that haven't started yet, propagating the error up.
-    #[cfg(feature = "experimental_arithmetic")]
-    let try_arithmetic = experimental_arithmetic_enabled();
-    #[cfg(not(feature = "experimental_arithmetic"))]
-    let try_arithmetic = false;
-    #[cfg(feature = "experimental_bit_pack")]
-    let try_bit_pack = experimental_bit_pack_enabled();
-    #[cfg(not(feature = "experimental_bit_pack"))]
-    let try_bit_pack = false;
-    let try_extended_lpc = experimental_extended_lpc_enabled();
-    let per_channel: Vec<ChannelEncodeOutput> = (0..n_ch)
-        .into_par_iter()
-        .map(|ch_idx| {
-            encode_one_channel(
-                &signal_ref[ch_idx],
-                n_levels,
-                mode,
-                try_arithmetic,
-                try_bit_pack,
-                try_extended_lpc,
-            )
-        })
-        .collect::<LmlResult<Vec<_>>>()?;
-
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let total_n_subbands: usize = per_channel.iter().map(|c| c.n_subbands).sum();
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let total_bp_savings: usize = per_channel.iter().map(|c| c.bp_savings).sum();
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let any_bit_pack_wins_global = total_bp_savings > total_n_subbands;
-    #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
-    let any_bit_pack_wins_global = false;
-    let lpc_meta_total: usize = per_channel.iter().map(|c| c.meta.len()).sum();
-
-    let mut lpc_meta = Vec::with_capacity(lpc_meta_total);
-    for c in &per_channel {
-        lpc_meta.extend_from_slice(&c.meta);
-    }
-    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-    let payload = assemble_payload(&per_channel, any_bit_pack_wins_global);
-    #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
-    let payload: Vec<u8> = {
-        let total: usize = per_channel.iter().map(|c| c.payload.len()).sum();
-        let mut p = Vec::with_capacity(total);
-        for c in &per_channel {
-            p.extend_from_slice(&c.payload);
-        }
-        p
-    };
-
-    let mut flags: u8 = (noise_bits & 0x3F) << 2;
-    if any_bit_pack_wins_global {
-        flags |= FLAG_BIT_PER_SUBBAND_TAG;
-    }
-    let mut header_var = [0u8; 14];
-    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
-    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
-    header_var[4] = n_levels;
-    header_var[5] = flags;
-    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
-    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-
-    let mut crc_state = CRC32_INIT;
-    crc_state = crc32_update(crc_state, &header_var);
-    crc_state = crc32_update(crc_state, &lpc_meta);
-    crc_state = crc32_update(crc_state, &payload);
-    let crc = crc_state ^ CRC32_INIT;
-
-    let mode_label = if noise_bits == 0 { "lossless" } else { "noise" };
-    let prefix = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode_label);
-
-    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(prefix.as_bytes());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&header_var);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&lpc_meta);
-    out.extend_from_slice(&payload);
-    Ok(out)
-}
-
 /// Compress a signal into any [`std::io::Write`] sink.
 ///
 /// Phase 0.4 wrapper around [`compress_with_mode`]: today this buffers
@@ -1586,365 +1487,28 @@ pub fn decompress_from<R: std::io::Read>(src: &mut R) -> LmlResult<Vec<Vec<i64>>
 }
 
 /// Decompress LML1 packet → [n_ch][T].
-pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
-    let offset = find_magic_offset(data)?;
-    let data = &data[offset..];
-
-    if data.len() < HEADER_SIZE {
-        return Err(LmlError::Truncated {
-            expected: HEADER_SIZE,
-            actual: data.len(),
-            context: "packet header",
-        });
-    }
-
-    let magic = &data[0..4];
-    if magic != MAGIC {
-        // No backwards compatibility — production accepts only LML1.
-        // Future versions are explicit; legacy iterations (LMQ4/LMQ5/LML )
-        // route to LmlError::InvalidMagic and must be decoded out-of-band.
-        if magic[0..3] == *b"LML" && magic[3].is_ascii_digit() && magic[3] != b'1' {
-            return Err(LmlError::UnsupportedVersion(magic[3]));
-        }
-        let mut m = [0u8; 4];
-        m.copy_from_slice(magic);
-        return Err(LmlError::InvalidMagic(m));
-    }
-
-    let n_ch = u16::from_le_bytes([data[4], data[5]]) as usize;
-    let t = u16::from_le_bytes([data[6], data[7]]) as usize;
-    let n_levels = data[8];
-    let flags = data[9];
-    let lpc_len = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
-    let sub_len = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
-    let crc_exp = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-
-    // ADR 0023 Track B1: bit 0 (`FLAG_BIT_PER_SUBBAND_TAG`) is a feature
-    // flag. ADR 0051 track 2: bit 1 (`FLAG_BIT_TRACK2_MODE`) marks a
-    // near-lossless / lossy packet — dispatched after CRC verify below. The
-    // two are mutually exclusive (track-2 has no wavelet subbands), so a
-    // packet asserting both is malformed → fail-closed.
-    if (flags & FLAG_BIT_TRACK2_MODE != 0) && (flags & FLAG_BIT_PER_SUBBAND_TAG != 0) {
-        return Err(LmlError::InvalidHeader(format!(
-            "LML1 track-2 + per-subband-tag both set (flags=0x{:02X})",
-            flags
-        )));
-    }
-    let use_per_subband_tag = (flags & FLAG_BIT_PER_SUBBAND_TAG) != 0;
-    let noise_bits = (flags >> 2) & 0x3F;
-
-    if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(format!("channel count: {}", n_ch)));
-    }
-    if t == 0 {
-        return Err(LmlError::InvalidHeader("zero samples".into()));
-    }
-    // n_levels is the lifting-DWT depth; only 0..=3 are defined (the
-    // synthesis match below handles 3/2/1 and 0). A crafted CRC-valid
-    // packet with n_levels>=4 would otherwise decode n_levels+1 subbands
-    // and fall through the `_` arm to return ONLY the first subband —
-    // wrong-length output presented as Ok instead of an error. Reject it.
-    // (The serial `decompress` and parallel `decompress_parallel` paths
-    // share this identical guard.)
-    if n_levels > 3 {
-        return Err(LmlError::InvalidHeader(format!(
-            "n_levels must be 0..=3, got {}",
-            n_levels
-        )));
-    }
-    if HEADER_SIZE + lpc_len + sub_len > data.len() {
-        return Err(LmlError::Truncated {
-            expected: HEADER_SIZE + lpc_len + sub_len,
-            actual: data.len(),
-            context: "payload",
-        });
-    }
-
-    // CRC covers the variable-fields header (bytes 4..18) plus
-    // lpc_meta + payload. Magic (bytes 0..4) is constant so excluded;
-    // the CRC field itself (bytes 18..22) is excluded to avoid self-
-    // reference. This matches the encoder side in `compress`.
-    //
-    // `verify_packet_crc` first checks the modern (a81cd04+) scope — the
-    // common fast path, byte-for-byte the old cost. Only on mismatch does
-    // it recompute the legacy payload-only scope to accept pre-a81cd04
-    // packets (warn-once via SAW_LEGACY_CRC). Both miss → CrcMismatch.
-    let payload_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len + sub_len];
-    verify_packet_crc(&data[4..18], payload_data, crc_exp)?;
-
-    // ADR 0051 track 2: near-lossless / lossy packet. CRC + size bounds are
-    // verified above; dispatch to the integer-only mode decoder.
-    if flags & FLAG_BIT_TRACK2_MODE != 0 {
-        let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
-        let payload = &data[HEADER_SIZE + lpc_len..HEADER_SIZE + lpc_len + sub_len];
-        return decode_track2(n_ch, t, n_levels, lpc_data, payload);
-    }
-
-    let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
-    let mut lpc_pos = 0usize;
-    let mut sub_pos = HEADER_SIZE + lpc_len;
-    // n_levels can be 0..3 (Python adaptively reduces for short windows).
-    // Subbands: n_levels=3 → 4 (approx3 + detail3,2,1),
-    //           n_levels=2 → 3 (approx2 + detail2,1),
-    //           n_levels=1 → 2 (approx1 + detail1),
-    //           n_levels=0 → 1 (raw signal, no DWT)
-    let n_sub = if n_levels == 0 {
-        1
-    } else {
-        (n_levels as usize) + 1
-    };
-
-    // Audit-2026-05-11 Fix-C4: bound output allocation against
-    // MAX_DECODE_BYTES so an attacker-controlled `n_ch * t` cannot
-    // trigger a multi-hundred-MB malloc on a tiny packet. CRC having
-    // passed earlier only proves the bytes the attacker supplied are
-    // self-consistent; it says nothing about the implied decoded size.
-    let total_bytes = (n_ch as u64)
-        .checked_mul(t as u64)
-        .and_then(|p| p.checked_mul(8))
-        .ok_or_else(|| {
-            LmlError::InvalidHeader(alloc::format!("n_ch={} × t={} × 8 overflows u64", n_ch, t))
-        })?;
-    if total_bytes > MAX_DECODE_BYTES {
-        return Err(LmlError::InvalidHeader(alloc::format!(
-            "decoded size {total_bytes} bytes > MAX_DECODE_BYTES {MAX_DECODE_BYTES}"
-        )));
-    }
-
-    let mut signal = vec![vec![0i64; t]; n_ch];
-    // ADR 0023 Track B1: only computed (and required) on packets
-    // that opt in via FLAG_BIT_PER_SUBBAND_TAG. Bit-pack decode
-    // needs the sample count per subband out-of-band.
-    let sub_lens: Vec<usize> = if use_per_subband_tag {
-        subband_lengths(t, n_levels)
-    } else {
-        Vec::new()
-    };
-
-    for ch in 0..n_ch {
-        let mut subs: Vec<Vec<i64>> = Vec::with_capacity(n_sub);
-
-        for sb_idx in 0..n_sub {
-            if lpc_pos >= lpc_data.len() {
-                return Err(LmlError::Truncated {
-                    expected: lpc_pos + 1,
-                    actual: lpc_data.len(),
-                    context: "LPC metadata",
-                });
-            }
-            let order = lpc_data[lpc_pos] as usize;
-            lpc_pos += 1;
-
-            let mut coeffs = Vec::with_capacity(order);
-            for _ in 0..order {
-                if lpc_pos + 4 > lpc_data.len() {
-                    return Err(LmlError::Truncated {
-                        expected: lpc_pos + 4,
-                        actual: lpc_data.len(),
-                        context: "LPC coefficients",
-                    });
-                }
-                coeffs.push(i32::from_le_bytes([
-                    lpc_data[lpc_pos],
-                    lpc_data[lpc_pos + 1],
-                    lpc_data[lpc_pos + 2],
-                    lpc_data[lpc_pos + 3],
-                ]));
-                lpc_pos += 4;
-            }
-
-            // Audit-2026-05-11 Fix-C5: bound golomb decoder to the
-            // declared subband region. Without this bound the decoder
-            // can read past `sub_len` into the next subband (or off the
-            // packet entirely) and produce internally-consistent garbage
-            // that decodes as `Ok` — a CRC-recompute attack would let
-            // a crafted packet smuggle decoded values across subband
-            // boundaries.
-            let payload_end = HEADER_SIZE + lpc_len + sub_len;
-            if sub_pos > payload_end {
-                return Err(LmlError::InvalidHeader(alloc::format!(
-                    "subband cursor {sub_pos} past declared payload end {payload_end}"
-                )));
-            }
-            // ADR 0023 Track B1: dispatch on per-subband tag when the
-            // header opted into the new framing. Legacy framing (no
-            // tag) is the pre-B1 path — byte-equal to old archives.
-            let decoded = if use_per_subband_tag {
-                if sub_pos >= payload_end {
-                    return Err(LmlError::Truncated {
-                        expected: sub_pos + 1,
-                        actual: payload_end,
-                        context: "per-subband codec tag",
-                    });
-                }
-                let tag = data[sub_pos];
-                sub_pos += 1;
-                let sub_slice = &data[sub_pos..payload_end];
-                match tag {
-                    SUBBAND_TAG_GOLOMB => {
-                        let (d, consumed) = golomb::decode_dense(sub_slice, 0)?;
-                        sub_pos += consumed;
-                        if sub_pos > payload_end {
-                            return Err(LmlError::InvalidHeader(alloc::format!(
-                                "golomb decoder consumed {consumed} bytes, past declared payload end"
-                            )));
-                        }
-                        d
-                    }
-                    SUBBAND_TAG_BIT_PACK => {
-                        let n_samples = sub_lens
-                            .get(sb_idx)
-                            .copied()
-                            .ok_or_else(|| LmlError::InvalidHeader(alloc::format!(
-                                "no subband length for index {} (n_sub={})", sb_idx, n_sub
-                            )))?;
-                        let (d, consumed) = bit_pack::decode_dense(sub_slice, n_samples)
-                            .map_err(|e| LmlError::InvalidHeader(alloc::format!(
-                                "bit_pack::decode_dense failed: {}", e
-                            )))?;
-                        sub_pos += consumed;
-                        if sub_pos > payload_end {
-                            return Err(LmlError::InvalidHeader(alloc::format!(
-                                "bit_pack decoder consumed {consumed} bytes, past declared payload end"
-                            )));
-                        }
-                        d
-                    }
-                    #[cfg(feature = "experimental_arithmetic")]
-                    SUBBAND_TAG_ARITHMETIC => {
-                        let n_samples = sub_lens
-                            .get(sb_idx)
-                            .copied()
-                            .ok_or_else(|| LmlError::InvalidHeader(alloc::format!(
-                                "no subband length for index {} (n_sub={})", sb_idx, n_sub
-                            )))?;
-                        let (d, consumed) = crate::arithmetic::decode_dense(sub_slice, n_samples)
-                            .map_err(|e| LmlError::InvalidHeader(alloc::format!(
-                                "arithmetic::decode_dense failed: {}", e
-                            )))?;
-                        sub_pos += consumed;
-                        if sub_pos > payload_end {
-                            return Err(LmlError::InvalidHeader(alloc::format!(
-                                "arithmetic decoder consumed {consumed} bytes, past declared payload end"
-                            )));
-                        }
-                        d
-                    }
-                    _ => {
-                        return Err(LmlError::InvalidHeader(alloc::format!(
-                            "unknown per-subband codec tag 0x{:02X}", tag
-                        )));
-                    }
-                }
-            } else {
-                let sub_slice = &data[sub_pos..payload_end];
-                let (d, consumed) = golomb::decode_dense(sub_slice, 0)?;
-                sub_pos += consumed;
-                if sub_pos > payload_end {
-                    return Err(LmlError::InvalidHeader(alloc::format!(
-                        "golomb decoder consumed {consumed} bytes, past declared payload end"
-                    )));
-                }
-                d
-            };
-
-            // Always run synthesize — even order=0 needs bias_restore
-            subs.push(lpc::synthesize(&decoded, &coeffs, order, BIAS_CTX));
-        }
-
-        signal[ch] = match n_levels {
-            3 => lifting::inverse_3level(&subs[0], &subs[1], &subs[2], &subs[3]),
-            2 => {
-                // 2-level: subs = [l2_approx, l2_detail, l1_detail]
-                let l1_approx = lifting::inverse(&subs[0], &subs[1]);
-                lifting::inverse(&l1_approx, &subs[2])
-            }
-            1 => {
-                // 1-level: subs = [approx, detail]
-                lifting::inverse(&subs[0], &subs[1])
-            }
-            _ => {
-                // 0 levels: raw signal, single subband.
-                // Audit-2026-05-11 Fix-#42: previous `unwrap_or_default()`
-                // silently returned an empty Vec on a corrupt manifest
-                // where `n_sub` claimed 1 subband but decode produced
-                // zero — that fed a zero-filled signal downstream
-                // without diagnostic. Return Err so the caller learns.
-                subs.into_iter().next().ok_or_else(|| {
-                    LmlError::InvalidHeader("n_levels=0 but no subband decoded".into())
-                })?
-            }
-        };
-    }
-
-    if noise_bits > 0 {
-        for ch in signal.iter_mut() {
-            for v in ch.iter_mut() {
-                *v <<= noise_bits;
-            }
-        }
-    }
-
-    Ok(signal)
+/// Decode plan produced by [`parse_lml_channels`] — either an already-decoded
+/// signal (track-2 path) or per-channel subbands awaiting synth + lifting.
+#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
+pub enum DecodePlan {
+    /// Track-2 near-lossless / lossy packet: already a full signal.
+    Done(Vec<Vec<i64>>),
+    /// Standard LML1: per-channel `Vec<(coeffs, residual)>` per subband, plus
+    /// the level depth and noise-bit shift to apply after synthesis.
+    Synthesize {
+        n_levels: u8,
+        noise_bits: u8,
+        channels: Vec<Vec<(Vec<i32>, Vec<i64>)>>,
+    },
 }
 
-/// Synthesize one channel's signal from its per-subband
-/// `(coeffs, residual)` pairs. Pure function -- no shared state.
-///
-/// Mirrors the body of the inner per-channel loop in `decompress`
-/// (lpc::synthesize each subband + lifting::inverse_Nlevel + the
-/// n_levels=0 edge case). Extracted so the parallel decoder can
-/// dispatch this work across rayon workers while the byte-equal
-/// invariant is preserved by construction.
-#[cfg(feature = "archive")]
-fn synthesize_channel_signal(
-    per_subband: Vec<(Vec<i32>, Vec<i64>)>,
-    n_levels: u8,
-) -> LmlResult<Vec<i64>> {
-    let subs: Vec<Vec<i64>> = per_subband
-        .into_iter()
-        .map(|(coeffs, residual)| {
-            let order = coeffs.len();
-            lpc::synthesize(&residual, &coeffs, order, BIAS_CTX)
-        })
-        .collect();
-    Ok(match n_levels {
-        3 => lifting::inverse_3level(&subs[0], &subs[1], &subs[2], &subs[3]),
-        2 => {
-            let l1_approx = lifting::inverse(&subs[0], &subs[1]);
-            lifting::inverse(&l1_approx, &subs[2])
-        }
-        1 => lifting::inverse(&subs[0], &subs[1]),
-        _ => subs
-            .into_iter()
-            .next()
-            .ok_or_else(|| LmlError::InvalidHeader("n_levels=0 but no subband decoded".into()))?,
-    })
-}
-
-/// Host-only parallel decompress. Byte-equal output to the serial
-/// `decompress` path; the parallelism happens in the heaviest step
-/// (LPC synthesize + lifting inverse) per channel via rayon.
-///
-/// Two phases:
-///
-///   1. **Serial parse** -- walk the input cursor through `lpc_data`
-///      + golomb-encoded payload, decoding coeffs + residuals per
-///      `(channel, subband)`. Has to be sequential because each
-///      subband's byte length is determined by golomb decode (no
-///      upfront index).
-///   2. **Parallel synth + lift** -- for each channel, dispatch
-///      `synthesize_channel_signal(subs, n_levels)` across rayon
-///      workers. Output order preserved by
-///      `par_iter().map(...).collect()`.
-///
-/// The byte-equal cross-backend gate (`tests/byte_equal_backends.rs`)
-/// proves the parallel output matches the serial path for every
-/// fixture.
-#[cfg(feature = "archive")]
-pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
-    use rayon::prelude::*;
-
+/// Parse an LML1 stream up to (but not including) per-channel synthesis: header,
+/// validation, CRC verify, track-2 dispatch, and the sequential per-(channel,
+/// subband) coeff/residual decode. Shared by the serial (MCU) and parallel
+/// (Desktop) decode orchestrators; the only thing they add is HOW the per-channel
+/// [`synthesize_channel_signal`] runs (serial vs rayon) + the post-synth shift.
+#[doc(hidden)]
+pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
     let offset = find_magic_offset(data)?;
     let data = &data[offset..];
 
@@ -2025,7 +1589,9 @@ pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if flags & FLAG_BIT_TRACK2_MODE != 0 {
         let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
         let payload = &data[HEADER_SIZE + lpc_len..HEADER_SIZE + lpc_len + sub_len];
-        return decode_track2(n_ch, t, n_levels, lpc_data, payload);
+        return Ok(DecodePlan::Done(decode_track2(
+            n_ch, t, n_levels, lpc_data, payload,
+        )?));
     }
 
     let lpc_data = &data[HEADER_SIZE..HEADER_SIZE + lpc_len];
@@ -2180,25 +1746,90 @@ pub fn decompress_parallel(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         per_channel.push(subs);
     }
 
-    // Phase 2: parallel synth + lifting inverse. Order-preserving
-    // collect keeps the channel-wise output stable.
-    let signal: Result<Vec<Vec<i64>>, LmlError> = per_channel
-        .into_par_iter()
-        .map(|subs| synthesize_channel_signal(subs, n_levels))
-        .collect();
-    let mut signal = signal?;
-
-    if noise_bits > 0 {
-        for ch in signal.iter_mut() {
-            for v in ch.iter_mut() {
-                *v <<= noise_bits;
-            }
-        }
-    }
-
-    Ok(signal)
+    Ok(DecodePlan::Synthesize {
+        n_levels,
+        noise_bits,
+        channels: per_channel,
+    })
 }
 
+pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
+    match parse_lml_channels(data)? {
+        DecodePlan::Done(signal) => Ok(signal),
+        DecodePlan::Synthesize {
+            n_levels,
+            noise_bits,
+            channels,
+        } => {
+            let mut signal: Vec<Vec<i64>> = channels
+                .into_iter()
+                .map(|subs| synthesize_channel_signal(subs, n_levels))
+                .collect::<LmlResult<Vec<_>>>()?;
+            if noise_bits > 0 {
+                for ch in signal.iter_mut() {
+                    for v in ch.iter_mut() {
+                        *v <<= noise_bits;
+                    }
+                }
+            }
+            Ok(signal)
+        }
+    }
+}
+
+/// Synthesize one channel's signal from its per-subband
+/// `(coeffs, residual)` pairs. Pure function -- no shared state.
+///
+/// Mirrors the body of the inner per-channel loop in `decompress`
+/// (lpc::synthesize each subband + lifting::inverse_Nlevel + the
+/// n_levels=0 edge case). Extracted so the parallel decoder can
+/// dispatch this work across rayon workers while the byte-equal
+/// invariant is preserved by construction.
+#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
+pub fn synthesize_channel_signal(
+    per_subband: Vec<(Vec<i32>, Vec<i64>)>,
+    n_levels: u8,
+) -> LmlResult<Vec<i64>> {
+    let subs: Vec<Vec<i64>> = per_subband
+        .into_iter()
+        .map(|(coeffs, residual)| {
+            let order = coeffs.len();
+            lpc::synthesize(&residual, &coeffs, order, BIAS_CTX)
+        })
+        .collect();
+    Ok(match n_levels {
+        3 => lifting::inverse_3level(&subs[0], &subs[1], &subs[2], &subs[3]),
+        2 => {
+            let l1_approx = lifting::inverse(&subs[0], &subs[1]);
+            lifting::inverse(&l1_approx, &subs[2])
+        }
+        1 => lifting::inverse(&subs[0], &subs[1]),
+        _ => subs
+            .into_iter()
+            .next()
+            .ok_or_else(|| LmlError::InvalidHeader("n_levels=0 but no subband decoded".into()))?,
+    })
+}
+
+/// Host-only parallel decompress. Byte-equal output to the serial
+/// `decompress` path; the parallelism happens in the heaviest step
+/// (LPC synthesize + lifting inverse) per channel via rayon.
+///
+/// Two phases:
+///
+///   1. **Serial parse** -- walk the input cursor through `lpc_data`
+///      + golomb-encoded payload, decoding coeffs + residuals per
+///      `(channel, subband)`. Has to be sequential because each
+///      subband's byte length is determined by golomb decode (no
+///      upfront index).
+///   2. **Parallel synth + lift** -- for each channel, dispatch
+///      `synthesize_channel_signal(subs, n_levels)` across rayon
+///      workers. Output order preserved by
+///      `par_iter().map(...).collect()`.
+///
+/// The byte-equal cross-backend gate (`tests/byte_equal_backends.rs`)
+/// proves the parallel output matches the serial path for every
+/// fixture.
 fn find_magic_offset(data: &[u8]) -> LmlResult<usize> {
     if data.len() < 4 {
         return Err(LmlError::Truncated {
@@ -2475,11 +2106,8 @@ mod tests {
         packet[magic_pos + 8] = 4; // n_levels = 4, outside the defined 0..=3 range
         let r = decompress(&packet);
         assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "serial: {r:?}");
-        #[cfg(feature = "archive")]
-        {
-            let r = decompress_parallel(&packet);
-            assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "parallel: {r:?}");
-        }
+        // (The parallel-decode equivalent of this guard is tested in the Desktop
+        // tier `lamquant-lml-desktop`, which now owns `decompress_parallel`.)
     }
 }
 

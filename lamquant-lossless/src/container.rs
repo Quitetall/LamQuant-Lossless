@@ -427,9 +427,10 @@ fn encode_into<W: std::io::Write + ?Sized>(
                 crate::backend::ComputeBackend::Firmware => {
                     lml::compress_with_mode(&window, noise_bits, lpc_mode)?
                 }
-                #[cfg(feature = "archive")]
+                // ADR 0058 carve-full: the parallel path lives in the Desktop
+                // tier, re-exported as `crate::compress_with_mode_parallel`.
                 crate::backend::ComputeBackend::Desktop => {
-                    lml::compress_with_mode_parallel(&window, noise_bits, lpc_mode)?
+                    crate::compress_with_mode_parallel(&window, noise_bits, lpc_mode)?
                 }
             }
         };
