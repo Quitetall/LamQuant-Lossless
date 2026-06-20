@@ -32,10 +32,10 @@
 //! same gate without compiling Rust, mirror the table into
 //! `specs/conformance/byte_equal_v1.json` at that time.
 
-use lamquant_lossless_core::backend::{
+use lamquant_lml_mcu::backend::{
     compress_with_backend, decompress_with_backend, ComputeBackend,
 };
-use lamquant_lossless_core::lpc::LpcMode;
+use lamquant_lml_mcu::lpc::LpcMode;
 use sha2::{Digest, Sha256};
 
 /// xorshift64 — deterministic across machines + architectures.

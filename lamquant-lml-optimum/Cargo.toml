@@ -1,11 +1,11 @@
 [package]
-# ADR 0052 Tier 3 ("Optimum") + ADR 0054 (the H.BWC warplan): the LMO codec —
-# deterministic, max-compression-ratio, float-allowed, NOT MCU-decodable.
-# Skeleton only at Phase 1; the LMO wire format + Codec trait + PCRD/transform
-# attack land in warplan Phases 2-4. Depends on -core for the shared input
-# abstraction; NEVER pulled into the firmware (riscv32) dependency graph via its
-# `encode` feature, so its float/heavy DSP cannot threaten the lossless floor.
-name = "lamquant-optimum"
+# ADR 0052 Tier 3 ("Optimum") + ADR 0054 (the H.BWC warplan) + ADR 0058 (the
+# lamquant-lml-* tier naming): the LMO codec — deterministic, max-compression-
+# ratio, float-allowed, NOT MCU-decodable. Depends on the MCU tier
+# (`lamquant-lml-mcu`) for the shared Codec seam + the LML codec it re-encodes
+# for WP0 parity; NEVER pulled into the firmware (riscv32) dependency graph via
+# its `encode` feature, so its float/heavy DSP cannot threaten the lossless floor.
+name = "lamquant-lml-optimum"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.81"
@@ -14,7 +14,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/LamQuant-Lossless"
 
 [lib]
-name = "lamquant_optimum"
+name = "lamquant_lml_optimum"
 crate-type = ["rlib"]
 
 [features]
@@ -33,11 +33,11 @@ decode = []
 # enabled in the firmware graph. Pulls the core `archive` feature so the host
 # RD search (`lml::compress_target_bps`, archive-gated) is reachable for the
 # `Mode::TargetBps` (WP1-WP8) path.
-encode = ["std", "decode", "lamquant-lossless-core/archive"]
+encode = ["std", "decode", "lamquant-lml-mcu/archive"]
 
 # Host std (f64, std::io). Implied by `encode`.
-std = ["lamquant-lossless-core/std"]
+std = ["lamquant-lml-mcu/std"]
 
 [dependencies]
-# The shared input abstraction + the Codec trait live in -core (ADR 0052).
-lamquant-lossless-core = { version = "0.9.3", path = "../lamquant-lossless-core", default-features = false }
+# The shared Codec seam + the LML codec live in the MCU tier (ADR 0058).
+lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }

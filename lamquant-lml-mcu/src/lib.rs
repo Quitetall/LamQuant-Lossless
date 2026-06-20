@@ -4,11 +4,12 @@
     clippy::type_complexity,
     clippy::unnecessary_sort_by
 )]
-//! LamQuant LML codec **core** — the no_std integer lossless floor (ADR 0052
-//! Tier 1, "Firmware"). Carved out of `lamquant-lml` so the firmware build
-//! depends on ONLY this crate; the facade crate `lamquant-lml` (lib name
-//! `lamquant_core`) re-exports every module here, so existing
-//! `use lamquant_core::{lml, lpc, ...}` call sites are unchanged.
+//! LamQuant LML — **MCU tier** (ADR 0058): the no_std integer lossless floor +
+//! the shared `codec` seam. Firmware links ONLY this crate; the Desktop and
+//! Optimum tiers depend on it (they reuse the LML codec + the `Codec` seam). The
+//! umbrella crate `lamquant-lml` (lib name `lamquant_core`) re-exports every
+//! module here, so existing `use lamquant_core::{lml, lpc, ...}` call sites are
+//! unchanged.
 //!
 //! Build modes:
 //!   no features  — `no_std` + `alloc`. Integer codec only. RP2350 firmware.

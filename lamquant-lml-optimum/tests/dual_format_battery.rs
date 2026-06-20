@@ -10,8 +10,8 @@
 //!   cargo test -p lamquant-optimum --features encode --test dual_format_battery
 #![cfg(feature = "encode")]
 
-use lamquant_lossless_core::codec::{self, Codec, Format, LmlCodec, Mode};
-use lamquant_optimum::{decode_any, LmoCodec};
+use lamquant_lml_mcu::codec::{self, Codec, Format, LmlCodec, Mode};
+use lamquant_lml_optimum::{decode_any, LmoCodec};
 
 /// Smooth low-freq + a little high-freq + periodic spikes, so the wavelet
 /// subbands carry real, allocatable energy (mirrors the core BPS property test).

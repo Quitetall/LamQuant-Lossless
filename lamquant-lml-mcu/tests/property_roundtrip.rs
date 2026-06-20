@@ -12,7 +12,7 @@
 
 use std::io::Cursor;
 
-use lamquant_lossless_core::lml;
+use lamquant_lml_mcu::lml;
 use proptest::prelude::*;
 
 /// Quantize an i64 sample to a given bit depth `[-2^(bits-1), 2^(bits-1))`.

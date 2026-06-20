@@ -22,9 +22,9 @@
 
 use alloc::vec::Vec;
 
-use lamquant_lossless_core::codec::{Codec, CodecError, Format, Mode, Signal, LMO_MAGIC};
-use lamquant_lossless_core::error::LmlError;
-use lamquant_lossless_core::lml;
+use lamquant_lml_mcu::codec::{Codec, CodecError, Format, Mode, Signal, LMO_MAGIC};
+use lamquant_lml_mcu::error::LmlError;
+use lamquant_lml_mcu::lml;
 
 /// LMO container version. Bumped only on a wire-format change.
 pub const LMO_VERSION: u8 = 1;
@@ -77,7 +77,7 @@ pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
     // Delegate to the LML floor for the payload (parity baseline). TargetBps
     // pulls the host RD search via `lamquant-lossless-core/archive`, enabled by
     // this crate's `encode` feature.
-    let inner = lamquant_lossless_core::codec::LmlCodec.encode(signal, mode)?;
+    let inner = lamquant_lml_mcu::codec::LmlCodec.encode(signal, mode)?;
 
     let mut out = Vec::with_capacity(LMO_HEADER_LEN + inner.len());
     out.extend_from_slice(LMO_MAGIC.as_slice());
@@ -110,9 +110,9 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
 /// Routes LML streams to the integer floor and LMO streams here. This is the
 /// "full" dispatch (no [`CodecError::OptimumNotInstalled`]) the Desktop profile
 /// — and a Firmware build that opted into LMO decode — exposes, in contrast to
-/// `lamquant_lossless_core::codec::decode` which returns *not installed* for LMO.
+/// `lamquant_lml_mcu::codec::decode` which returns *not installed* for LMO.
 pub fn decode_any(bytes: &[u8]) -> Result<Signal, CodecError> {
-    match lamquant_lossless_core::codec::peek_format(bytes) {
+    match lamquant_lml_mcu::codec::peek_format(bytes) {
         Some(Format::Lml) => lml::decompress(bytes).map_err(Into::into),
         Some(Format::Lmo) => decode(bytes),
         None => Err(CodecError::UnknownFormat),

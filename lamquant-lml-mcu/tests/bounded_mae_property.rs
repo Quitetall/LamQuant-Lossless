@@ -7,8 +7,8 @@
 //! replays the identical prediction loop), so it must hold regardless of the
 //! signal or the predictor coefficients chosen.
 
-use lamquant_lossless_core::lml::{compress_bounded_mae, decompress};
-use lamquant_lossless_core::lpc::LpcMode;
+use lamquant_lml_mcu::lml::{compress_bounded_mae, decompress};
+use lamquant_lml_mcu::lpc::LpcMode;
 
 /// Deterministic pseudo-signal generator (no rng dependency): a mix of a
 /// ramp, a periodic component, and a sparse-spike term so subbands and

@@ -7,7 +7,7 @@
 //! of the shared [`Codec`] seam. WP0 is a *faithful re-encode of the LML
 //! pipeline* (bit-exact parity baseline) — see [`lmo`]. The crate also provides
 //! the *full* magic-dispatch decode ([`decode_any`]) that routes LMO streams
-//! here, in contrast to `lamquant_lossless_core::codec::decode` which returns a
+//! here, in contrast to `lamquant_lml_mcu::codec::decode` which returns a
 //! typed "LMO not installed" for an LMO stream on a build that lacks this crate.
 //!
 //! **Phases 3–4 (next):** the ratio attack the bench says wins — Lagrangian
@@ -27,9 +27,9 @@ extern crate alloc;
 pub mod lmo;
 
 // Re-export the shared codec seam (defined in -core) so consumers can write
-// `use lamquant_optimum::{Codec, Mode, Format, ...}` without reaching across to
+// `use lamquant_lml_optimum::{Codec, Mode, Format, ...}` without reaching across to
 // the core crate.
-pub use lamquant_lossless_core::codec::{
+pub use lamquant_lml_mcu::codec::{
     peek_format, Codec, CodecError, Format, Mode, Signal, LML_MAGIC, LMO_MAGIC,
 };
 

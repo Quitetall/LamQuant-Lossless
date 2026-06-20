@@ -1,0 +1,43 @@
+[package]
+# The Desktop tier (ADR 0058): the host fast path. "Identical to the MCU tier,
+# just fast" — rayon per-channel parallelism (+ future SIMD), producing
+# BYTE-IDENTICAL LML output. It is the MCU codec assembled with the host perf
+# path turned on, NOT a reimplementation (ADR 0052).
+#
+# Carve note: at ADR 0058 the rayon code physically still lives in
+# `lamquant-lml-mcu` behind its `archive` feature (firmware excludes it via
+# `--no-default-features`). This crate turns that path on and presents it as the
+# Desktop tier. Physically relocating the parallel code out of `-mcu` into this
+# crate is a tracked follow-up (it would split the `byte_equal_backends`
+# Firmware-vs-Desktop gate across two crates, so it is staged separately).
+name = "lamquant-lml-desktop"
+version = "0.9.3"
+edition = "2021"
+rust-version = "1.81"
+description = "LamQuant LML — Desktop tier: host fast path (rayon + future SIMD), byte-identical LML output to the MCU tier. Built on lamquant-lml-mcu."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+
+[lib]
+name = "lamquant_lml_desktop"
+crate-type = ["rlib"]
+
+[features]
+# Default = the fast path on (this crate's whole reason to exist).
+default = ["fast"]
+
+# The Desktop fast path: rayon parallel encode/decode (the MCU tier's `archive`
+# path). `archive` implies `std` in `-mcu`.
+fast = ["lamquant-lml-mcu/archive"]
+
+# Host std without the parallel path (e.g. for a SIMD-only future build).
+std = ["lamquant-lml-mcu/std"]
+
+# Experimental coder pass-throughs (mirror the MCU tier's opt-ins).
+experimental_arithmetic = ["fast", "lamquant-lml-mcu/experimental_arithmetic"]
+experimental_bit_pack = ["fast", "lamquant-lml-mcu/experimental_bit_pack"]
+
+[dependencies]
+# The Desktop tier builds ON the MCU tier (the shared codec + seam); it adds the
+# host execution profile, not a second codec.
+lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }

@@ -33,25 +33,32 @@
 extern crate alloc;
 
 // ─── Core codec (ADR 0052 Tier 1) ─────────────────────────────────
-// The no_std integer LML codec now lives in `lamquant-lossless-core`. It is
+// The no_std integer LML codec now lives in `lamquant-lml-mcu`. It is
 // re-exported here so the historical `lamquant_core::{lml, lpc, golomb, ...}`
 // paths stay byte-for-byte stable for firmware, lamquant-lsl, the Python
 // extension, and every test — none of those call sites change.
-pub use lamquant_lossless_core::{
+pub use lamquant_lml_mcu::{
     backend, bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting,
     lml, lmqc, lpc, quant, rans, zrle,
 };
 // ADR 0023 Track B5+ / ADR 0051 P3.5: arithmetic + empirical-categorical range
 // coders are opt-in via `experimental_arithmetic` (re-exported from core).
 #[cfg(feature = "experimental_arithmetic")]
-pub use lamquant_lossless_core::{arith_cat, arithmetic};
+pub use lamquant_lml_mcu::{arith_cat, arithmetic};
 
-// ─── Optimum / LMO (ADR 0052 Tier 3, ADR 0054) ────────────────────
-// This facade IS the Desktop profile: it ships the LMO encoder + decoder as
-// standard. Re-exported as `lamquant_core::optimum`. The `encode` half is
-// gated on `archive` (it needs the core RD search), matching where the host
-// codec capabilities already live.
-pub use lamquant_optimum as optimum;
+// ─── Tier crates (ADR 0058) ───────────────────────────────────────
+// This umbrella IS the Desktop assembly: it links all three tiers. The MCU tier
+// (`lamquant-lml-mcu`) is re-exported module-by-module above (the stable
+// `lamquant_core::{lml,lpc,...}` surface). The Desktop tier (host fast path) is
+// re-exported as `lamquant_core::desktop` under `archive` (it is std/rayon, so
+// the no_std facade build omits it).
+#[cfg(feature = "archive")]
+pub use lamquant_lml_desktop as desktop;
+
+// The Optimum (LMO) tier. Re-exported as `lamquant_core::optimum`; it ships the
+// LMO decoder always and the encoder under `archive` (which needs the MCU tier's
+// RD search), matching where the host codec capabilities already live.
+pub use lamquant_lml_optimum as optimum;
 
 /// Universal magic-dispatch decode (the Desktop full dispatch): routes an LML
 /// stream to the integer floor and an LMO stream to the Optimum decoder. Unlike

@@ -3315,9 +3315,10 @@ dependencies = [
  "keyring",
  "lamquant-common",
  "lamquant-history",
- "lamquant-lossless-core",
+ "lamquant-lml-desktop",
+ "lamquant-lml-mcu",
+ "lamquant-lml-optimum",
  "lamquant-ops",
- "lamquant-optimum",
  "loom",
  "ndarray 0.16.1",
  "notify",
@@ -3352,7 +3353,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "lamquant-lossless-core"
+name = "lamquant-lml-desktop"
+version = "0.9.3"
+dependencies = [
+ "lamquant-lml-mcu",
+]
+
+[[package]]
+name = "lamquant-lml-mcu"
 version = "0.9.3"
 dependencies = [
  "constriction",
@@ -3365,19 +3373,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lamquant-lml-optimum"
+version = "0.0.1"
+dependencies = [
+ "lamquant-lml-mcu",
+]
+
+[[package]]
 name = "lamquant-ops"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "lamquant-optimum"
-version = "0.0.1"
-dependencies = [
- "lamquant-lossless-core",
 ]
 
 [[package]]

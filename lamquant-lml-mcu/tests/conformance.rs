@@ -3,7 +3,7 @@
 //! These tests verify that the codec produces correct output for known inputs.
 //! Any implementation claiming LML conformance must pass these tests.
 
-use lamquant_lossless_core::{lifting, lml, lpc};
+use lamquant_lml_mcu::{lifting, lml, lpc};
 
 /// Deterministic signal generator matching Python's numpy.random.default_rng.
 /// Uses a simple LCG for reproducibility across languages.
@@ -185,7 +185,7 @@ fn rejects_future_version() {
     let err = lml::decompress(&compressed).unwrap_err();
     assert!(matches!(
         err,
-        lamquant_lossless_core::error::LmlError::UnsupportedVersion(b'2')
+        lamquant_lml_mcu::error::LmlError::UnsupportedVersion(b'2')
     ));
 }
 
