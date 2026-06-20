@@ -907,7 +907,7 @@ Output: pico_sota.pth
 **Language:** Python/PyTorch (training), C (firmware)
 **Target:** RP2350 Hazard3 (64KB SRAM, < 4ms latency)
 **Repo:** `github.com/Quitetall/lamquant_gen6`
-**License:** Firmware GPLv3, Transport AGPLv3, Weights CC BY-NC 4.0
+**License:** Firmware GPLv3, Transport AGPLv3, Weights RAIL-M
 
 ### 6.1 Overview
 
