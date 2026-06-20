@@ -70,14 +70,22 @@ impl Codec for LmoCodec {
 
 /// Encode `signal` under `mode` into an LMO container (host-only).
 ///
-/// Phase 2: the payload is a faithful LML re-encode in the same mode, so WP0 is
-/// bit-exact and the δ-bound / BPS-ceiling guarantees are inherited from LML.
+/// - **`TargetBps` (the lossy ratio attack, ADR 0054 Phase 3):** per-subband
+///   Lagrangian **PCRD** allocation (`lml::compress_target_bps_pcrd`) — the LMO
+///   ratio play, strictly better PRD-at-rate than the LML global-scale path.
+/// - **`Lossless` / `BoundedMae`:** the LML integer floor (WP0 bit-exact / δ-bound
+///   inherited; no rate knob to attack).
+///
+/// All paths emit a `MODE_*` LML payload wrapped in the LMO container, so the
+/// decoder is the unchanged integer `lml::decompress`.
 #[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
-    // Delegate to the LML floor for the payload (parity baseline). TargetBps
-    // pulls the host RD search via `lamquant-lossless-core/archive`, enabled by
-    // this crate's `encode` feature.
-    let inner = lamquant_lml_mcu::codec::LmlCodec.encode(signal, mode)?;
+    let inner = match mode {
+        Mode::TargetBps(bps) => {
+            lml::compress_target_bps_pcrd(signal, bps, lamquant_lml_mcu::lpc::LpcMode::default())?
+        }
+        other => lamquant_lml_mcu::codec::LmlCodec.encode(signal, other)?,
+    };
 
     let mut out = Vec::with_capacity(LMO_HEADER_LEN + inner.len());
     out.extend_from_slice(LMO_MAGIC.as_slice());
