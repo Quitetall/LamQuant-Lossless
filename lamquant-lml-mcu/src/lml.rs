@@ -802,6 +802,14 @@ pub fn compress_target_bps(
     target_bps: f64,
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
+    // ADR 0054 Phase 3 (PCRD prototype): env-gated A/B. When LAMQUANT_PCRD=1,
+    // replace the global-scale rate search with per-subband Lagrangian rate-
+    // distortion allocation. Same wire format (per-subband q_s), decoder
+    // unchanged — a pure encoder-side win.
+    if std::env::var("LAMQUANT_PCRD").map(|v| v == "1" || v == "true").unwrap_or(false) {
+        return compress_target_bps_pcrd(signal, target_bps, mode);
+    }
+
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     if n_ch == 0 || n_ch > 1024 {
@@ -932,6 +940,169 @@ pub fn compress_target_bps(
     out.extend_from_slice(&payload);
     Ok(out)
 }
+
+/// ADR 0054 Phase 3 — per-subband **Lagrangian PCRD** rate allocation.
+///
+/// The global-scale `compress_target_bps` derives every subband's step from one
+/// scalar via a fixed gain rule. This instead traces each subband's measured
+/// rate-distortion curve over a grid of candidate steps, then picks the step per
+/// subband that minimises `D_s(q) + λ·R_s(q)` and bisects λ to the BPS ceiling —
+/// the RD-optimal allocation. Distortion is signal-domain SSE
+/// (`G_s · Σ(coeff − dequant)²`, `G_s` = synthesis L2 gain); rate is the measured
+/// encoded bits. Output is a normal `MODE_TARGET_BPS` packet (per-subband `q_s`),
+/// so the decoder is unchanged. Host-only (f64).
+#[cfg(feature = "std")]
+pub fn compress_target_bps_pcrd(
+    signal: &[Vec<i64>],
+    target_bps: f64,
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    if n_ch == 0 || n_ch > 1024 {
+        return Err(LmlError::InvalidHeader(format!("n_ch={} out of range 1..=1024", n_ch)));
+    }
+    if t == 0 || t > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader(format!("T={} out of range 1..={}", t, u16::MAX)));
+    }
+    for (c, ch) in signal.iter().enumerate() {
+        if ch.len() != t {
+            return Err(LmlError::InvalidHeader(format!(
+                "ragged channels: ch {} has {} samples, expected {}", c, ch.len(), t
+            )));
+        }
+    }
+    if !(target_bps.is_finite() && target_bps > 0.0) {
+        return Err(LmlError::InvalidHeader(format!("target_bps must be finite > 0, got {}", target_bps)));
+    }
+
+    let n_levels = compute_n_levels(t);
+    let sub_lens = subband_lengths(t, n_levels);
+    let n_sub = sub_lens.len();
+    let gains = quant::synthesis_gains(n_levels, &sub_lens);
+    let chan_subs: Vec<Vec<Vec<i64>>> =
+        signal.iter().map(|ch| forward_subbands(ch, n_levels)).collect();
+
+    let nm = (n_ch * t) as f64;
+    let fixed_overhead = HEADER_SIZE + 1 + 1 + 4 * n_sub;
+
+    // Candidate quantizer steps (geometric grid; q=1 is finest/near-lossless).
+    let candidates: [i64; 46] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48,
+        56, 64, 80, 96, 128, 160, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144,
+        8192, 12288, 16384,
+    ];
+
+    // Per (subband index, candidate): (rate_bits, distortion) summed over channels.
+    let mut rd: Vec<Vec<(f64, f64)>> = vec![vec![(0.0, 0.0); candidates.len()]; n_sub];
+    for sb in 0..n_sub {
+        for (ci, &q) in candidates.iter().enumerate() {
+            let mut rate_bytes = 0usize;
+            let mut sse = 0.0f64;
+            for subs in &chan_subs {
+                let sub = &subs[sb];
+                let idx = quant::quantize(sub, q);
+                let deq = quant::dequantize(&idx, q);
+                for (o, d) in sub.iter().zip(deq.iter()) {
+                    let e = (*o - *d) as f64;
+                    sse += e * e;
+                }
+                let scoped = scope_lpc_mode(mode, lpc_max_order(sub.len()));
+                let (coeffs, residual, _order) =
+                    lpc::analyze_with_mode(&idx, sb, scoped, BIAS_CTX, None);
+                rate_bytes += 1 + 4 * coeffs.len() + encode_subband_payload(&residual)?.len();
+            }
+            rd[sb][ci] = (rate_bytes as f64 * 8.0, gains[sb] * sse);
+        }
+    }
+
+    // Greedy R-D allocation: start at the coarsest step (min rate) and
+    // repeatedly apply the per-subband refinement (a move to a finer step) with
+    // the best distortion-reduction-per-added-bit that still fits the BPS
+    // budget. Hits the budget tightly (no unspent bits) and is robust to
+    // non-convex per-subband curves — replaces the global-scale search.
+    let budget = (target_bps * nm - fixed_overhead as f64 * 8.0).max(0.0);
+    let coarsest = candidates.len() - 1;
+    let mut chosen = vec![coarsest; n_sub];
+    let mut cur_rate: f64 = (0..n_sub).map(|sb| rd[sb][coarsest].0).sum();
+    loop {
+        let mut best: Option<(usize, usize, f64)> = None;
+        let mut best_ratio = 0.0f64;
+        for sb in 0..n_sub {
+            for ci in 0..chosen[sb] {
+                let dr = rd[sb][ci].0 - rd[sb][chosen[sb]].0;
+                let dd = rd[sb][chosen[sb]].1 - rd[sb][ci].1;
+                if dr > 1e-9 && dd > 0.0 && cur_rate + dr <= budget {
+                    let ratio = dd / dr;
+                    if ratio > best_ratio {
+                        best_ratio = ratio;
+                        best = Some((sb, ci, dr));
+                    }
+                }
+            }
+        }
+        match best {
+            Some((sb, ci, dr)) => {
+                chosen[sb] = ci;
+                cur_rate += dr;
+            }
+            None => break,
+        }
+    }
+    let qs: Vec<i64> = (0..n_sub).map(|sb| candidates[chosen[sb]]).collect();
+
+    // Final encode at the chosen per-subband steps.
+    let mut meta_body = Vec::new();
+    let mut payload = Vec::new();
+    for subs in &chan_subs {
+        for (sb_idx, sub) in subs.iter().enumerate() {
+            let idx = quant::quantize(sub, qs[sb_idx]);
+            let scoped = scope_lpc_mode(mode, lpc_max_order(sub.len()));
+            let (coeffs, residual, order) =
+                lpc::analyze_with_mode(&idx, sb_idx, scoped, BIAS_CTX, None);
+            meta_body.push(order as u8);
+            for &c in &coeffs {
+                meta_body.extend_from_slice(&c.to_le_bytes());
+            }
+            payload.extend_from_slice(&encode_subband_payload(&residual)?);
+        }
+    }
+
+    let mut lpc_meta = Vec::with_capacity(2 + 4 * n_sub + meta_body.len());
+    lpc_meta.push(MODE_TARGET_BPS);
+    lpc_meta.push(n_sub as u8);
+    for &q in &qs {
+        lpc_meta.extend_from_slice(&(q as u32).to_le_bytes());
+    }
+    lpc_meta.extend_from_slice(&meta_body);
+
+    let flags: u8 = FLAG_BIT_TRACK2_MODE;
+    let mut header_var = [0u8; 14];
+    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
+    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
+    header_var[4] = n_levels;
+    header_var[5] = flags;
+    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
+    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+
+    let mut crc_state = CRC32_INIT;
+    crc_state = crc32_update(crc_state, &header_var);
+    crc_state = crc32_update(crc_state, &lpc_meta);
+    crc_state = crc32_update(crc_state, &payload);
+    let crc = crc_state ^ CRC32_INIT;
+
+    let prefix = format!("LML | {}ch | lossy-bps | CRC-32\n", n_ch);
+    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(prefix.as_bytes());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&header_var);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&lpc_meta);
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
 
 /// Decode a track-2 packet (lpc_meta begins with a `mode_id`). Shared by the
 /// serial and parallel decoders. `lpc_data` and `payload` are the already

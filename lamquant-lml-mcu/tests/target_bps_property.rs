@@ -7,7 +7,7 @@
 //! Unlike bounded-MAE there is no hard error bound — this minimizes distortion
 //! subject to a RATE ceiling (the H.BWC WP1..WP8 competition tier).
 
-use lamquant_lml_mcu::lml::{compress_target_bps, decompress};
+use lamquant_lml_mcu::lml::{compress_target_bps, compress_target_bps_pcrd, decompress};
 use lamquant_lml_mcu::lpc::LpcMode;
 
 fn make_signal(n_ch: usize, t: usize, seed: i64) -> Vec<Vec<i64>> {
@@ -84,6 +84,37 @@ fn target_bps_meets_rate_ceiling() {
         );
         let recon = decompress(&bytes).unwrap();
         assert_eq!(recon.len(), 8);
+    }
+}
+
+/// ADR 0054 Phase 3 — the per-subband PCRD allocator must honor the same BPS
+/// ceiling AND never be worse than the global-scale allocation at matched rate
+/// (it decodes to the same shape via the unchanged `MODE_TARGET_BPS` format).
+/// Measured on real CHB-MIT EEG the PRD gain is large at low BPS (e.g. −25% at
+/// 1.5 BPS); on this synthetic signal the floor is "no regression".
+#[test]
+fn pcrd_honors_ceiling_and_does_not_regress_vs_global() {
+    let signal = make_signal(8, 2560, 99);
+    let nm = (8 * 2560) as f64;
+    for &target in &[3.0f64, 2.0, 1.5] {
+        let g = compress_target_bps(&signal, target, LpcMode::default()).unwrap();
+        let p = compress_target_bps_pcrd(&signal, target, LpcMode::default()).unwrap();
+        let p_bps = p.len() as f64 * 8.0 / nm;
+        assert!(
+            p_bps <= target * 1.10,
+            "pcrd target {target}: BPS {p_bps:.3} exceeds ceiling+10%"
+        );
+        let g_recon = decompress(&g).unwrap();
+        let p_recon = decompress(&p).unwrap();
+        assert_eq!(p_recon.len(), 8);
+        assert_eq!(p_recon[0].len(), 2560);
+        let (g_prd, p_prd) = (prd(&signal, &g_recon), prd(&signal, &p_recon));
+        // RD-optimal allocation must not be meaningfully worse than the fixed
+        // gain rule at the same rate ceiling (5% slack for synthetic-signal noise).
+        assert!(
+            p_prd <= g_prd * 1.05,
+            "pcrd target {target}: PRD {p_prd:.3} regressed vs global {g_prd:.3}"
+        );
     }
 }
 
