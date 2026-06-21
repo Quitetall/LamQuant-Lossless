@@ -130,7 +130,7 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
     out.extend_from_slice(&(t as u32).to_le_bytes());
     for ch in signal {
         if ch.len() != t {
-            return Err(LmlError::InvalidHeader(alloc::format!("rls ragged channel")));
+            return Err(LmlError::InvalidHeader("rls ragged channel".into()));
         }
         let mut rls = Rls::new();
         let res: Vec<i64> = ch
