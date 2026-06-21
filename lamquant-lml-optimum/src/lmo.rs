@@ -14,8 +14,9 @@
 //!   [4]     version       = LMO_VERSION
 //!   [5]     mode_tag      = 0 lossless | 1 bounded_mae | 2 target_bps  (informational)
 //!   [6]     transform_id  = 0 inner LML stream (5/3 integer floor)
-//!                         | 1 LMO-native 9/7 float body (ADR 0054 lever 2)
-//!   [7..]   inner payload (an LML stream when transform_id=0, a 9/7 PCRD body when =1)
+//!                         | 1 LMO-native 9/7 float body (ADR 0054 lever 2, lossy)
+//!                         | 2 Optimum-lossless body (cross-channel + lml, Lever C)
+//!   [7..]   inner payload (LML stream =0 | 9/7 PCRD body =1 | lossless body =2)
 //! ```
 //!
 //! Decode is `no_std`-capable: it strips the 7-byte header and routes on
@@ -43,6 +44,9 @@ pub const LMO_HEADER_LEN: usize = 7;
 const TRANSFORM_LML_53: u8 = 0;
 /// `transform_id` = the inner payload is an LMO-native 9/7 float PCRD body.
 const TRANSFORM_LMO_97: u8 = 1;
+/// `transform_id` = the Optimum LOSSLESS body (cross-channel spatial prediction
+/// + the lossless `lml` codec; ADR 0054 Lever C). Bit-exact, integer-only decode.
+const TRANSFORM_OPTIMUM_LOSSLESS: u8 = 2;
 
 /// The Optimum (LMO) codec. Implements the shared [`Codec`] seam.
 #[derive(Debug, Default, Clone, Copy)]
@@ -136,6 +140,16 @@ pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
                 Err(_) => (TRANSFORM_LML_53, i53),
             }
         }
+        Mode::Lossless => {
+            // Auto-pick the Optimum-lossless body (id=2, cross-channel) vs the
+            // 5/3 floor (id=0), keep the smaller. Both are bit-exact lossless, so
+            // the container is never worse than the floor.
+            let floor = lamquant_lml_mcu::codec::LmlCodec.encode(signal, Mode::Lossless)?;
+            match crate::lmo_lossless::encode(signal) {
+                Ok(opt) if opt.len() < floor.len() => (TRANSFORM_OPTIMUM_LOSSLESS, opt),
+                _ => (TRANSFORM_LML_53, floor),
+            }
+        }
         other => (
             TRANSFORM_LML_53,
             lamquant_lml_mcu::codec::LmlCodec.encode(signal, other)?,
@@ -170,6 +184,7 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
     match transform_id {
         TRANSFORM_LML_53 => lml::decompress(inner).map_err(Into::into),
         TRANSFORM_LMO_97 => crate::lmo_pcrd97::decode_97(inner).map_err(Into::into),
+        TRANSFORM_OPTIMUM_LOSSLESS => crate::lmo_lossless::decode(inner).map_err(Into::into),
         other => Err(CodecError::Lml(LmlError::InvalidHeader(alloc::format!(
             "unknown LMO transform_id 0x{other:02X}"
         )))),

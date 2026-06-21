@@ -134,6 +134,34 @@ fn lmo_target_bps_auto_pick_never_worse_than_5_3_floor() {
     }
 }
 
+/// ADR 0054 Lever C: on correlated multichannel data the LMO `Lossless` auto-pick
+/// selects the Optimum-lossless body (`transform_id=2`, cross-channel spatial
+/// prediction), is bit-exact, and is no larger than the 5/3 floor.
+#[test]
+fn lmo_lossless_picks_crosschan_on_correlated_and_is_bit_exact() {
+    // Channels = gain·(shared base) + small per-channel detail ⇒ real cross-channel
+    // redundancy (unlike make_signal's phase-decorrelated channels).
+    let t = 4096usize;
+    let base: Vec<i64> = (0..t).map(|i| ((i as f64 * 0.05).sin() * 3000.0) as i64).collect();
+    let sig: Vec<Vec<i64>> = (0..8)
+        .map(|c| {
+            let g = 0.6 + 0.1 * c as f64;
+            (0..t)
+                .map(|i| (g * base[i] as f64) as i64 + (((i + c * 7) as f64 * 0.9).sin() * 120.0) as i64)
+                .collect()
+        })
+        .collect();
+
+    let lmo = LmoCodec.encode(&sig, Mode::Lossless).unwrap();
+    assert_eq!(codec::peek_format(&lmo), Some(Format::Lmo));
+    assert_eq!(lmo[6], 2, "correlated channels should select transform_id=2 (Optimum-lossless)");
+
+    assert_eq!(decode_any(&lmo).unwrap(), sig, "id=2 must be bit-exact lossless");
+
+    let floor = LmlCodec.encode(&sig, Mode::Lossless).unwrap();
+    assert!(lmo.len() <= floor.len(), "auto-pick: LMO {} must be ≤ floor {}", lmo.len(), floor.len());
+}
+
 #[test]
 fn universal_dispatch_routes_both_and_core_reports_not_installed() {
     let sig = make_signal(3, 512, 5);
