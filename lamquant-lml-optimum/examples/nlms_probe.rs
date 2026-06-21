@@ -155,7 +155,8 @@ fn main() {
         println!("  NLMS o={:<2} mu=2^-{} mn={:<2}    {:>9} {:>+7.1}% {:>9.3} {:>5}", order, mu, mn, tot, d, tot as f64 * 8.0 / nm, if allrt { "ok" } else { "FAIL" });
     }
     println!("# -- cascade (short fast → long slow) --");
-    let cascades: [(&str, (usize, i32, u32), (usize, i32, u32)); 6] = [
+    type Stage = (usize, i32, u32);
+    let cascades: [(&str, Stage, Stage); 6] = [
         ("16/1 → 256/8", (16, 1, 14), (256, 8, 18)),
         ("16/1 → 256/10", (16, 1, 14), (256, 10, 18)),
         ("16/1 → 256/12", (16, 1, 14), (256, 12, 18)),
