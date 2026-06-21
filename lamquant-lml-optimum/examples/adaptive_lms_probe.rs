@@ -80,7 +80,7 @@ fn main() {
 
     let mut ta = 0usize;
     let mut best: Vec<(String, usize)> = Vec::new();
-    for (ci, full) in sig.iter().enumerate() {
+    for full in &sig {
         ta += wavelet_lpc_golomb(&full[..t]);
     }
     for &(order, mu) in &[(16usize, 8i64), (16, 32), (32, 8), (32, 32), (32, 128), (16, 128)] {
