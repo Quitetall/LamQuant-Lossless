@@ -107,10 +107,14 @@ fn quant_f64(coeff: f64, q: i64) -> i64 {
 /// available coders. Output `[tag][coded]`:
 ///   * `0` = Golomb-Rice, `1` = zero-RLE — always available (no_std), the same
 ///     tag values the `mcu` track-2 reader uses.
-///   * `2` = empirical-categorical order-0, `3` = order-1 context (`arith_cat`)
-///     — only under `experimental_arithmetic` (std, ADR 0054 lever-3 stage 3a).
-///     The default build never selects these, so the no_std decode path stays
-///     Golomb/zRLE-only.
+///   * `4` = integer empirical-categorical order-0, `5` = order-1 context
+///     ([`crate::arith_int`]) — the PRODUCTION arithmetic coders (ADR 0054
+///     lever-3 stage 3b). Integer-only / `no_std`, so they are always available
+///     and the default LMO decode stays MCU-decodable.
+///   * `2` = `arith_cat` order-0, `3` = order-1 — the std/`constriction`
+///     measurement oracle, only under `experimental_arithmetic`. Kept so the
+///     integer coder's compression can be A/B'd against the reference; never
+///     selected in a default build.
 fn encode_residual(values: &[i64]) -> LmlResult<Vec<u8>> {
     let mut tag = 0u8;
     let mut best = golomb::encode_dense(values)?;
@@ -119,11 +123,23 @@ fn encode_residual(values: &[i64]) -> LmlResult<Vec<u8>> {
         tag = 1;
         best = z;
     }
+    // Production integer arithmetic (no_std). A coder may bail on a too-wide
+    // alphabet — that just means "not a candidate", absorbed by keep-smallest.
+    if let Ok(a4) = crate::arith_int::encode_dense(values) {
+        if a4.len() < best.len() {
+            tag = 4;
+            best = a4;
+        }
+    }
+    if let Ok(a5) = crate::arith_int::encode_dense_ctx(values) {
+        if a5.len() < best.len() {
+            tag = 5;
+            best = a5;
+        }
+    }
     #[cfg(feature = "experimental_arithmetic")]
     {
         use lamquant_lml_mcu::arith_cat;
-        // Each coder may legitimately bail (alphabet too wide); a bail just means
-        // "not a candidate", never an error — keep-smallest absorbs it.
         if let Ok(a0) = arith_cat::encode_dense(values) {
             if a0.len() < best.len() {
                 tag = 2;
@@ -157,6 +173,8 @@ fn decode_residual(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> {
     let (vals, consumed) = match tag {
         0 => golomb::decode_dense(data, offset + 1)?,
         1 => zrle::decode_dense(data, offset + 1)?,
+        4 => crate::arith_int::decode_dense(data, offset + 1)?,
+        5 => crate::arith_int::decode_dense_ctx(data, offset + 1)?,
         #[cfg(feature = "experimental_arithmetic")]
         2 => lamquant_lml_mcu::arith_cat::decode_dense(data, offset + 1)?,
         #[cfg(feature = "experimental_arithmetic")]
