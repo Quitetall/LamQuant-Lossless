@@ -97,9 +97,21 @@ fn synthesis_gains_97(sub_lens: &[usize], n_levels: u8) -> Vec<f64> {
 /// Quantize a float coefficient to an integer index with step `q` (round half
 /// away from zero). Dequant is `idx * q`.
 #[inline]
-fn quant_f64(coeff: f64, q: i64) -> i64 {
-    let r = coeff / q as f64;
-    wavelet97::round_i64(r)
+/// Deadzone scalar quantizer (ADR 0054 lossy RDOQ-lite): `idx = sign(c)·⌊|c|/q +
+/// δ⌋`. `δ = 0.5` is round-nearest (== [`quant_f64`]); `δ < 0.5` widens the
+/// dead-zone around 0 (zeros more small coefficients, trading distortion for
+/// rate) — the dominant practical RDOQ gain for Laplacian wavelet coefficients
+/// (JPEG2000/VVC use ≈0.375). Reconstruction stays `idx·q`, so DECODE is
+/// unchanged — `δ` is a pure encode-side RD choice, no wire-format change.
+#[cfg(feature = "encode")]
+#[inline]
+fn quant_f64_dz(coeff: f64, q: i64, dz_offset: f64) -> i64 {
+    let a = (coeff.abs() / q as f64 + dz_offset).floor() as i64;
+    if coeff < 0.0 {
+        -a
+    } else {
+        a
+    }
 }
 
 /// Entropy-code one subband's residual (LPC residual, or — in the order-0
@@ -238,6 +250,49 @@ pub fn encode_target_bps_97(
     target_bps: f64,
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
+    // RDOQ-lite: try a few deadzone offsets and keep the lowest-PRD body. Decode
+    // is δ-agnostic (reconstruction is idx·q), so this is encode-only and never
+    // worse than round-nearest (δ=0.5 is in the set). δ≈0.375–0.42 wins the
+    // WP3–WP5 band; 0.5 wins at high BPS — keep-best covers both (ADR 0054).
+    let mut best: Option<(f64, Vec<u8>)> = None;
+    for &dz in &[0.5f64, 0.42, 0.375] {
+        let body = encode_target_bps_97_dz(signal, target_bps, mode, dz)?;
+        let p = prd_i64(signal, &decode_97(&body)?);
+        if best.as_ref().is_none_or(|(bp, _)| p < *bp) {
+            best = Some((p, body));
+        }
+    }
+    Ok(best.expect("at least one dz candidate").1)
+}
+
+/// CfP §4 mean-removed PRD (%), encode-side keep-best metric.
+#[cfg(feature = "encode")]
+fn prd_i64(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (o, r) in orig.iter().zip(recon) {
+        let m = o.iter().sum::<i64>() as f64 / o.len().max(1) as f64;
+        for (a, b) in o.iter().zip(r) {
+            let e = (*a - *b) as f64;
+            num += e * e;
+            den += (*a as f64 - m) * (*a as f64 - m);
+        }
+    }
+    if den == 0.0 {
+        0.0
+    } else {
+        100.0 * (num / den).sqrt()
+    }
+}
+
+/// As [`encode_target_bps_97`], with an explicit deadzone offset `dz_offset`
+/// (RDOQ-lite screen; `0.5` = round-nearest). Decode is identical regardless.
+#[cfg(feature = "encode")]
+pub fn encode_target_bps_97_dz(
+    signal: &[Vec<i64>],
+    target_bps: f64,
+    mode: lpc::LpcMode,
+    dz_offset: f64,
+) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     if n_ch == 0 || n_ch > 1024 {
@@ -285,7 +340,7 @@ pub fn encode_target_bps_97(
             let mut sse = 0.0f64;
             for subs in &chan_subs {
                 let sub = &subs[sb];
-                let idx: Vec<i64> = sub.iter().map(|&c| quant_f64(c, q)).collect();
+                let idx: Vec<i64> = sub.iter().map(|&c| quant_f64_dz(c, q, dz_offset)).collect();
                 let qf = q as f64;
                 for (&c, &i) in sub.iter().zip(idx.iter()) {
                     let e = c - i as f64 * qf;
@@ -335,7 +390,7 @@ pub fn encode_target_bps_97(
     let mut payload = Vec::new();
     for subs in &chan_subs {
         for (sb_idx, sub) in subs.iter().enumerate() {
-            let idx: Vec<i64> = sub.iter().map(|&c| quant_f64(c, qs[sb_idx])).collect();
+            let idx: Vec<i64> = sub.iter().map(|&c| quant_f64_dz(c, qs[sb_idx], dz_offset)).collect();
             let (meta, pay) = encode_subband(&idx, sb_idx, mode)?;
             meta_body.extend_from_slice(&meta);
             payload.extend_from_slice(&pay);
