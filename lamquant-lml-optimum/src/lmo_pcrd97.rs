@@ -94,9 +94,6 @@ fn synthesis_gains_97(sub_lens: &[usize], n_levels: u8) -> Vec<f64> {
     gains
 }
 
-/// Quantize a float coefficient to an integer index with step `q` (round half
-/// away from zero). Dequant is `idx * q`.
-#[inline]
 /// Deadzone scalar quantizer (ADR 0054 lossy RDOQ-lite): `idx = sign(c)·⌊|c|/q +
 /// δ⌋`. `δ = 0.5` is round-nearest (== [`quant_f64`]); `δ < 0.5` widens the
 /// dead-zone around 0 (zeros more small coefficients, trading distortion for
@@ -258,7 +255,7 @@ pub fn encode_target_bps_97(
     for &dz in &[0.5f64, 0.42, 0.375] {
         let body = encode_target_bps_97_dz(signal, target_bps, mode, dz)?;
         let p = prd_i64(signal, &decode_97(&body)?);
-        if best.as_ref().is_none_or(|(bp, _)| p < *bp) {
+        if best.as_ref().map_or(true, |(bp, _)| p < *bp) {
             best = Some((p, body));
         }
     }
