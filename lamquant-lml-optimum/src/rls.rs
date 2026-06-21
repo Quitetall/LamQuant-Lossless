@@ -24,7 +24,6 @@
 use alloc::vec::Vec;
 
 use lamquant_lml_mcu::error::{LmlError, LmlResult};
-use lamquant_lml_mcu::golomb;
 
 /// Predictor order (8 was the RD sweet spot — bigger gave no gain, more compute).
 const ORDER: usize = 8;
@@ -101,6 +100,7 @@ impl Rls {
         self.hist[0] = x;
     }
 
+    #[cfg(feature = "encode")]
     fn encode_sample(&mut self, x: i64) -> i64 {
         let pred = self.predict();
         let e = x - crate::wavelet97::round_i64(pred);
@@ -118,7 +118,8 @@ impl Rls {
     }
 }
 
-/// Encode a multichannel signal with per-channel RLS prediction + Golomb.
+/// Encode a multichannel signal with per-channel RLS prediction + entropy coding.
+#[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     if n_ch == 0 || n_ch > u16::MAX as usize {
@@ -143,7 +144,7 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
                 rls.encode_sample(x)
             })
             .collect();
-        let g = golomb::encode_dense(&res)?;
+        let g = crate::entropy::encode(&res)?;
         out.extend_from_slice(&(g.len() as u32).to_le_bytes());
         out.extend_from_slice(&g);
     }
@@ -168,7 +169,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         if pos + glen > body.len() {
             return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "rls ch data" });
         }
-        let (res, _consumed) = golomb::decode_dense(&body[pos..pos + glen], 0)?;
+        let res = crate::entropy::decode(&body[pos..pos + glen])?;
         pos += glen;
         if res.len() != t {
             return Err(LmlError::InvalidHeader(alloc::format!("rls ch t={} != {t}", res.len())));

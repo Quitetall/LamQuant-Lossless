@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod arith_int;
 pub mod crosschan;
+pub mod entropy;
 pub mod lmo;
 pub mod lmo_lossless;
 pub mod mv_rls;

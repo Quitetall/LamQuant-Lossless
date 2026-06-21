@@ -20,7 +20,6 @@
 use alloc::vec::Vec;
 
 use lamquant_lml_mcu::error::{LmlError, LmlResult};
-use lamquant_lml_mcu::golomb;
 
 use crate::wavelet97::round_i64;
 
@@ -136,7 +135,7 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
             }
             own[0] = signal[c][n] as f64;
         }
-        let g = golomb::encode_dense(&res)?;
+        let g = crate::entropy::encode(&res)?;
         out.extend_from_slice(&(g.len() as u32).to_le_bytes());
         out.extend_from_slice(&g);
     }
@@ -167,7 +166,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         if pos + glen > body.len() {
             return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "mv_rls ch data" });
         }
-        let (res, _) = golomb::decode_dense(&body[pos..pos + glen], 0)?;
+        let res = crate::entropy::decode(&body[pos..pos + glen])?;
         pos += glen;
         if res.len() != t {
             return Err(LmlError::InvalidHeader("mv_rls ch t".into()));
