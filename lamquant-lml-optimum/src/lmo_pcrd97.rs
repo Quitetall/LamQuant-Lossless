@@ -40,10 +40,39 @@ use alloc::vec::Vec;
 use lamquant_lml_mcu::error::{LmlError, LmlResult};
 use lamquant_lml_mcu::{golomb, lml, lpc, zrle};
 
-use crate::wavelet97;
+use crate::{tcq, wavelet97};
 
-/// Fixed body header length (before the per-subband step table).
-const BODY_HEADER: usize = 14;
+/// Fixed body header length (before the per-subband step table). v3 adds a
+/// `quant_mode` byte (0 = scalar deadzone, 1 = TCQ dependent quantization).
+const BODY_HEADER: usize = 15;
+
+/// quant_mode values in the body header.
+const QM_SCALAR: u8 = 0;
+const QM_TCQ: u8 = 1;
+
+/// TCQ Viterbi λ as a fraction of `gain·q²` (the high-rate RD λ for step q). A
+/// single robust constant — TCQ's RD decision is not very λ-sensitive.
+#[cfg(feature = "encode")]
+const TCQ_LAMBDA_C: f64 = 0.12;
+
+/// Quantize one channel-subband to (levels, reconstruction) under the chosen
+/// quantizer. Scalar = deadzone `idx`, recon `idx·q`. TCQ = dependent-quantized
+/// levels (Viterbi), recon via the state machine. Levels feed LPC+entropy as the
+/// `idx` either way; the reconstruction drives the PCRD distortion + the decoder.
+#[cfg(feature = "encode")]
+fn quantize_subband(coeffs: &[f64], q: i64, gain: f64, use_tcq: bool, dz_offset: f64) -> (Vec<i64>, Vec<f64>) {
+    if use_tcq {
+        let lambda = gain * (q as f64) * (q as f64) * TCQ_LAMBDA_C;
+        let levels = tcq::quantize_tcq(coeffs, q, gain, lambda);
+        let recon = tcq::dequantize_tcq(&levels, q);
+        (levels, recon)
+    } else {
+        let qf = q as f64;
+        let idx: Vec<i64> = coeffs.iter().map(|&c| quant_f64_dz(c, q, dz_offset)).collect();
+        let recon: Vec<f64> = idx.iter().map(|&i| i as f64 * qf).collect();
+        (idx, recon)
+    }
+}
 
 /// Candidate quantizer steps — geometric grid, dense at small `q`. Identical to
 /// the 5/3 PCRD grid so the rate–distortion sweep is comparable.
@@ -252,14 +281,20 @@ pub fn encode_target_bps_97(
     // worse than round-nearest (δ=0.5 is in the set). δ≈0.375–0.42 wins the
     // WP3–WP5 band; 0.5 wins at high BPS — keep-best covers both (ADR 0054).
     let mut best: Option<(f64, Vec<u8>)> = None;
-    for &dz in &[0.5f64, 0.42, 0.375] {
-        let body = encode_target_bps_97_dz(signal, target_bps, mode, dz)?;
+    let consider = |body: Vec<u8>, best: &mut Option<(f64, Vec<u8>)>| -> LmlResult<()> {
         let p = prd_i64(signal, &decode_97(&body)?);
         if best.as_ref().map_or(true, |(bp, _)| p < *bp) {
-            best = Some((p, body));
+            *best = Some((p, body));
         }
+        Ok(())
+    };
+    for &dz in &[0.5f64, 0.42, 0.375] {
+        consider(encode_target_bps_97_q(signal, target_bps, mode, dz, false)?, &mut best)?;
     }
-    Ok(best.expect("at least one dz candidate").1)
+    // TCQ dependent-quantization candidate (ADR 0054). Decode auto-detects via the
+    // body quant_mode byte; keep-best ⇒ never worse than the scalar paths.
+    consider(encode_target_bps_97_q(signal, target_bps, mode, 0.5, true)?, &mut best)?;
+    Ok(best.expect("at least one candidate").1)
 }
 
 /// CfP §4 mean-removed PRD (%), encode-side keep-best metric.
@@ -289,6 +324,20 @@ pub fn encode_target_bps_97_dz(
     target_bps: f64,
     mode: lpc::LpcMode,
     dz_offset: f64,
+) -> LmlResult<Vec<u8>> {
+    encode_target_bps_97_q(signal, target_bps, mode, dz_offset, false)
+}
+
+/// As [`encode_target_bps_97_dz`], with `use_tcq` selecting TCQ dependent
+/// quantization (ADR 0054) instead of scalar deadzone. Decode auto-detects from
+/// the body's `quant_mode` byte.
+#[cfg(feature = "encode")]
+pub fn encode_target_bps_97_q(
+    signal: &[Vec<i64>],
+    target_bps: f64,
+    mode: lpc::LpcMode,
+    dz_offset: f64,
+    use_tcq: bool,
 ) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
@@ -337,10 +386,9 @@ pub fn encode_target_bps_97_dz(
             let mut sse = 0.0f64;
             for subs in &chan_subs {
                 let sub = &subs[sb];
-                let idx: Vec<i64> = sub.iter().map(|&c| quant_f64_dz(c, q, dz_offset)).collect();
-                let qf = q as f64;
-                for (&c, &i) in sub.iter().zip(idx.iter()) {
-                    let e = c - i as f64 * qf;
+                let (idx, recon) = quantize_subband(sub, q, gains[sb], use_tcq, dz_offset);
+                for (&c, &r) in sub.iter().zip(recon.iter()) {
+                    let e = c - r;
                     sse += e * e;
                 }
                 let (meta, payload) = encode_subband(&idx, sb, mode)?;
@@ -387,7 +435,7 @@ pub fn encode_target_bps_97_dz(
     let mut payload = Vec::new();
     for subs in &chan_subs {
         for (sb_idx, sub) in subs.iter().enumerate() {
-            let idx: Vec<i64> = sub.iter().map(|&c| quant_f64_dz(c, qs[sb_idx], dz_offset)).collect();
+            let (idx, _recon) = quantize_subband(sub, qs[sb_idx], gains[sb_idx], use_tcq, dz_offset);
             let (meta, pay) = encode_subband(&idx, sb_idx, mode)?;
             meta_body.extend_from_slice(&meta);
             payload.extend_from_slice(&pay);
@@ -400,6 +448,7 @@ pub fn encode_target_bps_97_dz(
     body.extend_from_slice(&(t as u16).to_le_bytes());
     body.push(n_levels);
     body.push(n_sub as u8);
+    body.push(if use_tcq { QM_TCQ } else { QM_SCALAR });
     body.extend_from_slice(&(meta_body.len() as u32).to_le_bytes());
     body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     for &q in &qs {
@@ -424,8 +473,9 @@ pub fn decode_97(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let t = u16::from_le_bytes([body[2], body[3]]) as usize;
     let n_levels = body[4];
     let n_sub = body[5] as usize;
-    let meta_len = u32::from_le_bytes([body[6], body[7], body[8], body[9]]) as usize;
-    let payload_len = u32::from_le_bytes([body[10], body[11], body[12], body[13]]) as usize;
+    let quant_mode = body[6];
+    let meta_len = u32::from_le_bytes([body[7], body[8], body[9], body[10]]) as usize;
+    let payload_len = u32::from_le_bytes([body[11], body[12], body[13], body[14]]) as usize;
 
     let sub_lens = subband_lengths(t, n_levels);
     if sub_lens.len() != n_sub {
@@ -488,8 +538,12 @@ pub fn decode_97(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             let (residual, consumed) = decode_residual(payload, pay_pos)?;
             pay_pos += consumed;
             let idx = lpc::synthesize(&residual, &coeffs, order, lml::BIAS_CTX);
-            let qf = q as f64;
-            subs_f.push(idx.iter().map(|&i| i as f64 * qf).collect());
+            if quant_mode == QM_TCQ {
+                subs_f.push(tcq::dequantize_tcq(&idx, q));
+            } else {
+                let qf = q as f64;
+                subs_f.push(idx.iter().map(|&i| i as f64 * qf).collect());
+            }
         }
         out.push(wavelet97::inverse_97_levels(&subs_f, n_levels));
     }
