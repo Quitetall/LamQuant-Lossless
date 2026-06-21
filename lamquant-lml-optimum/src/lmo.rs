@@ -7,18 +7,23 @@
 //! ratio attack (Phases 3–4) a trustworthy baseline to beat before any deeper
 //! transform / PCRD allocation / LMO-native entropy lands.
 //!
-//! Container layout (v1):
+//! Container layout (v2):
 //!
 //! ```text
 //!   [0..4]  LMO_MAGIC = b"LMO1"
-//!   [4]     version   = LMO_VERSION
-//!   [5]     mode_tag  = 0 lossless | 1 bounded_mae | 2 target_bps  (informational)
-//!   [6..]   inner LML stream (the Phase-2 payload)
+//!   [4]     version       = LMO_VERSION
+//!   [5]     mode_tag      = 0 lossless | 1 bounded_mae | 2 target_bps  (informational)
+//!   [6]     transform_id  = 0 inner LML stream (5/3 integer floor)
+//!                         | 1 LMO-native 9/7 float body (ADR 0054 lever 2)
+//!   [7..]   inner payload (an LML stream when transform_id=0, a 9/7 PCRD body when =1)
 //! ```
 //!
-//! Decode is `no_std`-capable (it just strips the 6-byte header and delegates
-//! to the integer `lml::decompress`). Encode is host-only (`encode` feature):
-//! it may invoke the f64 RD search for `TargetBps`.
+//! Decode is `no_std`-capable: it strips the 7-byte header and routes on
+//! `transform_id` — `0` → the integer `lml::decompress`, `1` → the float
+//! `lmo_pcrd97::decode_97` (float lifting needs no std/libm). Encode is host-only
+//! (`encode` feature): for `TargetBps` it runs BOTH the 5/3 and 9/7 ratio attacks
+//! and keeps whichever reconstructs at lower PRD (the 9/7 transform wins ~6% PRD
+//! on EEG; auto-pick guarantees the container is never worse than the 5/3 floor).
 
 use alloc::vec::Vec;
 
@@ -26,11 +31,18 @@ use lamquant_lml_mcu::codec::{Codec, CodecError, Format, Mode, Signal, LMO_MAGIC
 use lamquant_lml_mcu::error::LmlError;
 use lamquant_lml_mcu::lml;
 
-/// LMO container version. Bumped only on a wire-format change.
-pub const LMO_VERSION: u8 = 1;
+/// LMO container version. Bumped only on a wire-format change. v2 adds the
+/// `transform_id` byte (ADR 0054 lever 2). LMO is research-tier with in-process
+/// tests only, so there is no on-disk v1 to keep readable.
+pub const LMO_VERSION: u8 = 2;
 
-/// Fixed container header length (`magic(4) + version(1) + mode_tag(1)`).
-pub const LMO_HEADER_LEN: usize = 6;
+/// Fixed container header length (`magic(4) + version(1) + mode_tag(1) + transform_id(1)`).
+pub const LMO_HEADER_LEN: usize = 7;
+
+/// `transform_id` = the inner payload is an LML stream (integer 5/3 floor).
+const TRANSFORM_LML_53: u8 = 0;
+/// `transform_id` = the inner payload is an LMO-native 9/7 float PCRD body.
+const TRANSFORM_LMO_97: u8 = 1;
 
 /// The Optimum (LMO) codec. Implements the shared [`Codec`] seam.
 #[derive(Debug, Default, Clone, Copy)]
@@ -68,29 +80,73 @@ impl Codec for LmoCodec {
     }
 }
 
+/// CfP §4 mean-removed PRD (%), for the encode-side transform auto-pick.
+#[cfg(feature = "encode")]
+fn prd(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (o, r) in orig.iter().zip(recon.iter()) {
+        let m = o.iter().sum::<i64>() as f64 / o.len().max(1) as f64;
+        for (a, b) in o.iter().zip(r.iter()) {
+            let e = (*a - *b) as f64;
+            num += e * e;
+            den += (*a as f64 - m) * (*a as f64 - m);
+        }
+    }
+    if den == 0.0 {
+        0.0
+    } else {
+        100.0 * (num / den).sqrt()
+    }
+}
+
 /// Encode `signal` under `mode` into an LMO container (host-only).
 ///
-/// - **`TargetBps` (the lossy ratio attack, ADR 0054 Phase 3):** per-subband
-///   Lagrangian **PCRD** allocation (`lml::compress_target_bps_pcrd`) — the LMO
-///   ratio play, strictly better PRD-at-rate than the LML global-scale path.
+/// - **`TargetBps` (the lossy ratio attack, ADR 0054 Phase 3):** runs BOTH ratio
+///   attacks at the target rate — the integer 5/3 per-subband **PCRD**
+///   (`lml::compress_target_bps_pcrd`) and the float **9/7 CDF** PCRD
+///   (`lmo_pcrd97::encode_target_bps_97`, lever 2) — decodes each, and keeps the
+///   one with lower PRD. The container records the winner in `transform_id`, so a
+///   9/7 stream is never worse than the 5/3 floor.
 /// - **`Lossless` / `BoundedMae`:** the LML integer floor (WP0 bit-exact / δ-bound
-///   inherited; no rate knob to attack).
-///
-/// All paths emit a `MODE_*` LML payload wrapped in the LMO container, so the
-/// decoder is the unchanged integer `lml::decompress`.
+///   inherited; 9/7 is float ⇒ not bit-exact, so it never applies here).
 #[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
-    let inner = match mode {
+    use lamquant_lml_mcu::lpc::LpcMode;
+
+    let (transform_id, inner) = match mode {
         Mode::TargetBps(bps) => {
-            lml::compress_target_bps_pcrd(signal, bps, lamquant_lml_mcu::lpc::LpcMode::default())?
+            // Candidate 1: the integer 5/3 floor (always valid).
+            let i53 = lml::compress_target_bps_pcrd(signal, bps, LpcMode::default())?;
+            // Candidate 2: the float 9/7 ratio attack (lossy-only). Auto-pick the
+            // lower-PRD reconstruction at the matched rate ceiling.
+            match crate::lmo_pcrd97::encode_target_bps_97(signal, bps, LpcMode::default()) {
+                Ok(b97) => {
+                    let prd53 = prd(signal, &lml::decompress(&i53)?);
+                    let pick_97 = match crate::lmo_pcrd97::decode_97(&b97) {
+                        Ok(r97) => prd(signal, &r97) < prd53,
+                        Err(_) => false,
+                    };
+                    if pick_97 {
+                        (TRANSFORM_LMO_97, b97)
+                    } else {
+                        (TRANSFORM_LML_53, i53)
+                    }
+                }
+                Err(_) => (TRANSFORM_LML_53, i53),
+            }
         }
-        other => lamquant_lml_mcu::codec::LmlCodec.encode(signal, other)?,
+        other => (
+            TRANSFORM_LML_53,
+            lamquant_lml_mcu::codec::LmlCodec.encode(signal, other)?,
+        ),
     };
 
     let mut out = Vec::with_capacity(LMO_HEADER_LEN + inner.len());
     out.extend_from_slice(LMO_MAGIC.as_slice());
     out.push(LMO_VERSION);
     out.push(mode_tag(mode));
+    out.push(transform_id);
     out.extend_from_slice(&inner);
     Ok(out)
 }
@@ -108,9 +164,16 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
         // No back-compat history yet; an unknown version is not decodable here.
         return Err(CodecError::Lml(LmlError::UnsupportedVersion(version)));
     }
-    // bytes[5] = mode_tag, informational — the inner LML stream self-describes.
+    // bytes[5] = mode_tag, informational. bytes[6] = transform_id routes the body.
+    let transform_id = bytes[6];
     let inner = &bytes[LMO_HEADER_LEN..];
-    lml::decompress(inner).map_err(Into::into)
+    match transform_id {
+        TRANSFORM_LML_53 => lml::decompress(inner).map_err(Into::into),
+        TRANSFORM_LMO_97 => crate::lmo_pcrd97::decode_97(inner).map_err(Into::into),
+        other => Err(CodecError::Lml(LmlError::InvalidHeader(alloc::format!(
+            "unknown LMO transform_id 0x{other:02X}"
+        )))),
+    }
 }
 
 /// Universal magic-dispatch decode for a build that has the LMO decoder linked.

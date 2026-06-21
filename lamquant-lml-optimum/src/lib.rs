@@ -25,6 +25,8 @@
 extern crate alloc;
 
 pub mod lmo;
+pub mod lmo_pcrd97;
+pub mod wavelet97;
 
 // Re-export the shared codec seam (defined in -core) so consumers can write
 // `use lamquant_lml_optimum::{Codec, Mode, Format, ...}` without reaching across to

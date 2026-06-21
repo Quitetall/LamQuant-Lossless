@@ -354,7 +354,7 @@ fn verify_packet_crc(
 /// parser in `stream.rs`. Any drift between these breaks decode.
 pub const MAGIC: &[u8; 4] = b"LML1";
 const HEADER_SIZE: usize = 22;
-const BIAS_CTX: usize = 32;
+pub const BIAS_CTX: usize = 32;
 
 /// Maximum bytes a decoder will allocate for the reconstructed signal.
 ///
@@ -390,7 +390,7 @@ const LPC_ORDER_HARD_CAP: usize = 16;
 /// 313/313/625/1250, giving ceilings 16/16/16/16 (all hard-capped); a
 /// 32-sample tiny window gives ceiling 4. Principled and smooth.
 #[inline]
-fn lpc_max_order(subband_len: usize) -> usize {
+pub fn lpc_max_order(subband_len: usize) -> usize {
     (subband_len / 8).min(LPC_ORDER_HARD_CAP)
 }
 
@@ -409,7 +409,7 @@ fn lpc_max_order_extended(subband_len: usize) -> usize {
 /// subband can support. `Fixed` mode is unaffected — its schedule is
 /// already small and the inner `analyze` does its own size check.
 #[inline]
-fn scope_lpc_mode(mode: lpc::LpcMode, ceiling: usize) -> lpc::LpcMode {
+pub fn scope_lpc_mode(mode: lpc::LpcMode, ceiling: usize) -> lpc::LpcMode {
     match mode {
         lpc::LpcMode::Fixed => mode,
         lpc::LpcMode::Adaptive { max_order } => lpc::LpcMode::Adaptive {

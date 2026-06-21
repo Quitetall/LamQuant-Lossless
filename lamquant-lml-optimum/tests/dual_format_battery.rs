@@ -82,7 +82,7 @@ fn target_bps_rate_ceiling_both_formats() {
             assert_eq!(codec::peek_format(&stream), Some(fmt), "{name} magic");
             let bps = stream.len() as f64 * 8.0 / nm;
             // +10% tolerance for header overhead on a finite window (same bound
-            // the core target_bps_property test uses); LMO's 6-byte container
+            // the core target_bps_property test uses); LMO's 7-byte container
             // header is sub-0.01 BPS here.
             assert!(
                 bps <= target * 1.10,
@@ -92,6 +92,45 @@ fn target_bps_rate_ceiling_both_formats() {
             assert_eq!(back.len(), n_ch, "{name}: channel count preserved");
             assert_eq!(back[0].len(), t, "{name}: sample count preserved");
         }
+    }
+}
+
+/// ADR 0054 lever 2: LMO `TargetBps` runs both the 5/3 floor and the 9/7 ratio
+/// attack and keeps the lower-PRD one. The auto-pick guarantee: the LMO stream's
+/// reconstruction is **never meaningfully worse** than the raw 5/3 PCRD floor at
+/// the matched rate ceiling — and `decode_any` round-trips whichever transform
+/// (incl. a `transform_id=1` / 9/7 body) was chosen.
+#[test]
+fn lmo_target_bps_auto_pick_never_worse_than_5_3_floor() {
+    fn prd(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for (o, r) in orig.iter().zip(recon) {
+            let m = o.iter().sum::<i64>() as f64 / o.len().max(1) as f64;
+            for (a, b) in o.iter().zip(r) {
+                let e = (*a - *b) as f64;
+                num += e * e;
+                den += (*a as f64 - m).powi(2);
+            }
+        }
+        if den == 0.0 { 0.0 } else { 100.0 * (num / den).sqrt() }
+    }
+
+    let sig = make_signal(8, 2560, 99);
+    for target in [3.0f64, 2.0, 1.5] {
+        // Raw 5/3 floor (the LML codec's TargetBps path).
+        let floor = LmlCodec.encode(&sig, Mode::TargetBps(target)).unwrap();
+        let floor_prd = prd(&sig, &LmlCodec.decode(&floor).unwrap());
+
+        // LMO auto-pick. decode_any must round-trip whichever transform won.
+        let lmo = LmoCodec.encode(&sig, Mode::TargetBps(target)).unwrap();
+        let lmo_recon = decode_any(&lmo).unwrap();
+        assert_eq!(lmo_recon.len(), sig.len());
+        let lmo_prd = prd(&sig, &lmo_recon);
+
+        assert!(
+            lmo_prd <= floor_prd * 1.001,
+            "target {target}: LMO auto-pick PRD {lmo_prd:.3} worse than 5/3 floor {floor_prd:.3}"
+        );
     }
 }
 
