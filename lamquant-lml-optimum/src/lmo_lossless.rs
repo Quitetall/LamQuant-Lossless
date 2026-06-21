@@ -41,7 +41,12 @@ use lamquant_lml_mcu::lml;
 
 /// Intra-id=2 kernel version (bump on any body-format / prediction-math change).
 /// v2 = multi-reference prediction (v1 was single-reference).
-const KERNEL_VERSION: u8 = 2;
+const KERNEL_VERSION: u8 = 3;
+/// Residual-coder mode byte (after the per-channel metadata): 0 = the lml codec
+/// (5/3+LPC+Golomb), 1 = per-channel RLS prediction + Golomb (ADR 0054 — wins on
+/// non-stationary signals where the static path collapses). Keep-best per body.
+const CODER_LML: u8 = 0;
+const CODER_RLS: u8 = 1;
 /// feature_bitmask bit 0: cross-channel spatial prediction present. (Written by
 /// the encoder; decode is forward-compatible and does not hard-require the bit.)
 #[cfg(feature = "encode")]
@@ -98,7 +103,20 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         metas.push((refs, gains));
     }
 
-    let resid = lml::decompress(&body[pos..])?;
+    if pos >= body.len() {
+        return Err(LmlError::Truncated { expected: pos + 1, actual: body.len(), context: "lmo_lossless coder_mode" });
+    }
+    let coder_mode = body[pos];
+    pos += 1;
+    let resid = match coder_mode {
+        CODER_LML => lml::decompress(&body[pos..])?,
+        CODER_RLS => crate::rls::decode(&body[pos..])?,
+        other => {
+            return Err(LmlError::InvalidHeader(alloc::format!(
+                "lmo_lossless unknown coder_mode 0x{other:02X}"
+            )))
+        }
+    };
     if resid.len() != n_ch {
         return Err(LmlError::InvalidHeader(alloc::format!(
             "lmo_lossless n_ch={n_ch} disagrees with lml stream {}",
@@ -309,20 +327,48 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
         resid_signal.push(best_resid);
     }
 
-    let lml_stream = lml::compress(&resid_signal, 0)?;
-
-    let mut body = Vec::with_capacity(4 + n_ch + lml_stream.len());
-    body.push(KERNEL_VERSION);
-    body.push(FEATURE_CROSSCHAN);
-    body.extend_from_slice(&(n_ch as u16).to_le_bytes());
-    for (refs, gains) in &metas {
-        body.push(refs.len() as u8);
-        for (&r, &g) in refs.iter().zip(gains) {
-            body.extend_from_slice(&(r as u16).to_le_bytes());
-            body.extend_from_slice(&g.to_le_bytes());
+    let assemble = |metas: &[(Vec<usize>, Vec<i32>)], coder_mode: u8, stream: &[u8]| -> Vec<u8> {
+        let mut body = Vec::with_capacity(5 + n_ch + stream.len());
+        body.push(KERNEL_VERSION);
+        body.push(FEATURE_CROSSCHAN);
+        body.extend_from_slice(&(n_ch as u16).to_le_bytes());
+        for (refs, gains) in metas {
+            body.push(refs.len() as u8);
+            for (&r, &g) in refs.iter().zip(gains) {
+                body.extend_from_slice(&(r as u16).to_le_bytes());
+                body.extend_from_slice(&g.to_le_bytes());
+            }
         }
-    }
-    body.extend_from_slice(&lml_stream);
+        body.push(coder_mode);
+        body.extend_from_slice(stream);
+        body
+    };
+
+    // Candidate A: cross-channel prediction + keep-best{lml, RLS} on the residual.
+    let lml_stream = lml::compress(&resid_signal, 0)?;
+    let (cc_coder, cc_stream) = match crate::rls::encode(&resid_signal) {
+        Ok(r) if r.len() < lml_stream.len() => (CODER_RLS, r),
+        _ => (CODER_LML, lml_stream),
+    };
+    let body_cc = assemble(&metas, cc_coder, &cc_stream);
+
+    // Candidate B: RLS directly on the ORIGINAL signal (NO cross-channel). On
+    // non-stationary signals temporal RLS adaptation beats spatial decorrelation
+    // (the ma 21ch case: cross-channel gets selected but sabotages RLS). All
+    // channels are coded "raw" (no refs), so decode reconstructs them directly.
+    let body = match crate::rls::encode(signal) {
+        Ok(raw_rls) => {
+            let raw_metas: Vec<(Vec<usize>, Vec<i32>)> =
+                (0..n_ch).map(|_| (Vec::new(), Vec::new())).collect();
+            let body_raw = assemble(&raw_metas, CODER_RLS, &raw_rls);
+            if body_raw.len() < body_cc.len() {
+                body_raw
+            } else {
+                body_cc
+            }
+        }
+        Err(_) => body_cc,
+    };
     Ok(body)
 }
 
