@@ -255,8 +255,20 @@ fn encode_subband(idx: &[i64], sb_idx: usize, mode: lpc::LpcMode) -> LmlResult<(
     let bypass_payload = encode_residual(&residual0)?;
     let bypass_total = 1 + bypass_payload.len();
 
-    if bypass_total < lpc_total {
-        Ok((vec![0u8], bypass_payload))
+    // RLS path (ADR 0054): adaptive prediction of the quantized indices + the
+    // keep-best entropy coder. Wins big at the lossy operating points (−20 to −36%
+    // index bytes vs LPC at the same quantizer). meta = sentinel order 255 (real
+    // LPC orders are ≤ lpc_max_order ≪ 255, 0 = bypass); payload = [len u32][stream].
+    let rls_coded = crate::entropy::encode(&crate::rls::residual(idx))?;
+    let rls_total = 1 + 4 + rls_coded.len();
+
+    if rls_total <= lpc_total && rls_total <= bypass_total {
+        let mut payload = Vec::with_capacity(4 + rls_coded.len());
+        payload.extend_from_slice(&(rls_coded.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&rls_coded);
+        Ok((alloc::vec![255u8], payload))
+    } else if bypass_total < lpc_total {
+        Ok((alloc::vec![0u8], bypass_payload))
     } else {
         let mut meta = Vec::with_capacity(1 + 4 * coeffs.len());
         meta.push(order as u8);
@@ -518,26 +530,32 @@ pub fn decode_97(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             }
             let order = meta[meta_pos] as usize;
             meta_pos += 1;
-            if meta_pos + 4 * order > meta.len() {
-                return Err(LmlError::Truncated {
-                    expected: meta_pos + 4 * order,
-                    actual: meta.len(),
-                    context: "9/7 lpc coeffs",
-                });
-            }
-            let mut coeffs = Vec::with_capacity(order);
-            for _ in 0..order {
-                coeffs.push(i32::from_le_bytes([
-                    meta[meta_pos],
-                    meta[meta_pos + 1],
-                    meta[meta_pos + 2],
-                    meta[meta_pos + 3],
-                ]));
-                meta_pos += 4;
-            }
-            let (residual, consumed) = decode_residual(payload, pay_pos)?;
-            pay_pos += consumed;
-            let idx = lpc::synthesize(&residual, &coeffs, order, lml::BIAS_CTX);
+            let idx = if order == 255 {
+                // RLS-coded subband: payload = [len u32][entropy stream].
+                if pay_pos + 4 > payload.len() {
+                    return Err(LmlError::Truncated { expected: pay_pos + 4, actual: payload.len(), context: "9/7 rls len" });
+                }
+                let plen = u32::from_le_bytes([payload[pay_pos], payload[pay_pos + 1], payload[pay_pos + 2], payload[pay_pos + 3]]) as usize;
+                pay_pos += 4;
+                if pay_pos + plen > payload.len() {
+                    return Err(LmlError::Truncated { expected: pay_pos + plen, actual: payload.len(), context: "9/7 rls stream" });
+                }
+                let res = crate::entropy::decode(&payload[pay_pos..pay_pos + plen])?;
+                pay_pos += plen;
+                crate::rls::reconstruct(&res)
+            } else {
+                if meta_pos + 4 * order > meta.len() {
+                    return Err(LmlError::Truncated { expected: meta_pos + 4 * order, actual: meta.len(), context: "9/7 lpc coeffs" });
+                }
+                let mut coeffs = Vec::with_capacity(order);
+                for _ in 0..order {
+                    coeffs.push(i32::from_le_bytes([meta[meta_pos], meta[meta_pos + 1], meta[meta_pos + 2], meta[meta_pos + 3]]));
+                    meta_pos += 4;
+                }
+                let (residual, consumed) = decode_residual(payload, pay_pos)?;
+                pay_pos += consumed;
+                lpc::synthesize(&residual, &coeffs, order, lml::BIAS_CTX)
+            };
             if quant_mode == QM_TCQ {
                 subs_f.push(tcq::dequantize_tcq(&idx, q));
             } else {

@@ -118,6 +118,36 @@ impl Rls {
     }
 }
 
+/// RLS residual of a single integer sequence (with periodic reset) — used by the
+/// lossy 9/7 path to adaptively predict the quantized indices.
+#[cfg(feature = "encode")]
+pub fn residual(seq: &[i64]) -> Vec<i64> {
+    let mut rls = Rls::new();
+    seq.iter()
+        .enumerate()
+        .map(|(i, &x)| {
+            if i != 0 && i % RESET_PERIOD == 0 {
+                rls = Rls::new();
+            }
+            rls.encode_sample(x)
+        })
+        .collect()
+}
+
+/// Reconstruct a sequence from its RLS [`residual`] (no_std). Inverse of [`residual`].
+pub fn reconstruct(res: &[i64]) -> Vec<i64> {
+    let mut rls = Rls::new();
+    res.iter()
+        .enumerate()
+        .map(|(i, &e)| {
+            if i != 0 && i % RESET_PERIOD == 0 {
+                rls = Rls::new();
+            }
+            rls.decode_sample(e)
+        })
+        .collect()
+}
+
 /// Encode a multichannel signal with per-channel RLS prediction + entropy coding.
 #[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
