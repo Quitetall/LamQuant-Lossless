@@ -25,6 +25,7 @@
 extern crate alloc;
 
 pub mod arith_int;
+pub mod crosschan;
 pub mod lmo;
 pub mod lmo_pcrd97;
 pub mod wavelet97;
