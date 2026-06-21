@@ -98,6 +98,7 @@ fn greedy_refs(target: &[i64], priors: &[Vec<i64>], k: usize) -> Vec<usize> {
 
 /// Joint LS gains predicting `target` from the selected `refs` (Gaussian elim on
 /// the small normal equations `X'X g = X'y`).
+#[allow(clippy::needless_range_loop)] // index-based Gaussian elimination
 fn joint_ls(target: &[i64], refs: &[usize], priors: &[Vec<i64>]) -> Vec<f64> {
     let k = refs.len();
     let mut a = vec![vec![0.0f64; k]; k];

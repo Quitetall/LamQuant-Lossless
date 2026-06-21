@@ -143,6 +143,7 @@ fn dot(a: &[i64], b: &[i64]) -> f64 {
 /// Joint LS float gains predicting `target` from `refs` (Gaussian elimination on
 /// the small normal equations `X'X g = X'y`, ridge for safety).
 #[cfg(feature = "encode")]
+#[allow(clippy::needless_range_loop)] // index-based Gaussian elimination
 fn joint_ls(target: &[i64], refs: &[usize], chans: &[Vec<i64>]) -> Vec<f64> {
     let k = refs.len();
     let mut a = alloc::vec![alloc::vec![0.0f64; k]; k];
@@ -220,6 +221,7 @@ const PER_REF_OVERHEAD: usize = 6;
 /// Energy-best prior `j ∉ chosen` for predicting `residual` (single-tap LS
 /// energy reduction `<resid,ch_j>²/<ch_j,ch_j>`).
 #[cfg(feature = "encode")]
+#[allow(clippy::needless_range_loop)] // j indexes chans and is matched against `chosen`
 fn best_energy_ref(residual: &[i64], chans: &[Vec<i64>], n_prior: usize, chosen: &[usize]) -> Option<usize> {
     let mut best = (usize::MAX, 0.0f64);
     for j in 0..n_prior {
