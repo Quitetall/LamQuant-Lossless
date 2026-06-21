@@ -102,9 +102,15 @@ fn quant_f64(coeff: f64, q: i64) -> i64 {
     wavelet97::round_i64(r)
 }
 
-/// Entropy-code one subband's LPC residual, keeping the smaller of Golomb-Rice
-/// and zero-RLE. Output `[tag][coded]` with tag `0`=Golomb, `1`=zRLE — the same
-/// tag values the `mcu` track-2 reader uses.
+/// Entropy-code one subband's residual (LPC residual, or — in the order-0
+/// bypass — the bias-cancelled quantizer indices), keeping the smallest of the
+/// available coders. Output `[tag][coded]`:
+///   * `0` = Golomb-Rice, `1` = zero-RLE — always available (no_std), the same
+///     tag values the `mcu` track-2 reader uses.
+///   * `2` = empirical-categorical order-0, `3` = order-1 context (`arith_cat`)
+///     — only under `experimental_arithmetic` (std, ADR 0054 lever-3 stage 3a).
+///     The default build never selects these, so the no_std decode path stays
+///     Golomb/zRLE-only.
 fn encode_residual(values: &[i64]) -> LmlResult<Vec<u8>> {
     let mut tag = 0u8;
     let mut best = golomb::encode_dense(values)?;
@@ -112,6 +118,24 @@ fn encode_residual(values: &[i64]) -> LmlResult<Vec<u8>> {
     if z.len() < best.len() {
         tag = 1;
         best = z;
+    }
+    #[cfg(feature = "experimental_arithmetic")]
+    {
+        use lamquant_lml_mcu::arith_cat;
+        // Each coder may legitimately bail (alphabet too wide); a bail just means
+        // "not a candidate", never an error — keep-smallest absorbs it.
+        if let Ok(a0) = arith_cat::encode_dense(values) {
+            if a0.len() < best.len() {
+                tag = 2;
+                best = a0;
+            }
+        }
+        if let Ok(a1) = arith_cat::encode_dense_ctx(values) {
+            if a1.len() < best.len() {
+                tag = 3;
+                best = a1;
+            }
+        }
     }
     let mut out = Vec::with_capacity(1 + best.len());
     out.push(tag);
@@ -133,6 +157,10 @@ fn decode_residual(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> {
     let (vals, consumed) = match tag {
         0 => golomb::decode_dense(data, offset + 1)?,
         1 => zrle::decode_dense(data, offset + 1)?,
+        #[cfg(feature = "experimental_arithmetic")]
+        2 => lamquant_lml_mcu::arith_cat::decode_dense(data, offset + 1)?,
+        #[cfg(feature = "experimental_arithmetic")]
+        3 => lamquant_lml_mcu::arith_cat::decode_dense_ctx(data, offset + 1)?,
         other => {
             return Err(LmlError::InvalidHeader(alloc::format!(
                 "unknown 9/7 residual coder tag 0x{:02X}",
@@ -141,6 +169,46 @@ fn decode_residual(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> {
         }
     };
     Ok((vals, consumed + 1))
+}
+
+/// Encode one channel's quantized subband to its `(meta, payload)` packet,
+/// choosing the smaller of two substrates (ADR 0054 lever-3 stage 3a):
+///
+///   * **LPC path** — `analyze_with_mode` picks an order; `meta = [order][coeffs…]`,
+///     `payload = encode_residual(lpc_residual)`. The current (lever-2) behaviour.
+///   * **Coefficient-domain bypass** — force `order = 0` and entropy-code the
+///     bias-cancelled indices *directly* (`encode_residual(idx)`); `meta = [0]`.
+///     This is the EBCOT-aligned substrate: no LPC, let the (arithmetic) entropy
+///     coder model the coefficient distribution itself.
+///
+/// Keep-smallest over `meta.len()+payload.len()`, so the bypass can only help.
+/// `decode_97` already reconstructs both: an `order == 0` packet round-trips
+/// because `synthesize(order=0)` is `bias_restore`, the inverse of the
+/// `bias_cancel` that `analyze(_, 0, _)` applies. (When `experimental_arithmetic`
+/// is off this still adds the Golomb/zRLE-on-indices alternative — never worse.)
+#[cfg(feature = "encode")]
+fn encode_subband(idx: &[i64], sb_idx: usize, mode: lpc::LpcMode) -> LmlResult<(Vec<u8>, Vec<u8>)> {
+    // LPC path.
+    let scoped = lml::scope_lpc_mode(mode, lml::lpc_max_order(idx.len()));
+    let (coeffs, residual, order) = lpc::analyze_with_mode(idx, sb_idx, scoped, lml::BIAS_CTX, None);
+    let lpc_payload = encode_residual(&residual)?;
+    let lpc_total = 1 + 4 * coeffs.len() + lpc_payload.len();
+
+    // Coefficient-domain bypass: order 0, code the bias-cancelled indices direct.
+    let (_c0, residual0) = lpc::analyze(idx, 0, lml::BIAS_CTX);
+    let bypass_payload = encode_residual(&residual0)?;
+    let bypass_total = 1 + bypass_payload.len();
+
+    if bypass_total < lpc_total {
+        Ok((vec![0u8], bypass_payload))
+    } else {
+        let mut meta = Vec::with_capacity(1 + 4 * coeffs.len());
+        meta.push(order as u8);
+        for &c in &coeffs {
+            meta.extend_from_slice(&c.to_le_bytes());
+        }
+        Ok((meta, lpc_payload))
+    }
 }
 
 /// Encode `signal` ([n_ch][T]) to a target bits-per-sample using the float 9/7
@@ -205,10 +273,8 @@ pub fn encode_target_bps_97(
                     let e = c - i as f64 * qf;
                     sse += e * e;
                 }
-                let scoped = lml::scope_lpc_mode(mode, lml::lpc_max_order(sub.len()));
-                let (coeffs, residual, _order) =
-                    lpc::analyze_with_mode(&idx, sb, scoped, lml::BIAS_CTX, None);
-                rate_bytes += 1 + 4 * coeffs.len() + encode_residual(&residual)?.len();
+                let (meta, payload) = encode_subband(&idx, sb, mode)?;
+                rate_bytes += meta.len() + payload.len();
             }
             rd[sb][ci] = (rate_bytes as f64 * 8.0, gains[sb] * sse);
         }
@@ -252,14 +318,9 @@ pub fn encode_target_bps_97(
     for subs in &chan_subs {
         for (sb_idx, sub) in subs.iter().enumerate() {
             let idx: Vec<i64> = sub.iter().map(|&c| quant_f64(c, qs[sb_idx])).collect();
-            let scoped = lml::scope_lpc_mode(mode, lml::lpc_max_order(sub.len()));
-            let (coeffs, residual, order) =
-                lpc::analyze_with_mode(&idx, sb_idx, scoped, lml::BIAS_CTX, None);
-            meta_body.push(order as u8);
-            for &c in &coeffs {
-                meta_body.extend_from_slice(&c.to_le_bytes());
-            }
-            payload.extend_from_slice(&encode_residual(&residual)?);
+            let (meta, pay) = encode_subband(&idx, sb_idx, mode)?;
+            meta_body.extend_from_slice(&meta);
+            payload.extend_from_slice(&pay);
         }
     }
 

@@ -38,6 +38,14 @@ encode = ["std", "decode"]
 # Host std (f64, std::io). Implied by `encode`.
 std = ["lamquant-lml-mcu/std"]
 
+# ADR 0054 Phase 3 lever 3 (stage 3a — measurement): forward the MCU tier's
+# constriction-backed empirical-categorical range coders (`arith_cat`, order-0 +
+# order-1 context) so the 9/7 per-subband path can A/B them against Golomb/zRLE.
+# std-only (constriction) ⇒ host-encode / host-decode measurement substrate; the
+# DEFAULT LMO build never emits the arithmetic coder tags, so the no_std decode
+# path is unaffected. Implies `encode` (the path that selects coders lives there).
+experimental_arithmetic = ["encode", "lamquant-lml-mcu/experimental_arithmetic"]
+
 [dependencies]
 # The shared Codec seam + the LML codec live in the MCU tier (ADR 0058).
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
