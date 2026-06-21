@@ -28,6 +28,7 @@ pub mod arith_int;
 pub mod crosschan;
 pub mod lmo;
 pub mod lmo_lossless;
+pub mod mv_rls;
 pub mod rls;
 pub mod tcq;
 pub mod lmo_pcrd97;

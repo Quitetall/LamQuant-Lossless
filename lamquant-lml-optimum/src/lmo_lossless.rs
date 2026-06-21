@@ -47,6 +47,8 @@ const KERNEL_VERSION: u8 = 3;
 /// non-stationary signals where the static path collapses). Keep-best per body.
 const CODER_LML: u8 = 0;
 const CODER_RLS: u8 = 1;
+/// Multivariate cross-channel RLS on the raw signal (all channels coded "raw").
+const CODER_MV_RLS: u8 = 2;
 /// feature_bitmask bit 0: cross-channel spatial prediction present. (Written by
 /// the encoder; decode is forward-compatible and does not hard-require the bit.)
 #[cfg(feature = "encode")]
@@ -111,6 +113,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let resid = match coder_mode {
         CODER_LML => lml::decompress(&body[pos..])?,
         CODER_RLS => crate::rls::decode(&body[pos..])?,
+        CODER_MV_RLS => crate::mv_rls::decode(&body[pos..])?,
         other => {
             return Err(LmlError::InvalidHeader(alloc::format!(
                 "lmo_lossless unknown coder_mode 0x{other:02X}"
@@ -356,19 +359,22 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
     // non-stationary signals temporal RLS adaptation beats spatial decorrelation
     // (the ma 21ch case: cross-channel gets selected but sabotages RLS). All
     // channels are coded "raw" (no refs), so decode reconstructs them directly.
-    let body = match crate::rls::encode(signal) {
-        Ok(raw_rls) => {
-            let raw_metas: Vec<(Vec<usize>, Vec<i32>)> =
-                (0..n_ch).map(|_| (Vec::new(), Vec::new())).collect();
-            let body_raw = assemble(&raw_metas, CODER_RLS, &raw_rls);
-            if body_raw.len() < body_cc.len() {
-                body_raw
-            } else {
-                body_cc
-            }
+    let raw_metas: Vec<(Vec<usize>, Vec<i32>)> = (0..n_ch).map(|_| (Vec::new(), Vec::new())).collect();
+    let mut body = body_cc;
+    if let Ok(raw_rls) = crate::rls::encode(signal) {
+        let cand = assemble(&raw_metas, CODER_RLS, &raw_rls);
+        if cand.len() < body.len() {
+            body = cand;
         }
-        Err(_) => body_cc,
-    };
+    }
+    // Candidate C: multivariate cross-channel RLS on the raw signal — wins on hard
+    // non-stationary high-amplitude EEG where the static best-of-prior collapses.
+    if let Ok(mv) = crate::mv_rls::encode(signal) {
+        let cand = assemble(&raw_metas, CODER_MV_RLS, &mv);
+        if cand.len() < body.len() {
+            body = cand;
+        }
+    }
     Ok(body)
 }
 
