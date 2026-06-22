@@ -108,6 +108,30 @@ fn arith_block_bytes(res: &[i64]) -> usize {
         .sum()
 }
 
+/// Ceiling of a LEARNED conditional entropy model (codec-technique-mine §B.2 /
+/// ADR 0058) — the one neural-track idea that is lossless-compatible (a better
+/// probability model shrinks arithmetic coding; reconstruction stays exact). The
+/// model conditions the residual SHAPE on the local SCALE (a baked-in/"learned"
+/// per-context distribution, ZERO transmission cost — unlike per-block histograms),
+/// then codes to that distribution's entropy. Tests: does modeling shape-per-scale
+/// beat block-Golomb's geometric-per-block assumption? This is the achievable
+/// ceiling of a scale-conditioned learned coder (optimistic: distribution fit on
+/// the data, no generalization gap — same spirit as the H0 floor).
+fn learned_conditional_bytes(res: &[i64]) -> usize {
+    use std::collections::HashMap;
+    const BLK: usize = 256;
+    // Bucket every 256-sample block by its local scale (log2 mean|x|); pool all
+    // same-scale blocks → one shape model per scale context.
+    let mut buckets: HashMap<i32, Vec<i64>> = HashMap::new();
+    for block in res.chunks(BLK) {
+        let mean = block.iter().map(|&x| x.unsigned_abs() as f64).sum::<f64>()
+            / block.len().max(1) as f64;
+        let ctx = mean.max(1.0).log2().floor() as i32; // local-scale context
+        buckets.entry(ctx).or_default().extend_from_slice(block);
+    }
+    buckets.values().map(|v| h0_floor_bytes(v)).sum()
+}
+
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -123,6 +147,7 @@ fn main() {
     let mut block_golomb = 0usize; // production baseline (entropy::encode keep-best)
     let mut arith_block = 0usize;
     let mut adaptive = 0usize;
+    let mut learned = 0usize;
     let mut h0_floor = 0usize;
     let mut h0_block = 0usize;
 
@@ -134,6 +159,7 @@ fn main() {
             block_golomb += entropy::encode(win).unwrap().len();
             arith_block += arith_block_bytes(win);
             adaptive += adaptive_order0_bytes(win);
+            learned += learned_conditional_bytes(win);
             h0_floor += h0_floor_bytes(win);
             h0_block += h0_block_floor_bytes(win);
         }
@@ -154,7 +180,8 @@ fn main() {
     println!("  {:>22} | {:>12} {:>9} {:>9}", "coder", "bytes", "bps", "vs base");
     row("block-Golomb (PROD)", block_golomb);
     row("arith order-0 /block", arith_block); // static, transmits per-block model
-    row("adaptive order-0", adaptive); // online, no transmitted model — the candidate
+    row("adaptive order-0", adaptive); // online, no transmitted model
+    row("learned cond (scale)", learned); // §B.2/ADR0058 ceiling — shape | local scale
     row("H0 floor global", h0_floor);
     row("H0 floor /block", h0_block);
     println!("# adaptive order-0 = exact size of an online range coder (no transmitted model).");
