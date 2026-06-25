@@ -29,6 +29,8 @@ pub mod crosschan;
 pub mod entropy;
 pub mod lmo;
 pub mod lmo_lossless;
+#[cfg(feature = "encode")]
+pub mod montage;
 pub mod mv_rls;
 pub mod rls;
 pub mod tcq;

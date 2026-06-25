@@ -270,6 +270,20 @@ fn best_energy_ref(residual: &[i64], chans: &[Vec<i64>], n_prior: usize, chosen:
 /// prediction. Host-only.
 #[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
+    encode_with_geometry(signal, None)
+}
+
+/// Like [`encode`], but a montage `geom` (per-channel electrode coords, encode-only,
+/// NEVER serialized) seeds the per-channel cross-channel reference search with the
+/// geometrically nearest prior electrodes as one more keep-smaller candidate. The
+/// chosen `(ref, gain)` pairs are written exactly as today, so the wire format and the
+/// `no_std` decoder are unchanged; geometry-free (`geom = None`) is byte-identical to
+/// [`encode`]. (Phase A1, `eeg-codec-design-from-port` §2 Stage 1.)
+#[cfg(feature = "encode")]
+pub fn encode_with_geometry(
+    signal: &[Vec<i64>],
+    geom: Option<&crate::montage::MontageGeometry>,
+) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     if n_ch == 0 || n_ch > 1024 {
         return Err(LmlError::InvalidHeader(alloc::format!("n_ch={n_ch} out of range 1..=1024")));
@@ -323,6 +337,26 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
                 best_resid = r;
             } else {
                 break;
+            }
+        }
+
+        // (3) GEOMETRY candidate (encode-only search prior; never serialized): the
+        // montage-nearest prior electrodes as one keep-smaller reference set. Geometry
+        // captures cross-channel coupling the energy-greedy heuristic can miss on the
+        // multi-reference tail; keep it only if it shrinks the channel.
+        if let Some(g) = geom {
+            let geo_refs = g.nearest_prior(i, MAX_REFS.min(i));
+            if !geo_refs.is_empty() && geo_refs != best_refs {
+                let gv = joint_ls(&signal[i], &geo_refs, signal);
+                if let Some(gq) = quantize_gains(&gv) {
+                    let r = residual_multi(&signal[i], &geo_refs, &gq, signal);
+                    let cost = channel_cost(&r).saturating_add(geo_refs.len() * PER_REF_OVERHEAD + 1);
+                    if cost < best_cost {
+                        best_refs = geo_refs;
+                        best_gains = gq;
+                        best_resid = r;
+                    }
+                }
             }
         }
 
@@ -441,5 +475,26 @@ mod tests {
         let sig = vec![(0..600).map(|i| ((i * 13) % 91) as i64 - 45).collect::<Vec<i64>>()];
         let body = encode(&sig).unwrap();
         assert_eq!(decode(&body).unwrap(), sig);
+    }
+
+    /// A1 guarantee: geometry-free `encode_with_geometry` is BYTE-IDENTICAL to `encode`
+    /// (no regression / no wire change), and a geometry-seeded body still roundtrips
+    /// bit-exact through the unchanged decoder (geometry is an encoder-only search prior).
+    #[test]
+    fn geometry_free_byte_identical_and_geometry_roundtrips() {
+        use crate::montage::MontageGeometry;
+        for (n_ch, t) in [(8usize, 2048usize), (16, 1500)] {
+            let sig = make_corr_signal(n_ch, t);
+            assert_eq!(
+                encode(&sig).unwrap(),
+                encode_with_geometry(&sig, None).unwrap(),
+                "geometry-free encode must be byte-identical to encode()"
+            );
+            // a synthetic line montage (channel c at x=c) ⇒ nearest = adjacent channels
+            let coords: Vec<Option<[f64; 3]>> = (0..n_ch).map(|c| Some([c as f64, 0.0, 0.0])).collect();
+            let geom = MontageGeometry::new(coords);
+            let body = encode_with_geometry(&sig, Some(&geom)).unwrap();
+            assert_eq!(decode(&body).unwrap(), sig, "geometry body must roundtrip bit-exact");
+        }
     }
 }
