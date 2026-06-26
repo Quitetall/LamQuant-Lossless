@@ -23,30 +23,36 @@ use lamquant_lml_mcu::error::{LmlError, LmlResult};
 
 use crate::wavelet97::round_i64;
 
-/// own temporal order / max cross-channel taps / reset — written into the header
-/// by the encoder; decode reads them back, so these consts are encode-side.
+/// own temporal order / max cross-channel taps — written into the header by the
+/// encoder; decode reads them back, so these consts are encode-side.
 #[cfg(feature = "encode")]
 const K: usize = 8;
 #[cfg(feature = "encode")]
 const M: usize = 32;
-const LAMBDA: f64 = 0.999;
-#[cfg(feature = "encode")]
-const RESET: usize = 8192;
+
+/// Keep-best `(λ, reset)` adaptation configs — the chosen INDEX is signaled in the
+/// header (1 byte). idx 0 = the prior slow default; idx 1 = faster forgetting +
+/// tighter reset, which tracks non-stationary cross-channel coupling and wins the
+/// non-stationary EEG regime (ma 2/8 → 5/8 wins vs H.BWC). The encoder tries each
+/// and keeps the smallest; the decoder looks up its index. The `f64` consts are
+/// identical on both sides ⇒ deterministic / bit-exact.
+const CONFIGS: &[(f64, usize)] = &[(0.999, 8192), (0.997, 4096)];
 
 /// Variable-order RLS (order = K + #cross-channel taps for the channel).
 struct Rls {
     n: usize,
     w: Vec<f64>,
     p: Vec<Vec<f64>>,
+    lambda: f64,
 }
 
 impl Rls {
-    fn new(n: usize) -> Self {
+    fn new(n: usize, lambda: f64) -> Self {
         let mut p = alloc::vec![alloc::vec![0.0f64; n]; n];
         for i in 0..n {
             p[i][i] = 1.0;
         }
-        Self { n, w: alloc::vec![0.0; n], p }
+        Self { n, w: alloc::vec![0.0; n], p, lambda }
     }
 
     fn predict(&self, reg: &[f64]) -> f64 {
@@ -67,7 +73,7 @@ impl Rls {
             }
             px[i] = s;
         }
-        let mut denom = LAMBDA;
+        let mut denom = self.lambda;
         for j in 0..n {
             denom += reg[j] * px[j];
         }
@@ -76,7 +82,7 @@ impl Rls {
         for i in 0..n {
             self.w[i] += px[i] * inv * e;
         }
-        let ilam = 1.0 / LAMBDA;
+        let ilam = 1.0 / self.lambda;
         for i in 0..n {
             let ki = px[i] * inv;
             for j in 0..n {
@@ -98,19 +104,19 @@ fn regressor(own: &[f64], prior: &[Vec<i64>], refs: &[usize], n: usize) -> Vec<f
     reg
 }
 
+/// Encode under one `(λ, reset)` config (index `cfg`). Header:
+/// `[n_ch u16][t u32][k u8][m u8][cfg u8]`.
 #[cfg(feature = "encode")]
-pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
+fn encode_one(signal: &[Vec<i64>], cfg: usize) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
-    if n_ch == 0 || n_ch > u16::MAX as usize {
-        return Err(LmlError::InvalidHeader("mv_rls n_ch".into()));
-    }
     let t = signal[0].len();
+    let (lambda, reset) = CONFIGS[cfg];
     let mut out = Vec::new();
     out.extend_from_slice(&(n_ch as u16).to_le_bytes());
     out.extend_from_slice(&(t as u32).to_le_bytes());
     out.push(K as u8);
     out.push(M as u8);
-    out.extend_from_slice(&(RESET as u32).to_le_bytes());
+    out.push(cfg as u8);
 
     for c in 0..n_ch {
         if signal[c].len() != t {
@@ -119,12 +125,12 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
         let xref = c.min(M);
         let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
         let order = K + xref;
-        let mut rls = Rls::new(order);
+        let mut rls = Rls::new(order, lambda);
         let mut own = alloc::vec![0.0f64; K];
         let mut res = Vec::with_capacity(t);
         for n in 0..t {
-            if n != 0 && n % RESET == 0 {
-                rls = Rls::new(order);
+            if n != 0 && n % reset == 0 {
+                rls = Rls::new(order, lambda);
             }
             let reg = regressor(&own, signal, &refs, n);
             let pred = rls.predict(&reg);
@@ -142,20 +148,39 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
     Ok(out)
 }
 
+/// Encode keeping the smallest over the `(λ, reset)` config grid (never-worse).
+#[cfg(feature = "encode")]
+pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    if n_ch == 0 || n_ch > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader("mv_rls n_ch".into()));
+    }
+    let mut best: Option<Vec<u8>> = None;
+    for cfg in 0..CONFIGS.len() {
+        if let Ok(b) = encode_one(signal, cfg) {
+            if best.as_ref().map_or(true, |bb| b.len() < bb.len()) {
+                best = Some(b);
+            }
+        }
+    }
+    best.ok_or(LmlError::InvalidHeader("mv_rls: no config encoded".into()))
+}
+
 /// Decode. `no_std`-capable.
 pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
-    if body.len() < 12 {
-        return Err(LmlError::Truncated { expected: 12, actual: body.len(), context: "mv_rls header" });
+    if body.len() < 9 {
+        return Err(LmlError::Truncated { expected: 9, actual: body.len(), context: "mv_rls header" });
     }
     let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
     let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
     let k = body[6] as usize;
     let m = body[7] as usize;
-    let reset = u32::from_le_bytes([body[8], body[9], body[10], body[11]]) as usize;
-    if k == 0 || reset == 0 {
+    let cfg = body[8] as usize;
+    if k == 0 || cfg >= CONFIGS.len() {
         return Err(LmlError::InvalidHeader("mv_rls bad params".into()));
     }
-    let mut pos = 12usize;
+    let (lambda, reset) = CONFIGS[cfg];
+    let mut pos = 9usize;
     let mut out: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for c in 0..n_ch {
         if pos + 4 > body.len() {
@@ -174,12 +199,12 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         let xref = c.min(m);
         let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
         let order = k + xref;
-        let mut rls = Rls::new(order);
+        let mut rls = Rls::new(order, lambda);
         let mut own = alloc::vec![0.0f64; k];
         let mut ch = Vec::with_capacity(t);
         for n in 0..t {
             if n != 0 && n % reset == 0 {
-                rls = Rls::new(order);
+                rls = Rls::new(order, lambda);
             }
             let reg = regressor(&own, &out, &refs, n);
             let pred = rls.predict(&reg);
