@@ -33,6 +33,7 @@ pub mod lmo_lossless;
 pub mod montage;
 pub mod mv_rls;
 pub mod rls;
+pub mod segmentation;
 pub mod scale_cond;
 pub mod tcq;
 pub mod lmo_pcrd97;

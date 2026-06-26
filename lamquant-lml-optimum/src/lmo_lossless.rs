@@ -49,6 +49,10 @@ const CODER_LML: u8 = 0;
 const CODER_RLS: u8 = 1;
 /// Multivariate cross-channel RLS on the raw signal (all channels coded "raw").
 const CODER_MV_RLS: u8 = 2;
+/// Per-channel RLS with change-point segmentation (ADR 0054 Lever C) — resets the
+/// RLS at causal signal-derived regime boundaries in addition to the fixed period.
+/// A SEPARATE mode so the plain `CODER_RLS` wire stays byte-identical. Keep-best.
+const CODER_RLS_SEG: u8 = 3;
 /// feature_bitmask bit 0: cross-channel spatial prediction present. (Written by
 /// the encoder; decode is forward-compatible and does not hard-require the bit.)
 #[cfg(feature = "encode")]
@@ -113,6 +117,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let resid = match coder_mode {
         CODER_LML => lml::decompress(&body[pos..])?,
         CODER_RLS => crate::rls::decode(&body[pos..])?,
+        CODER_RLS_SEG => crate::rls::decode_seg(&body[pos..])?,
         CODER_MV_RLS => crate::mv_rls::decode(&body[pos..])?,
         other => {
             return Err(LmlError::InvalidHeader(alloc::format!(
@@ -405,6 +410,16 @@ pub fn encode_with_geometry(
     // non-stationary high-amplitude EEG where the static best-of-prior collapses.
     if let Ok(mv) = crate::mv_rls::encode(signal) {
         let cand = assemble(&raw_metas, CODER_MV_RLS, &mv);
+        if cand.len() < body.len() {
+            body = cand;
+        }
+    }
+    // Candidate D: per-channel RLS with change-point segmentation (Lever C) — resets
+    // the predictor at signal-derived regime boundaries (seizure onset, artefact),
+    // defeating HHI's fixed IntraPeriod. Never-worse keep-best (seg-off is the plain
+    // CODER_RLS candidate above; this only wins when boundary-resets help).
+    if let Ok(seg) = crate::rls::encode_seg(signal) {
+        let cand = assemble(&raw_metas, CODER_RLS_SEG, &seg);
         if cand.len() < body.len() {
             body = cand;
         }

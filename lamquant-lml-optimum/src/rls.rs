@@ -220,6 +220,89 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     Ok(out)
 }
 
+// ─── Lever C: per-channel RLS with change-point segmentation ────────────────────
+//
+// A SEPARATE coder mode (CODER_RLS_SEG in the container) so the plain CODER_RLS
+// wire stays byte-identical. In addition to the fixed `RESET_PERIOD`, the RLS is
+// reset at causal, signal-derived regime boundaries (see [`crate::segmentation`]).
+// The detector observes the losslessly-exact samples 0..n-1, so the decoder
+// reproduces every boundary with no per-boundary side info.
+
+/// Encode a multichannel signal with per-channel RLS + change-point reset. Wire is
+/// identical to [`encode`]'s (`[n_ch u16][t u32]` then per-channel golomb), the
+/// segmentation-on behavior is carried by the container's coder-mode byte.
+#[cfg(feature = "encode")]
+pub fn encode_seg(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    if n_ch == 0 || n_ch > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader(alloc::format!("rls_seg n_ch={n_ch}")));
+    }
+    let t = signal[0].len();
+    let mut out = Vec::new();
+    out.extend_from_slice(&(n_ch as u16).to_le_bytes());
+    out.extend_from_slice(&(t as u32).to_le_bytes());
+    for ch in signal {
+        if ch.len() != t {
+            return Err(LmlError::InvalidHeader("rls_seg ragged channel".into()));
+        }
+        let mut rls = Rls::new();
+        let mut det = crate::segmentation::ChangePoint::new();
+        let mut cp_next = false;
+        let mut res = Vec::with_capacity(t);
+        for (i, &x) in ch.iter().enumerate() {
+            if i != 0 && (i % RESET_PERIOD == 0 || cp_next) {
+                rls = Rls::new();
+            }
+            res.push(rls.encode_sample(x));
+            cp_next = det.observe(x);
+        }
+        let g = crate::entropy::encode(&res)?;
+        out.extend_from_slice(&(g.len() as u32).to_le_bytes());
+        out.extend_from_slice(&g);
+    }
+    Ok(out)
+}
+
+/// Decode an [`encode_seg`] body. `no_std`-capable (f64 +−×÷ only).
+pub fn decode_seg(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
+    if body.len() < 6 {
+        return Err(LmlError::Truncated { expected: 6, actual: body.len(), context: "rls_seg header" });
+    }
+    let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
+    let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
+    let mut pos = 6usize;
+    let mut out = Vec::with_capacity(n_ch);
+    for _ in 0..n_ch {
+        if pos + 4 > body.len() {
+            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "rls_seg ch len" });
+        }
+        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        pos += 4;
+        if pos + glen > body.len() {
+            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "rls_seg ch data" });
+        }
+        let res = crate::entropy::decode(&body[pos..pos + glen])?;
+        pos += glen;
+        if res.len() != t {
+            return Err(LmlError::InvalidHeader(alloc::format!("rls_seg ch t={} != {t}", res.len())));
+        }
+        let mut rls = Rls::new();
+        let mut det = crate::segmentation::ChangePoint::new();
+        let mut cp_next = false;
+        let mut ch = Vec::with_capacity(t);
+        for (i, &e) in res.iter().enumerate() {
+            if i != 0 && (i % RESET_PERIOD == 0 || cp_next) {
+                rls = Rls::new();
+            }
+            let x = rls.decode_sample(e);
+            cp_next = det.observe(x);
+            ch.push(x);
+        }
+        out.push(ch);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +337,24 @@ mod tests {
         for sig in [vec![vec![0i64; 100]], vec![vec![42i64; 50]], vec![vec![-7i64, 7, -7, 7]]] {
             let body = encode(&sig).unwrap();
             assert_eq!(decode(&body).unwrap(), sig);
+        }
+    }
+
+    /// Lever C: per-channel RLS-with-segmentation round-trips bit-exact, including a
+    /// signal with an abrupt regime change (which trips the change-point detector).
+    #[cfg(feature = "encode")]
+    #[test]
+    fn seg_roundtrip_bit_exact() {
+        // smooth prefix then a high-amplitude burst ⇒ a real change-point.
+        let mut ch: Vec<i64> = (0..3000).map(|i| ((i as f64 * 0.05).sin() * 30.0) as i64).collect();
+        ch.extend((0..3000).map(|i| ((i as f64 * 0.05).sin() * 8000.0) as i64));
+        let sig = vec![ch.clone(), ch.iter().map(|&v| v / 2 + 3).collect()];
+        let body = encode_seg(&sig).unwrap();
+        assert_eq!(decode_seg(&body).unwrap(), sig, "rls_seg must be bit-exact");
+        // stationary + tiny still round-trips
+        for s in [vec![vec![0i64; 100]], vec![vec![5i64, -5, 5, -5]]] {
+            let b = encode_seg(&s).unwrap();
+            assert_eq!(decode_seg(&b).unwrap(), s);
         }
     }
 }
