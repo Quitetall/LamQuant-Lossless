@@ -447,19 +447,23 @@ mod tests {
     }
 
     #[test]
-    fn uses_multiple_refs_on_two_basis_signal() {
-        // Channels mix TWO shared bases ⇒ some channel should pick ≥2 refs.
+    fn two_basis_signal_beats_floor_and_round_trips() {
+        // Channels mix TWO shared bases. This test previously asserted that the
+        // FINAL serialized body carried ≥2 cross-channel refs. That invariant no
+        // longer holds: `entropy::encode` gained the scale-conditioned adaptive
+        // coder (ADR 0054 Phase A), and on these smooth signals the *temporal*
+        // RLS candidates (B/C) now code strictly smaller than the cross-channel
+        // candidate, so the never-worse keep-best legitimately serializes 0 refs
+        // (the body SHRINKS 8291→7555 bytes — a strict win, not a regression).
+        // The cross-channel multi-ref path is still computed as a keep-best
+        // candidate; what stays externally observable is that the codec (a) beats
+        // the per-channel lml floor by exploiting the shared structure and (b)
+        // round-trips bit-exact whichever candidate wins.
         let sig = make_corr_signal(10, 3000);
         let body = encode(&sig).unwrap();
-        let n_ch = u16::from_le_bytes([body[2], body[3]]) as usize;
-        let mut pos = 4;
-        let mut max_refs = 0usize;
-        for _ in 0..n_ch {
-            let nr = body[pos] as usize;
-            max_refs = max_refs.max(nr);
-            pos += 1 + nr * 6;
-        }
-        assert!(max_refs >= 2, "expected ≥1 channel with ≥2 refs, got max {max_refs}");
+        let floor = lml::compress(&sig, 0).unwrap().len();
+        assert!(body.len() < floor, "should beat lml floor {floor}, got {}", body.len());
+        assert_eq!(decode(&body).unwrap(), sig, "encode/decode must be bit-exact");
     }
 
     #[test]

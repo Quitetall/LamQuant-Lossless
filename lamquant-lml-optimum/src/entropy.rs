@@ -19,8 +19,15 @@ use lamquant_lml_mcu::golomb;
 const BLOCK: usize = 256;
 const MODE_SINGLE: u8 = 0;
 const MODE_BLOCK: u8 = 1;
+/// Online scale-conditioned adaptive range coder (`crate::scale_cond`). Wired as
+/// a THIRD keep-smallest candidate: it only appears in the stream when its body
+/// is strictly smaller than both Golomb modes, so existing behavior is a lower
+/// bound — no input can regress, and older streams (which never carry this byte)
+/// still decode unchanged.
+const MODE_SCALE_COND: u8 = 2;
 
-/// Encode a residual, keeping the smaller of single-k and block-adaptive Golomb.
+/// Encode a residual, keeping the smallest of single-k Golomb, block-adaptive
+/// Golomb, and the scale-conditioned adaptive range coder.
 #[cfg(feature = "encode")]
 pub fn encode(res: &[i64]) -> LmlResult<Vec<u8>> {
     let single = golomb::encode_dense(res)?;
@@ -29,7 +36,22 @@ pub fn encode(res: &[i64]) -> LmlResult<Vec<u8>> {
     for chunk in res.chunks(BLOCK) {
         block.extend_from_slice(&golomb::encode_dense(chunk)?);
     }
-    if block.len() < single.len() {
+
+    // Best Golomb candidate so far (mode byte + payload length).
+    let (golomb_mode, golomb_len) =
+        if block.len() < single.len() { (MODE_BLOCK, block.len()) } else { (MODE_SINGLE, single.len()) };
+
+    // Third candidate: the online scale-conditioned coder. Keep it only if its
+    // body is STRICTLY smaller than the best Golomb body (never-worse).
+    let sc = crate::scale_cond::encode(res)?;
+    if sc.len() < golomb_len {
+        let mut out = Vec::with_capacity(1 + sc.len());
+        out.push(MODE_SCALE_COND);
+        out.extend_from_slice(&sc);
+        return Ok(out);
+    }
+
+    if golomb_mode == MODE_BLOCK {
         let mut out = Vec::with_capacity(1 + block.len());
         out.push(MODE_BLOCK);
         out.extend_from_slice(&block);
@@ -67,6 +89,7 @@ pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
             out.truncate(n);
             Ok(out)
         }
+        MODE_SCALE_COND => crate::scale_cond::decode(&data[1..]),
         other => Err(LmlError::InvalidHeader(alloc::format!("entropy unknown mode 0x{other:02X}"))),
     }
 }
