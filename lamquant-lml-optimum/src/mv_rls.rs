@@ -182,6 +182,44 @@ fn encode_one(signal: &[Vec<i64>], cfg: usize, seg: usize) -> LmlResult<Vec<u8>>
     Ok(out)
 }
 
+/// RESEARCH (E-A1): the per-channel MV-RLS residual for one `(cfg, seg)` — the
+/// signal the container actually entropy-codes for the win regime. Used to probe
+/// whether the SHIPPED residual retains structure a (nonlinear) predictor could
+/// exploit, instead of the per-channel RLS residual the order-1 probe wrongly used.
+#[cfg(feature = "encode")]
+pub fn residuals(signal: &[Vec<i64>], cfg: usize, seg: usize) -> Vec<Vec<i64>> {
+    let n_ch = signal.len();
+    let t = signal[0].len();
+    let (lambda, reset, m) = CONFIGS[cfg];
+    let mut out = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        let mut rls = Rls::new(order, lambda);
+        let mut own = alloc::vec![0.0f64; K];
+        let mut det = crate::segmentation::ChangePoint::new();
+        let mut cp_next = false;
+        let mut res = Vec::with_capacity(t);
+        for n in 0..t {
+            if n != 0 && (n % reset == 0 || cp_next) {
+                rls = Rls::new(order, lambda);
+            }
+            let reg = regressor(&own, signal, &refs, n);
+            let pred = rls.predict(&reg);
+            res.push(signal[c][n] - round_i64(pred));
+            rls.adapt(&reg, signal[c][n] as f64, pred);
+            cp_next = seg != 0 && det.observe(signal[c][n]);
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = signal[c][n] as f64;
+        }
+        out.push(res);
+    }
+    out
+}
+
 /// Encode keeping the smallest over the `(λ, reset, m)` config grid × the
 /// segmentation on/off axis (never-worse: `cfg = 0, seg = 0` is always tried and
 /// is byte-identical to the pre-Lever-B/C format).
