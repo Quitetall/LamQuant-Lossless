@@ -149,22 +149,14 @@ cli = [
 ]
 
 # ── Level 3: tui — cli + interactive TUI panels ──────────────────────────────
-# Enables: ratatui widget stack, IPC event bus (lamquant-ops), user history,
+# Enables: shared TUI framework (lamquant-tui), IPC event bus (lamquant-ops),
 #          PCCP YAML registry parsing.
 tui = [
     "cli",
-    "dep:ratatui",
-    "dep:crossterm",
+    "dep:lamquant-tui",
+    "dep:lamquant-config",
     "dep:serde_yaml",
     "dep:lamquant-ops",
-    "dep:lamquant-history",
-    "dep:throbber-widgets-tui",
-    "dep:ratatui-textarea",
-    "dep:tui-big-text",
-    "dep:tui-scrollview",
-    "dep:tui-tree-widget",
-    "dep:tui-widget-list",
-    "dep:tui-piechart",
 ]
 
 # ── security — archive + encryption / signing primitives ────────────────────
@@ -247,11 +239,14 @@ sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 # Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
-# Host feature only; firmware never spawns subprocesses.
+# Host feature only; firmware never spawns subprocesses. Also used by the
+# binary for JSON event emission during encode (not just TUI).
 lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops", optional = true }
-# Shared history.json reader/writer — see specs/history-schema.json.
-# Same `host`-only gate; firmware doesn't read user history.
-lamquant-history = { version = "0.1.0", path = "../../crates/lamquant-history", optional = true }
+# Shared TUI framework — all panels, Panel trait, AppState, Router, theme,
+# layout, config, etc. Replaces the 37-file local tui/ module.
+lamquant-tui = { version = "0.1.0", path = "../../crates/lamquant-tui", optional = true }
+# Shared config crate — comment-preserving TOML with section-per-binary model.
+lamquant-config = { version = "0.1.0", path = "../../crates/lamquant-config", optional = true }
 
 # Host-only deps (gated by `host` feature).
 clap = { version = "4", features = ["derive"], optional = true }
@@ -271,8 +266,6 @@ zstd = { version = "0.13", optional = true }
 globset = { version = "0.4", optional = true }
 tempfile = { version = "3", optional = true }
 filetime = { version = "0.2", optional = true }
-ratatui = { version = "0.30", optional = true }
-crossterm = { version = "0.28", optional = true }
 indicatif = { version = "0.17", optional = true }
 serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -281,15 +274,6 @@ serde = { version = "1", features = ["derive"], optional = true }
 # A+B+C commit — under FDA PCCP, registry interpretation must match the
 # Python gate's PyYAML view byte-for-byte. host-only.
 serde_yaml = { version = "0.9", optional = true }
-
-# TUI widget ecosystem
-throbber-widgets-tui = { version = "0.11", optional = true }
-ratatui-textarea = { version = "0.8", features = ["crossterm"], optional = true }
-tui-big-text = { version = "0.8", optional = true }
-tui-scrollview = { version = "0.6", optional = true }
-tui-tree-widget = { version = "0.24", optional = true }
-tui-widget-list = { version = "0.15", optional = true }
-tui-piechart = { version = "0.3", optional = true }
 
 # Structured logging substrate (Phase 0.8). `tracing` is the abstract
 # event emitter; `tracing-subscriber` configures filtering + format. The
