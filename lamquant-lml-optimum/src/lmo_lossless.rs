@@ -53,6 +53,16 @@ const CODER_MV_RLS: u8 = 2;
 /// RLS at causal signal-derived regime boundaries in addition to the fixed period.
 /// A SEPARATE mode so the plain `CODER_RLS` wire stays byte-identical. Keep-best.
 const CODER_RLS_SEG: u8 = 3;
+/// LSB bit-plane split layer. When the signal's low bit-plane(s) are heavily biased
+/// (e.g. linked-ear-montage LSB ≈ 0.3 bits — prediction would scramble that structure
+/// into a full-entropy residual LSB), strip `s` low bits, code the upper signal via the
+/// normal pipeline and the LSB plane(s) separately. The body starts with `SPLIT_MAGIC`
+/// (≠ `KERNEL_VERSION`) so `decode` dispatches BEFORE the version check; `s=0` (no split)
+/// returns the unchanged base body ⇒ byte-identical, never-worse, goldens unaffected.
+const SPLIT_MAGIC: u8 = 0xFE;
+/// Max low bit-planes the encoder will try to strip.
+#[cfg(feature = "encode")]
+const MAX_SPLIT: usize = 2;
 /// feature_bitmask bit 0: cross-channel spatial prediction present. (Written by
 /// the encoder; decode is forward-compatible and does not hard-require the bit.)
 #[cfg(feature = "encode")]
@@ -77,6 +87,9 @@ fn predict_multi(refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>], k: usize) 
 
 /// Decode an id=2 body back to the signal. `no_std`-capable (integer only).
 pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
+    if body.first() == Some(&SPLIT_MAGIC) {
+        return decode_lsb_split(body);
+    }
     if body.len() < 4 {
         return Err(LmlError::Truncated { expected: 4, actual: body.len(), context: "lmo_lossless header" });
     }
@@ -154,6 +167,48 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             }
         }
         let ch: Vec<i64> = (0..r.len()).map(|k| r[k] + predict_multi(refs, gains, &recon, k)).collect();
+        recon.push(ch);
+    }
+    Ok(recon)
+}
+
+/// Decode an LSB-split body: `[SPLIT_MAGIC][s u8][n_ch u16][t u32][upper_len u32]
+/// [upper_body][ (lsb_len u32)(lsb_body) × n_ch ]`. `no_std`-capable. Reconstructs
+/// `x = (upper << s) | lsb`. Recurses into `decode` for the upper body (which is a
+/// normal body, so no nesting).
+fn decode_lsb_split(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
+    if body.len() < 12 {
+        return Err(LmlError::Truncated { expected: 12, actual: body.len(), context: "lmo_lossless lsb-split header" });
+    }
+    let s = body[1] as usize;
+    if s > 16 {
+        return Err(LmlError::InvalidHeader(alloc::format!("lsb-split shift {s} out of range")));
+    }
+    let n_ch = u16::from_le_bytes([body[2], body[3]]) as usize;
+    let t = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
+    let upper_len = u32::from_le_bytes([body[8], body[9], body[10], body[11]]) as usize;
+    let upend = 12usize.checked_add(upper_len).filter(|&e| e <= body.len())
+        .ok_or(LmlError::Truncated { expected: 12 + upper_len, actual: body.len(), context: "lsb-split upper body" })?;
+    let upper = decode(&body[12..upend])?;
+    if upper.len() != n_ch {
+        return Err(LmlError::InvalidHeader(alloc::format!("lsb-split n_ch {n_ch} != upper {}", upper.len())));
+    }
+    let mut pos = upend;
+    let mut recon: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        if pos + 4 > body.len() {
+            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "lsb-split lsb len" });
+        }
+        let lsb_len = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        pos += 4;
+        let end = pos.checked_add(lsb_len).filter(|&e| e <= body.len())
+            .ok_or(LmlError::Truncated { expected: pos + lsb_len, actual: body.len(), context: "lsb-split lsb body" })?;
+        let lsb = crate::entropy::decode(&body[pos..end])?;
+        pos = end;
+        if lsb.len() != t || upper[c].len() != t {
+            return Err(LmlError::InvalidHeader(alloc::format!("lsb-split ch {c} length mismatch")));
+        }
+        let ch: Vec<i64> = (0..t).map(|n| (upper[c][n] << s) | lsb[n]).collect();
         recon.push(ch);
     }
     Ok(recon)
@@ -275,7 +330,67 @@ fn best_energy_ref(residual: &[i64], chans: &[Vec<i64>], n_prior: usize, chosen:
 /// prediction. Host-only.
 #[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
-    encode_with_geometry(signal, None)
+    let base = encode_with_geometry(signal, None)?;
+    // Keep-best LSB bit-plane split: only when a low bit-plane is biased, and only if
+    // it shrinks the body. s=0 (no biased low bits) returns `base` unchanged ⇒ never-worse.
+    let s = lsb_bias_count(signal);
+    if s == 0 {
+        return Ok(base);
+    }
+    match encode_lsb_split(signal, s) {
+        Ok(split) if split.len() < base.len() => Ok(split),
+        _ => Ok(base),
+    }
+}
+
+/// Number of consecutive low bit-planes biased enough to be worth splitting off
+/// (per-bit entropy < 0.92). 0 ⇒ no split. Cheap pre-check so the (expensive) split
+/// encode is only attempted when a free win is plausible.
+#[cfg(feature = "encode")]
+fn lsb_bias_count(signal: &[Vec<i64>]) -> usize {
+    let mut s = 0usize;
+    while s < MAX_SPLIT {
+        let (mut n0, mut n1) = (0u64, 0u64);
+        for ch in signal {
+            for &x in ch {
+                if (x >> s) & 1 == 0 { n0 += 1; } else { n1 += 1; }
+            }
+        }
+        let n = n0 + n1;
+        if n == 0 { break; }
+        let p1 = n1 as f64 / n as f64;
+        let h = if p1 <= 0.0 || p1 >= 1.0 { 0.0 } else { -(p1 * p1.log2() + (1.0 - p1) * (1.0 - p1).log2()) };
+        if h > 0.92 { break; }
+        s += 1;
+    }
+    s
+}
+
+/// Encode with the low `s` bit-planes split off and coded separately. The upper signal
+/// (`x >> s`) goes through the normal cross-channel + keep-best pipeline; each channel's
+/// LSB plane (`x & ((1<<s)-1)`) is entropy-coded on its own (per-channel so each stream
+/// stays under golomb's u16 length cap). Mirrors `decode_lsb_split`'s framing exactly.
+#[cfg(feature = "encode")]
+fn encode_lsb_split(signal: &[Vec<i64>], s: usize) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    let t = signal[0].len();
+    let mask = (1i64 << s) - 1;
+    let upper: Vec<Vec<i64>> = signal.iter().map(|ch| ch.iter().map(|&x| x >> s).collect()).collect();
+    let upper_body = encode_with_geometry(&upper, None)?;
+    let mut out = Vec::with_capacity(12 + upper_body.len());
+    out.push(SPLIT_MAGIC);
+    out.push(s as u8);
+    out.extend_from_slice(&(n_ch as u16).to_le_bytes());
+    out.extend_from_slice(&(t as u32).to_le_bytes());
+    out.extend_from_slice(&(upper_body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&upper_body);
+    for ch in signal {
+        let lsb_ch: Vec<i64> = ch.iter().map(|&x| x & mask).collect();
+        let b = crate::entropy::encode(&lsb_ch)?;
+        out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        out.extend_from_slice(&b);
+    }
+    Ok(out)
 }
 
 /// Like [`encode`], but a montage `geom` (per-channel electrode coords, encode-only,
@@ -431,6 +546,39 @@ pub fn encode_with_geometry(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn lsb_split_triggers_shrinks_and_roundtrips() {
+        // bit0 always 0 (all even) + structured upper ⇒ scale_cond would code the
+        // dead LSB raw; the split must strip it, shrink, and round-trip bit-exact.
+        let mut signal = vec![vec![0i64; 3000]; 5];
+        for c in 0..5 {
+            for n in 0..3000 {
+                signal[c][n] = (((n as i64 * 37 + c as i64 * 401) % 400) - 200) * 2;
+            }
+        }
+        assert_eq!(lsb_bias_count(&signal), 1, "all-even ⇒ 1 biased low bit");
+        let base = encode_with_geometry(&signal, None).unwrap();
+        let best = encode(&signal).unwrap();
+        assert_eq!(best[0], SPLIT_MAGIC, "split should be selected");
+        assert!(best.len() < base.len(), "split {} must beat base {}", best.len(), base.len());
+        assert_eq!(decode(&best).unwrap(), signal, "split must round-trip bit-exact");
+    }
+
+    #[test]
+    fn lsb_split_absent_when_lsb_clean() {
+        // full-entropy low bits ⇒ no split ⇒ byte-identical to the base (never-worse).
+        let mut signal = vec![vec![0i64; 2000]; 4];
+        let mut st = 0x1234_5678u64;
+        for ch in signal.iter_mut() {
+            for x in ch.iter_mut() {
+                st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+                *x = (st as i64 % 4000) - 2000;
+            }
+        }
+        assert_eq!(lsb_bias_count(&signal), 0, "random low bits ⇒ no split");
+        assert_eq!(encode(&signal).unwrap(), encode_with_geometry(&signal, None).unwrap());
+    }
 
     /// Correlated multichannel signal: each channel is a gain·(shared base) +
     /// per-channel detail, so cross-channel prediction has real redundancy.
