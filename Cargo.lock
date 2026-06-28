@@ -3321,6 +3321,7 @@ name = "lamquant-lml-optimum"
 version = "0.0.1"
 dependencies = [
  "lamquant-lml-mcu",
+ "rayon",
 ]
 
 [[package]]

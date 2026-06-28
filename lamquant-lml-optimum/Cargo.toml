@@ -33,7 +33,7 @@ decode = []
 # enabled in the firmware graph. Pulls the core `archive` feature so the host
 # RD search (`lml::compress_target_bps`, now std-gated after ADR 0058) is
 # reachable for the `Mode::TargetBps` (WP1-WP8) path via `std`.
-encode = ["std", "decode"]
+encode = ["std", "decode", "dep:rayon"]
 
 # Host std (f64, std::io). Implied by `encode`.
 std = ["lamquant-lml-mcu/std"]
@@ -49,3 +49,6 @@ experimental_arithmetic = ["encode", "lamquant-lml-mcu/experimental_arithmetic"]
 [dependencies]
 # The shared Codec seam + the LML codec live in the MCU tier (ADR 0058).
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
+# Host-only (encode feature): rayon parallelizes the keep-best across channels +
+# configs. std-only; never in the no_std/firmware decode graph.
+rayon = { version = "1", optional = true }

@@ -134,6 +134,9 @@ fn regressor(own: &[f64], prior: &[Vec<i64>], refs: &[usize], n: usize) -> Vec<f
 /// The per-config `m` is written to the header `m` byte (decode reads it there,
 /// never indexing CONFIGS for `m`).
 #[cfg(feature = "encode")]
+use rayon::prelude::*;
+
+#[cfg(feature = "encode")]
 fn encode_one(signal: &[Vec<i64>], cfg: usize, seg: usize) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     let t = signal[0].len();
@@ -146,38 +149,51 @@ fn encode_one(signal: &[Vec<i64>], cfg: usize, seg: usize) -> LmlResult<Vec<u8>>
     out.push(m as u8);
     out.push(packed as u8);
 
-    for c in 0..n_ch {
-        if signal[c].len() != t {
-            return Err(LmlError::InvalidHeader("mv_rls ragged".into()));
-        }
-        let xref = c.min(m);
-        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
-        let order = K + xref;
-        let mut rls = Rls::new(order, lambda);
-        let mut own = alloc::vec![0.0f64; K];
-        let mut det = crate::segmentation::ChangePoint::new();
-        let mut cp_next = false;
-        let mut res = Vec::with_capacity(t);
-        for n in 0..t {
-            // `cp_next` was decided from samples 0..n-1 (causal) on the prior
-            // iteration, so the decoder — which has the exact samples 0..n-1 — can
-            // reproduce it BEFORE it needs to predict sample n.
-            if n != 0 && (n % reset == 0 || cp_next) {
-                rls = Rls::new(order, lambda);
+    // Per-channel encode runs across rayon workers — each channel reads `signal`
+    // immutably and produces its own `[len u32][entropy bytes]` chunk; collecting
+    // an ORDERED Vec preserves the serial layout ⇒ byte-identical output. This is
+    // the embarrassingly-parallel keep-best the Optimum tier always should have had
+    // (mirrors the Desktop tier's per-channel rayon path).
+    let chunks: LmlResult<Vec<Vec<u8>>> = (0..n_ch)
+        .into_par_iter()
+        .map(|c| {
+            if signal[c].len() != t {
+                return Err(LmlError::InvalidHeader("mv_rls ragged".into()));
             }
-            let reg = regressor(&own, signal, &refs, n);
-            let pred = rls.predict(&reg);
-            res.push(signal[c][n] - round_i64(pred));
-            rls.adapt(&reg, signal[c][n] as f64, pred);
-            cp_next = seg != 0 && det.observe(signal[c][n]);
-            for q in (1..K).rev() {
-                own[q] = own[q - 1];
+            let xref = c.min(m);
+            let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+            let order = K + xref;
+            let mut rls = Rls::new(order, lambda);
+            let mut own = alloc::vec![0.0f64; K];
+            let mut det = crate::segmentation::ChangePoint::new();
+            let mut cp_next = false;
+            let mut res = Vec::with_capacity(t);
+            for n in 0..t {
+                // `cp_next` was decided from samples 0..n-1 (causal) on the prior
+                // iteration, so the decoder — which has the exact samples 0..n-1 — can
+                // reproduce it BEFORE it needs to predict sample n.
+                if n != 0 && (n % reset == 0 || cp_next) {
+                    rls = Rls::new(order, lambda);
+                }
+                let reg = regressor(&own, signal, &refs, n);
+                let pred = rls.predict(&reg);
+                res.push(signal[c][n] - round_i64(pred));
+                rls.adapt(&reg, signal[c][n] as f64, pred);
+                cp_next = seg != 0 && det.observe(signal[c][n]);
+                for q in (1..K).rev() {
+                    own[q] = own[q - 1];
+                }
+                own[0] = signal[c][n] as f64;
             }
-            own[0] = signal[c][n] as f64;
-        }
-        let g = crate::entropy::encode(&res)?;
-        out.extend_from_slice(&(g.len() as u32).to_le_bytes());
-        out.extend_from_slice(&g);
+            let g = crate::entropy::encode(&res)?;
+            let mut chunk = Vec::with_capacity(4 + g.len());
+            chunk.extend_from_slice(&(g.len() as u32).to_le_bytes());
+            chunk.extend_from_slice(&g);
+            Ok(chunk)
+        })
+        .collect();
+    for chunk in chunks? {
+        out.extend_from_slice(&chunk);
     }
     Ok(out)
 }
@@ -281,12 +297,19 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
     if n_ch == 0 || n_ch > u16::MAX as usize {
         return Err(LmlError::InvalidHeader("mv_rls n_ch".into()));
     }
+    // Run the config search across rayon workers too (nested with the per-channel
+    // parallelism inside `encode_one` — rayon's work-stealing pool flattens
+    // 6 configs × n_ch channels into one task set, saturating all cores). Collect
+    // in SEARCH_SET order, then pick the smallest with first-wins ties (lowest
+    // index) — identical to the serial keep-best ⇒ byte-identical output.
+    let cands: Vec<Vec<u8>> = SEARCH_SET
+        .par_iter()
+        .filter_map(|&(cfg, seg)| encode_one(signal, cfg, seg).ok())
+        .collect();
     let mut best: Option<Vec<u8>> = None;
-    for &(cfg, seg) in SEARCH_SET {
-        if let Ok(b) = encode_one(signal, cfg, seg) {
-            if best.as_ref().map_or(true, |bb| b.len() < bb.len()) {
-                best = Some(b);
-            }
+    for b in cands {
+        if best.as_ref().map_or(true, |bb| b.len() < bb.len()) {
+            best = Some(b);
         }
     }
     best.ok_or(LmlError::InvalidHeader("mv_rls: no config encoded".into()))
