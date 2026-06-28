@@ -264,9 +264,17 @@ pub fn encode_len_params(signal: &[Vec<i64>], lambda: f64, reset: usize, m: usiz
     total
 }
 
-/// Encode keeping the smallest over the `(λ, reset, m)` config grid × the
-/// segmentation on/off axis (never-worse: `cfg = 0, seg = 0` is always tried and
-/// is byte-identical to the pre-Lever-B/C format).
+/// Encode-only search set: the `(cfg, seg)` variants that EVER win the internal keep-best,
+/// measured across the full 40-recording corpus (`grid_winners_broad`). The pruned variants —
+/// the entire `seg=1` axis and `cfg6` — never won, so searching only these is byte-identical
+/// to the full 14-variant grid at ~2.3× lower encode cost. `CONFIGS`/`SEG_VARIANTS` are kept
+/// for DECODE (the packed-config wire byte `cfg + seg·CONFIGS.len()` is unchanged).
+#[cfg(feature = "encode")]
+const SEARCH_SET: &[(usize, usize)] = &[(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)];
+
+/// Encode keeping the smallest over the `SEARCH_SET` (the winning `(cfg, seg)` variants).
+/// Never-worse: `cfg = 0, seg = 0` is always tried and is byte-identical to the
+/// pre-Lever-B/C format.
 #[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
@@ -274,12 +282,10 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
         return Err(LmlError::InvalidHeader("mv_rls n_ch".into()));
     }
     let mut best: Option<Vec<u8>> = None;
-    for seg in 0..SEG_VARIANTS {
-        for cfg in 0..CONFIGS.len() {
-            if let Ok(b) = encode_one(signal, cfg, seg) {
-                if best.as_ref().map_or(true, |bb| b.len() < bb.len()) {
-                    best = Some(b);
-                }
+    for &(cfg, seg) in SEARCH_SET {
+        if let Ok(b) = encode_one(signal, cfg, seg) {
+            if best.as_ref().map_or(true, |bb| b.len() < bb.len()) {
+                best = Some(b);
             }
         }
     }

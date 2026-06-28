@@ -509,32 +509,16 @@ pub fn encode_with_geometry(
     };
     let body_cc = assemble(&metas, cc_coder, &cc_stream);
 
-    // Candidate B: RLS directly on the ORIGINAL signal (NO cross-channel). On
-    // non-stationary signals temporal RLS adaptation beats spatial decorrelation
-    // (the ma 21ch case: cross-channel gets selected but sabotages RLS). All
-    // channels are coded "raw" (no refs), so decode reconstructs them directly.
+    // Candidate C: multivariate cross-channel RLS on the raw signal — wins on hard
+    // non-stationary high-amplitude EEG where the static best-of-prior collapses. The
+    // ONLY raw-signal candidate kept: a 40-recording win-tally found raw per-channel RLS
+    // (old CODER_RLS candidate) and RLS+change-point-segmentation (CODER_RLS_SEG) NEVER win
+    // — they are dominated subsets of cross-channel (above) or MV-RLS (here). Dropped from
+    // the encode search (decode still accepts their wire modes for old streams).
     let raw_metas: Vec<(Vec<usize>, Vec<i32>)> = (0..n_ch).map(|_| (Vec::new(), Vec::new())).collect();
     let mut body = body_cc;
-    if let Ok(raw_rls) = crate::rls::encode(signal) {
-        let cand = assemble(&raw_metas, CODER_RLS, &raw_rls);
-        if cand.len() < body.len() {
-            body = cand;
-        }
-    }
-    // Candidate C: multivariate cross-channel RLS on the raw signal — wins on hard
-    // non-stationary high-amplitude EEG where the static best-of-prior collapses.
     if let Ok(mv) = crate::mv_rls::encode(signal) {
         let cand = assemble(&raw_metas, CODER_MV_RLS, &mv);
-        if cand.len() < body.len() {
-            body = cand;
-        }
-    }
-    // Candidate D: per-channel RLS with change-point segmentation (Lever C) — resets
-    // the predictor at signal-derived regime boundaries (seizure onset, artefact),
-    // defeating HHI's fixed IntraPeriod. Never-worse keep-best (seg-off is the plain
-    // CODER_RLS candidate above; this only wins when boundary-resets help).
-    if let Ok(seg) = crate::rls::encode_seg(signal) {
-        let cand = assemble(&raw_metas, CODER_RLS_SEG, &seg);
         if cand.len() < body.len() {
             body = cand;
         }
