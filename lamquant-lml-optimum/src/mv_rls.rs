@@ -220,6 +220,50 @@ pub fn residuals(signal: &[Vec<i64>], cfg: usize, seg: usize) -> Vec<Vec<i64>> {
     out
 }
 
+/// RESEARCH (TUH tuning): the exact encoded BYTE LENGTH under ARBITRARY
+/// `(λ, reset, m, seg)` params — the search primitive for finding new configs to
+/// ADD to `CONFIGS` (keep-best ⇒ never-worse). Mirrors `encode_one`'s body byte
+/// count exactly (9-byte header + per-channel `4 + entropy(res).len()`), so a param
+/// tuple that wins here is a real container candidate once added to the grid.
+#[cfg(feature = "encode")]
+pub fn encode_len_params(signal: &[Vec<i64>], lambda: f64, reset: usize, m: usize, seg: usize) -> usize {
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    let mut total = 9; // [n_ch u16][t u32][k u8][m u8][packed u8]
+    for c in 0..n_ch {
+        if signal[c].len() != t {
+            return usize::MAX; // ragged — disqualify
+        }
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        let mut rls = Rls::new(order, lambda);
+        let mut own = alloc::vec![0.0f64; K];
+        let mut det = crate::segmentation::ChangePoint::new();
+        let mut cp_next = false;
+        let mut res = Vec::with_capacity(t);
+        for n in 0..t {
+            if n != 0 && (n % reset == 0 || cp_next) {
+                rls = Rls::new(order, lambda);
+            }
+            let reg = regressor(&own, signal, &refs, n);
+            let pred = rls.predict(&reg);
+            res.push(signal[c][n] - round_i64(pred));
+            rls.adapt(&reg, signal[c][n] as f64, pred);
+            cp_next = seg != 0 && det.observe(signal[c][n]);
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = signal[c][n] as f64;
+        }
+        match crate::entropy::encode(&res) {
+            Ok(g) => total += 4 + g.len(),
+            Err(_) => return usize::MAX,
+        }
+    }
+    total
+}
+
 /// Encode keeping the smallest over the `(λ, reset, m)` config grid × the
 /// segmentation on/off axis (never-worse: `cfg = 0, seg = 0` is always tried and
 /// is byte-identical to the pre-Lever-B/C format).
