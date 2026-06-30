@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/lamquant-common",
+    "crates/lamquant-abir",
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
     "lamquant-lml-optimum",
@@ -20,6 +21,7 @@ members = [
 # This workspace is now host codec-only.
 default-members = [
     "crates/lamquant-common",
+    "crates/lamquant-abir",
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
     "lamquant-lml-optimum",

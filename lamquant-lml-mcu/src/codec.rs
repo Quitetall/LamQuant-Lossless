@@ -38,30 +38,14 @@ pub const LML_MAGIC: &[u8; 4] = lml::MAGIC;
 /// registry has exactly one source of truth.
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";
 
-/// Which deterministic wire format a stream is, decided by its leading magic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    /// LML — the cheap-decode integer floor / interchange standard.
-    Lml,
-    /// LMO — the Optimum max-compression-ratio ceiling.
-    Lmo,
-}
-
-/// The functional surface shared by both formats (ADR 0052). Each variant maps
-/// to an LML entry point today; LMO mirrors the same surface with its own
-/// machinery.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mode {
-    /// Bit-exact, MAE = 0 (H.BWC WP0). Integer-only, available everywhere.
-    Lossless,
-    /// Near-lossless: every reconstructed sample within `delta` of the original
-    /// (bounded MAE). Integer-only, available everywhere.
-    BoundedMae(u64),
-    /// Rate-targeted: minimize distortion subject to a bit-per-sample ceiling
-    /// (H.BWC WP1–WP8). Needs the host RD search (`archive` feature); a no_std
-    /// build returns [`CodecError::ModeUnsupported`].
-    TargetBps(f64),
-}
+// `Format` (wire-format discriminator) and `Mode` (codec operation mode) are the
+// two self-contained seam enums; ADR 0069 S2a relocated them DOWN into the
+// foundational `lamquant-abir` crate. Re-exported here so
+// `lamquant_lml_mcu::codec::{Format, Mode}` — and every downstream path
+// (`lamquant_core::codec::*`, `lamquant_lml_optimum::*`, firmware) — stays
+// byte-identical with zero consumer edits. (The `Codec` trait + `CodecError`
+// follow in a later increment, once the error vocabulary's home is decided.)
+pub use lamquant_abir::{Format, Mode};
 
 /// Errors at the codec seam. Wraps the per-format [`LmlError`] and adds the
 /// dispatch-level conditions the two-format design introduces.

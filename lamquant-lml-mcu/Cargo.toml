@@ -46,6 +46,9 @@ experimental_bit_pack = ["std"]
 [dependencies]
 # Shared no_std CRC-32 (re-exported as `lamquant_lml_mcu::crc32`).
 lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", default-features = false }
+# Foundational ABIR crate (ADR 0069 S2a): owns the codec-seam enums Format/Mode
+# (re-exported from `crate::codec`), growing to the typed IR + Codec trait.
+lamquant-abir = { version = "0.1.0", path = "../crates/lamquant-abir", default-features = false }
 # `libm` supplies `log` for the adaptive-LPC AIC/MDL penalty in no_std builds
 # (`f64::ln()` is std-only and would break the firmware path).
 libm = "0.2"
