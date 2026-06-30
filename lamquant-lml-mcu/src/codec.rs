@@ -19,6 +19,7 @@
 //!     the typed "LMO decoder not installed" story of ADR 0052 — a Firmware
 //!     stream is never mis-parsed.
 
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::error::{LmlError, LmlResult};
@@ -38,67 +39,20 @@ pub const LML_MAGIC: &[u8; 4] = lml::MAGIC;
 /// registry has exactly one source of truth.
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";
 
-// `Format` (wire-format discriminator) and `Mode` (codec operation mode) are the
-// two self-contained seam enums; ADR 0069 S2a relocated them DOWN into the
-// foundational `lamquant-abir` crate. Re-exported here so
-// `lamquant_lml_mcu::codec::{Format, Mode}` — and every downstream path
-// (`lamquant_core::codec::*`, `lamquant_lml_optimum::*`, firmware) — stays
-// byte-identical with zero consumer edits. (The `Codec` trait + `CodecError`
-// follow in a later increment, once the error vocabulary's home is decided.)
-pub use lamquant_abir::{Format, Mode};
+// The codec seam — `Format`, `Mode`, the `Codec` trait, and the format-agnostic
+// `CodecError` — lives in the foundational `lamquant-abir` crate (ADR 0069 S2a/L2).
+// Re-exported here so `lamquant_lml_mcu::codec::{Format, Mode, Codec, CodecError}` —
+// and every downstream path (`lamquant_core::codec::*`, `lamquant_lml_optimum::*`,
+// firmware) — keeps resolving with zero consumer edits. L2 decoupled `CodecError`
+// from `LmlError`: the LML/LMO impls map their kernel error into
+// `CodecError::Backend(_)` at the boundary via [`lml_err`].
+pub use lamquant_abir::{Codec, CodecError, Format, Mode};
 
-/// Errors at the codec seam. Wraps the per-format [`LmlError`] and adds the
-/// dispatch-level conditions the two-format design introduces.
-#[derive(Debug)]
-pub enum CodecError {
-    /// An LML-layer error (header, version, payload, I/O).
-    Lml(LmlError),
-    /// The stream is an LMO stream but this build has no LMO decoder linked.
-    /// (The ADR 0052 "module not installed" outcome — never a mis-parse.)
-    OptimumNotInstalled,
-    /// The leading bytes match no known format magic.
-    UnknownFormat,
-    /// The requested [`Mode`] is not compiled into this build (e.g.
-    /// [`Mode::TargetBps`] without the `archive`/host RD search).
-    ModeUnsupported,
-}
-
-impl From<LmlError> for CodecError {
-    fn from(e: LmlError) -> Self {
-        CodecError::Lml(e)
-    }
-}
-
-impl core::fmt::Display for CodecError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            CodecError::Lml(e) => write!(f, "LML codec error: {}", e),
-            CodecError::OptimumNotInstalled => {
-                write!(f, "LMO decoder not installed in this build")
-            }
-            CodecError::UnknownFormat => write!(f, "unknown stream format (no magic match)"),
-            CodecError::ModeUnsupported => {
-                write!(f, "requested codec mode not available in this build")
-            }
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for CodecError {}
-
-/// The shared encode/decode contract. `LmlCodec` implements it here; `LmoCodec`
-/// (in `lamquant-optimum`) implements the same surface for the LMO format. A
-/// universal [`decode`] dispatches on magic to the right one.
-pub trait Codec {
-    /// The wire format this codec produces and reads.
-    fn format(&self) -> Format;
-
-    /// Encode `signal` under `mode` into a self-describing (magic-stamped) stream.
-    fn encode(&self, signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError>;
-
-    /// Decode a stream of this codec's format back into the signal.
-    fn decode(&self, bytes: &[u8]) -> Result<Signal, CodecError>;
+/// Map a kernel [`LmlError`] into the format-agnostic [`CodecError`] at the seam
+/// boundary (ADR 0069 L2: the contract no longer wraps `LmlError`). Uses the
+/// `Display` rendering — human-readable and no_std-clean.
+fn lml_err(e: LmlError) -> CodecError {
+    CodecError::Backend(e.to_string())
 }
 
 /// The LML codec — integer, cheap-decode, no_std. The interchange floor.
@@ -112,15 +66,15 @@ impl Codec for LmlCodec {
 
     fn encode(&self, signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
         match mode {
-            Mode::Lossless => lml::compress(signal, 0).map_err(Into::into),
+            Mode::Lossless => lml::compress(signal, 0).map_err(lml_err),
             Mode::BoundedMae(delta) => {
-                lml::compress_bounded_mae(signal, delta, lpc::LpcMode::default()).map_err(Into::into)
+                lml::compress_bounded_mae(signal, delta, lpc::LpcMode::default()).map_err(lml_err)
             }
             Mode::TargetBps(bps) => {
                 #[cfg(feature = "std")]
                 {
                     lml::compress_target_bps(signal, bps, lpc::LpcMode::default())
-                        .map_err(Into::into)
+                        .map_err(lml_err)
                 }
                 #[cfg(not(feature = "std"))]
                 {
@@ -132,7 +86,7 @@ impl Codec for LmlCodec {
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Signal, CodecError> {
-        lml::decompress(bytes).map_err(Into::into)
+        lml::decompress(bytes).map_err(lml_err)
     }
 }
 
@@ -168,7 +122,7 @@ pub fn peek_format(bytes: &[u8]) -> Option<Format> {
 /// * unknown magic → [`CodecError::UnknownFormat`].
 pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
     match peek_format(bytes) {
-        Some(Format::Lml) => lml::decompress(bytes).map_err(Into::into),
+        Some(Format::Lml) => lml::decompress(bytes).map_err(lml_err),
         Some(Format::Lmo) => Err(CodecError::OptimumNotInstalled),
         None => Err(CodecError::UnknownFormat),
     }
@@ -177,14 +131,26 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
 /// Convenience: encode via the LML codec (the always-available floor).
 /// LMO encode lives in `lamquant-optimum` behind its `encode` feature.
 pub fn encode_lml(signal: &[Vec<i64>], mode: Mode) -> LmlResult<Vec<u8>> {
-    match LmlCodec.encode(signal, mode) {
-        Ok(v) => Ok(v),
-        Err(CodecError::Lml(e)) => Err(e),
-        // Mode unsupported in this build surfaces as an LML header error so the
-        // LmlResult signature stays honest without leaking the dispatch enum.
-        Err(_) => Err(LmlError::InvalidHeader(alloc::string::String::from(
-            "requested mode unsupported in this build",
-        ))),
+    // ADR 0069 L2: call the LML encode path DIRECTLY so it returns the native
+    // `LmlError` — no round-trip through the (now format-agnostic) `CodecError`.
+    match mode {
+        Mode::Lossless => lml::compress(signal, 0),
+        Mode::BoundedMae(delta) => {
+            lml::compress_bounded_mae(signal, delta, lpc::LpcMode::default())
+        }
+        Mode::TargetBps(bps) => {
+            #[cfg(feature = "std")]
+            {
+                lml::compress_target_bps(signal, bps, lpc::LpcMode::default())
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                let _ = bps;
+                Err(LmlError::InvalidHeader(alloc::string::String::from(
+                    "requested mode unsupported in this build",
+                )))
+            }
+        }
     }
 }
 

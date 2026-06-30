@@ -29,7 +29,6 @@
 use alloc::vec::Vec;
 
 use lamquant_lml_mcu::codec::{Codec, CodecError, Format, Mode, Signal, LMO_MAGIC};
-use lamquant_lml_mcu::error::LmlError;
 use lamquant_lml_mcu::lml;
 
 /// LMO container version. Bumped only on a wire-format change. v2 adds the
@@ -114,6 +113,12 @@ fn prd(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
 ///   9/7 stream is never worse than the 5/3 floor.
 /// - **`Lossless` / `BoundedMae`:** the LML integer floor (WP0 bit-exact / δ-bound
 ///   inherited; 9/7 is float ⇒ not bit-exact, so it never applies here).
+/// Map any backend error into the format-agnostic `CodecError` (ADR 0069 L2: the
+/// codec contract no longer wraps `LmlError`; the typed error stays on the LML path).
+fn to_backend<E: core::fmt::Display>(e: E) -> CodecError {
+    CodecError::Backend(alloc::string::ToString::to_string(&e))
+}
+
 #[cfg(feature = "encode")]
 pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
     use lamquant_lml_mcu::lpc::LpcMode;
@@ -121,12 +126,12 @@ pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
     let (transform_id, inner) = match mode {
         Mode::TargetBps(bps) => {
             // Candidate 1: the integer 5/3 floor (always valid).
-            let i53 = lml::compress_target_bps_pcrd(signal, bps, LpcMode::default())?;
+            let i53 = lml::compress_target_bps_pcrd(signal, bps, LpcMode::default()).map_err(to_backend)?;
             // Candidate 2: the float 9/7 ratio attack (lossy-only). Auto-pick the
             // lower-PRD reconstruction at the matched rate ceiling.
             match crate::lmo_pcrd97::encode_target_bps_97(signal, bps, LpcMode::default()) {
                 Ok(b97) => {
-                    let prd53 = prd(signal, &lml::decompress(&i53)?);
+                    let prd53 = prd(signal, &lml::decompress(&i53).map_err(to_backend)?);
                     let pick_97 = match crate::lmo_pcrd97::decode_97(&b97) {
                         Ok(r97) => prd(signal, &r97) < prd53,
                         Err(_) => false,
@@ -176,18 +181,20 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
     let version = bytes[4];
     if version != LMO_VERSION {
         // No back-compat history yet; an unknown version is not decodable here.
-        return Err(CodecError::Lml(LmlError::UnsupportedVersion(version)));
+        return Err(CodecError::Backend(alloc::format!(
+            "unsupported LMO container version: {version}"
+        )));
     }
     // bytes[5] = mode_tag, informational. bytes[6] = transform_id routes the body.
     let transform_id = bytes[6];
     let inner = &bytes[LMO_HEADER_LEN..];
     match transform_id {
-        TRANSFORM_LML_53 => lml::decompress(inner).map_err(Into::into),
-        TRANSFORM_LMO_97 => crate::lmo_pcrd97::decode_97(inner).map_err(Into::into),
-        TRANSFORM_OPTIMUM_LOSSLESS => crate::lmo_lossless::decode(inner).map_err(Into::into),
-        other => Err(CodecError::Lml(LmlError::InvalidHeader(alloc::format!(
+        TRANSFORM_LML_53 => lml::decompress(inner).map_err(to_backend),
+        TRANSFORM_LMO_97 => crate::lmo_pcrd97::decode_97(inner).map_err(to_backend),
+        TRANSFORM_OPTIMUM_LOSSLESS => crate::lmo_lossless::decode(inner).map_err(to_backend),
+        other => Err(CodecError::Backend(alloc::format!(
             "unknown LMO transform_id 0x{other:02X}"
-        )))),
+        ))),
     }
 }
 
@@ -199,7 +206,7 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
 /// `lamquant_lml_mcu::codec::decode` which returns *not installed* for LMO.
 pub fn decode_any(bytes: &[u8]) -> Result<Signal, CodecError> {
     match lamquant_lml_mcu::codec::peek_format(bytes) {
-        Some(Format::Lml) => lml::decompress(bytes).map_err(Into::into),
+        Some(Format::Lml) => lml::decompress(bytes).map_err(to_backend),
         Some(Format::Lmo) => decode(bytes),
         None => Err(CodecError::UnknownFormat),
     }
