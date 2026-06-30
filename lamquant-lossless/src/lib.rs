@@ -101,6 +101,10 @@ pub mod io;
 pub mod lma;
 #[cfg(feature = "archive")]
 pub mod offset_table;
+// NWB/HDF5 integer-signal reader → LML ingest (ADR 0051 Track 3). Host-only:
+// the `nwb` feature gates in libhdf5 via hdf5-metno; never in the no_std build.
+#[cfg(feature = "nwb")]
+pub mod nwb;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
 #[cfg(feature = "archive")]
 pub use lamquant_common::paths;

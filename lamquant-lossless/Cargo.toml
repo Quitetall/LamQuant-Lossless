@@ -348,7 +348,9 @@ arrow-schema = { version = "53", default-features = false, optional = true }
 # Phase 5.6 — HDF5 export. Static-link the system libhdf5 dev
 # headers via the `static` feature when available.
 hdf5-metno = { version = "0.12", optional = true }
-ndarray = { version = "0.16", optional = true }
+# Aligned to 0.17 to match hdf5-metno 0.12's ndarray (avoids a two-version
+# tree that breaks DatasetBuilder::with_data). Only pulled in by `hdf5`.
+ndarray = { version = "0.17", optional = true }
 # Phase 4.7 — DICOM Waveform parsing (feature `dicom`).
 dicom-object = { version = "0.8", optional = true }
 dicom-core = { version = "0.8", optional = true }

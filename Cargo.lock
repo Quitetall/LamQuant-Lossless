@@ -3271,7 +3271,7 @@ dependencies = [
  "lamquant-ops",
  "lamquant-tui",
  "loom",
- "ndarray 0.16.1",
+ "ndarray 0.17.2",
  "notify",
  "parquet",
  "proptest",
