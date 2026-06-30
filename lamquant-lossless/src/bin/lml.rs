@@ -445,6 +445,14 @@ SOURCE FORMATS:
         #[arg(long = "lossless-mode", value_name = "MODE", value_parser = ["mcu", "basestation"])]
         lossless_mode: Option<String>,
     },
+    /// Losslessly shrink (or restore) a native NWB/HDF5 file in place using the
+    /// LML H5Z filter — only integer datasets are recoded; structure, metadata,
+    /// compound electrode tables, and object references are preserved by HDF5.
+    /// (Built with `--features nwb`; drives the system `h5repack`.)
+    Nwb {
+        #[command(subcommand)]
+        cmd: NwbCmd,
+    },
     /// Compare two LML files sample-by-sample
     Diff {
         /// First LML file
@@ -1010,6 +1018,37 @@ EXAMPLES:
 }
 
 #[derive(Subcommand)]
+enum NwbCmd {
+    /// Pack: rewrite a native NWB/HDF5 with its integer datasets LML-compressed.
+    /// Output stays a valid NWB/HDF5, readable anywhere the filter is present.
+    Pack {
+        /// Source .nwb / .h5 / .hdf5
+        input: PathBuf,
+        /// Destination (native NWB/HDF5, smaller)
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Path to liblamquant_lml_h5filter.so (else $LAMQUANT_H5FILTER, else
+        /// searched beside the lml binary and target/release).
+        #[arg(long = "plugin-so", value_name = "PATH")]
+        plugin_so: Option<PathBuf>,
+        /// Skip the lossless round-trip verification (on by default).
+        #[arg(long = "no-verify")]
+        no_verify: bool,
+    },
+    /// Unpack: rewrite an LML-filtered NWB/HDF5 back to a plain (unfiltered) one.
+    Unpack {
+        /// Source LML-filtered .nwb / .h5
+        input: PathBuf,
+        /// Destination (plain native NWB/HDF5)
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Path to the filter .so (needed to DECODE); see `pack --plugin-so`.
+        #[arg(long = "plugin-so", value_name = "PATH")]
+        plugin_so: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AuditAction {
     /// Append a new entry to the audit log.
     Append {
@@ -1359,6 +1398,10 @@ fn op_id_of(cmd: &Commands) -> &'static str {
             "raw" => "export_raw",
             _ => "export_csv",
         },
+        Commands::Nwb { cmd } => match cmd {
+            NwbCmd::Pack { .. } => "nwb_pack",
+            NwbCmd::Unpack { .. } => "nwb_unpack",
+        },
         Commands::Diff { .. } => "diff",
         Commands::Recover { .. } => "recover",
         Commands::Bench { .. } => "bench",
@@ -1671,6 +1714,7 @@ fn main() {
                 format,
                 lossless_mode,
             } => cmd_export(&input, output.as_deref(), &format, lossless_mode.as_deref()),
+            Commands::Nwb { cmd } => cmd_nwb(cmd),
             Commands::Diff { a, b } => cmd_diff(&a, &b),
             Commands::Recover { input, output } => cmd_recover(&input, &output),
             Commands::Bench { input } => cmd_bench(&input),
@@ -7004,6 +7048,190 @@ fn write_nwb(
         .new_dataset_builder()
         .with_data(b"lml")
         .create("source_codec")?;
+    Ok(())
+}
+
+// ── NWB/HDF5 pack/unpack (ADR 0051 Track 3) ──
+//
+// Drives the system `h5repack` with the LML H5Z filter. h5repack is used
+// deliberately: an in-process repack cannot safely shrink a real NWB — HDF5
+// does not reclaim freed space in place, and rebuilding a file piecemeal breaks
+// object references (e.g. an ElectricalSeries' electrodes DynamicTableRegion).
+// h5repack does the compact rewrite + reference fix-up correctly; `lml nwb`
+// just makes it a one-liner (locates the filter, sets the plugin path, and
+// verifies losslessness via our own reader). Filter id matches the plugin.
+#[cfg(feature = "nwb")]
+const FILTER_SO: &str = "liblamquant_lml_h5filter.so";
+#[cfg(feature = "nwb")]
+const FILTER_UD: &str = "32200";
+/// Value-returning result (the bin's `R` alias is fixed to `()`).
+#[cfg(feature = "nwb")]
+type Rt<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[cfg(feature = "nwb")]
+fn cmd_nwb(cmd: NwbCmd) -> R {
+    match cmd {
+        NwbCmd::Pack {
+            input,
+            output,
+            plugin_so,
+            no_verify,
+        } => cmd_nwb_pack(&input, &output, plugin_so.as_deref(), !no_verify),
+        NwbCmd::Unpack {
+            input,
+            output,
+            plugin_so,
+        } => cmd_nwb_unpack(&input, &output, plugin_so.as_deref()),
+    }
+}
+
+#[cfg(not(feature = "nwb"))]
+fn cmd_nwb(_cmd: NwbCmd) -> R {
+    Err("`lml nwb` requires building lml with `--features nwb` (pulls in libhdf5). \
+         The default `host` build doesn't link HDF5."
+        .into())
+}
+
+/// Resolve the directory containing `liblamquant_lml_h5filter.so` for
+/// `HDF5_PLUGIN_PATH`, trying (in order): an explicit path, `$LAMQUANT_H5FILTER`,
+/// next to the running `lml` binary, then common dev build dirs.
+#[cfg(feature = "nwb")]
+fn filter_plugin_dir(explicit: Option<&Path>) -> Rt<PathBuf> {
+    fn so_dir(p: &Path) -> Option<PathBuf> {
+        let cand = if p.is_dir() { p.join(FILTER_SO) } else { p.to_path_buf() };
+        if cand.is_file() {
+            cand.parent().map(|d| d.to_path_buf())
+        } else {
+            None
+        }
+    }
+    let mut tried = Vec::new();
+    let mut try_one = |p: &Path| -> Option<PathBuf> {
+        match so_dir(p) {
+            Some(d) => Some(d),
+            None => {
+                tried.push(p.display().to_string());
+                None
+            }
+        }
+    };
+    if let Some(p) = explicit {
+        if let Some(d) = try_one(p) {
+            return Ok(d);
+        }
+    }
+    if let Ok(env) = std::env::var("LAMQUANT_H5FILTER") {
+        if let Some(d) = try_one(Path::new(&env)) {
+            return Ok(d);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(d) = try_one(dir) {
+                return Ok(d);
+            }
+        }
+    }
+    for p in ["target/release", "target/debug", "codec-lossless/target/release"] {
+        if let Some(d) = try_one(Path::new(p)) {
+            return Ok(d);
+        }
+    }
+    Err(format!(
+        "could not locate {FILTER_SO}. Build it with \
+         `cargo build -p lamquant-lml-h5filter --release`, then pass \
+         `--plugin-so <path>` or set $LAMQUANT_H5FILTER. Tried: {}",
+        tried.join(", ")
+    )
+    .into())
+}
+
+#[cfg(feature = "nwb")]
+fn run_h5repack(args: &[&str], plugin_dir: &Path) -> R {
+    let status = std::process::Command::new("h5repack")
+        .args(args)
+        .env("HDF5_PLUGIN_PATH", plugin_dir)
+        .status()
+        .map_err(|e| {
+            format!("failed to launch h5repack ({e}). Install the HDF5 CLI tools (libhdf5).")
+        })?;
+    if !status.success() {
+        return Err(format!("h5repack exited with {status}").into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "nwb")]
+fn path_str(p: &Path) -> Rt<&str> {
+    p.to_str()
+        .ok_or_else(|| format!("non-UTF-8 path: {}", p.display()).into())
+}
+
+#[cfg(feature = "nwb")]
+fn cmd_nwb_pack(input: &Path, output: &Path, plugin_so: Option<&Path>, verify: bool) -> R {
+    let dir = filter_plugin_dir(plugin_so)?;
+    let ud = format!("UD={FILTER_UD},0,0");
+    run_h5repack(&["-f", &ud, path_str(input)?, path_str(output)?], &dir)?;
+
+    let si = std::fs::metadata(input)?.len();
+    let so = std::fs::metadata(output)?.len();
+    let ratio = if so > 0 { si as f64 / so as f64 } else { 0.0 };
+    println!(
+        "Packed {} -> {}  ({} -> {} bytes, {ratio:.3}x)",
+        input.display(),
+        output.display(),
+        si,
+        so
+    );
+
+    if verify {
+        // Decode path needs the filter discoverable in-process.
+        std::env::set_var("HDF5_PLUGIN_PATH", &dir);
+        verify_int_datasets_match(input, output)?;
+        println!("Verified: lossless (every integer dataset round-trips identically).");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "nwb")]
+fn cmd_nwb_unpack(input: &Path, output: &Path, plugin_so: Option<&Path>) -> R {
+    let dir = filter_plugin_dir(plugin_so)?;
+    // `-f NONE` strips all filters; HDF5_PLUGIN_PATH lets h5repack DECODE the
+    // LML-filtered source.
+    run_h5repack(&["-f", "NONE", path_str(input)?, path_str(output)?], &dir)?;
+    println!(
+        "Unpacked {} -> {} (plain native NWB/HDF5)",
+        input.display(),
+        output.display()
+    );
+    Ok(())
+}
+
+/// Read both files' integer datasets through our reader and assert they match
+/// (same paths, same values). The strong lossless gate for pack.
+#[cfg(feature = "nwb")]
+fn verify_int_datasets_match(a: &Path, b: &Path) -> R {
+    use std::collections::BTreeMap;
+    let to_map = |p: &Path| -> Rt<BTreeMap<String, Vec<Vec<i64>>>> {
+        Ok(lamquant_core::nwb::read_int_signals(p)?
+            .into_iter()
+            .map(|s| (s.h5_path, s.signal))
+            .collect())
+    };
+    let (ma, mb) = (to_map(a)?, to_map(b)?);
+    if ma.keys().ne(mb.keys()) {
+        return Err(format!(
+            "integer-dataset set differs after pack: {:?} vs {:?}",
+            ma.keys().collect::<Vec<_>>(),
+            mb.keys().collect::<Vec<_>>()
+        )
+        .into());
+    }
+    for (k, va) in &ma {
+        if mb.get(k) != Some(va) {
+            return Err(format!("dataset {k} differs after pack — NOT lossless").into());
+        }
+    }
     Ok(())
 }
 

@@ -22,7 +22,22 @@ cargo build -p lamquant-lml-h5filter --release
 The `.so` carries **no `DT_NEEDED` on libhdf5** — HDF5 symbols resolve from the
 process that loads it, so it works under whatever libhdf5 the host provides.
 
-## Use it (system HDF5 tools — the deployable path)
+## Use it (one command — `lml nwb`)
+
+Build `lml` with `--features nwb` and let it drive everything (locates this
+plugin, runs the repack, verifies losslessness via the LML reader):
+
+```sh
+lml nwb pack    recording.nwb -o recording.lml.nwb   # shrink (self-verifies)
+lml nwb unpack  recording.lml.nwb -o plain.nwb        # restore plain NWB
+# --plugin-so <path> or $LAMQUANT_H5FILTER if the .so isn't auto-found.
+```
+
+`pack` prints the ratio and confirms every integer dataset round-trips
+identically before exiting. Example: a 3000×16 int32 ElectricalSeries packs
+4.9× and verifies lossless.
+
+## Use it (system HDF5 tools — the underlying path)
 
 ```sh
 export HDF5_PLUGIN_PATH=/path/to/target/release
