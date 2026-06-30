@@ -16,8 +16,10 @@
 //! item), so the ingest caller stores those byte-exact instead of through LML.
 
 use crate::error::{LmlError, LmlResult};
+use crate::source::{SidecarBlob, SignalBundle, SourceMetadata};
 use hdf5_metno::types::{IntSize, TypeDescriptor};
 use hdf5_metno::{Dataset, File, Group};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// One integer time-series dataset extracted from an HDF5/NWB file, in the
@@ -166,4 +168,193 @@ pub fn read_int_signals(path: &Path) -> LmlResult<Vec<H5IntSignal>> {
         }
     }
     Ok(out)
+}
+
+// ── Zero-skeleton NWB ⇄ SignalBundle (ADR 0051 Track 3, Phase B) ──────────────
+//
+// Ingest an NWB/HDF5 into the codec's `SignalBundle` IR without a fragile
+// structural transcoder. The trick: the bundle's `signal` carries the integer
+// datasets (→ LML); a sidecar carries the original file with those datasets
+// **zeroed** (a "skeleton"). Zeros compress to ~nothing, so the skeleton adds
+// little, yet it is a real HDF5 file — every group, attribute, float/compound
+// dataset, and object reference survives untouched. Reconstruction writes the
+// LML-decoded values back into the skeleton's (zeroed) datasets. The result is
+// data-identical to the original, with no structural modelling and no
+// double-storage of the signal.
+
+/// Sidecar key: the original HDF5 with its integer datasets zeroed.
+const SKEL_KEY: &str = "nwb_skeleton";
+/// Sidecar key: JSON `[NwbSlot]` describing how to split `signal` back into the
+/// skeleton's integer datasets.
+const SLOTS_KEY: &str = "nwb_slots";
+
+/// One integer dataset's placement: where it lives in the skeleton and which
+/// span of `SignalBundle.signal` channels reconstructs it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NwbSlot {
+    h5_path: String,
+    int_bytes: u8,
+    signed: bool,
+    orig_shape: Vec<usize>,
+    time_major: bool,
+    /// First channel index in `SignalBundle.signal` for this dataset.
+    first_ch: usize,
+    /// Number of channels this dataset contributes.
+    n_ch: usize,
+}
+
+/// Write `flat` (i64, row-major over the dataset's dims) into `ds`, narrowed to
+/// the dataset's on-disk integer type. Two's-complement low bytes are identical
+/// for signed/unsigned, so `as` narrowing is exact for values that fit.
+fn write_flat_i64(ds: &Dataset, int_bytes: u8, signed: bool, flat: &[i64]) -> LmlResult<()> {
+    macro_rules! w {
+        ($t:ty) => {{
+            let v: Vec<$t> = flat.iter().map(|&x| x as $t).collect();
+            h5(ds.write_raw(&v), "write_raw")?;
+        }};
+    }
+    match (int_bytes, signed) {
+        (1, true) => w!(i8),
+        (2, true) => w!(i16),
+        (4, true) => w!(i32),
+        (8, true) => w!(i64),
+        (1, false) => w!(u8),
+        (2, false) => w!(u16),
+        (4, false) => w!(u32),
+        (8, false) => w!(u64),
+        _ => return Err(LmlError::InvalidHeader(format!("unsupported int width {int_bytes}"))),
+    }
+    Ok(())
+}
+
+/// Channel-major `[n_ch][t]` → flat row-major over `shape` (the dataset's
+/// storage order), matching `write_raw`.
+fn flatten_slot(chs: &[Vec<i64>], shape: &[usize], time_major: bool) -> Vec<i64> {
+    if shape.len() == 1 {
+        return chs.first().cloned().unwrap_or_default();
+    }
+    let (t, c) = (shape[0], shape[1]);
+    let mut flat = Vec::with_capacity(t * c);
+    if time_major {
+        // dataset is (T, C): flat[t*C + c] = chs[c][t]
+        for ti in 0..t {
+            for ch in chs.iter().take(c) {
+                flat.push(ch[ti]);
+            }
+        }
+    } else {
+        for ch in chs.iter().take(c) {
+            flat.extend_from_slice(&ch[..t]);
+        }
+    }
+    flat
+}
+
+/// Read an HDF5/NWB file into a [`SignalBundle`]: integer datasets become
+/// `signal` (for LML), and a zeroed copy of the whole file plus a slot map go
+/// into the sidecar (see module note). The original is never mutated.
+///
+/// Note: the bundle may be *ragged* (integer datasets of differing length), so
+/// callers must NOT assume `SignalBundle::validate`'s equal-length invariant.
+pub fn read_bundle(path: &Path) -> LmlResult<SignalBundle> {
+    let sigs = read_int_signals(path)?;
+    if sigs.is_empty() {
+        return Err(LmlError::InvalidHeader(
+            "no little-endian integer datasets found to compress".into(),
+        ));
+    }
+
+    let mut signal: Vec<Vec<i64>> = Vec::new();
+    let mut slots: Vec<NwbSlot> = Vec::new();
+    for s in sigs {
+        let first_ch = signal.len();
+        let n_ch = s.signal.len();
+        slots.push(NwbSlot {
+            h5_path: s.h5_path,
+            int_bytes: s.int_bytes,
+            signed: s.signed,
+            orig_shape: s.orig_shape,
+            time_major: s.time_major,
+            first_ch,
+            n_ch,
+        });
+        signal.extend(s.signal);
+    }
+
+    // Build the zeroed skeleton: copy the file, overwrite each integer dataset
+    // with zeros, read the bytes back. The temp file is removed on drop.
+    let skel = tempfile::Builder::new()
+        .prefix("lml_nwb_skel_")
+        .suffix(".h5")
+        .tempfile()
+        .map_err(LmlError::Io)?;
+    std::fs::copy(path, skel.path()).map_err(LmlError::Io)?;
+    {
+        let f = h5(File::open_rw(skel.path()), "open_rw skeleton")?;
+        for slot in &slots {
+            let ds = h5(f.dataset(&slot.h5_path), "skeleton dataset")?;
+            let n: usize = slot.orig_shape.iter().product();
+            write_flat_i64(&ds, slot.int_bytes, slot.signed, &vec![0i64; n])?;
+        }
+    }
+    let skel_bytes = std::fs::read(skel.path()).map_err(LmlError::Io)?;
+
+    let n = signal.len();
+    let slots_json = serde_json::to_vec(&slots)
+        .map_err(|e| LmlError::InvalidHeader(format!("slot encode: {e}")))?;
+    Ok(SignalBundle {
+        signal,
+        sample_rate: 0.0,
+        channels: (0..n).map(|i| format!("ch{i}")).collect(),
+        phys_min: vec![0.0; n],
+        phys_max: vec![0.0; n],
+        duration_s: 0.0,
+        metadata: SourceMetadata {
+            source_file: path.display().to_string(),
+            format: "NWB".into(),
+            patient_id: String::new(),
+            recording_info: String::new(),
+            startdate: String::new(),
+            phys_dim: String::new(),
+        },
+        sidecar: vec![
+            SidecarBlob { key: SKEL_KEY.into(), bytes: skel_bytes, aux: None },
+            SidecarBlob { key: SLOTS_KEY.into(), bytes: slots_json, aux: None },
+        ],
+    })
+}
+
+/// Reconstruct an HDF5/NWB file at `out` from a [`SignalBundle`] produced by
+/// [`read_bundle`]: write the skeleton, then refill each integer dataset with
+/// its `signal` channels. Data-identical to the original (HDF5 byte layout may
+/// differ, as HDF5 permits).
+pub fn write_bundle(bundle: &SignalBundle, out: &Path) -> LmlResult<()> {
+    let skel = bundle
+        .sidecar_first(SKEL_KEY)
+        .ok_or_else(|| LmlError::InvalidHeader("bundle missing nwb_skeleton sidecar".into()))?;
+    let slots_blob = bundle
+        .sidecar_first(SLOTS_KEY)
+        .ok_or_else(|| LmlError::InvalidHeader("bundle missing nwb_slots sidecar".into()))?;
+    let slots: Vec<NwbSlot> = serde_json::from_slice(&slots_blob.bytes)
+        .map_err(|e| LmlError::InvalidHeader(format!("slot decode: {e}")))?;
+
+    std::fs::write(out, &skel.bytes).map_err(LmlError::Io)?;
+    let f = h5(File::open_rw(out), "open_rw output")?;
+    for slot in &slots {
+        let end = slot.first_ch + slot.n_ch;
+        if end > bundle.signal.len() {
+            return Err(LmlError::InvalidHeader(format!(
+                "slot {} channel span {}..{} exceeds signal ({})",
+                slot.h5_path,
+                slot.first_ch,
+                end,
+                bundle.signal.len()
+            )));
+        }
+        let chs = &bundle.signal[slot.first_ch..end];
+        let flat = flatten_slot(chs, &slot.orig_shape, slot.time_major);
+        let ds = h5(f.dataset(&slot.h5_path), "output dataset")?;
+        write_flat_i64(&ds, slot.int_bytes, slot.signed, &flat)?;
+    }
+    Ok(())
 }

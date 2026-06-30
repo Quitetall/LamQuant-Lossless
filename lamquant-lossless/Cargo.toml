@@ -186,7 +186,8 @@ keyring = ["host", "dep:keyring"]
 parquet = ["host", "dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
 # Phase 5.6 — HDF5 export. Requires libhdf5 system headers.
 hdf5 = ["host", "dep:hdf5-metno", "dep:ndarray"]
-nwb = ["hdf5"]
+# `archive` brings in the SignalBundle IR + LMA container the NWB ingest targets.
+nwb = ["hdf5", "archive"]
 # Phase 4.7 — DICOM Waveform read. Pure-Rust, no system deps.
 dicom = ["archive", "dep:dicom-object", "dep:dicom-core"]
 # Phase 6.2/6.3/6.7 — S3 read/write/ETag via aws-sdk-s3.
