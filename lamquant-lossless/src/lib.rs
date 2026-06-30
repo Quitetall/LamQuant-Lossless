@@ -105,6 +105,10 @@ pub mod offset_table;
 // the `nwb` feature gates in libhdf5 via hdf5-metno; never in the no_std build.
 #[cfg(feature = "nwb")]
 pub mod nwb;
+// Textual biosignal-IR form (ADR 0069) — the golden/debug serialization of the
+// SignalBundle IR. Needs the bundle (archive feature).
+#[cfg(feature = "archive")]
+pub mod ir;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
 #[cfg(feature = "archive")]
 pub use lamquant_common::paths;
