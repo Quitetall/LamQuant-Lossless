@@ -7,6 +7,11 @@ members = [
     "lamquant-lml-optimum",
     "lamquant-lossless",
     "lamquant-py",
+    # HDF5 H5Z filter cdylib (ADR 0051 Track 3). In `members` so it shares the
+    # lock, but kept OUT of `default-members` below: it links system libhdf5,
+    # so a bare `cargo build` must not pull it in. Build it explicitly with
+    # `cargo build -p lamquant-lml-h5filter --release`.
+    "lamquant-lml-h5filter",
 ]
 # Firmware + weights moved to the LamQuant-Firmware submodule (ADR 0026
 # phase B.1, 2026-05-30). lamquant-lsl moved to the Vision submodule

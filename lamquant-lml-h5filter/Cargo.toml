@@ -1,0 +1,28 @@
+[package]
+name = "lamquant-lml-h5filter"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "LamQuant LML registered as an HDF5 (H5Z) dynamically-loaded compression filter. Lets stock h5py/pynwb store NWB/HDF5 integer datasets through the royalty-free LML lossless codec, and `h5repack -f UD=<id>` losslessly shrink existing NWB files in place. Host-only; never part of the no_std firmware build. ADR 0051 Track 3 (the NWB flank H.BWC cannot reach)."
+
+# Excluded from the default workspace build (it links system libhdf5); build
+# explicitly with `cargo build -p lamquant-lml-h5filter --release`.
+
+[lib]
+# cdylib = the HDF5 plugin .so; rlib = lets the in-process `register_lml_filter`
+# entry point be linked by tests / embedders.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The MCU-tier lossless codec (lml::compress / lml::decompress) — the same
+# byte-exact integer pipeline the rest of the codec ships. Host build (std).
+lamquant-lml-mcu = { path = "../lamquant-lml-mcu" }
+# H5Z / H5PL ABI + libhdf5 link. Same major as the rest of the tree (0.11.x).
+hdf5-metno-sys = "0.11"
+
+[dev-dependencies]
+# End-to-end round-trip test drives real libhdf5 through the high-level API
+# (same system libhdf5 the filter links — no dual-HDF5 ABI mismatch).
+hdf5-metno = "0.12"
+ndarray = "0.17"
+tempfile = "3"

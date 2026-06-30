@@ -3305,6 +3305,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lamquant-lml-h5filter"
+version = "0.1.0"
+dependencies = [
+ "hdf5-metno",
+ "hdf5-metno-sys",
+ "lamquant-lml-mcu",
+ "ndarray 0.17.2",
+ "tempfile",
+]
+
+[[package]]
 name = "lamquant-lml-mcu"
 version = "0.9.3"
 dependencies = [
