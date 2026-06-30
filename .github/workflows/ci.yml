@@ -50,7 +50,13 @@ jobs:
       # payload-only legacy CRC fallback (and that genuine corruption is
       # still rejected). It is the dedicated old-format guard.
       - name: legacy .lml decode back-compat gate
-        run: cargo test -p lamquant-lossless --test legacy_crc_decode
+        run: cargo test -p lamquant-lml --test legacy_crc_decode
+      # S1 byte-identity gate (ADR 0069): the front_end_bit_exact container/EDF
+      # locks run in the workspace step above only via default=host→archive; pin
+      # them EXPLICITLY so a future `default` trim can't silently delete the S1
+      # lock. (The sibling nwb lock is dormant — it needs libhdf5+h5py; tracked.)
+      - name: S1 front-end byte-identity gate (archive)
+        run: cargo test -p lamquant-lml --features archive --test front_end_bit_exact
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
