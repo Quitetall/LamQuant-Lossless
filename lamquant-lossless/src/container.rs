@@ -566,6 +566,16 @@ pub fn parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
             let ml = u32::from_le_bytes([data[22], data[23], data[24], data[25]]) as usize;
             (n_ch, n_win, total, ws, ml, 32usize)
         } else {
+            // 20-byte header. Guard the read: a `probe==1` buffer truncated to
+            // 18–19 bytes reaches here (it failed the 32-byte branch) and would
+            // index `data[16..20]` out of bounds — return Truncated, never panic.
+            if data.len() < 20 {
+                return Err(LmlError::Truncated {
+                    expected: 20,
+                    actual: data.len(),
+                    context: "container header (20-byte)",
+                });
+            }
             let n_ch = u16::from_le_bytes([data[6], data[7]]) as usize;
             let n_win = u16::from_le_bytes([data[8], data[9]]) as usize;
             let total = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
@@ -895,7 +905,16 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
             let ml = u32::from_le_bytes([data[22], data[23], data[24], data[25]]) as usize;
             (n_ch, n_win, total, ws, ml, 32usize)
         } else {
-            // 20-byte header (version u16 + 14 bytes)
+            // 20-byte header (version u16 + 14 bytes). Guard the read: a `probe==1`
+            // buffer truncated to 18–19 bytes reaches here (it failed the 32-byte
+            // branch) and would index `data[16..20]` out of bounds — Truncated, not panic.
+            if data.len() < 20 {
+                return Err(LmlError::Truncated {
+                    expected: 20,
+                    actual: data.len(),
+                    context: "container header (20-byte)",
+                });
+            }
             let n_ch = u16::from_le_bytes([data[6], data[7]]) as usize;
             let n_win = u16::from_le_bytes([data[8], data[9]]) as usize;
             let total = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;

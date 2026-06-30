@@ -57,6 +57,11 @@ jobs:
       # lock. (The sibling nwb lock is dormant — it needs libhdf5+h5py; tracked.)
       - name: S1 front-end byte-identity gate (archive)
         run: cargo test -p lamquant-lml --features archive --test front_end_bit_exact
+      # L1 differential oracle (ADR 0069): byte-identity + round-trip + decode-old-files
+      # KAT + hardening reference for the legacy-crate carve. Explicit feature pin so
+      # it cannot silently vanish if default features change.
+      - name: L1 differential oracle (oracle)
+        run: cargo test -p lamquant-lml --features oracle --test oracle_diff
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR

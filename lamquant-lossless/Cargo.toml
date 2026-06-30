@@ -134,6 +134,14 @@ archive = [
     "dep:filetime",
 ]
 
+# ── oracle: READ-ONLY differential oracle test (ADR 0069 L1) ─────────────────
+# Pins the LML-v1 container byte-identity + round-trip + decode-old-files KAT +
+# hardening reference BEFORE the legacy-crate carve. Read-only — only the
+# existing decode/encode surface (no new encoder), so it just needs `archive`
+# (container / lml / sha2 / tempfile). Run:
+#   cargo test --features oracle --test oracle_diff
+oracle = ["archive"]
+
 # ── Level 2: cli — archive + command-line interface ──────────────────────────
 # Enables: clap, shell completions, man pages, progress bars, structured
 #          logging. Use this for scripting or embedding lml operations without
