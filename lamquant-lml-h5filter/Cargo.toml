@@ -17,12 +17,14 @@ crate-type = ["cdylib", "rlib"]
 # The MCU-tier lossless codec (lml::compress / lml::decompress) — the same
 # byte-exact integer pipeline the rest of the codec ships. Host build (std).
 lamquant-lml-mcu = { path = "../lamquant-lml-mcu" }
-# H5Z / H5PL ABI + libhdf5 link. Same major as the rest of the tree (0.11.x).
-hdf5-metno-sys = "0.11"
+# NOTE: deliberately NO hdf5-metno-sys here. The shipped cdylib must carry no
+# DT_NEEDED on any specific libhdf5 (see src/hdf5_abi.rs) so it loads under
+# whatever libhdf5 the host process (system / conda / pip-h5py) provides.
 
 [dev-dependencies]
-# End-to-end round-trip test drives real libhdf5 through the high-level API
-# (same system libhdf5 the filter links — no dual-HDF5 ABI mismatch).
+# Tests link real libhdf5 (via hdf5-metno) to drive the filter end-to-end and to
+# cross-check our hand-declared H5Z_class2_t layout against the -sys bindings.
 hdf5-metno = "0.12"
+hdf5-metno-sys = "0.11"
 ndarray = "0.17"
 tempfile = "3"

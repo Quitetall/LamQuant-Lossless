@@ -18,14 +18,12 @@
 //! **Host-only.** Pulls in libhdf5 via `hdf5-metno-sys`; never compiled into the
 //! no_std firmware floor.
 
-use hdf5_metno_sys::h5::{H5allocate_memory, H5free_memory};
-use hdf5_metno_sys::h5i::hid_t;
-use hdf5_metno_sys::h5p::{H5Pget_chunk, H5Pmodify_filter};
-use hdf5_metno_sys::h5pl::H5PL_type_t;
-use hdf5_metno_sys::h5t::{
-    H5Tget_class, H5Tget_order, H5Tget_sign, H5Tget_size, H5T_class_t, H5T_order_t, H5T_sign_t,
+mod hdf5_abi;
+use hdf5_abi::{
+    hid_t, H5Tget_class, H5Tget_order, H5Tget_sign, H5Tget_size, H5Zregister, H5Z_class2_t,
+    H5Z_filter_t, H5allocate_memory, H5free_memory, H5Pget_chunk, H5Pmodify_filter,
+    H5PL_TYPE_FILTER, H5T_INTEGER, H5T_ORDER_LE, H5T_SGN_2, H5Z_CLASS_T_VERS, H5Z_FLAG_REVERSE,
 };
-use hdf5_metno_sys::h5z::{H5Z_class2_t, H5Z_filter_t, H5Z_CLASS_T_VERS, H5Z_FLAG_REVERSE};
 use std::os::raw::{c_int, c_uint, c_void};
 use std::panic::catch_unwind;
 
@@ -146,8 +144,8 @@ fn reverse(input: &[u8]) -> Option<Vec<u8>> {
 /// so non-integer data is never routed through (and corrupted by) LML.
 extern "C" fn can_apply(_dcpl: hid_t, type_id: hid_t, _space: hid_t) -> c_int {
     unsafe {
-        let is_int = H5Tget_class(type_id) == H5T_class_t::H5T_INTEGER;
-        let is_le = H5Tget_order(type_id) == H5T_order_t::H5T_ORDER_LE;
+        let is_int = H5Tget_class(type_id) == H5T_INTEGER;
+        let is_le = H5Tget_order(type_id) == H5T_ORDER_LE;
         let sz = H5Tget_size(type_id);
         if is_int && is_le && matches!(sz, 1 | 2 | 4 | 8) {
             1
@@ -165,7 +163,7 @@ extern "C" fn set_local(dcpl: hid_t, type_id: hid_t, _space: hid_t) -> c_int {
         if elem == 0 {
             return -1;
         }
-        let signed = (H5Tget_sign(type_id) == H5T_sign_t::H5T_SGN_2) as c_uint;
+        let signed = (H5Tget_sign(type_id) == H5T_SGN_2) as c_uint;
 
         // Channel count = fastest-varying chunk dimension; 1 for rank-1 chunks.
         let mut dims = [0u64; 32];
@@ -255,23 +253,41 @@ static LML_FILTER_CLASS: FilterClass = FilterClass(H5Z_class2_t {
 /// `herr_t` (>= 0 on success). After this, datasets created with filter id
 /// [`LML_H5_FILTER_ID`] compress through LML without `HDF5_PLUGIN_PATH`.
 pub fn register_lml_filter() -> c_int {
-    unsafe {
-        hdf5_metno_sys::h5z::H5Zregister(
-            &LML_FILTER_CLASS.0 as *const H5Z_class2_t as *const c_void,
-        )
-    }
+    unsafe { H5Zregister(&LML_FILTER_CLASS.0 as *const H5Z_class2_t as *const c_void) }
 }
 
 // ── HDF5 plugin discovery entry points (exported C symbols) ─────────────────
 
-/// HDF5 calls this to learn the plugin kind.
+/// HDF5 calls this to learn the plugin kind. Returns `H5PL_TYPE_FILTER` (the
+/// `H5PL_type_t` enum is ABI-identical to a C `int`).
 #[no_mangle]
-pub extern "C" fn H5PLget_plugin_type() -> H5PL_type_t {
-    H5PL_type_t::H5PL_TYPE_FILTER
+pub extern "C" fn H5PLget_plugin_type() -> c_int {
+    H5PL_TYPE_FILTER
 }
 
 /// HDF5 calls this to fetch the filter class struct.
 #[no_mangle]
 pub extern "C" fn H5PLget_plugin_info() -> *const c_void {
     &LML_FILTER_CLASS.0 as *const H5Z_class2_t as *const c_void
+}
+
+#[cfg(test)]
+mod abi_check {
+    /// Our hand-declared `H5Z_class2_t` (link-free, see `hdf5_abi`) must have the
+    /// exact size + alignment of the real one, or libhdf5 would read garbage
+    /// through the filter-class pointer. Cross-check against `hdf5-metno-sys`
+    /// (dev-dependency only — never linked into the shipped cdylib).
+    #[test]
+    fn h5z_class2_t_layout_matches_sys() {
+        assert_eq!(
+            std::mem::size_of::<super::hdf5_abi::H5Z_class2_t>(),
+            std::mem::size_of::<hdf5_metno_sys::h5z::H5Z_class2_t>(),
+            "H5Z_class2_t size drift vs libhdf5 bindings"
+        );
+        assert_eq!(
+            std::mem::align_of::<super::hdf5_abi::H5Z_class2_t>(),
+            std::mem::align_of::<hdf5_metno_sys::h5z::H5Z_class2_t>(),
+            "H5Z_class2_t alignment drift vs libhdf5 bindings"
+        );
+    }
 }
