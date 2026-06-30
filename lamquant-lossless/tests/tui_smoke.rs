@@ -1,3 +1,8 @@
+// DISABLED (cfg(any()) = never compiled): stale post-W2-extract remnant.
+// Tests ratatui rendering (TestBackend) + crossterm events that moved to the
+// `tui/` crate; `src/tui` here is now headless. Preserved as migration reference;
+// re-home to crates/lamquant-tui or delete. See task: "Relocate stale TUI render tests".
+#![cfg(any())]
 //! TUI smoke tests — drive the App with synthetic key events through a
 //! `TestBackend`, then snapshot or assert on the rendered buffer.
 //!

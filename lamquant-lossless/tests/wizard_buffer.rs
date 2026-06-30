@@ -1,3 +1,9 @@
+// DISABLED (cfg(any()) = never compiled): stale post-W2-extract remnant.
+// Drives WizardPanel via crossterm events that `src/tui` no longer accepts
+// (headless model has its own event type; crossterm isn't a dep). Preserved as
+// migration reference; re-home to crates/lamquant-tui or delete. See task:
+// "Relocate stale TUI render tests".
+#![cfg(any())]
 //! Phase 0 #18 contract: the worker-count input on the wizard's step 3
 //! caps at 8 characters. The previous 4-char cap silently truncated
 //! 99999 → "9999" with no UI feedback. 8 chars accommodates large

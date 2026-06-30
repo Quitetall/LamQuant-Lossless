@@ -1,3 +1,9 @@
+// DISABLED (cfg(any()) = never compiled): stale post-W2-extract remnant.
+// Tests ratatui rendering (TestBackend) that moved to the `tui/` crate; `src/tui`
+// here is now headless (no ratatui/crossterm deps), so this can't compile.
+// Preserved as the migration reference; re-home to crates/lamquant-tui or delete
+// once covered there. See task: "Relocate stale TUI render tests".
+#![cfg(any())]
 //! TUI golden-render baselines.
 //!
 //! These tests snapshot the *current* rendered output of TUI panels
