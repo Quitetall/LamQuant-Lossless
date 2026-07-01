@@ -119,6 +119,9 @@ archive = [
     # implies `std`.
     "dep:lamquant-lml-desktop",
     "lamquant-lml-desktop/fast",
+    # ADR 0069 L6.2: the ABIR container writer (`abir_container::write_abir`)
+    # is sourced from `lamquant_abir::Abir` instead of `Vec<Vec<i64>>`.
+    "dep:lamquant-abir",
     "dep:lamquant-lml-legacy",
     "lamquant-lml-legacy/legacy-decode",
     # ADR 0069 L5(c): the CLI write path (`lml compress` et al) still
@@ -237,6 +240,11 @@ lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", defau
 # default-features = false so a no_std facade build stays no_std; the facade's
 # own `std`/`archive`/`experimental_*` features turn on the matching core ones.
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
+# ADR 0069 L6(a-b)/L6.2: the ABIR atoms (`Abir`/`Column`/`Channel`) — the typed
+# currency `abir_container::write_abir` reads windows from. Optional; enabled
+# by `archive` (the ABIR writer is host-only today, mirroring the legacy
+# writer it clones).
+lamquant-abir = { version = "0.1.0", path = "../crates/lamquant-abir", default-features = false, optional = true }
 # ADR 0052 Tier 3 / ADR 0054: the Optimum (LMO) codec. The facade IS the Desktop
 # profile, so it links the LMO DECODER always (no_std-capable, cheap) and turns
 # on the host LMO ENCODER under the facade's `archive` feature (which already

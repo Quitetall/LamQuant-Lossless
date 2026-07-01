@@ -3267,6 +3267,7 @@ dependencies = [
  "indicatif",
  "insta",
  "keyring",
+ "lamquant-abir",
  "lamquant-common",
  "lamquant-config",
  "lamquant-lml-desktop",

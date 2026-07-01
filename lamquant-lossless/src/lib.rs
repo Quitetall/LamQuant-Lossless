@@ -84,6 +84,12 @@ pub fn decode(bytes: &[u8]) -> Result<codec::Signal, codec::CodecError> {
 
 #[cfg(feature = "async")]
 pub mod async_io;
+// ADR 0069 L6.2: the clean, self-contained ABIR container writer — a
+// byte-identical clone of the legacy v1 `encode_into`, sourced from
+// `lamquant_abir::Abir`. See module docs for what's cloned vs reused from
+// `lamquant-lml-legacy`.
+#[cfg(feature = "archive")]
+pub mod abir_container;
 #[cfg(feature = "archive")]
 pub mod codec_stages;
 // ADR 0069 L4: the LML-v1 wire (container/offset_table/stream) is sequestered in

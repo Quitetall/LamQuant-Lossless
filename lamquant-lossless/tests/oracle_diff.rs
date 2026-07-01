@@ -18,6 +18,8 @@
 //!   `LAMQUANT_REGEN_ORACLE=1 cargo test --features oracle --test oracle_diff -- --nocapture`
 #![cfg(feature = "oracle")]
 
+use lamquant_abir::Abir;
+use lamquant_core::abir_container::write_abir_to_vec;
 use lamquant_core::error::LmlError;
 use lamquant_core::lpc::LpcMode;
 use lamquant_core::{container, lml};
@@ -173,6 +175,21 @@ fn arm_a_lossless_golden() {
         assert_eq!(got, want, "arm A byte-identity drift: {name}");
         // same-process determinism
         assert_eq!(got, sha_bytes(&write_into_vec(&sig, LpcMode::default())), "arm A nondeterministic: {name}");
+        // ADR 0069 L6.2: the clean `write_abir` must reproduce the exact legacy
+        // bytes — same-process byte-identity AND the frozen S1 golden.
+        let abir = Abir::from_channels_i64(sig.clone(), 250.0);
+        let abir_bytes = write_abir_to_vec(&abir, 250.0, 256, 0, "{}", LpcMode::default(), None, None)
+            .expect("write_abir_to_vec");
+        assert_eq!(
+            sha_bytes(&abir_bytes),
+            got,
+            "arm A write_abir byte-identity drift vs legacy: {name}"
+        );
+        assert_eq!(
+            sha_bytes(&abir_bytes),
+            want,
+            "arm A write_abir vs GOLDEN_CONTAINER drift: {name}"
+        );
         // round-trip MAE=0 (exact)
         let (rec, _) = container::read_bytes(&buf).expect("read_bytes");
         assert_eq!(rec.len(), sig.len(), "arm A channel count: {name}");
@@ -195,6 +212,16 @@ fn arm_b_lpc_modes_lossless() {
             let got = sha_bytes(&buf);
             assert_eq!(got, sha_bytes(&write_into_vec(&sig, lpc)), "arm B nondeterministic: {key}");
             check_oracle_sha(&key, &got);
+            // ADR 0069 L6.2: write_abir must reproduce the exact legacy bytes
+            // for every LpcMode, not just the default.
+            let abir = Abir::from_channels_i64(sig.clone(), 250.0);
+            let abir_bytes = write_abir_to_vec(&abir, 250.0, 256, 0, "{}", lpc, None, None)
+                .expect("write_abir_to_vec");
+            assert_eq!(
+                sha_bytes(&abir_bytes),
+                got,
+                "arm B write_abir byte-identity drift: {key}"
+            );
             // lossless for ANY LpcMode → exact round-trip
             let (rec, _) = container::read_bytes(&buf).expect("read_bytes");
             for ch in 0..sig.len() {
@@ -218,6 +245,26 @@ fn arm_c_bounded_mae() {
             let bytes = std::fs::read(&p).unwrap();
             let key = format!("C.{name}.d{delta}");
             check_oracle_sha(&key, &sha_bytes(&bytes));
+            // ADR 0069 L6.2: write_abir must reproduce the exact legacy bytes
+            // in bounded-MAE mode too (write_file_bounded_mae feeds
+            // encode_into noise_bits=0, Some(delta), target_bps=None).
+            let abir = Abir::from_channels_i64(sig.clone(), 250.0);
+            let abir_bytes = write_abir_to_vec(
+                &abir,
+                250.0,
+                256,
+                0,
+                "{}",
+                LpcMode::default(),
+                Some(delta),
+                None,
+            )
+            .expect("write_abir_to_vec");
+            assert_eq!(
+                sha_bytes(&abir_bytes),
+                sha_bytes(&bytes),
+                "arm C write_abir byte-identity drift: {key}"
+            );
             let (rec, _) = container::read_file(&p).expect("read_file bounded");
             if delta == 0 {
                 for ch in 0..sig.len() {
@@ -249,6 +296,26 @@ fn arm_d_target_bps() {
         let bytes = std::fs::read(&p).unwrap();
         let key = format!("D.{name}.bps4");
         check_oracle_sha(&key, &sha_bytes(&bytes));
+        // ADR 0069 L6.2: write_abir must reproduce the exact legacy bytes in
+        // target-BPS mode too (write_file_target_bps feeds encode_into
+        // noise_bits=0, delta=None, Some(4.0)).
+        let abir = Abir::from_channels_i64(sig.clone(), 250.0);
+        let abir_bytes = write_abir_to_vec(
+            &abir,
+            250.0,
+            256,
+            0,
+            "{}",
+            LpcMode::default(),
+            None,
+            Some(4.0),
+        )
+        .expect("write_abir_to_vec");
+        assert_eq!(
+            sha_bytes(&abir_bytes),
+            sha_bytes(&bytes),
+            "arm D write_abir byte-identity drift: {key}"
+        );
         // lossy → decode must SUCCEED with correct shape; NEVER assert MAE=0.
         let (rec, _) = container::read_file(&p).expect("read_file target_bps");
         assert_eq!(rec.len(), sig.len(), "arm D channel count: {key}");
