@@ -174,6 +174,197 @@ impl core::fmt::Display for VerifyError {
 #[cfg(feature = "std")]
 impl std::error::Error for VerifyError {}
 
+// ─────────────────── S3b: born-typed lowering (inference) ───────────────────
+//
+// `into_modality` (deliberate, manual) and `verify` (boundary check) are the
+// S3a trust model. S3b adds the FRONT half: infer the modality from the
+// recording itself at lowering time so a reader's `Abir<Untyped>` never
+// defaults to `{Manual, 255}` silently — see [`infer_modality`] below and
+// `Abir::with_inferred_modality` (`atoms.rs`) which wires it into every
+// reader's `lower_to_abir`. The recorded inference is then the thing
+// `Abir::try_into_modality` checks against an asserted type — a VERIFIED
+// promotion, as opposed to `into_modality`'s unchecked override.
+
+/// The canonical 10-20 EEG montage electrode names (upper-cased). Matched
+/// per-TOKEN (see [`label_tokens`]) so a bipolar-derivation label like
+/// `"Fp1-F7"` still reads as EEG — both halves are in this set.
+const EEG_1020_ELECTRODES: &[&str] = &[
+    "FP1", "FP2", "F3", "F4", "F7", "F8", "FZ", "C3", "C4", "CZ", "P3", "P4", "PZ", "O1", "O2",
+    "T3", "T4", "T5", "T6", "T7", "T8", "A1", "A2", "M1", "M2",
+];
+
+/// The standard 12-lead ECG lead names (upper-cased). Matched per-token,
+/// but — unlike the EEG electrode set above — a SINGLE occurrence is
+/// deliberately NOT enough evidence: `"I"`, `"II"`, `"V1"`, … are short
+/// and generic enough that one incidental match could be coincidence (a
+/// non-ECG channel that happens to be numbered/lettered this way). Only
+/// once at least two distinct lead-name channels co-occur does
+/// [`infer_modality`] credit them as ECG evidence.
+const ECG_12_LEADS: &[&str] = &[
+    "I", "II", "III", "AVR", "AVL", "AVF", "V1", "V2", "V3", "V4", "V5", "V6",
+];
+
+/// Split an already-uppercased label into tokens on the separators real
+/// montage/lead naming conventions use (`-`, `_`, `/`, whitespace), so
+/// `"FP1-F7"` yields `["FP1", "F7"]` and `"LEAD I"` yields `["LEAD", "I"]`.
+fn label_tokens(upper: &str) -> impl Iterator<Item = &str> {
+    upper
+        .split(|c: char| c == '-' || c == '_' || c == '/' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+}
+
+/// Classify an already-uppercased string against the substring markers
+/// that are unambiguous ON THEIR OWN — no multiplicity requirement,
+/// unlike the bare 12-lead-name path in [`infer_modality`]. Shared by
+/// both the per-label pass and the optional `format` hint (a format that
+/// deliberately declares its modality, e.g. a DICOM `Modality` attribute
+/// of `"ECG"`, is checked with the exact same rule as a channel label).
+///
+/// Order matters only in that each branch is mutually exclusive by
+/// construction (none of these substrings overlap), so it's written as a
+/// priority list for readability, not because of a real collision.
+fn classify_explicit(upper: &str) -> Option<u8> {
+    if upper.contains("EEG") {
+        Some(Eeg::TAG)
+    } else if upper.contains("ECG") || upper.contains("EKG") {
+        Some(Ecg::TAG)
+    } else if upper.contains("EMG") {
+        Some(Emg::TAG)
+    } else if upper.contains("EOG") {
+        Some(Eog::TAG)
+    } else if upper.contains("RESPIRATION") || upper.contains("RESP") || upper.contains("AIRFLOW") {
+        Some(Resp::TAG)
+    } else if upper.contains("ACCEL") || upper.contains("ACC") {
+        Some(Accel::TAG)
+    } else {
+        None
+    }
+}
+
+/// Infer a recording's modality from its channel labels (+ an optional
+/// format-declared hint), for [`crate::atoms::Abir::with_inferred_modality`]
+/// — the S3b born-typed-lowering entry point every reader's `lower_to_abir`
+/// calls right after building its `Abir<Untyped>`.
+///
+/// Returns `(tag, source)`: the inferred [`Modality::TAG`] (or
+/// [`Untyped::TAG`] `= 255` when nothing conclusive can be said) and HOW it
+/// was decided. Never silent — even the "give up" case is recorded as
+/// `(255, ChannelLabel)`, not left as some implicit default.
+///
+/// ## Rules (case-insensitive)
+///
+/// 1. **Format-declared hint** (`format`): if the caller passes a format
+///    string that itself carries an explicit modality declaration (e.g. a
+///    DICOM `(0008,0060) Modality` attribute value of `"ECG"` — see
+///    `source/dicom.rs`), that wins outright with
+///    [`ModalitySource::FormatDeclared`]. Most current readers don't have
+///    such a field (EDF/BDF/BrainVision/CNT/Raw are modality-agnostic
+///    containers) and pass `None`.
+/// 2. **Explicit per-channel substring markers**: a label containing
+///    `"EEG"` → EEG; `"ECG"`/`"EKG"` → ECG; `"EMG"` → EMG; `"EOG"` → EOG;
+///    `"RESP"`/`"RESPIRATION"`/`"AIRFLOW"` → Resp; `"ACC"`/`"ACCEL"` →
+///    Accel. A single such channel is enough evidence — these markers are
+///    unambiguous on their own.
+/// 3. **10-20 EEG electrode names** (`Fp1`, `Fz`, `Cz`, `A1`, …), matched
+///    per label-token so a bipolar montage label like `"Fp1-F7"` still
+///    reads as EEG (both tokens are 10-20 names).
+/// 4. **12-lead ECG names** (`I`, `II`, `aVR`, `V1`, …): matched
+///    per-token, but a LONE such channel is ambiguous (too short/generic
+///    to trust — e.g. a single `"II"` could be an unrelated numbered
+///    channel). Only once **two or more** distinct lead-name channels
+///    co-occur are they credited as ECG evidence.
+///
+/// Every channel casts at most one vote (rules applied in the order
+/// above, first match wins — they don't overlap in practice). The
+/// modality with the most votes wins ONLY if it is a strict majority
+/// (`> 50%`) of all channels; a tie, a plurality that doesn't clear 50%,
+/// or no votes at all (unclassifiable / generic channel names) all
+/// resolve to `Untyped` — conservative by design (see rule 4's rationale:
+/// better to under-classify than to silently guess).
+///
+/// `labels.is_empty()` → `(Untyped::TAG, ChannelLabel)` immediately (no
+/// channels, nothing to infer from).
+pub fn infer_modality(labels: &[&str], format: Option<&str>) -> (u8, ModalitySource) {
+    if let Some(fmt) = format {
+        let upper = fmt.to_ascii_uppercase();
+        if let Some(tag) = classify_explicit(&upper) {
+            return (tag, ModalitySource::FormatDeclared);
+        }
+    }
+
+    if labels.is_empty() {
+        return (Untyped::TAG, ModalitySource::ChannelLabel);
+    }
+
+    let mut eeg_votes = 0usize;
+    let mut ecg_votes = 0usize;
+    let mut emg_votes = 0usize;
+    let mut eog_votes = 0usize;
+    let mut resp_votes = 0usize;
+    let mut accel_votes = 0usize;
+    // Tentative — only promoted to `ecg_votes` if >= 2 (see rule 4).
+    let mut bare_lead_votes = 0usize;
+
+    for label in labels {
+        let upper = label.to_ascii_uppercase();
+        if let Some(tag) = classify_explicit(&upper) {
+            if tag == Eeg::TAG {
+                eeg_votes += 1;
+            } else if tag == Ecg::TAG {
+                ecg_votes += 1;
+            } else if tag == Emg::TAG {
+                emg_votes += 1;
+            } else if tag == Eog::TAG {
+                eog_votes += 1;
+            } else if tag == Resp::TAG {
+                resp_votes += 1;
+            } else if tag == Accel::TAG {
+                accel_votes += 1;
+            }
+            continue;
+        }
+        if label_tokens(&upper).any(|t| EEG_1020_ELECTRODES.contains(&t)) {
+            eeg_votes += 1;
+            continue;
+        }
+        if label_tokens(&upper).any(|t| ECG_12_LEADS.contains(&t)) {
+            bare_lead_votes += 1;
+            continue;
+        }
+        // Unclassified: no vote (e.g. "Status", "ch3", a numbered/generic
+        // label with no recognizable modality marker).
+    }
+
+    if bare_lead_votes >= 2 {
+        ecg_votes += bare_lead_votes;
+    }
+
+    let total = labels.len();
+    let candidates: [(u8, usize); 6] = [
+        (Eeg::TAG, eeg_votes),
+        (Ecg::TAG, ecg_votes),
+        (Emg::TAG, emg_votes),
+        (Eog::TAG, eog_votes),
+        (Resp::TAG, resp_votes),
+        (Accel::TAG, accel_votes),
+    ];
+    // `max_by_key` picks the LAST maximum on a tie; harmless here because
+    // a genuine tie can never individually clear the `> 50%` bar below, so
+    // the tied winner is discarded regardless of which one `max_by_key`
+    // happened to return.
+    let (best_tag, best_votes) = candidates
+        .iter()
+        .copied()
+        .max_by_key(|&(_, v)| v)
+        .unwrap_or((Untyped::TAG, 0));
+
+    if best_votes > 0 && best_votes * 2 > total {
+        (best_tag, ModalitySource::ChannelLabel)
+    } else {
+        (Untyped::TAG, ModalitySource::ChannelLabel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +390,128 @@ mod tests {
     fn markers_are_zero_sized() {
         assert_eq!(core::mem::size_of::<Eeg>(), 0);
         assert_eq!(core::mem::size_of::<Untyped>(), 0);
+    }
+
+    // ─────────────────── S3b: infer_modality ───────────────────
+
+    #[test]
+    fn ten_twenty_labels_infer_eeg() {
+        let labels = ["Fp1", "Fp2", "F3", "F4", "Cz", "O1", "O2", "A1"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Eeg::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn twelve_lead_labels_infer_ecg() {
+        let labels = [
+            "I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6",
+        ];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Ecg::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn mixed_eeg_and_ecg_labels_infer_untyped() {
+        // 2 clear EEG + 2 clear ECG — no strict majority either way, so
+        // this must NOT silently pick a winner.
+        let labels = ["Fp1", "Cz", "ECG1", "ECG2"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Untyped::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn empty_labels_infer_untyped() {
+        assert_eq!(
+            infer_modality(&[], None),
+            (Untyped::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn explicit_eeg_substring_wins_regardless_of_case() {
+        let labels = ["eeg Fp1-ref", "eeg fp2-ref"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Eeg::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn bipolar_montage_labels_still_read_as_eeg() {
+        let labels = ["Fp1-F7", "F7-T3", "T3-T5", "T5-O1"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Eeg::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn lone_lead_name_is_ambiguous_not_ecg() {
+        // A single "II" among otherwise-generic channels must NOT be
+        // enough to call ECG (rule 4 — only >=2 co-occurring lead names
+        // count).
+        let labels = ["II", "ch1", "ch2"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Untyped::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn two_co_occurring_lead_names_are_credited_as_ecg() {
+        let labels = ["II", "V1"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Ecg::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn generic_unclassifiable_labels_infer_untyped() {
+        let labels = ["ch0", "ch1", "ch2", "ch3"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Untyped::TAG, ModalitySource::ChannelLabel)
+        );
+    }
+
+    #[test]
+    fn format_declared_modality_wins_with_format_declared_source() {
+        // A reader that genuinely knows the modality (e.g. a DICOM
+        // `Modality` attribute) should win outright, source-tagged
+        // distinctly from a label-based guess.
+        let labels = ["Lead I", "Lead J", "Lead K"]; // generic non-standard names
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, Some("ECG")),
+            (Ecg::TAG, ModalitySource::FormatDeclared)
+        );
+    }
+
+    #[test]
+    fn majority_incidental_channel_does_not_flip_majority_modality() {
+        // Common real-world pattern: a 10-20 EEG montage plus one
+        // incidental EKG reference channel. The EEG majority (8/9) must
+        // still win.
+        let labels = ["Fp1", "Fp2", "F3", "F4", "Cz", "O1", "O2", "A1", "EKG1"];
+        let refs: Vec<&str> = labels.to_vec();
+        assert_eq!(
+            infer_modality(&refs, None),
+            (Eeg::TAG, ModalitySource::ChannelLabel)
+        );
     }
 }

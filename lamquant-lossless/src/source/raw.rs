@@ -529,7 +529,11 @@ impl SignalSourceReader for RawReader {
             }
         };
 
-        Ok(Abir::from_parts(channels, sc.sample_rate, n_samples))
+        // ADR 0069 S3b: the raw sidecar JSON has no modality field
+        // (`format: None`) — inference runs off `sc.channels`.
+        let labels: Vec<&str> = sc.channels.iter().map(String::as_str).collect();
+        Ok(Abir::from_parts(channels, sc.sample_rate, n_samples)
+            .with_inferred_modality(&labels, None))
     }
 }
 
@@ -685,5 +689,40 @@ mod tests {
                 "channel {j} mismatch"
             );
         }
+    }
+
+    // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
+
+    #[test]
+    fn lower_to_abir_infers_ecg_from_twelve_lead_channel_names() {
+        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let n_ch = 3usize;
+        let n_samples = 60usize;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n_ch * n_samples * 2);
+        for s in 0..n_samples {
+            for ch in 0..n_ch {
+                let v = (s as i16).wrapping_mul(ch as i16 + 1);
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let raw = tmp.path().join("ecg.raw");
+        let json = tmp.path().join("ecg.json");
+        std::fs::write(&raw, &bytes).unwrap();
+        std::fs::write(
+            &json,
+            "{\"n_channels\":3,\"sample_rate\":250.0,\"dtype\":\"int16\",\
+             \"orientation\":\"multiplexed\",\"channels\":[\"I\",\"II\",\"V1\"],\
+             \"phys_min\":[-200.0,-200.0,-200.0],\"phys_max\":[200.0,200.0,200.0],\
+             \"phys_dim\":\"uV\"}",
+        )
+        .unwrap();
+
+        let abir = RawReader::new(&raw).lower_to_abir().unwrap();
+        assert_eq!(abir.provenance().tag, Ecg::TAG);
+        assert_eq!(abir.provenance().source, ModalitySource::ChannelLabel);
+        assert!(abir.clone().try_into_modality::<Ecg>().is_ok());
+        assert!(abir.try_into_modality::<Eeg>().is_err());
     }
 }

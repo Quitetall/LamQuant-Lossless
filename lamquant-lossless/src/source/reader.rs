@@ -44,8 +44,18 @@ pub trait SignalSourceReader {
     /// `DicomWaveformReader` for the specialized paths; `EeglabReader`
     /// stays on this default (its lossless path float-bitcasts, not
     /// numeric-widens).
+    ///
+    /// Every path — this default and every specialized override — calls
+    /// `Abir::with_inferred_modality` before returning (ADR 0069 S3b:
+    /// born-typed lowering). `SignalBundle::metadata.format` is a
+    /// container-format identifier (`"EDF"`, `"EEGLAB_LOSSY_I16"`, …),
+    /// NOT a modality declaration, so the default path passes `None` for
+    /// the format hint and relies purely on channel-label inference; see
+    /// `crate::source::dicom` for the one reader that DOES have a real
+    /// declared-modality field to pass through.
     fn lower_to_abir(&mut self) -> LmlResult<Abir> {
         let b = self.read_bundle()?;
-        Ok(Abir::from_channels_i64(b.signal, b.sample_rate))
+        let labels: Vec<&str> = b.channels.iter().map(String::as_str).collect();
+        Ok(Abir::from_channels_i64(b.signal, b.sample_rate).with_inferred_modality(&labels, None))
     }
 }

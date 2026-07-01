@@ -274,11 +274,13 @@ impl SignalSourceReader for CntReader {
             })
             .collect();
 
-        Ok(Abir::from_parts(
-            channels,
-            sample_rate_u16 as f64,
-            total_samples,
-        ))
+        // ADR 0069 S3b: Neuroscan CNT carries no declared-modality field
+        // (`format: None`) — inference runs off the electrode-block labels.
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        Ok(
+            Abir::from_parts(channels, sample_rate_u16 as f64, total_samples)
+                .with_inferred_modality(&label_refs, None),
+        )
     }
 }
 
@@ -392,5 +394,42 @@ mod tests {
                 "channel {j} mismatch"
             );
         }
+    }
+
+    // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
+
+    fn synth_cnt_with_labels(labels: &[&str], n_samples: usize, sample_rate: u16) -> Vec<u8> {
+        let n_ch = labels.len();
+        let mut buf = vec![0u8; SETUP_HEADER_LEN];
+        buf[370..372].copy_from_slice(&(n_ch as u16).to_le_bytes());
+        buf[376..378].copy_from_slice(&sample_rate.to_le_bytes());
+        for label in labels {
+            let mut rec = vec![0u8; ELECTLOC_LEN];
+            rec[..label.len()].copy_from_slice(label.as_bytes());
+            buf.extend_from_slice(&rec);
+        }
+        for s in 0..n_samples {
+            for ch in 0..n_ch {
+                let v = (s as i16) * (ch as i16 + 1);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn lower_to_abir_infers_eeg_from_electrode_labels() {
+        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("named.cnt");
+        let blob = synth_cnt_with_labels(&["Fp1", "Fp2", "Cz", "O1"], 50, 250);
+        std::fs::write(&p, &blob).unwrap();
+
+        let abir = CntReader::new(&p).lower_to_abir().unwrap();
+        assert_eq!(abir.provenance().tag, Eeg::TAG);
+        assert_eq!(abir.provenance().source, ModalitySource::ChannelLabel);
+        assert!(abir.clone().try_into_modality::<Eeg>().is_ok());
+        assert!(abir.try_into_modality::<Ecg>().is_err());
     }
 }

@@ -615,7 +615,13 @@ impl SignalSourceReader for BrainVisionReader {
         };
 
         let sample_rate = 1_000_000.0 / hdr.sample_interval_us;
-        Ok(Abir::from_parts(channels, sample_rate, n_samples))
+        // ADR 0069 S3b: BrainVision's .vhdr carries no declared-modality
+        // field (`format: None`) — inference runs off `hdr.channels` names.
+        let labels: Vec<&str> = hdr.channels.iter().map(|c| c.name.as_str()).collect();
+        Ok(
+            Abir::from_parts(channels, sample_rate, n_samples)
+                .with_inferred_modality(&labels, None),
+        )
     }
 }
 
@@ -872,5 +878,55 @@ mod tests {
                 "channel {j} mismatch"
             );
         }
+    }
+
+    // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
+
+    fn synth_vhdr_with_channel_names(names: &[&str], sample_interval_us: f64) -> String {
+        let n_ch = names.len();
+        let mut s = String::new();
+        s.push_str("Brain Vision Data Exchange Header File Version 1.0\n");
+        s.push_str("[Common Infos]\n");
+        s.push_str("DataFile=named.eeg\n");
+        s.push_str("MarkerFile=named.vmrk\n");
+        s.push_str("DataFormat=BINARY\n");
+        s.push_str("DataOrientation=MULTIPLEXED\n");
+        s.push_str(&format!("NumberOfChannels={n_ch}\n"));
+        s.push_str(&format!("SamplingInterval={sample_interval_us}\n"));
+        s.push_str("\n[Binary Infos]\n");
+        s.push_str("BinaryFormat=INT_16\n");
+        s.push_str("\n[Channel Infos]\n");
+        for (i, name) in names.iter().enumerate() {
+            s.push_str(&format!("Ch{}={name},REF,0.5,uV\n", i + 1));
+        }
+        s
+    }
+
+    #[test]
+    fn lower_to_abir_infers_eeg_from_channel_names() {
+        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let names = ["Fp1", "Fp2", "Cz"];
+        let n_ch = names.len();
+        let n_samples = 40usize;
+        let mut eeg_bytes: Vec<u8> = Vec::with_capacity(n_ch * n_samples * 2);
+        for s in 0..n_samples {
+            for ch in 0..n_ch {
+                let v = (s as i16).wrapping_mul(ch as i16 + 1);
+                eeg_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        std::fs::write(tmp.path().join("named.eeg"), &eeg_bytes).unwrap();
+        let vhdr = synth_vhdr_with_channel_names(&names, 4000.0);
+        let p = tmp.path().join("named.vhdr");
+        std::fs::write(&p, vhdr.as_bytes()).unwrap();
+        std::fs::write(tmp.path().join("named.vmrk"), b"; vmrk stub").unwrap();
+
+        let abir = BrainVisionReader::new(&p).lower_to_abir().unwrap();
+        assert_eq!(abir.provenance().tag, Eeg::TAG);
+        assert_eq!(abir.provenance().source, ModalitySource::ChannelLabel);
+        assert!(abir.clone().try_into_modality::<Eeg>().is_ok());
+        assert!(abir.try_into_modality::<Ecg>().is_err());
     }
 }

@@ -106,7 +106,15 @@ impl SignalSourceReader for EdfReader {
                 }
             })
             .collect();
-        Ok(Abir::from_parts(channels, sample_rate, n_samples))
+        // ADR 0069 S3b: EDF/BDF is a modality-agnostic container (no
+        // declared-modality field), so `format` is `None` — inference runs
+        // purely off `ch_names` (e.g. a "EEG Fp1" label, or a bare 10-20
+        // electrode name).
+        let labels: Vec<&str> = ch_names.iter().map(String::as_str).collect();
+        Ok(
+            Abir::from_parts(channels, sample_rate, n_samples)
+                .with_inferred_modality(&labels, None),
+        )
     }
 }
 
@@ -597,5 +605,33 @@ mod tests {
                 "channel {j}: lower_to_abir must equal read_bundle's i64 exactly"
             );
         }
+    }
+
+    // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
+
+    #[test]
+    fn lower_to_abir_infers_eeg_from_edf_channel_label() {
+        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+
+        // The synth fixture's single channel is labeled "EEG ch0" (see
+        // `synth_single_channel_edf`) — an explicit "EEG" substring match.
+        let samples: Vec<i16> = (0..200).map(|t| (t % 100) as i16).collect();
+        let bytes = crate::ingest::synth_single_channel_edf(&samples, 250.0);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("synth.edf");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
+        assert_eq!(abir.provenance().tag, Eeg::TAG);
+        assert_eq!(abir.provenance().source, ModalitySource::ChannelLabel);
+
+        let eeg = abir.clone().try_into_modality::<Eeg>();
+        assert!(eeg.is_ok(), "recorded EEG inference must promote cleanly");
+
+        let ecg_attempt = abir.try_into_modality::<Ecg>();
+        assert!(
+            ecg_attempt.is_err(),
+            "an EEG-inferred Abir must refuse promotion to Ecg"
+        );
     }
 }

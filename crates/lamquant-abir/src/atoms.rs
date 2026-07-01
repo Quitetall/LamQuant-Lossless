@@ -214,6 +214,32 @@ impl Abir<Untyped> {
         }
     }
 
+    /// Born-typed lowering (ADR 0069 S3b): infer this `Abir`'s modality from
+    /// its channel labels (+ an optional format-declared hint, see
+    /// [`crate::modality::infer_modality`]) and overwrite `prov` with the
+    /// result. Every reader's `lower_to_abir` calls this right after
+    /// building its `Abir<Untyped>` (via [`from_channels_i64`](Abir::from_channels_i64)
+    /// or [`from_parts`](Abir::from_parts), both of which start `prov` at
+    /// `{Manual, 255}`) so lowering never leaves a stream silently
+    /// "untyped by default" — the provenance always records SOMETHING,
+    /// even when that something is "inference gave up: `{ChannelLabel, 255}`".
+    ///
+    /// `self` stays `Abir<Untyped>` — this only updates the runtime `prov`
+    /// bookkeeping, not the type. Asserting the type is the separate,
+    /// explicit [`Abir::try_into_modality`] step, which CHECKS the recorded
+    /// inference rather than overriding it.
+    ///
+    /// `labels` is taken as an explicit parameter (rather than read back off
+    /// `self.channels`) so a reader can pass its native label list (e.g. a
+    /// `SignalBundle`'s `channels: Vec<String>`, or a format header's own
+    /// channel-name array) without an extra borrow-then-collect round trip;
+    /// in every current caller it is exactly `self.channels[..].label`.
+    pub fn with_inferred_modality(mut self, labels: &[&str], format: Option<&str>) -> Self {
+        let (tag, source) = crate::modality::infer_modality(labels, format);
+        self.prov = ModalityProvenance { source, tag };
+        self
+    }
+
     /// One-time deliberate narrowing: promote an untyped `Abir` to a modality-typed one.
     /// Re-wraps the SAME `channels`/`sample_rate`/`n_samples` (a field move — `PhantomData` is
     /// zero-cost) under `M`, recording how the assignment was decided.
@@ -255,6 +281,57 @@ impl Abir<Untyped> {
             },
             _m: PhantomData,
         }
+    }
+
+    /// VERIFIED promotion (ADR 0069 S3b): promote to `Abir<M>` only if the
+    /// RECORDED inference (`self.prov.tag`, set by
+    /// [`with_inferred_modality`](Abir::with_inferred_modality) or a prior
+    /// narrowing) agrees with the asserted type `M`. Preserves the recorded
+    /// `prov.source` (it doesn't become "more Manual" just because the
+    /// caller asserted a type that matched).
+    ///
+    /// This is the CHECKED counterpart to [`into_modality`](Abir::into_modality):
+    /// `into_modality` is a deliberate, unconditional override (the caller
+    /// is asserting "trust me, this is `M`"); `try_into_modality` is a type
+    /// assertion against what the codec itself already inferred, and it
+    /// REFUSES to silently mislabel a mismatch — on failure, `self` is
+    /// handed back untouched (still `Abir<Untyped>`, nothing consumed)
+    /// alongside a [`VerifyError::ProvenanceTagMismatch`] explaining what
+    /// was recorded vs. what was asked for.
+    ///
+    /// ```
+    /// use lamquant_abir::{Abir, Ecg, Eeg, ModalitySource};
+    ///
+    /// let untyped = Abir::from_channels_i64(vec![vec![1i64, 2, 3]], 250.0)
+    ///     .with_inferred_modality(&["Fp1", "Fp2", "Cz"], None);
+    ///
+    /// // Matches the recorded inference: succeeds.
+    /// let eeg: Abir<Eeg> = untyped.clone().try_into_modality().unwrap();
+    /// assert_eq!(eeg.provenance().source, ModalitySource::ChannelLabel);
+    ///
+    /// // Doesn't match: refused, `self` handed back.
+    /// let (back, _err) = untyped.try_into_modality::<Ecg>().unwrap_err();
+    /// assert_eq!(back.n_channels(), 1);
+    /// ```
+    pub fn try_into_modality<M: Modality>(self) -> Result<Abir<M>, (Abir<Untyped>, VerifyError)> {
+        if self.prov.tag != M::TAG {
+            let err = VerifyError::ProvenanceTagMismatch {
+                recorded: self.prov.tag,
+                expected: M::TAG,
+            };
+            return Err((self, err));
+        }
+        let source = self.prov.source;
+        Ok(Abir {
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+            n_samples: self.n_samples,
+            prov: ModalityProvenance {
+                source,
+                tag: M::TAG,
+            },
+            _m: PhantomData,
+        })
     }
 }
 
@@ -379,5 +456,65 @@ mod tests {
             core::mem::size_of::<Abir<Eeg>>(),
             core::mem::size_of::<Abir<Untyped>>()
         );
+    }
+
+    // ─────────────────── S3b: born-typed lowering ───────────────────
+
+    use crate::modality::Ecg;
+
+    #[test]
+    fn with_inferred_modality_records_eeg_from_labels() {
+        let untyped = Abir::from_channels_i64(vec![vec![1i64, 2, 3], vec![4, 5, 6]], 250.0)
+            .with_inferred_modality(&["Fp1", "Fp2"], None);
+        assert_eq!(untyped.provenance().tag, Eeg::TAG);
+        assert_eq!(untyped.provenance().source, ModalitySource::ChannelLabel);
+    }
+
+    #[test]
+    fn with_inferred_modality_never_leaves_manual_default() {
+        // Even an inconclusive recording (unrecognizable labels) must be
+        // recorded as an explicit ChannelLabel-sourced Untyped verdict,
+        // NOT silently left at from_channels_i64's {Manual, 255} default.
+        let untyped = Abir::from_channels_i64(vec![vec![1i64, 2, 3]], 250.0)
+            .with_inferred_modality(&["ch0"], None);
+        assert_eq!(untyped.provenance().tag, Untyped::TAG);
+        assert_eq!(untyped.provenance().source, ModalitySource::ChannelLabel);
+    }
+
+    #[test]
+    fn try_into_modality_succeeds_when_inference_matches_asserted_type() {
+        let untyped = Abir::from_channels_i64(vec![vec![1i64, 2, 3, 4]], 250.0)
+            .with_inferred_modality(&["Fp1"], None);
+        let eeg: Abir<Eeg> = untyped.try_into_modality().expect("Eeg matches inference");
+        assert_eq!(eeg.provenance().tag, Eeg::TAG);
+        assert_eq!(eeg.provenance().source, ModalitySource::ChannelLabel);
+        assert!(eeg.verify().is_ok());
+    }
+
+    #[test]
+    fn try_into_modality_rejects_mismatched_asserted_type_and_returns_self() {
+        let untyped = Abir::from_channels_i64(vec![vec![1i64, 2, 3, 4]], 250.0)
+            .with_inferred_modality(&["Fp1"], None);
+        let (back, err) = untyped
+            .try_into_modality::<Ecg>()
+            .expect_err("Ecg does not match the recorded Eeg inference");
+        assert!(matches!(
+            err,
+            VerifyError::ProvenanceTagMismatch {
+                recorded: 0,
+                expected: 4,
+            }
+        ));
+        // `self` is handed back untouched — nothing consumed on failure.
+        assert_eq!(back.n_channels(), 1);
+        assert_eq!(back.provenance().tag, Eeg::TAG);
+    }
+
+    #[test]
+    fn try_into_modality_preserves_recorded_source_on_success() {
+        let untyped = Abir::from_channels_i64(vec![vec![1i64, 2, 3]], 250.0)
+            .with_inferred_modality(&[], Some("ECG"));
+        let ecg: Abir<Ecg> = untyped.try_into_modality().expect("format-declared ECG");
+        assert_eq!(ecg.provenance().source, ModalitySource::FormatDeclared);
     }
 }

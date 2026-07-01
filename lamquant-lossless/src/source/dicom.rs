@@ -61,6 +61,12 @@ const TAG_SAMPLE_INTERPRETATION: Tag = Tag(0x5400, 0x1006);
 const TAG_WAVEFORM_DATA: Tag = Tag(0x5400, 0x1010);
 const TAG_CHANNEL_DEF_SEQUENCE: Tag = Tag(0x003A, 0x0200);
 const TAG_CHANNEL_LABEL: Tag = Tag(0x003A, 0x0203);
+/// `(0008,0060) Modality` — DICOM's own declared-recording-type field
+/// (e.g. `"ECG"`). Read (best-effort; ADR 0069 S3b) so a reader that
+/// genuinely KNOWS its modality can pass it through to
+/// `Abir::with_inferred_modality` as a `FormatDeclared` hint, rather than
+/// relying purely on channel-label inference.
+const TAG_MODALITY: Tag = Tag(0x0008, 0x0060);
 
 /// `DicomWaveformReader` — file-backed `SignalSourceReader` for DICOM
 /// Waveform IODs.
@@ -364,6 +370,7 @@ impl SignalSourceReader for DicomWaveformReader {
         }
 
         let n_samples = cols.first().map(|c| c.len()).unwrap_or(0);
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let channels: Vec<Channel> = cols
             .into_iter()
             .enumerate()
@@ -375,7 +382,20 @@ impl SignalSourceReader for DicomWaveformReader {
             })
             .collect();
 
-        Ok(Abir::from_parts(channels, base_rate, n_samples))
+        // ADR 0069 S3b: unlike the other readers, DICOM DOES have a real
+        // declared-modality field — `(0008,0060) Modality` (e.g. `"ECG"`
+        // for the Waveform IODs this reader supports). Best-effort read:
+        // a missing/malformed tag falls back to `None`, and
+        // `infer_modality` then falls back to the channel-label pass.
+        let modality_hint: Option<String> = obj
+            .element(TAG_MODALITY)
+            .ok()
+            .and_then(|e| e.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        Ok(Abir::from_parts(channels, base_rate, n_samples)
+            .with_inferred_modality(&label_refs, modality_hint.as_deref()))
     }
 }
 
@@ -539,5 +559,34 @@ mod tests {
                 "channel {j} mismatch"
             );
         }
+    }
+
+    // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
+
+    #[test]
+    fn lower_to_abir_infers_ecg_from_dicom_modality_tag() {
+        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+
+        let path = fixture("general_ecg.dcm");
+        if !path.exists() {
+            eprintln!(
+                "SKIP lower_to_abir_infers_ecg_from_dicom_modality_tag: fixture missing at {}",
+                path.display()
+            );
+            return;
+        }
+        // This fixture's channel labels are non-standard ("Lead I/J/K" —
+        // not the 12-lead names `infer_modality` recognizes), so the ONLY
+        // reliable signal here is the DICOM `(0008,0060) Modality`
+        // attribute itself (`"ECG"` for this SOP class) — exercising the
+        // `FormatDeclared` path, not the channel-label path.
+        let abir = DicomWaveformReader::new(&path).lower_to_abir().unwrap();
+        assert_eq!(abir.provenance().tag, Ecg::TAG);
+        assert_eq!(abir.provenance().source, ModalitySource::FormatDeclared);
+        assert!(
+            abir.clone().try_into_modality::<Eeg>().is_err(),
+            "an ECG-declared Abir must refuse promotion to Eeg"
+        );
+        assert!(abir.try_into_modality::<Ecg>().is_ok());
     }
 }

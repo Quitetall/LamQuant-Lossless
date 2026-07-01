@@ -242,9 +242,7 @@ impl SignalSourceReader for EeglabReader {
             .checked_mul(meta.n_samples as u64)
             .and_then(|p| p.checked_mul(4))
             .ok_or_else(|| {
-                LmlError::InvalidHeader(
-                    "eeglab: n_channels * n_samples * 4 overflows u64".into(),
-                )
+                LmlError::InvalidHeader("eeglab: n_channels * n_samples * 4 overflows u64".into())
             })?;
         let fdt_size = std::fs::metadata(&fdt_path).map_err(LmlError::Io)?.len();
         if fdt_size < expected_bytes {
@@ -483,6 +481,34 @@ mod tests {
         let b = r.read_bundle().unwrap();
         assert_eq!(b.channels, vec!["Fp1".to_string(), "Cz".to_string()]);
         assert!((b.sample_rate - 250.0).abs() < 1e-9);
+    }
+
+    // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
+    //
+    // EeglabReader is the one reader that stays on `SignalSourceReader`'s
+    // DEFAULT `lower_to_abir` (see `source/reader.rs` docs) — this test
+    // exercises that shared default path, not a reader-specific override.
+
+    #[test]
+    fn lower_to_abir_infers_eeg_from_channel_labels() {
+        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let set = tmp.path().join("e.set");
+        std::fs::write(&set, b"").unwrap();
+        std::fs::write(tmp.path().join("e.fdt"), synth_fdt(2, 8)).unwrap();
+        std::fs::write(
+            tmp.path().join("e.lml-meta.json"),
+            "{\"n_channels\":2,\"n_samples\":8,\"sample_rate\":250.0,\
+             \"channels\":[\"Fp1\",\"Cz\"],\"phys_dim\":\"uV\"}",
+        )
+        .unwrap();
+
+        let abir = EeglabReader::new(&set).lower_to_abir().unwrap();
+        assert_eq!(abir.provenance().tag, Eeg::TAG);
+        assert_eq!(abir.provenance().source, ModalitySource::ChannelLabel);
+        assert!(abir.clone().try_into_modality::<Eeg>().is_ok());
+        assert!(abir.try_into_modality::<Ecg>().is_err());
     }
 
     #[test]
