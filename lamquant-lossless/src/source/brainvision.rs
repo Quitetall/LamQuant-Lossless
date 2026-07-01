@@ -880,6 +880,49 @@ mod tests {
         }
     }
 
+    /// Task #33 (ADR 0069 L9 hardening): INT_32 + VECTORIZED was untested
+    /// by construction — `lower_to_abir_int32_multiplexed_matches_read_bundle_i64`
+    /// covers INT_32 + MULTIPLEXED and `lower_to_abir_int16_vectorized_
+    /// matches_read_bundle_i64` covers INT_16 + VECTORIZED, but the
+    /// (Int32, Vectorized) combination in `lower_to_abir`'s match arm had
+    /// no dedicated byte-exact gate.
+    #[test]
+    fn lower_to_abir_int32_vectorized_matches_read_bundle_i64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let n_ch = 2usize;
+        let n_samples = 48usize;
+        let mut eeg_bytes: Vec<u8> = Vec::with_capacity(n_ch * n_samples * 4);
+        for ch in 0..n_ch {
+            for s in 0..n_samples {
+                let v = (s as i32).wrapping_mul(100_000).wrapping_add(ch as i32) - 40_000;
+                eeg_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        std::fs::write(tmp.path().join("i32v.eeg"), &eeg_bytes).unwrap();
+        let mut vhdr = synth_vhdr_int32_multiplexed(n_ch, 4000.0);
+        vhdr = vhdr.replace("DataOrientation=MULTIPLEXED", "DataOrientation=VECTORIZED");
+        vhdr = vhdr.replace("DataFile=test.eeg", "DataFile=i32v.eeg");
+        let p = tmp.path().join("i32v.vhdr");
+        std::fs::write(&p, vhdr.as_bytes()).unwrap();
+
+        let bundle = BrainVisionReader::new(&p).read_bundle().unwrap();
+        let abir = BrainVisionReader::new(&p).lower_to_abir().unwrap();
+        assert_eq!(abir.n_channels(), n_ch);
+        assert_eq!(abir.n_samples, n_samples);
+        for (j, ch) in abir.channels.iter().enumerate() {
+            assert!(
+                matches!(ch.data, Column::I32(_)),
+                "INT_32 + VECTORIZED must specialize to Column::I32"
+            );
+            let widened = ch.data.window_i64(0, abir.n_samples);
+            assert_eq!(
+                widened.as_ref(),
+                bundle.signal[j].as_slice(),
+                "channel {j} mismatch"
+            );
+        }
+    }
+
     // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
 
     fn synth_vhdr_with_channel_names(names: &[&str], sample_interval_us: f64) -> String {

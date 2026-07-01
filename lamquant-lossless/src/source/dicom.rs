@@ -514,6 +514,7 @@ fn missing(idx: usize, tag: Tag, name: &str) -> LmlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dicom_core::{dicom_value, PrimitiveValue};
     use std::path::PathBuf;
 
     /// Same fixture directory `tests/dicom_parity.rs` uses — real +
@@ -588,5 +589,101 @@ mod tests {
             "an ECG-declared Abir must refuse promotion to Eeg"
         );
         assert!(abir.try_into_modality::<Ecg>().is_ok());
+    }
+
+    // ─── Task #33 (ADR 0069 L9 hardening): negative-path refusal ───────
+    //
+    // `parse_group_meta` (called by BOTH `read_bundle` and `lower_to_abir`)
+    // refuses any group whose `WaveformBitsAllocated != 16` or
+    // `WaveformSampleInterpretation != "SS"` BEFORE a single sample byte
+    // is decoded — that check is what keeps `lower_to_abir`'s unconditional
+    // `Column::I16` narrow safe (a 32-bit or unsigned sample would silently
+    // corrupt an `i16` narrow otherwise). These tests mutate a real,
+    // otherwise-valid fixture (`general_ecg.dcm`) via `dicom-object`'s
+    // `update_value_at` so the byte layout stays spec-valid except for the
+    // one tag under test, then assert BOTH entry points reject it.
+
+    /// Mutate one primitive-valued tag inside multiplex group 0 of a
+    /// DICOM Waveform IOD fixture and write the result to a fresh temp
+    /// file. Panics (test setup failure, not the thing under test) if the
+    /// tag isn't present in the fixture.
+    fn mutate_group0_tag(
+        src: &std::path::Path,
+        tag: Tag,
+        new_value: PrimitiveValue,
+        out_name: &str,
+    ) -> PathBuf {
+        let mut obj = open_file(src).expect("fixture must open");
+        obj.update_value_at((TAG_WAVEFORM_SEQUENCE, 0u32, tag), |v| {
+            if let Some(p) = v.primitive_mut() {
+                *p = new_value.clone();
+            }
+        })
+        .expect("tag must be present in group 0 of the fixture");
+        let tmp = tempfile::tempdir().unwrap();
+        // Leak the tempdir so the file survives past this function's
+        // return (test-only; the OS reaps it at process exit).
+        let out = Box::leak(Box::new(tmp)).path().join(out_name);
+        obj.write_to_file(&out).expect("write mutated fixture");
+        out
+    }
+
+    #[test]
+    fn read_bundle_and_lower_to_abir_reject_bits_allocated_ne_16() {
+        let path = fixture("general_ecg.dcm");
+        if !path.exists() {
+            eprintln!(
+                "SKIP read_bundle_and_lower_to_abir_reject_bits_allocated_ne_16: \
+                 fixture missing at {}",
+                path.display()
+            );
+            return;
+        }
+        let out = mutate_group0_tag(
+            &path,
+            TAG_BITS_ALLOCATED,
+            dicom_value!(U16, [8u16]),
+            "bits_allocated_8.dcm",
+        );
+
+        assert!(
+            DicomWaveformReader::new(&out).read_bundle().is_err(),
+            "WaveformBitsAllocated=8 must be refused by read_bundle (only 16-bit \
+             supported — PS3.3 §C.10.9)"
+        );
+        assert!(
+            DicomWaveformReader::new(&out).lower_to_abir().is_err(),
+            "WaveformBitsAllocated=8 must be refused by lower_to_abir — an \
+             oversized value must never reach the unconditional Column::I16 narrow"
+        );
+    }
+
+    #[test]
+    fn read_bundle_and_lower_to_abir_reject_sample_interpretation_ne_ss() {
+        let path = fixture("general_ecg.dcm");
+        if !path.exists() {
+            eprintln!(
+                "SKIP read_bundle_and_lower_to_abir_reject_sample_interpretation_ne_ss: \
+                 fixture missing at {}",
+                path.display()
+            );
+            return;
+        }
+        let out = mutate_group0_tag(
+            &path,
+            TAG_SAMPLE_INTERPRETATION,
+            PrimitiveValue::from("UB"),
+            "interp_ub.dcm",
+        );
+
+        assert!(
+            DicomWaveformReader::new(&out).read_bundle().is_err(),
+            "WaveformSampleInterpretation=UB must be refused by read_bundle \
+             (only 'SS' supported — PS3.3 §C.10.9.1)"
+        );
+        assert!(
+            DicomWaveformReader::new(&out).lower_to_abir().is_err(),
+            "WaveformSampleInterpretation=UB must be refused by lower_to_abir"
+        );
     }
 }

@@ -579,6 +579,39 @@ mod tests {
         }
     }
 
+    /// Task #33 (ADR 0069 L9 hardening): the gate above only exercises
+    /// small values (±306) that fit comfortably in `i16` — it would PASS
+    /// even if EDF wrongly narrowed to something smaller than `i16` (e.g.
+    /// `i8`). Prove the actual boundary: `i16::MIN`/`i16::MAX` must
+    /// survive the `Column::I16` widen exactly, with no clipping or wrap
+    /// at either extreme.
+    #[test]
+    fn lower_to_abir_edf_i16_extremes_round_trip_exactly() {
+        let samples: Vec<i16> = vec![i16::MIN, i16::MAX, 0, i16::MIN, i16::MAX];
+        let bytes = crate::ingest::synth_single_channel_edf(&samples, 250.0);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("synth_extremes.edf");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let bundle = EdfReader::new(&path).read_bundle().unwrap();
+        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
+
+        assert!(
+            matches!(abir.channels[0].data, Column::I16(_)),
+            "EDF must specialize to Column::I16"
+        );
+        let widened = abir.channels[0].data.window_i64(0, abir.n_samples);
+        assert_eq!(
+            widened.as_ref(),
+            bundle.signal[0].as_slice(),
+            "lower_to_abir must equal read_bundle's i64 exactly at the i16 extremes"
+        );
+        assert_eq!(widened[0], i16::MIN as i64, "i16::MIN must round-trip exactly");
+        assert_eq!(widened[1], i16::MAX as i64, "i16::MAX must round-trip exactly");
+        assert_eq!(widened[3], i16::MIN as i64, "second i16::MIN must round-trip exactly");
+        assert_eq!(widened[4], i16::MAX as i64, "second i16::MAX must round-trip exactly");
+    }
+
     #[test]
     fn lower_to_abir_bdf_matches_read_bundle_i64() {
         // Values span the full 24-bit-ish range this synth encodes so
@@ -605,6 +638,42 @@ mod tests {
                 "channel {j}: lower_to_abir must equal read_bundle's i64 exactly"
             );
         }
+    }
+
+    /// Task #33 (ADR 0069 L9 hardening): the BDF gate above uses values
+    /// spanning ±3000 — well inside `i16` range (±32767) — so it would
+    /// PASS even if `lower_to_abir`'s `is_bdf` branch wrongly picked
+    /// `Column::I16` for BDF. Prove the specialization is load-bearing
+    /// with values that overflow `i16` but are still valid 24-bit BDF
+    /// samples: `-8_388_608` (min) and `8_388_607` (max). A confirmed
+    /// fail-then-fix pass (temporarily forcing BDF to `Column::I16`) shows
+    /// these exact extremes corrupt under an `i16` narrow — see the
+    /// commit message for the observed failure.
+    #[test]
+    fn lower_to_abir_bdf_i24_extremes_round_trip_exactly() {
+        let samples: Vec<i32> = vec![-8_388_608, 8_388_607, 0, -8_388_608, 8_388_607];
+        let bytes = synth_single_channel_bdf(&samples, 250.0);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("synth_extremes.bdf");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let bundle = EdfReader::new(&path).read_bundle().unwrap();
+        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
+
+        assert!(
+            matches!(abir.channels[0].data, Column::I24(_)),
+            "BDF must specialize to Column::I24, NOT I16 (24-bit overflows i16)"
+        );
+        let widened = abir.channels[0].data.window_i64(0, abir.n_samples);
+        assert_eq!(
+            widened.as_ref(),
+            bundle.signal[0].as_slice(),
+            "lower_to_abir must equal read_bundle's i64 exactly at the i24 extremes"
+        );
+        assert_eq!(widened[0], -8_388_608i64, "i24 min must round-trip exactly");
+        assert_eq!(widened[1], 8_388_607i64, "i24 max must round-trip exactly");
+        assert_eq!(widened[3], -8_388_608i64, "second i24 min must round-trip exactly");
+        assert_eq!(widened[4], 8_388_607i64, "second i24 max must round-trip exactly");
     }
 
     // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
