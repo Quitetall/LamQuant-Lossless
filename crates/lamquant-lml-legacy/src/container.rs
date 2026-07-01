@@ -2,10 +2,10 @@
 //!
 //! Spec: specs/lml-format-v1.md Section 2
 
-use crate::deployment::LosslessMode;
-use crate::error::{LmlError, LmlResult};
-use crate::lml::{self, MAGIC};
-use crate::lpc::LpcMode;
+use lamquant_lml_mcu::deployment::LosslessMode;
+use lamquant_lml_mcu::error::{LmlError, LmlResult};
+use lamquant_lml_mcu::lml::{self, MAGIC};
+use lamquant_lml_mcu::lpc::LpcMode;
 use crate::offset_table::{OffsetEntry, OffsetTable};
 use std::path::Path;
 const VERSION_MAJOR: u8 = 1;
@@ -409,7 +409,7 @@ fn encode_into<W: std::io::Write + ?Sized>(
     // on host the rayon-parallel + AVX2 path runs by default. Output
     // is byte-identical regardless of backend; only wall-clock
     // differs. Firmware builds compile out the Desktop arm via cfg.
-    let backend = crate::backend::global_backend();
+    let backend = lamquant_lml_desktop::backend::global_backend();
     let mut window_payloads: Vec<Vec<u8>> = Vec::with_capacity(n_windows);
     for w in 0..n_windows {
         let start = w * actual_window;
@@ -424,13 +424,13 @@ fn encode_into<W: std::io::Write + ?Sized>(
             lml::compress_bounded_mae(&window, d, lpc_mode)?
         } else {
             match backend {
-                crate::backend::ComputeBackend::Firmware => {
+                lamquant_lml_desktop::backend::ComputeBackend::Firmware => {
                     lml::compress_with_mode(&window, noise_bits, lpc_mode)?
                 }
                 // ADR 0058 carve-full: the parallel path lives in the Desktop
-                // tier, re-exported as `crate::compress_with_mode_parallel`.
-                crate::backend::ComputeBackend::Desktop => {
-                    crate::compress_with_mode_parallel(&window, noise_bits, lpc_mode)?
+                // tier, re-exported as `lamquant_lml_desktop::compress_with_mode_parallel`.
+                lamquant_lml_desktop::backend::ComputeBackend::Desktop => {
+                    lamquant_lml_desktop::compress_with_mode_parallel(&window, noise_bits, lpc_mode)?
                 }
             }
         };
@@ -1217,6 +1217,27 @@ mod tests {
         );
     }
 
+    /// A `Read` that yields one byte per call — locally defined (the shared helper
+    /// lived in `lamquant-lossless::io`, which stays in that crate).
+    struct ByteAtATime<'a> {
+        src: &'a [u8],
+    }
+    impl<'a> ByteAtATime<'a> {
+        fn new(src: &'a [u8]) -> Self {
+            Self { src }
+        }
+    }
+    impl std::io::Read for ByteAtATime<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.src.is_empty() || buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = self.src[0];
+            self.src = &self.src[1..];
+            Ok(1)
+        }
+    }
+
     #[test]
     fn read_from_handles_partial_reads() {
         // Force one-byte-per-read; read_to_end inside read_from must
@@ -1224,7 +1245,7 @@ mod tests {
         let sig = synth_signal(1, 128, 99);
         let mut sink: Vec<u8> = Vec::new();
         write_into(&mut sink, &sig, 250.0, 64, 0, "{}", LpcMode::default()).unwrap();
-        let mut src = crate::io::tests::ByteAtATime::new(&sink);
+        let mut src = ByteAtATime::new(&sink);
         let (recovered, _) = read_from(&mut src).unwrap();
         assert_eq!(recovered[0], sig[0]);
     }

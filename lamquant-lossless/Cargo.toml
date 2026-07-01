@@ -119,6 +119,8 @@ archive = [
     # implies `std`.
     "dep:lamquant-lml-desktop",
     "lamquant-lml-desktop/fast",
+    "dep:lamquant-lml-legacy",
+    "lamquant-lml-legacy/legacy-decode",
     # Desktop ships the LMO encoder as standard (ADR 0052).
     "lamquant-lml-optimum/encode",
     "lamquant-common/host",
@@ -243,6 +245,9 @@ lamquant-lml-optimum = { version = "0.0.1", path = "../lamquant-lml-optimum", de
 # `lamquant-lml-mcu/archive`; this links the Desktop tier crate so the umbrella
 # assembles all three tiers (mcu + desktop + optimum).
 lamquant-lml-desktop = { version = "0.9.3", path = "../lamquant-lml-desktop", default-features = false, optional = true }
+# ADR 0069 L4: the sequestered LML-v1 wire (container/offset_table/stream). Optional;
+# enabled by `archive` and re-exported at the stable `lamquant_core::container` path.
+lamquant-lml-legacy = { version = "0.1.0", path = "../crates/lamquant-lml-legacy", optional = true }
 # Used by the facade's container/lma/security/config (SHA-256, base64).
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }

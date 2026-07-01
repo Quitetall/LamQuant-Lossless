@@ -3270,6 +3270,7 @@ dependencies = [
  "lamquant-common",
  "lamquant-config",
  "lamquant-lml-desktop",
+ "lamquant-lml-legacy",
  "lamquant-lml-mcu",
  "lamquant-lml-optimum",
  "lamquant-ops",
@@ -3316,6 +3317,16 @@ dependencies = [
  "hdf5-metno-sys",
  "lamquant-lml-mcu",
  "ndarray 0.17.2",
+ "tempfile",
+]
+
+[[package]]
+name = "lamquant-lml-legacy"
+version = "0.1.0"
+dependencies = [
+ "lamquant-lml-desktop",
+ "lamquant-lml-mcu",
+ "serde_json",
  "tempfile",
 ]
 

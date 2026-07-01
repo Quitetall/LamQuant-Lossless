@@ -36,8 +36,8 @@
 //!   `Ok(Some(_))` for "footer parsed", `Err(_)` for "footer present but
 //!   malformed".
 
-use crate::crc32::{crc32_update, CRC32_INIT};
-use crate::error::{LmlError, LmlResult};
+use lamquant_lml_mcu::crc32::{crc32_update, CRC32_INIT};
+use lamquant_lml_mcu::error::{LmlError, LmlResult};
 
 /// Footer magic — identifies the seek-table trailer.
 pub const FOOTER_MAGIC: &[u8; 8] = b"LMLFOOT1";

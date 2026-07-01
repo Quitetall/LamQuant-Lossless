@@ -7,8 +7,8 @@
 //! can plug in. `LmlReader::open(path)` remains as a back-compat
 //! shortcut returning a `LmlReader<BufReader<File>>`.
 
-use crate::error::{LmlError, LmlResult};
-use crate::lml::{self, MAGIC};
+use lamquant_lml_mcu::error::{LmlError, LmlResult};
+use lamquant_lml_mcu::lml::{self, MAGIC};
 use crate::offset_table::{OffsetTable, ENTRY_SIZE, FOOTER_MAGIC, FOOTER_SIZE};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -310,7 +310,7 @@ impl<R: Read + Seek> Iterator for LmlReader<R> {
 mod tests {
     use super::*;
     use crate::container;
-    use crate::lpc::LpcMode;
+    use lamquant_lml_mcu::lpc::LpcMode;
 
     fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);

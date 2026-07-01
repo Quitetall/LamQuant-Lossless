@@ -20,4 +20,15 @@
 //! re-exported at the stable `lamquant_core::container` path so every call site + the
 //! S1 golden + `legacy_crc_decode` + the L1 oracle stay byte-identical by construction.
 
-// (modules land in L4)
+// The v1 wire modules (ADR 0069 L4), relocated verbatim from `lamquant-lossless`.
+// For this first cut all three ride under `legacy-decode` (default ON), so both the
+// frozen reader and the oracle writer are available; the finer read/`legacy-encode`
+// split is a tracked follow-up. Their `crate::{error,lml,lpc,deployment,crc32}` refs
+// now resolve against `lamquant-lml-mcu`, and `crate::{backend,compress_with_mode_parallel}`
+// against `lamquant-lml-desktop`.
+#[cfg(feature = "legacy-decode")]
+pub mod offset_table;
+#[cfg(feature = "legacy-decode")]
+pub mod container;
+#[cfg(feature = "legacy-decode")]
+pub mod stream;

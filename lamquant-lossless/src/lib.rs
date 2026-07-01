@@ -86,8 +86,12 @@ pub fn decode(bytes: &[u8]) -> Result<codec::Signal, codec::CodecError> {
 pub mod async_io;
 #[cfg(feature = "archive")]
 pub mod codec_stages;
+// ADR 0069 L4: the LML-v1 wire (container/offset_table/stream) is sequestered in
+// `lamquant-lml-legacy`; re-exported here at the stable `lamquant_core::container`
+// path so every call site + the S1 golden + legacy_crc_decode + the L1 oracle stay
+// byte-identical by construction.
 #[cfg(feature = "archive")]
-pub mod container;
+pub use lamquant_lml_legacy::container;
 #[cfg(feature = "archive")]
 pub mod edf;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
@@ -100,7 +104,7 @@ pub mod io;
 #[cfg(feature = "archive")]
 pub mod lma;
 #[cfg(feature = "archive")]
-pub mod offset_table;
+pub use lamquant_lml_legacy::offset_table;
 // NWB/HDF5 integer-signal reader → LML ingest (ADR 0051 Track 3). Host-only:
 // the `nwb` feature gates in libhdf5 via hdf5-metno; never in the no_std build.
 #[cfg(feature = "nwb")]
@@ -119,7 +123,7 @@ pub mod range;
 #[cfg(feature = "archive")]
 pub mod source;
 #[cfg(feature = "archive")]
-pub mod stream;
+pub use lamquant_lml_legacy::stream;
 
 // ─── security: encryption / signing primitives ────────────────────
 #[cfg(feature = "security")]
