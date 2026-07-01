@@ -18,9 +18,12 @@ name = "lamquant_abir"
 crate-type = ["rlib"]
 
 [features]
-default = []
-# Host-side std (gates std::error::Error impls when the error vocabulary lands
-# in a later increment). Inert today — Format/Mode are core-only.
+# `std` ON by default (mirrors lamquant-lml-mcu) so `cargo test`/`--workspace` build
+# with a libtest harness; the no_std chain reaches abir via `default-features = false`
+# (mcu's abir dep) and the riscv build uses `--no-default-features`.
+default = ["std"]
+# Host-side std: flips off `#![no_std]` and gates the `std::error::Error` impl on
+# `CodecError`. The atoms + Format/Mode/Codec are `alloc`-only (no_std-clean).
 std = []
 
 [dependencies]

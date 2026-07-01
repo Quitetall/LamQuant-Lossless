@@ -14,6 +14,10 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// The ABIR atoms — the columnar, width-typed, zero-copy signal currency (Pillar 2).
+pub mod atoms;
+pub use atoms::{Abir, Channel, Column};
+
 /// Which deterministic wire format a stream is, decided by its leading magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
