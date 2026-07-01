@@ -91,12 +91,23 @@ fn container_decode_bit_exact_after_repeated_encode() {
 
 #[test]
 fn container_endianness_invariants() {
-    // The wire format is little-endian everywhere. Confirm by
-    // probing the n_channels field after the 6-byte magic + version
-    // prefix (bytes 6..8 = u16 LE).
+    // The wire format is little-endian everywhere. Confirm by probing the
+    // n_channels field.
+    //
+    // ADR 0069/0071 L9: `container::write_into` now emits the BCS1 40-byte
+    // typed header (magic + version_major/minor + modality_tag/source +
+    // codec_descriptor + mode + tier + decode_capability, THEN n_channels at
+    // offset 12..14 as u16 LE) instead of the legacy 32-byte header (where
+    // n_channels sat at offset 6..8, right after the 6-byte magic+version
+    // prefix). This assertion is updated to the new offset — it is a
+    // structural wire-layout check (little-endian-ness), not a frozen sha
+    // golden, so it reflects the CURRENT header layout rather than being
+    // left pinned to the pre-L9 one. See `lamquant_abir::bcs1` for the full
+    // layout.
     let sig = synth_signal(7, 128, 11);
     let mut sink = Vec::new();
     container::write_into(&mut sink, &sig, 250.0, 64, 0, "{}", LpcMode::default()).unwrap();
-    let n_ch = u16::from_le_bytes([sink[6], sink[7]]) as usize;
+    assert_eq!(&sink[0..4], b"BCS1", "container::write_into must emit the BCS1 magic");
+    let n_ch = u16::from_le_bytes([sink[12], sink[13]]) as usize;
     assert_eq!(n_ch, 7);
 }

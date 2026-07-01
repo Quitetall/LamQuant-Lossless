@@ -92,6 +92,12 @@ pub mod async_io;
 // `lamquant-lml-legacy`.
 #[cfg(feature = "archive")]
 pub mod abir_container;
+// ADR 0069/0071 L9 (read-side completion): the BCS1-aware streaming reader
+// (`Bcs1StreamReader`) + the magic-dispatching `AnyLmlReader` facade that
+// `range::RangeReader` and `bin/lml.rs`'s streaming decode paths use instead
+// of hardcoding the frozen `stream::LmlReader`. See module docs.
+#[cfg(feature = "archive")]
+pub mod bcs1_stream;
 #[cfg(feature = "archive")]
 pub mod codec_stages;
 // ADR 0069 L8 (cutover): `lamquant_core::container` now aliases the clean

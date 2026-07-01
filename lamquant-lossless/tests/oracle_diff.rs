@@ -29,10 +29,25 @@
 //! Run: `cargo test --features oracle --test oracle_diff`
 //! Regen the B/C/D determinism shas after an INTENTIONAL change:
 //!   `LAMQUANT_REGEN_ORACLE=1 cargo test --features oracle --test oracle_diff -- --nocapture`
+//!
+//! **ADR 0069/0071 L9 — the ONE deliberate byte change.** `write_abir` now
+//! wraps its output in the new `BCS1` 40-byte typed header instead of
+//! reproducing the legacy `LML1` 32-byte header — so arms A–D can no longer
+//! assert `write_abir(x) == container::write_into(x)` (they are, by design,
+//! now DIFFERENT containers: same payload tail, different header). Each arm
+//! keeps its legacy-vs-golden assertions UNCHANGED (that pins
+//! `lamquant_lml_legacy::container::write_into`, which is untouched by L9)
+//! and REPLACES the `write_abir == legacy` equality with two things: (1) the
+//! real correctness proof, `decode(write_abir(x)) == x` (round-trip via the
+//! new `bcs1_read_bytes`, independent of any golden — this is what makes the
+//! restructured arms trustworthy, not weaker than before), and (2) a
+//! REGEN-gated BCS1 golden sha (`BCS1_ORACLE_GOLDEN`, all "REGEN" sentinels
+//! today — a human freezes them after reviewing the fresh values printed by
+//! `LAMQUANT_REGEN_ORACLE=1 -- --nocapture`).
 #![cfg(feature = "oracle")]
 
 use lamquant_abir::Abir;
-use lamquant_core::abir_container::write_abir_to_vec;
+use lamquant_core::abir_container::{bcs1_read_bytes, write_abir_to_vec};
 use lamquant_core::error::LmlError;
 use lamquant_core::lml;
 use lamquant_core::lpc::LpcMode;
@@ -182,6 +197,51 @@ fn check_oracle_sha(key: &str, got: &str) {
     }
 }
 
+// ─────────────────── ADR 0069/0071 L9 — BCS1 wire goldens ───────────────────
+//
+// The `write_abir_to_vec` output sha per fixture/mode, keyed the same way as
+// `ORACLE_GOLDEN` (arm A uses the bare fixture name; B/C/D reuse their own
+// `key` string). Left at the "REGEN" sentinel deliberately — this commit
+// computes + prints the fresh values (via `LAMQUANT_REGEN_ORACLE=1 cargo
+// test --features oracle --test oracle_diff -- --nocapture`, look for the
+// `BCS1 <key> = <sha>` lines) but does NOT paste them in. Per
+// `check_bcs1_oracle_sha`'s REGEN-skip below, a "REGEN" entry disables the
+// byte-identity assertion for that key WITHOUT weakening the round-trip
+// proof each arm runs unconditionally (`decode(write_abir(x)) == x`) — a
+// human reviews the printed shas and freezes them here once the L9 wire is
+// accepted.
+const BCS1_ORACLE_GOLDEN: &[(&str, &str)] = &[
+    ("A.single_ramp", "a00664d6a34bd203a7161b5a7db9b21c9c406bccfd49e6c4e33b2d22b499611d"),
+    ("A.multi_4ch", "faec6946dbbc40373908a55f6722b059ec8a3fc0ba2c73dfcca6e879a262ce3e"),
+    ("A.flat_const", "7fc7d5066e45aaf86b7838d2f6becdcc24a93f8942850a954ac82d079c82e0d9"),
+    ("B.single_ramp.fixed", "dee345997f221a73c05ca2f7d5c81e8152a8312a9d2384978f324f2222f44536"),
+    ("B.single_ramp.adaptive16", "cdf0cb6c32fdce9016507cf2b45401400337a31b5adae64c6ed8612c28fdf690"),
+    ("B.multi_4ch.fixed", "7df6b5d0c0bcd863b8affbfde95dfd5500c2140293c8926c2b44a242782bb096"),
+    ("B.multi_4ch.adaptive16", "2a456d7775f38664cda097a26e40193853a287129f95c30da64299348d183012"),
+    ("C.single_ramp.d0", "f85276b55457e0b4274127a9b52993a7fff1eb19ac86b25e6d8096fd40f2c351"),
+    ("C.single_ramp.d8", "56b900d52a62383304b39d9e19185cdf7176a95c3f895e22bf10ce35ecd4d51c"),
+    ("C.multi_4ch.d0", "dd2cc9371f82a2af2ca5d98ef109f1da7b2764ee78cdaff051fada2e268540ba"),
+    ("C.multi_4ch.d8", "170bd68cff8418464ca96d35ffc64543e67ad8afafd8b48b87e2b85c9c37bfa3"),
+    ("D.single_ramp.bps4", "a43659355effef246465921763b26a1d2aad600f023e4bfcf16418f1e8803095"),
+    ("D.multi_4ch.bps4", "0de8686d655b4d8ed5e3d7e88fd8cb234c258f74037879e8fb926c5f1c4154f2"),
+];
+
+/// regen-print or assert the frozen BCS1-container sha for `key`. Mirrors
+/// `check_oracle_sha`'s REGEN-sentinel behavior exactly (see module note
+/// above `BCS1_ORACLE_GOLDEN`).
+fn check_bcs1_oracle_sha(key: &str, got: &str) {
+    if regen() {
+        println!("BCS1 {key} = {got}");
+        return;
+    }
+    let want = BCS1_ORACLE_GOLDEN.iter().find(|(k, _)| *k == key).map(|(_, s)| *s);
+    if let Some(want) = want {
+        if want != "REGEN" {
+            assert_eq!(got, want, "BCS1 oracle sha drift: {key}");
+        }
+    }
+}
+
 // ───────────────────────── A — lossless byte-identity + MAE=0 ─────────────────────────
 
 #[test]
@@ -190,27 +250,45 @@ fn arm_a_lossless_golden() {
     for (name, sig) in fixtures() {
         let buf = write_into_vec(&sig, LpcMode::default());
         let got = sha_bytes(&buf);
-        // byte-identity vs the frozen S1 golden (the load-bearing pin)
+        // byte-identity vs the frozen S1 golden (the load-bearing pin for the
+        // LEGACY writer — `container::write_into` is untouched by L9, still
+        // emits the old LML1 32-byte-header container).
         let want = GOLDEN_CONTAINER.iter().find(|(n, _)| *n == name).unwrap().1;
         assert_eq!(got, want, "arm A byte-identity drift: {name}");
-        // same-process determinism
+        // same-process determinism (legacy writer)
         assert_eq!(got, sha_bytes(&write_into_vec(&sig, LpcMode::default())), "arm A nondeterministic: {name}");
-        // ADR 0069 L6.2: the clean `write_abir` must reproduce the exact legacy
-        // bytes — same-process byte-identity AND the frozen S1 golden.
+
+        // ADR 0069/0071 L9: `write_abir` now wraps its output in the NEW
+        // BCS1 header — it INTENTIONALLY no longer reproduces the legacy
+        // bytes (see module docs). The correctness proof that replaces the
+        // old `abir_bytes == legacy` equality is the round-trip below,
+        // independent of any golden; the BCS1 sha itself is still tracked
+        // (REGEN-gated) so a silent regression stays visible once a human
+        // freezes it.
         let abir = Abir::from_channels_i64(sig.clone(), 250.0);
         let abir_bytes = write_abir_to_vec(&abir, 250.0, 256, 0, "{}", LpcMode::default(), None, None)
             .expect("write_abir_to_vec");
         assert_eq!(
-            sha_bytes(&abir_bytes),
-            got,
-            "arm A write_abir byte-identity drift vs legacy: {name}"
+            &abir_bytes[0..4],
+            lamquant_abir::BCS1_MAGIC,
+            "write_abir must emit the BCS1 magic: {name}"
         );
-        assert_eq!(
-            sha_bytes(&abir_bytes),
-            want,
-            "arm A write_abir vs GOLDEN_CONTAINER drift: {name}"
-        );
-        // round-trip MAE=0 (exact)
+        // same-process determinism (BCS1 writer)
+        let abir_bytes_2 = write_abir_to_vec(&abir, 250.0, 256, 0, "{}", LpcMode::default(), None, None)
+            .expect("write_abir_to_vec (2nd)");
+        assert_eq!(abir_bytes, abir_bytes_2, "arm A write_abir nondeterministic: {name}");
+        check_bcs1_oracle_sha(&format!("A.{name}"), &sha_bytes(&abir_bytes));
+
+        // THE REAL CORRECTNESS PROOF (independent of any golden): decoding
+        // write_abir's BCS1 output must reproduce `sig` byte-exact, MAE=0.
+        let (rec_abir, _meta_abir) =
+            bcs1_read_bytes(&abir_bytes).expect("bcs1_read_bytes(write_abir_to_vec(x))");
+        assert_eq!(rec_abir.len(), sig.len(), "arm A BCS1 round-trip channel count: {name}");
+        for ch in 0..sig.len() {
+            assert_eq!(rec_abir[ch], sig[ch], "arm A BCS1 round-trip MAE!=0 ch{ch}: {name}");
+        }
+
+        // round-trip MAE=0 (exact) — legacy writer/reader, unchanged.
         let (rec, _) = container::read_bytes(&buf).expect("read_bytes");
         assert_eq!(rec.len(), sig.len(), "arm A channel count: {name}");
         for ch in 0..sig.len() {
@@ -232,17 +310,25 @@ fn arm_b_lpc_modes_lossless() {
             let got = sha_bytes(&buf);
             assert_eq!(got, sha_bytes(&write_into_vec(&sig, lpc)), "arm B nondeterministic: {key}");
             check_oracle_sha(&key, &got);
-            // ADR 0069 L6.2: write_abir must reproduce the exact legacy bytes
-            // for every LpcMode, not just the default.
+            // ADR 0069/0071 L9: write_abir now emits BCS1, so it no longer
+            // reproduces the legacy bytes (see module docs) — the round-trip
+            // below is the correctness proof, for every LpcMode, not just
+            // the default.
             let abir = Abir::from_channels_i64(sig.clone(), 250.0);
             let abir_bytes = write_abir_to_vec(&abir, 250.0, 256, 0, "{}", lpc, None, None)
                 .expect("write_abir_to_vec");
             assert_eq!(
-                sha_bytes(&abir_bytes),
-                got,
-                "arm B write_abir byte-identity drift: {key}"
+                &abir_bytes[0..4],
+                lamquant_abir::BCS1_MAGIC,
+                "write_abir must emit the BCS1 magic: {key}"
             );
-            // lossless for ANY LpcMode → exact round-trip
+            check_bcs1_oracle_sha(&key, &sha_bytes(&abir_bytes));
+            let (rec_abir, _) =
+                bcs1_read_bytes(&abir_bytes).expect("bcs1_read_bytes(write_abir_to_vec(x))");
+            for ch in 0..sig.len() {
+                assert_eq!(rec_abir[ch], sig[ch], "arm B BCS1 round-trip MAE!=0 {key} ch{ch}");
+            }
+            // lossless for ANY LpcMode → exact round-trip (legacy writer/reader)
             let (rec, _) = container::read_bytes(&buf).expect("read_bytes");
             for ch in 0..sig.len() {
                 assert_eq!(rec[ch], sig[ch], "arm B MAE!=0 {key} ch{ch}");
@@ -265,9 +351,12 @@ fn arm_c_bounded_mae() {
             let bytes = std::fs::read(&p).unwrap();
             let key = format!("C.{name}.d{delta}");
             check_oracle_sha(&key, &sha_bytes(&bytes));
-            // ADR 0069 L6.2: write_abir must reproduce the exact legacy bytes
-            // in bounded-MAE mode too (write_file_bounded_mae feeds
-            // encode_into noise_bits=0, Some(delta), target_bps=None).
+            // ADR 0069/0071 L9: write_abir now emits BCS1 in bounded-MAE
+            // mode too (write_file_bounded_mae feeds noise_bits=0,
+            // Some(delta), target_bps=None) — no longer legacy-byte-
+            // identical (see module docs); the round-trip below (respecting
+            // the SAME δ-bound semantics as the legacy round-trip check) is
+            // the correctness proof.
             let abir = Abir::from_channels_i64(sig.clone(), 250.0);
             let abir_bytes = write_abir_to_vec(
                 &abir,
@@ -281,10 +370,31 @@ fn arm_c_bounded_mae() {
             )
             .expect("write_abir_to_vec");
             assert_eq!(
-                sha_bytes(&abir_bytes),
-                sha_bytes(&bytes),
-                "arm C write_abir byte-identity drift: {key}"
+                &abir_bytes[0..4],
+                lamquant_abir::BCS1_MAGIC,
+                "write_abir must emit the BCS1 magic: {key}"
             );
+            check_bcs1_oracle_sha(&key, &sha_bytes(&abir_bytes));
+            let (rec_abir, _) =
+                bcs1_read_bytes(&abir_bytes).expect("bcs1_read_bytes bounded");
+            if delta == 0 {
+                for ch in 0..sig.len() {
+                    assert_eq!(rec_abir[ch], sig[ch], "arm C BCS1 δ=0 MAE!=0 {key} ch{ch}");
+                }
+            } else {
+                let mut maxd_abir = 0i64;
+                for ch in 0..sig.len() {
+                    for i in 0..sig[ch].len() {
+                        maxd_abir = maxd_abir.max((sig[ch][i] - rec_abir[ch][i]).abs());
+                    }
+                }
+                assert!(
+                    maxd_abir as u64 <= delta,
+                    "arm C BCS1 δ={delta} bound violated: max|diff|={maxd_abir} {key}"
+                );
+            }
+
+            // legacy writer/reader round-trip, unchanged.
             let (rec, _) = container::read_file(&p).expect("read_file bounded");
             if delta == 0 {
                 for ch in 0..sig.len() {
@@ -316,9 +426,11 @@ fn arm_d_target_bps() {
         let bytes = std::fs::read(&p).unwrap();
         let key = format!("D.{name}.bps4");
         check_oracle_sha(&key, &sha_bytes(&bytes));
-        // ADR 0069 L6.2: write_abir must reproduce the exact legacy bytes in
-        // target-BPS mode too (write_file_target_bps feeds encode_into
-        // noise_bits=0, delta=None, Some(4.0)).
+        // ADR 0069/0071 L9: write_abir now emits BCS1 in target-BPS mode too
+        // (write_file_target_bps feeds noise_bits=0, delta=None, Some(4.0))
+        // — no longer legacy-byte-identical (see module docs); the
+        // round-trip below (lossy: shape-only, matching the legacy
+        // round-trip check) is the correctness proof.
         let abir = Abir::from_channels_i64(sig.clone(), 250.0);
         let abir_bytes = write_abir_to_vec(
             &abir,
@@ -332,11 +444,19 @@ fn arm_d_target_bps() {
         )
         .expect("write_abir_to_vec");
         assert_eq!(
-            sha_bytes(&abir_bytes),
-            sha_bytes(&bytes),
-            "arm D write_abir byte-identity drift: {key}"
+            &abir_bytes[0..4],
+            lamquant_abir::BCS1_MAGIC,
+            "write_abir must emit the BCS1 magic: {key}"
         );
+        check_bcs1_oracle_sha(&key, &sha_bytes(&abir_bytes));
         // lossy → decode must SUCCEED with correct shape; NEVER assert MAE=0.
+        let (rec_abir, _) = bcs1_read_bytes(&abir_bytes).expect("bcs1_read_bytes target_bps");
+        assert_eq!(rec_abir.len(), sig.len(), "arm D BCS1 channel count: {key}");
+        for ch in 0..sig.len() {
+            assert_eq!(rec_abir[ch].len(), sig[ch].len(), "arm D BCS1 sample count {key} ch{ch}");
+        }
+
+        // legacy writer/reader, unchanged.
         let (rec, _) = container::read_file(&p).expect("read_file target_bps");
         assert_eq!(rec.len(), sig.len(), "arm D channel count: {key}");
         for ch in 0..sig.len() {

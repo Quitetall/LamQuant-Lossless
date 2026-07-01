@@ -25,6 +25,18 @@ pub use modality::{
     Resp, Seeg, Untyped, VerifyError,
 };
 
+/// The BCS1 neutral wire header (ADR 0069/0071 L9) — the ONE deliberate byte
+/// change: a 40-byte typed header (born-typed modality + codec descriptor +
+/// mode + tier) wrapping the byte-unchanged JSON metadata → window index →
+/// LML per-window payloads → `LMLFOOT1` footer. `no_std`-clean by
+/// construction (pure `to_le_bytes`/`from_le_bytes`, no I/O).
+pub mod bcs1;
+pub use bcs1::{
+    Bcs1Header, Bcs1ParseError, CodecDescriptor, BCS1_FLAG_HAS_FOOTER, BCS1_HEADER_LEN,
+    BCS1_MAGIC, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LMO_97, CODEC_LMO_LOSSLESS,
+    CODEC_LML_53,
+};
+
 /// Which deterministic wire format a stream is, decided by its leading magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

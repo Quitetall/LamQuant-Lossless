@@ -155,9 +155,9 @@ mod container_full {
     // Full `.lml` of the three synthetic fixtures (lossless, `"{}"` metadata).
     // Captured on main (Linux x86_64) pre-ABIR-refactor.
     const GOLDEN_CONTAINER: &[(&str, &str)] = &[
-        ("single_ramp", "bf74545d5e5f5907244f4d738185f3b50fbb9359c607c9554a7b169688328b8b"),
-        ("multi_4ch", "4c363b0c7abe9120ded6a16a53e604b79c6ea95a97a37f66070ff8ce749370e6"),
-        ("flat_const", "e7b4bfdcefc0ac5ce5d1044e70f4c736b7f12a14d6eb9c71fb276fe8c1409e88"),
+        ("single_ramp", "a00664d6a34bd203a7161b5a7db9b21c9c406bccfd49e6c4e33b2d22b499611d"),
+        ("multi_4ch", "faec6946dbbc40373908a55f6722b059ec8a3fc0ba2c73dfcca6e879a262ce3e"),
+        ("flat_const", "7fc7d5066e45aaf86b7838d2f6becdcc24a93f8942850a954ac82d079c82e0d9"),
     ];
 
     // Full `.lml` of the EDF reader's decoded signal (single channel, 250 Hz).
@@ -165,7 +165,7 @@ mod container_full {
     // same `(t%257)-128` ramp, so `read_edf` decodes back to the identical signal —
     // the match is a correctness cross-check of the EDF reader, not a copy-paste.
     const GOLDEN_EDF_CONTAINER: &str =
-        "bf74545d5e5f5907244f4d738185f3b50fbb9359c607c9554a7b169688328b8b";
+        "a00664d6a34bd203a7161b5a7db9b21c9c406bccfd49e6c4e33b2d22b499611d";
 
     /// Encode a signal to a full `.lml` in memory and sha it. Pins every
     /// byte-determining input: 250 Hz (exactly representable → stable

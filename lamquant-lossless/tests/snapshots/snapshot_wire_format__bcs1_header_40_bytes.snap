@@ -1,0 +1,5 @@
+---
+source: lamquant-lossless/tests/snapshot_wire_format.rs
+expression: "hex_prefix(&sink, 40)"
+---
+42 43 53 31 01 00 FF 02 00 00 01 00 01 00 03 00 58 02 00 00 00 01 90 D0 03 00 10 01 6E 00 00 00 00 00 00 00 00 00 00 00

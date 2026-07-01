@@ -25,9 +25,12 @@
 //!   always returns the same `RangeSlice` — no hidden internal state
 //!   leaks across calls.
 
+use crate::bcs1_stream::{AnyLmlReader, Bcs1StreamReader};
 use crate::error::{LmlError, LmlResult};
 use crate::stream::LmlReader;
-use std::io::{Read, Seek};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek};
+use std::path::Path;
 
 /// Inclusive-start, exclusive-end sample range plus optional channel
 /// subset.
@@ -129,20 +132,37 @@ impl RangeSlice {
     }
 }
 
-/// Thin facade that owns an `LmlReader` and exposes range-based reads.
+/// Thin facade that owns an [`AnyLmlReader`] and exposes range-based reads.
 ///
-/// Wrap an already-constructed `LmlReader` — `RangeReader` does NOT
-/// re-parse the container. The underlying reader retains its position
-/// across calls; future S3-range / async-IO impls can plug in by
-/// providing a different `LmlReader<R>`.
+/// ADR 0069/0071 L9: `RangeReader` used to wrap `LmlReader` (frozen,
+/// LML1-only) directly. Since `write_abir` now emits `BCS1` by default, the
+/// inner reader must be able to dispatch to either wire format — it now
+/// wraps `AnyLmlReader`, the magic-dispatching facade in `bcs1_stream`.
+/// `RangeReader` does NOT re-parse the container itself; the underlying
+/// reader retains its position across calls.
 pub struct RangeReader<R: Read + Seek> {
-    inner: LmlReader<R>,
+    inner: AnyLmlReader<R>,
 }
 
 impl<R: Read + Seek> RangeReader<R> {
-    /// Build over an existing reader. Errors if the reader's container
-    /// has no LMLFOOT1 seek table (legacy file).
+    /// Build over an existing legacy `LmlReader`. Errors if the reader's
+    /// container has no LMLFOOT1 seek table (legacy file written before
+    /// Phase 0.6/0.7). Kept for back-compat call sites that already hold a
+    /// constructed `LmlReader`; new call sites should prefer
+    /// [`RangeReader::open`] / [`RangeReader::open_from_source`], which
+    /// dispatch on magic automatically instead of requiring the caller to
+    /// pick a reader type up front.
     pub fn new(inner: LmlReader<R>) -> LmlResult<Self> {
+        Self::from_any(AnyLmlReader::Legacy(inner))
+    }
+
+    /// Build over an existing [`Bcs1StreamReader`]. The BCS1 counterpart of
+    /// [`RangeReader::new`].
+    pub fn new_bcs1(inner: Bcs1StreamReader<R>) -> LmlResult<Self> {
+        Self::from_any(AnyLmlReader::Bcs1(inner))
+    }
+
+    fn from_any(inner: AnyLmlReader<R>) -> LmlResult<Self> {
         if inner.offset_table().is_none() {
             return Err(LmlError::InvalidHeader(
                 "RangeReader: container has no LMLFOOT1 seek table; legacy files \
@@ -151,6 +171,15 @@ impl<R: Read + Seek> RangeReader<R> {
             ));
         }
         Ok(Self { inner })
+    }
+
+    /// Magic-dispatching construction directly from a `Read + Seek` source
+    /// positioned at byte 0 (ADR 0069/0071 L9) — peeks the leading 4 bytes
+    /// and routes to the BCS1-aware or legacy-LML1 streaming reader before
+    /// wrapping it, so callers don't need to construct an
+    /// `LmlReader`/`Bcs1StreamReader` themselves first.
+    pub fn open_from_source(source: R) -> LmlResult<Self> {
+        Self::from_any(AnyLmlReader::from_source(source)?)
     }
 
     pub fn header(&self) -> &crate::stream::ContainerHeader {
@@ -273,6 +302,20 @@ impl<R: Read + Seek> RangeReader<R> {
     }
 }
 
+impl RangeReader<BufReader<File>> {
+    /// Open a file by path, dispatching on its leading 4 bytes (ADR
+    /// 0069/0071 L9) — the entry point most callers should use instead of
+    /// constructing an `LmlReader`/`Bcs1StreamReader` + calling
+    /// `RangeReader::new` themselves. Replaces the old two-step
+    /// `LmlReader::open(path)` + `RangeReader::new(reader)` pattern (which
+    /// hard-failed with `InvalidMagic` on a `BCS1` file before
+    /// `RangeReader::new` was ever reached).
+    pub fn open(path: &Path) -> LmlResult<Self> {
+        let file = File::open(path).map_err(LmlError::Io)?;
+        Self::open_from_source(BufReader::new(file))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,8 +367,7 @@ mod tests {
     #[test]
     fn read_full_range_all_channels_matches_original() {
         let (sig, sink) = write_synth(3, 384, 128, 7);
-        let reader = LmlReader::from_source(std::io::Cursor::new(sink)).unwrap();
-        let mut rr = RangeReader::new(reader).unwrap();
+        let mut rr = RangeReader::open_from_source(std::io::Cursor::new(sink)).unwrap();
         let q = RangeQuery::new(0, 384, None).unwrap();
         let slice = rr.read(&q).unwrap();
         assert_eq!(slice.n_channels(), 3);
@@ -340,8 +382,7 @@ mod tests {
         // Windows of 128 each; range [150, 400) → trim 22 off window 1's
         // head and 16 off window 3's tail.
         let (sig, sink) = write_synth(2, 512, 128, 23);
-        let reader = LmlReader::from_source(std::io::Cursor::new(sink)).unwrap();
-        let mut rr = RangeReader::new(reader).unwrap();
+        let mut rr = RangeReader::open_from_source(std::io::Cursor::new(sink)).unwrap();
         let q = RangeQuery::new(150, 400, None).unwrap();
         let slice = rr.read(&q).unwrap();
         assert_eq!(slice.start_sample, 150);
@@ -355,8 +396,7 @@ mod tests {
     #[test]
     fn read_channel_subset_returns_only_selected() {
         let (sig, sink) = write_synth(4, 256, 128, 31);
-        let reader = LmlReader::from_source(std::io::Cursor::new(sink)).unwrap();
-        let mut rr = RangeReader::new(reader).unwrap();
+        let mut rr = RangeReader::open_from_source(std::io::Cursor::new(sink)).unwrap();
         let q = RangeQuery::new(0, 256, Some(vec![2, 0])).unwrap();
         let slice = rr.read(&q).unwrap();
         assert_eq!(slice.n_channels(), 2);
@@ -369,8 +409,7 @@ mod tests {
     #[test]
     fn read_clamps_end_to_total_samples() {
         let (sig, sink) = write_synth(1, 200, 128, 41);
-        let reader = LmlReader::from_source(std::io::Cursor::new(sink)).unwrap();
-        let mut rr = RangeReader::new(reader).unwrap();
+        let mut rr = RangeReader::open_from_source(std::io::Cursor::new(sink)).unwrap();
         // Ask for [50, 9_999) — must clamp to [50, 200).
         let q = RangeQuery::new(50, 9_999, None).unwrap();
         let slice = rr.read(&q).unwrap();
@@ -382,8 +421,7 @@ mod tests {
     #[test]
     fn read_errors_on_start_past_eof() {
         let (_sig, sink) = write_synth(1, 128, 128, 43);
-        let reader = LmlReader::from_source(std::io::Cursor::new(sink)).unwrap();
-        let mut rr = RangeReader::new(reader).unwrap();
+        let mut rr = RangeReader::open_from_source(std::io::Cursor::new(sink)).unwrap();
         let q = RangeQuery::new(9_999, 10_000, None).unwrap();
         match rr.read(&q) {
             Err(LmlError::InvalidHeader(msg)) => {
@@ -396,8 +434,7 @@ mod tests {
     #[test]
     fn read_errors_on_out_of_range_channel() {
         let (_sig, sink) = write_synth(2, 128, 64, 47);
-        let reader = LmlReader::from_source(std::io::Cursor::new(sink)).unwrap();
-        let mut rr = RangeReader::new(reader).unwrap();
+        let mut rr = RangeReader::open_from_source(std::io::Cursor::new(sink)).unwrap();
         let q = RangeQuery::new(0, 64, Some(vec![5])).unwrap();
         match rr.read(&q) {
             Err(LmlError::InvalidHeader(msg)) => {

@@ -1,10 +1,23 @@
-//! ABIR container writer (ADR 0069 L6.2, zero-copy kernel L6.3).
+//! ABIR container writer (ADR 0069 L6.2, zero-copy kernel L6.3, BCS1 wire L9).
 //!
 //! A clean, faithful clone of the legacy v1 `encode_into` writer
 //! (`lamquant-lml-legacy::container::encode_into`), sourced from
-//! `lamquant_abir::Abir` instead of `&[Vec<i64>]`. BYTE-IDENTICAL to the legacy
-//! writer by construction — proven by extending the L1 differential oracle
-//! (`tests/oracle_diff.rs`).
+//! `lamquant_abir::Abir` instead of `&[Vec<i64>]`. Through L8 this was
+//! BYTE-IDENTICAL to the legacy writer by construction — proven by extending
+//! the L1 differential oracle (`tests/oracle_diff.rs`).
+//!
+//! **L9 (ADR 0069/0071) — the ONE deliberate byte change.** `write_abir` no
+//! longer reproduces the legacy 32-byte `LML1` header. It now emits the new
+//! `BCS1` 40-byte TYPED header (born-typed modality + codec descriptor + mode
+//! + tier — see `lamquant_abir::bcs1`), wrapping the exact same
+//! byte-unchanged tail: JSON metadata → window index → per-window `LML1`
+//! payloads → `LMLFOOT1` footer. `lamquant_lml_legacy::container::write_into`
+//! (the retiring v1 writer, oracle-only) is UNCHANGED and still emits `LML1`
+//! — the two writers are now intentionally divergent formats, not two
+//! implementations of the same byte-identical wire. The oracle
+//! (`tests/oracle_diff.rs`) was restructured accordingly: it proves
+//! `decode(write_abir(x)) == x` (round-trip, independent of any golden)
+//! instead of `write_abir(x) == write_into(x)`.
 //!
 //! **The lossless dispatch is zero-copy (L6.3).** The per-window signal is
 //! built via [`lamquant_abir::Abir::window_views`] (a `Cow`-backed O(1)
@@ -17,15 +30,17 @@
 //! `Cow`s — those kernels (`compress_bounded_mae`/`compress_target_bps`)
 //! take `&[Vec<i64>]` wholesale and are RD-search paths, not the hot loop;
 //! a view-taking variant for them is a tracked fast-follow, not L6.3. Every
-//! other byte (header, metadata, offset table, footer) is produced by logic
-//! cloned verbatim from the legacy writer, so the output is bit-for-bit
-//! unchanged.
+//! byte AFTER the header (metadata, window index, per-window payloads,
+//! footer) is produced by logic cloned verbatim from the legacy writer, so
+//! that tail is bit-for-bit unchanged; the header itself is the L9 BCS1
+//! typed header described above, not a clone of the legacy 32-byte one.
 //!
 //! **Self-containment (L6.2):** this module does NOT call
 //! `lamquant_lml_legacy::container::encode_into`. The small write-only helpers
-//! (`metadata_with_codec_mode`, `lossless_mode_for_lpc_mode`, the 32-byte-header
-//! constants) are cloned here verbatim. `write_abir` itself mirrors
-//! `encode_into`'s signature/body directly (it IS the encode-loop level, not the
+//! (`metadata_with_codec_mode`, `lossless_mode_for_lpc_mode`) are cloned here
+//! verbatim; the header itself is built from `lamquant_abir::Bcs1Header`
+//! (L9) rather than cloned legacy header-writing code. `write_abir` itself
+//! mirrors `encode_into`'s signature/body directly (it IS the encode-loop level, not the
 //! `ContainerStats`-computing `write_into` wrapper, so no `CountingWriter` is
 //! needed here). The offset-table / footer serializer (`OffsetEntry` /
 //! `OffsetTable::write_into`) is REUSED from `crate::offset_table` (re-exported
@@ -44,19 +59,35 @@
 //! `write_file_bounded_mae`/`write_file_target_bps` shims with the EXACT
 //! legacy signatures (each builds an `Abir` from the caller's `&[Vec<i64>]`
 //! and calls `write_abir`), plus a re-export of the legacy crate's frozen
-//! READ side (`read_file`, `read_bytes`, `read_from`, `parse_header`,
-//! `ContainerHeader`, `read_window_from_bytes`,
+//! READ side (`parse_header`, `ContainerHeader`, `read_window_from_bytes`,
 //! `read_bytes_into_f32_calibrated`) and shared types (`ContainerStats`,
 //! `OffsetEntry`, `OffsetTable`). `lamquant_core::container` (`lib.rs`) is
 //! aliased to `abir_container` at the cutover, so every existing
 //! `container::*` call site keeps compiling unchanged while the write half
 //! now goes through `write_abir`.
+//!
+//! **L9 — `read_file`/`read_bytes`/`read_from` become a magic DISPATCHER,
+//! not a plain re-export.** Since `write_abir` now emits `BCS1`, the
+//! facade's read side can no longer be a bare `pub use` of the legacy reader
+//! (which rejects `BCS1` at its very first guard — `data[0..3] != b"LML"`).
+//! `read_bytes` peeks `data[0..4]`: `b"BCS1"` routes to the new
+//! [`bcs1_read_bytes`]; every other magic (the seven legacy ones —
+//! `LML1`/`LMO1`/`LMA1`/`LMA2`/`LMQC`/`LMLCRYPT`, plus anything too short to
+//! tell) falls through to the FROZEN `lamquant_lml_legacy::container::
+//! read_bytes` — decode-forever for every file already on disk. `read_file`
+//! and `read_from` are thin wrappers over it (`read_from` buffers its
+//! `std::io::Read` source, same shape as the legacy `read_from` it replaces
+//! — needed because `codec_stages::DecompressStage`, production code in this
+//! crate, calls it directly). Every OTHER read export (`parse_header`,
+//! `read_window_from_bytes`, `read_bytes_into_f32_calibrated`) stays a pure
+//! legacy re-export — out of L9's minimal scope; they do not yet understand
+//! `BCS1` (see the read functions' doc comments below for the consequence).
 
 use crate::deployment::LosslessMode;
 use crate::error::{LmlError, LmlResult};
 use crate::lml;
 use crate::lpc::LpcMode;
-use lamquant_abir::{Abir, Modality};
+use lamquant_abir::{Abir, Bcs1Header, CodecDescriptor, Modality, BCS1_HEADER_LEN, BCS1_MAGIC};
 use std::path::Path;
 
 // Re-exported at `abir_container::{OffsetEntry, OffsetTable}` (this `pub use`
@@ -68,11 +99,29 @@ pub use crate::offset_table::{OffsetEntry, OffsetTable};
 // The FROZEN v1 reader + shared write-result/parse types, re-exported
 // verbatim from `lamquant-lml-legacy` (always available under
 // `legacy-decode`, which `archive` keeps on). These are unchanged by the
-// cutover — only the WRITE half moves to `write_abir` below.
+// cutover — only the WRITE half moves to `write_abir` below. NOTE:
+// `read_file`/`read_bytes`/`read_from` are intentionally NOT re-exported here
+// anymore — L9 replaces them with the dispatcher functions of the same name
+// defined below (see module docs "L9 — read_file/read_bytes become a magic
+// DISPATCHER"). `read_from` joins that trio (beyond L9's originally-scoped
+// read_file/read_bytes) because it is exercised by PRODUCTION code in this
+// same crate — `codec_stages::DecompressStage` (the `pass.rs`/`pipeline.rs`
+// Reversible-Pass Stage machinery) calls `container::read_from` directly, so
+// leaving it legacy-only would silently break that pipeline's decode half
+// the moment `write_abir`/BCS1 became the live encode path. The fix is the
+// same buffer-then-dispatch shape as the legacy `read_from` itself (see
+// below) — no new design surface, so it stays in L9 rather than becoming its
+// own step.
 pub use lamquant_lml_legacy::container::{
-    parse_header, read_bytes, read_bytes_into_f32_calibrated, read_file, read_from,
-    read_window_from_bytes, ContainerHeader, ContainerStats,
+    parse_header, read_bytes_into_f32_calibrated, read_window_from_bytes, ContainerHeader,
+    ContainerStats,
 };
+// The legacy `read_bytes` this module dispatches AROUND (aliased so the
+// dispatcher body below can call it without shadowing this module's own
+// `read_bytes`). `read_file` doesn't need its own alias — the dispatcher's
+// `read_file` re-reads the file and calls this module's `read_bytes`, which
+// is where the BCS1-vs-legacy routing actually happens.
+use lamquant_lml_legacy::container::read_bytes as legacy_read_bytes;
 
 // Cloned verbatim from `lamquant-lml-legacy::container` (VERSION_MAJOR/MINOR,
 // FLAG_HAS_FOOTER) — these are wire-format constants, not implementation
@@ -337,26 +386,43 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
         window_payloads.push(compressed);
     }
 
-    // 32-byte header (spec Section 2.1)
-    sink.write_all(lml::MAGIC).map_err(LmlError::Io)?;
-    sink.write_all(&[VERSION_MAJOR]).map_err(LmlError::Io)?; // byte 4
-    sink.write_all(&[VERSION_MINOR]).map_err(LmlError::Io)?; // byte 5
-    sink.write_all(&(n_ch as u16).to_le_bytes())
-        .map_err(LmlError::Io)?; // 6-7
-    sink.write_all(&(n_windows as u16).to_le_bytes())
-        .map_err(LmlError::Io)?; // 8-9
-    sink.write_all(&(total_samples as u32).to_le_bytes())
-        .map_err(LmlError::Io)?; // 10-13
-    sink.write_all(&(actual_window as u16).to_le_bytes())
-        .map_err(LmlError::Io)?; // 14-15
-    sink.write_all(&sample_rate_mhz.to_le_bytes())
-        .map_err(LmlError::Io)?; // 16-19
-    sink.write_all(&[16u8]).map_err(LmlError::Io)?; // 20: bit_depth (default 16)
-    sink.write_all(&[FLAG_HAS_FOOTER]).map_err(LmlError::Io)?; // 21: flags
-    sink.write_all(&(meta_bytes.len() as u32).to_le_bytes())
-        .map_err(LmlError::Io)?; // 22-25
-    sink.write_all(&[0u8; 2]).map_err(LmlError::Io)?; // 26-27: reserved_0
-    sink.write_all(&[0u8; 4]).map_err(LmlError::Io)?; // 28-31: reserved_1
+    // BCS1 40-byte typed header (ADR 0069/0071 L9 — the ONE deliberate byte
+    // change). `mode` mirrors `metadata_with_codec_mode`'s own precedence
+    // (target_bps wins over delta wins over lossless); `tier` is the
+    // DESCRIPTIVE, non-gating deployment stamp (`lossless_mode_for_lpc_mode`);
+    // `decode_capability` is the actual GATE — this writer only ever emits
+    // `CodecDescriptor::Lml53` payloads, so it is unconditionally the integer
+    // floor (0).
+    let mode: u8 = if target_bps.is_some() {
+        2
+    } else if delta.is_some() {
+        1
+    } else {
+        0
+    };
+    let tier: u8 = match lossless_mode_for_lpc_mode(lpc_mode) {
+        LosslessMode::Mcu => 0,
+        LosslessMode::Basestation => 1,
+    };
+    let bcs1_header = Bcs1Header {
+        version_major: VERSION_MAJOR,
+        version_minor: VERSION_MINOR,
+        modality_tag: abir.prov.tag,
+        modality_source: abir.prov.source.to_u8(),
+        codec_descriptor: CodecDescriptor::Lml53.to_u8(),
+        mode,
+        tier,
+        decode_capability: 0,
+        n_channels: n_ch as u16,
+        n_windows: n_windows as u16,
+        total_samples: total_samples as u32,
+        window_size: actual_window as u16,
+        sample_rate_mhz,
+        bit_depth: 16,
+        flags: FLAG_HAS_FOOTER,
+        metadata_length: meta_bytes.len() as u32,
+    };
+    sink.write_all(&bcs1_header.to_bytes()).map_err(LmlError::Io)?;
 
     // Metadata JSON
     sink.write_all(meta_bytes).map_err(LmlError::Io)?;
@@ -376,10 +442,15 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
         offset += (payload.len() as u32) + 4;
     }
 
-    // The header is fixed 32 bytes; metadata is `meta_bytes.len()`; window index
-    // is `n_windows * 4`. The first payload's length prefix begins immediately
-    // after.
-    let first_payload_abs = 32u64 + meta_bytes.len() as u64 + n_windows as u64 * 4;
+    // CRITICAL ARITHMETIC (ADR 0069/0071 L9): the header is now the fixed
+    // 40-byte BCS1 header, NOT the legacy 32-byte one — `BCS1_HEADER_LEN`
+    // (=40), not a bare `32u64`. Metadata is `meta_bytes.len()`; window index
+    // is `n_windows * 4`. The first payload's length prefix begins
+    // immediately after. Missing this shifts the `LMLFOOT1` footer's absolute
+    // offsets by 8 bytes off the true payload positions (the `OffsetTable`
+    // stores ABSOLUTE offsets, so this is the only place the new header size
+    // must be threaded through).
+    let first_payload_abs = BCS1_HEADER_LEN as u64 + meta_bytes.len() as u64 + n_windows as u64 * 4;
 
     // Window payloads (length-prefixed) — track absolute offsets so the
     // LMLFOOT1 seek table at EOF carries O(log n) random-access entries.
@@ -407,6 +478,318 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
 
     sink.flush().map_err(LmlError::Io)?;
     Ok(n_windows)
+}
+
+// ─────────────────────── L9: the BCS1 read dispatch ───────────────────────
+//
+// `write_abir` (above) now emits `BCS1`. The FROZEN legacy reader
+// (`lamquant_lml_legacy::container::{read_file,read_bytes}`) rejects it
+// outright — `parse_header`'s very first guard is `data[0..3] != b"LML"`,
+// and `B`,`C`,`S` differ from `L`,`M`,`L` at byte 0, so a `BCS1` stream hits
+// `LmlError::InvalidMagic` immediately, before any BCS1-specific field is
+// even read. That is the correct, safe failure mode for the legacy path —
+// it must never be taught to understand the new header. Decoding `BCS1` is
+// `bcs1_read_bytes`/`bcs1_read_file` below; `read_bytes`/`read_file` (which
+// shadow the legacy re-exports of the same name — see the module docs "L9 —
+// read_file/read_bytes become a magic DISPATCHER") peek the leading 4 bytes
+// and route to whichever reader understands them.
+
+/// Decode a `BCS1` container from in-memory bytes into `(signal,
+/// metadata_json)` — the BCS1 counterpart of
+/// `lamquant_lml_legacy::container::read_bytes`. Parses the 40-byte typed
+/// header, then walks the SAME metadata → window-index → per-window-payload
+/// layout the legacy reader does (only the header shape + its length
+/// changed), dispatching the payload decode on `codec_descriptor`.
+///
+/// Only `CodecDescriptor::Lml53` (=0) is wired to an actual decoder today —
+/// the LMO/LMQ descriptors are parseable (the header round-trips cleanly)
+/// but deliberately NOT decodable yet (ADR 0069 L9 minimal scope; see
+/// `lamquant_abir::bcs1` module docs). An unrecognized or not-yet-wired
+/// descriptor is a clean `LmlError::InvalidHeader`, never a silent
+/// mis-decode or a panic.
+pub fn bcs1_read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
+    let header = Bcs1Header::parse(data)
+        .map_err(|e| LmlError::InvalidHeader(format!("BCS1 header: {e}")))?;
+
+    let n_ch = header.n_channels as usize;
+    if n_ch == 0 || n_ch > 1024 {
+        return Err(LmlError::InvalidHeader(format!("channel count: {}", n_ch)));
+    }
+    let total_samples = header.total_samples as usize;
+    if total_samples == 0 {
+        return Err(LmlError::InvalidHeader("zero samples".into()));
+    }
+    let n_windows = header.n_windows as usize;
+    if n_windows == 0 {
+        return Err(LmlError::InvalidHeader("zero windows".into()));
+    }
+    let window_size = header.window_size as usize;
+    // Bound the signal allocation against the data-implied size (mirrors the
+    // legacy `read_bytes` guard) — total_samples can never legitimately
+    // exceed n_windows * window_size, so reject before allocating.
+    let max_samples = (n_windows as u64)
+        .checked_mul(window_size as u64)
+        .ok_or_else(|| LmlError::InvalidHeader("n_windows * window_size overflows u64".into()))?;
+    if total_samples as u64 > max_samples {
+        return Err(LmlError::InvalidHeader(format!(
+            "total_samples {total_samples} exceeds n_windows*window_size {max_samples}"
+        )));
+    }
+
+    let meta_len = header.metadata_length as usize;
+    let mut pos = BCS1_HEADER_LEN;
+    if pos + meta_len > data.len() {
+        return Err(LmlError::Truncated {
+            expected: pos + meta_len,
+            actual: data.len(),
+            context: "metadata",
+        });
+    }
+    let metadata = std::str::from_utf8(&data[pos..pos + meta_len])
+        .map_err(|e| LmlError::InvalidHeader(format!("metadata is not valid UTF-8: {e}")))?
+        .to_string();
+    pos += meta_len;
+
+    // Skip the window-length index (n_windows × u32 LE offsets) — this
+    // decoder walks payloads sequentially, same as the legacy reader.
+    // Random access via the index / LMLFOOT1 footer for the BCS1 path is a
+    // tracked fast-follow (L9 is the wire + the sequential decode proof;
+    // `stream::LmlReader`-style seek access is out of this minimal scope).
+    pos += n_windows * 4;
+
+    if header.codec_descriptor != CodecDescriptor::Lml53.to_u8() {
+        return Err(LmlError::InvalidHeader(format!(
+            "BCS1 codec_descriptor {} not wired to a decoder in this build \
+             (only CODEC_LML_53=0 decodes today; LMO/LMQ descriptors are deferred)",
+            header.codec_descriptor
+        )));
+    }
+
+    // Decompress windows — identical loop to
+    // `lamquant_lml_legacy::container::read_bytes`'s tail (the per-window
+    // `LML1` packet format is byte-unchanged by L9).
+    let mut signal = vec![vec![0i64; total_samples]; n_ch];
+    for w in 0..n_windows {
+        if pos + 4 > data.len() {
+            return Err(LmlError::Truncated {
+                expected: pos + 4,
+                actual: data.len(),
+                context: "window length",
+            });
+        }
+        let payload_len =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+        if pos + payload_len > data.len() {
+            return Err(LmlError::Truncated {
+                expected: pos + payload_len,
+                actual: data.len(),
+                context: "window payload",
+            });
+        }
+        let window = lml::decompress(&data[pos..pos + payload_len])?;
+        pos += payload_len;
+
+        if window.len() != n_ch {
+            return Err(LmlError::InvalidHeader(format!(
+                "window {w}: decoded channel count {} != header n_ch {}",
+                window.len(),
+                n_ch
+            )));
+        }
+
+        let start = w * window_size;
+        for ch in 0..n_ch {
+            let end = (start + window[ch].len()).min(total_samples);
+            let copy_len = end - start;
+            signal[ch][start..start + copy_len].copy_from_slice(&window[ch][..copy_len]);
+        }
+    }
+
+    Ok((signal, metadata))
+}
+
+/// Decode a `BCS1` container file — thin wrapper over [`bcs1_read_bytes`],
+/// mirroring the legacy `read_file`/`read_bytes` split.
+pub fn bcs1_read_file(path: &Path) -> LmlResult<(Vec<Vec<i64>>, String)> {
+    let data = std::fs::read(path).map_err(LmlError::Io)?;
+    bcs1_read_bytes(&data)
+}
+
+/// Read a container from in-memory bytes — the facade DISPATCHER (ADR 0069
+/// L9). Peeks `data[0..4]`: `BCS1_MAGIC` routes to [`bcs1_read_bytes`];
+/// every other leading 4 bytes (the seven legacy magics, or a buffer too
+/// short to tell) falls through to the FROZEN
+/// `lamquant_lml_legacy::container::read_bytes`, which owns its own
+/// truncation/magic error handling for that case — this function does not
+/// duplicate it.
+pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
+    if data.len() >= 4 && &data[0..4] == BCS1_MAGIC {
+        bcs1_read_bytes(data)
+    } else {
+        legacy_read_bytes(data)
+    }
+}
+
+/// Read a container from a file — the facade DISPATCHER (ADR 0069 L9).
+/// Same routing as [`read_bytes`]; reads the file once and dispatches on the
+/// same 4-byte peek so a `BCS1` file never round-trips through the legacy
+/// reader's own (separate) file-read.
+pub fn read_file(path: &Path) -> LmlResult<(Vec<Vec<i64>>, String)> {
+    let data = std::fs::read(path).map_err(LmlError::Io)?;
+    read_bytes(&data)
+}
+
+/// Read a container from any [`std::io::Read`] source — the facade
+/// DISPATCHER (ADR 0069 L9). Buffers the whole stream (identical shape to
+/// the legacy `read_from`'s own `read_to_end` behavior — no new design
+/// surface) then routes through this module's [`read_bytes`] dispatcher.
+/// Exists alongside `read_file`/`read_bytes` (rather than staying a bare
+/// legacy re-export) because `codec_stages::DecompressStage` — production
+/// code in this crate — calls `container::read_from` directly; see the
+/// module-level import comment above for why.
+pub fn read_from<R: std::io::Read>(src: &mut R) -> LmlResult<(Vec<Vec<i64>>, String)> {
+    let mut data = Vec::new();
+    src.read_to_end(&mut data).map_err(LmlError::Io)?;
+    read_bytes(&data)
+}
+
+#[cfg(test)]
+mod bcs1_read_tests {
+    use super::*;
+
+    fn two_channel_signal() -> Vec<Vec<i64>> {
+        vec![
+            (0..600i64).map(|t| ((t * 37) % 4001) - 2000).collect(),
+            (0..600i64).map(|t| ((t * 53) % 3001) - 1500).collect(),
+        ]
+    }
+
+    #[test]
+    fn dispatcher_routes_bcs1_and_round_trips() {
+        let signal = two_channel_signal();
+        let abir = Abir::from_channels_i64(signal.clone(), 250.0);
+        let bytes = write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None)
+            .expect("write_abir_to_vec");
+        assert_eq!(&bytes[0..4], BCS1_MAGIC, "write_abir must emit BCS1");
+
+        let (rec, _meta) = read_bytes(&bytes).expect("dispatcher read_bytes");
+        assert_eq!(rec, signal, "dispatched BCS1 decode must round-trip exactly");
+
+        let (rec2, _meta2) = bcs1_read_bytes(&bytes).expect("bcs1_read_bytes directly");
+        assert_eq!(rec2, signal, "bcs1_read_bytes must round-trip exactly");
+
+        // `read_from` (the `std::io::Read`-generic entry point production
+        // code like `codec_stages::DecompressStage` calls) must dispatch
+        // identically to `read_bytes`.
+        let (rec3, _meta3) =
+            read_from(&mut std::io::Cursor::new(&bytes)).expect("dispatcher read_from");
+        assert_eq!(rec3, signal, "dispatched BCS1 read_from must round-trip exactly");
+    }
+
+    #[test]
+    fn dispatcher_falls_through_to_legacy_for_lml1() {
+        // A legacy LML1 buffer (built via the frozen legacy writer under
+        // `oracle`/`legacy-encode` isn't linked here, so hand-craft the
+        // smallest possible rejection case instead: legacy read_bytes must
+        // still own the LML1 path, i.e. the dispatcher must NOT try to BCS1
+        // -parse an LML1 buffer.) Feed a truncated LML1 buffer to prove it's
+        // legacy_read_bytes (which returns Truncated for <18 bytes), not the
+        // BCS1 parser (which would report a magic mismatch instead — a
+        // different error shape — if it were wrongly invoked).
+        let short_lml1 = b"LML1\x01\x00\x00\x00";
+        let err = read_bytes(short_lml1).expect_err("too-short buffer must Err");
+        assert!(
+            matches!(err, LmlError::Truncated { .. }),
+            "non-BCS1 magic must fall through to the legacy reader's own \
+             Truncated error, not a BCS1 InvalidMagic: {err:?}"
+        );
+    }
+
+    #[test]
+    fn footer_offsets_point_at_real_window_payloads_in_bcs1_output() {
+        // THE direct proof of the `:382` `first_payload_abs` arithmetic fix
+        // (32 -> BCS1_HEADER_LEN=40): `first_payload_abs` seeds
+        // `payload_abs`, which becomes every `OffsetEntry::abs_offset`
+        // written into the `LMLFOOT1` footer. `bcs1_read_bytes`'s own
+        // round-trip tests decode SEQUENTIALLY (never touch the footer), so
+        // they would NOT have caught an 8-byte drift here — this test reads
+        // the footer's offsets back and confirms each one points at a REAL
+        // `[u32 len][packet]` block inside the actual BCS1 file bytes.
+        // Mirrors `lamquant_lml_legacy::container::tests::
+        // footer_offsets_point_at_real_window_payloads` for the legacy
+        // 32-byte header.
+        let signal: Vec<Vec<i64>> = vec![
+            (0..384i64).map(|t| ((t * 17) % 2001) - 1000).collect(),
+            (0..384i64).map(|t| ((t * 29) % 1501) - 750).collect(),
+        ];
+        let abir = Abir::from_channels_i64(signal, 250.0);
+        let bytes = write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None)
+            .expect("write_abir_to_vec");
+        assert_eq!(&bytes[0..4], BCS1_MAGIC);
+
+        let table = OffsetTable::read_from_buffer(&bytes)
+            .expect("footer parse must not error")
+            .expect("BCS1 output must carry an LMLFOOT1 footer (FLAG_HAS_FOOTER is set)");
+        assert!(table.len() >= 1, "at least one window");
+        for e in table.entries() {
+            let off = e.abs_offset as usize;
+            assert!(
+                off + 4 <= bytes.len(),
+                "abs_offset {off} lands past EOF (len={}) — the header-size base is wrong",
+                bytes.len()
+            );
+            let prefix =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+            assert_eq!(
+                prefix + 4,
+                e.payload_len,
+                "length-prefix at abs_offset={off} doesn't match the footer entry — \
+                 first_payload_abs is off (the exact :382 8-byte-drift bug this test targets)"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_parse_header_rejects_real_bcs1_bytes_cleanly() {
+        // The exact confirmation ADR 0069/0071 L9 Step 3 calls for: a REAL
+        // `write_abir` (BCS1) output fed straight into the FROZEN legacy
+        // `lamquant_lml_legacy::container::parse_header` must be rejected at
+        // its very first guard (`data[0..3] != b"LML"` — `B`,`C`,`S` != `L`,
+        // `M`,`L`) BEFORE the probe field (`data[4..6]`) is ever read, so
+        // there is no risk of the legacy reader mis-interpreting a BCS1
+        // stream as some exotic legacy header variant.
+        let signal = two_channel_signal();
+        let abir = Abir::from_channels_i64(signal, 250.0);
+        let bytes = write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None)
+            .expect("write_abir_to_vec");
+        assert_eq!(&bytes[0..4], BCS1_MAGIC);
+
+        // `ContainerHeader` (the Ok side) isn't `Debug`, so `expect_err` won't
+        // compile — match explicitly instead.
+        let err = match parse_header(&bytes) {
+            Err(e) => e,
+            Ok(_) => panic!("legacy parse_header must reject real BCS1 bytes, got Ok"),
+        };
+        assert!(
+            matches!(err, LmlError::InvalidMagic([b'B', b'C', b'S', b'1'])),
+            "expected InvalidMagic([B,C,S,1]) from the FIRST guard, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bcs1_read_bytes_rejects_unwired_codec_descriptor() {
+        let signal = two_channel_signal();
+        let abir = Abir::from_channels_i64(signal, 250.0);
+        let mut bytes = write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None)
+            .expect("write_abir_to_vec");
+        bytes[8] = CodecDescriptor::Lmo97.to_u8(); // codec_descriptor byte
+        let err = bcs1_read_bytes(&bytes).expect_err("unwired descriptor must Err, not decode");
+        assert!(
+            matches!(err, LmlError::InvalidHeader(_)),
+            "unwired codec_descriptor must be a clean InvalidHeader: {err:?}"
+        );
+    }
 }
 
 // ─────────────────────── L8: the `container::*` write shims ───────────────────────
@@ -746,5 +1129,86 @@ mod tests {
         set_global_backend(ComputeBackend::default());
 
         assert_eq!(firmware, desktop);
+    }
+
+    /// ADR 0069/0071 L9 — the BCS1 header itself must be backend-invariant,
+    /// not just the payload. Every header field (`n_channels`, `n_windows`,
+    /// `total_samples`, `window_size`, `sample_rate_mhz`, `modality_tag`/
+    /// `modality_source`, `mode`, `tier`, `decode_capability`,
+    /// `metadata_length`) is computed from `abir`/`sample_rate`/
+    /// `window_size`/`metadata_json`/`lpc_mode`/`delta`/`target_bps` BEFORE
+    /// the `backend` match arm ever runs — `backend` only selects which
+    /// per-window compression kernel runs. This test asserts FULL byte
+    /// equality (header AND payload) across Firmware/Desktop for a spread of
+    /// codec modes wider than the two Anytime-only tests above (which were
+    /// written for the pre-existing task #32 edge case, not for L9): Fixed,
+    /// Adaptive, BoundedMae, and TargetBps.
+    #[test]
+    fn write_abir_bcs1_output_matches_across_backends_for_multiple_codec_modes() {
+        let _guard = backend_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        let signal = two_channel_signal();
+        let abir = Abir::from_channels_i64(signal, 250.0);
+
+        struct Case {
+            name: &'static str,
+            lpc: LpcMode,
+            delta: Option<u64>,
+            target_bps: Option<f64>,
+        }
+        let cases = [
+            Case { name: "fixed", lpc: LpcMode::Fixed, delta: None, target_bps: None },
+            Case {
+                name: "adaptive16",
+                lpc: LpcMode::Adaptive { max_order: 16 },
+                delta: None,
+                target_bps: None,
+            },
+            Case {
+                name: "bounded_mae_d8",
+                lpc: LpcMode::default(),
+                delta: Some(8),
+                target_bps: None,
+            },
+            Case {
+                name: "target_bps_4",
+                lpc: LpcMode::default(),
+                delta: None,
+                target_bps: Some(4.0),
+            },
+        ];
+
+        for case in cases {
+            set_global_backend(ComputeBackend::Firmware);
+            let firmware = write_abir_to_vec(
+                &abir, 250.0, 250, 0, "{}", case.lpc, case.delta, case.target_bps,
+            )
+            .unwrap_or_else(|e| panic!("firmware encode ({}): {e:?}", case.name));
+
+            set_global_backend(ComputeBackend::Desktop);
+            let desktop = write_abir_to_vec(
+                &abir, 250.0, 250, 0, "{}", case.lpc, case.delta, case.target_bps,
+            )
+            .unwrap_or_else(|e| panic!("desktop encode ({}): {e:?}", case.name));
+
+            set_global_backend(ComputeBackend::default());
+
+            assert_eq!(&firmware[0..4], BCS1_MAGIC, "case {}: firmware output must be BCS1", case.name);
+            assert_eq!(
+                firmware, desktop,
+                "case {}: BCS1 output (header + payload) diverged across backends",
+                case.name
+            );
+            // The header specifically (first BCS1_HEADER_LEN bytes) — a
+            // narrower, explicit assertion so a future regression that only
+            // touches the header (not the payload) still fails loudly here
+            // rather than only showing up as "some byte differs".
+            assert_eq!(
+                &firmware[..BCS1_HEADER_LEN],
+                &desktop[..BCS1_HEADER_LEN],
+                "case {}: BCS1 HEADER diverged across backends",
+                case.name
+            );
+        }
     }
 }

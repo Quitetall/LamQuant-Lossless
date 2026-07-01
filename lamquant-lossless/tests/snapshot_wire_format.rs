@@ -14,6 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use lamquant_core::lma;
+use lamquant_core::lpc::LpcMode;
 use tempfile::TempDir;
 
 /// Hex-dump first `n` bytes of a slice as "AA BB CC ..." for snapshotting.
@@ -55,4 +56,31 @@ fn lma_header_magic_version_count() {
         "lma_v2_magic_version_count_12_bytes",
         hex_prefix(&bytes, 12)
     );
+}
+
+/// ADR 0069/0071 L9 — snapshot the full 40-byte `BCS1` typed header
+/// `container::write_into` (→ `write_abir`) now emits, in place of the
+/// legacy 32-byte `LML1` header. Deterministic inputs: a fixed synthetic
+/// signal, 250 Hz, 256-sample windows, `noise_bits=0`, `LpcMode::default()`
+/// (`Anytime{deadline:None}`, never reads a clock), `"{}"` metadata (so
+/// `metadata_length` is the deterministic codec-stamp JSON's own byte
+/// count, not caller-supplied content). See `lamquant_abir::bcs1` for the
+/// field-by-field layout.
+///
+/// **NEW snapshot — no `.snap` committed yet.** Per the L9 STRICT-DISCIPLINE
+/// mandate ("prove correctness before touching any golden; do NOT
+/// regenerate goldens"), this test is added but its snapshot is
+/// intentionally left UNACCEPTED: the first run produces a
+/// `snapshot_wire_format__bcs1_header_40_bytes.snap.new` pending file (and
+/// the test itself fails, by insta's own design, until accepted) rather
+/// than a human running `cargo insta accept`. A human reviews the pending
+/// snapshot and runs `cargo insta review` to freeze it once the L9 wire is
+/// accepted.
+#[test]
+fn bcs1_header_40_bytes() {
+    let sig: Vec<Vec<i64>> = vec![(0..600i64).map(|t| ((t * 37) % 4001) - 2000).collect()];
+    let mut sink = Vec::new();
+    lamquant_core::container::write_into(&mut sink, &sig, 250.0, 256, 0, "{}", LpcMode::default())
+        .expect("write_into");
+    insta::assert_snapshot!("bcs1_header_40_bytes", hex_prefix(&sink, 40));
 }

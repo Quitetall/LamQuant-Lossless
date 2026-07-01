@@ -119,6 +119,30 @@ pub enum ModalitySource {
     Manual,
 }
 
+impl ModalitySource {
+    /// The BCS1 wire byte for this source (ADR 0069/0071 L9 header, offset
+    /// 7 `modality_source`): `ChannelLabel=0`, `FormatDeclared=1`,
+    /// `Manual=2`.
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            Self::ChannelLabel => 0,
+            Self::FormatDeclared => 1,
+            Self::Manual => 2,
+        }
+    }
+
+    /// Parse a BCS1 `modality_source` wire byte. `None` for anything
+    /// unrecognized — callers must not silently default to a source.
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::ChannelLabel),
+            1 => Some(Self::FormatDeclared),
+            2 => Some(Self::Manual),
+            _ => None,
+        }
+    }
+}
+
 /// Provenance of an `Abir`'s modality assignment: how it was decided
 /// ([`ModalitySource`]) and which modality it resolved to (`tag`, matching
 /// the assigned `Modality::TAG`).
@@ -384,6 +408,33 @@ mod tests {
         assert_eq!(Resp::TAG, 7);
         assert_eq!(Accel::TAG, 8);
         assert_eq!(Other::TAG, 9);
+    }
+
+    #[test]
+    fn modality_source_wire_bytes_pinned() {
+        // ADR 0069/0071 L9 BCS1 header offset 7 — these values are ON THE
+        // WIRE, not an implementation detail; a silent renumbering would
+        // desync old vs new BCS1 readers.
+        assert_eq!(ModalitySource::ChannelLabel.to_u8(), 0);
+        assert_eq!(ModalitySource::FormatDeclared.to_u8(), 1);
+        assert_eq!(ModalitySource::Manual.to_u8(), 2);
+    }
+
+    #[test]
+    fn modality_source_from_u8_round_trips() {
+        for s in [
+            ModalitySource::ChannelLabel,
+            ModalitySource::FormatDeclared,
+            ModalitySource::Manual,
+        ] {
+            assert_eq!(ModalitySource::from_u8(s.to_u8()), Some(s));
+        }
+    }
+
+    #[test]
+    fn modality_source_from_u8_rejects_unknown() {
+        assert_eq!(ModalitySource::from_u8(3), None);
+        assert_eq!(ModalitySource::from_u8(255), None);
     }
 
     #[test]
