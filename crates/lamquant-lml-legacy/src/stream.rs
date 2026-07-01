@@ -309,9 +309,12 @@ impl<R: Read + Seek> Iterator for LmlReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "legacy-encode")]
     use crate::container;
+    #[cfg(feature = "legacy-encode")]
     use lamquant_lml_mcu::lpc::LpcMode;
 
+    #[cfg(feature = "legacy-encode")]
     fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut sig = vec![Vec::with_capacity(t); n_ch];
@@ -359,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn streams_one_window_at_a_time() {
         let sig = synth_signal(4, 512, 7);
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -380,6 +384,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn next_returns_none_after_eof() {
         let sig = synth_signal(2, 128, 11);
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -395,6 +400,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn iterator_yields_full_signal_in_order() {
         let sig = synth_signal(3, 256, 13);
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -414,6 +420,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn from_source_cursor_streams_one_window_at_a_time() {
         // Phase 0.5: stream from an in-memory Cursor (the LmlSource
         // dispatch path will pass exactly this kind of source).
@@ -433,6 +440,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn bogus_table_start_field_is_ignored_for_security() {
         // Lamu V4 Pro security finding: footer bytes 20-23 (table_start)
         // are NOT covered by the CRC. A maliciously crafted footer
@@ -458,6 +466,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn offset_table_loaded_for_new_files() {
         // Phase 0.7: new files (with LMLFOOT1 footer) must populate
         // the offset_table at open time.
@@ -473,6 +482,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn seek_to_window_decodes_only_target() {
         let sig = synth_signal(3, 384, 7);
         let mut sink: Vec<u8> = Vec::new();
@@ -488,6 +498,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn seek_to_window_out_of_range_errors() {
         let sig = synth_signal(1, 128, 13);
         let mut sink: Vec<u8> = Vec::new();
@@ -502,6 +513,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn windows_for_range_returns_only_intersecting_windows() {
         let sig = synth_signal(2, 512, 23);
         let mut sink: Vec<u8> = Vec::new();
@@ -523,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn rewind_resets_to_window_zero() {
         let sig = synth_signal(1, 256, 31);
         let mut sink: Vec<u8> = Vec::new();
@@ -537,6 +550,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn from_source_recovers_full_signal_byte_identical() {
         // Verify file path and source path produce identical decode.
         let sig = synth_signal(3, 256, 31);

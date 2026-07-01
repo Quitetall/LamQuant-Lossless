@@ -2,20 +2,44 @@
 //!
 //! Spec: specs/lml-format-v1.md Section 2
 
+// ADR 0069 L5(c): `LosslessMode` (write-only stamp), `LpcMode` (write-fn
+// signatures) and `OffsetEntry`/`OffsetTable` (footer construction) are
+// consumed ONLY by the encode half below — gated with it. `LmlError`/
+// `LmlError`/`LmlResult`/`lml`/`Path` are shared by read+write and stay
+// ungated (WATCH #1). `MAGIC` is write/test-only — the non-test read path
+// validates the magic via literal bytes, so it rides with the encode half
+// (+ the header-crafting read tests).
+#[cfg(feature = "legacy-encode")]
 use lamquant_lml_mcu::deployment::LosslessMode;
 use lamquant_lml_mcu::error::{LmlError, LmlResult};
-use lamquant_lml_mcu::lml::{self, MAGIC};
+use lamquant_lml_mcu::lml;
+#[cfg(any(feature = "legacy-encode", test))]
+use lamquant_lml_mcu::lml::MAGIC;
+#[cfg(feature = "legacy-encode")]
 use lamquant_lml_mcu::lpc::LpcMode;
+#[cfg(feature = "legacy-encode")]
 use crate::offset_table::{OffsetEntry, OffsetTable};
 use std::path::Path;
+// VERSION_MAJOR/MINOR are written by `encode_into` (encode half) and also
+// consumed by pure-READ tests that hand-craft header fixtures — so they ride
+// with `legacy-encode` OR `test` (the non-test read path validates the version
+// via literal bytes, never these symbols).
+#[cfg(any(feature = "legacy-encode", test))]
 const VERSION_MAJOR: u8 = 1;
+#[cfg(any(feature = "legacy-encode", test))]
 const VERSION_MINOR: u8 = 0;
 
 /// Header flag bit 0 — when set, the file carries an `LMLFOOT1` seek
 /// table at EOF. Old readers ignore the flag and silently skip the
 /// footer; new readers consult it for O(log n) random access.
+///
+/// WRITE-only: only `encode_into` sets the bit. The read side never
+/// branches on it (readers unconditionally probe EOF for the footer
+/// via `stream::LmlReader::try_read_footer` / `OffsetTable::read_from_buffer`).
+#[cfg(feature = "legacy-encode")]
 const FLAG_HAS_FOOTER: u8 = 0b0000_0001;
 
+#[cfg(feature = "legacy-encode")]
 fn lossless_mode_for_lpc_mode(mode: LpcMode) -> LosslessMode {
     match mode {
         LpcMode::Fixed => LosslessMode::Mcu,
@@ -23,6 +47,7 @@ fn lossless_mode_for_lpc_mode(mode: LpcMode) -> LosslessMode {
     }
 }
 
+#[cfg(feature = "legacy-encode")]
 fn metadata_with_codec_mode(
     metadata_json: &str,
     lpc_mode: LpcMode,
@@ -70,6 +95,7 @@ fn metadata_with_codec_mode(
 /// [`LpcMode::default()`] — `Anytime` with no deadline, which behaves
 /// like pure adaptive on host. Streaming consumers should use
 /// `write_file_with_mode` directly to pass an explicit deadline.
+#[cfg(feature = "legacy-encode")]
 pub fn write_file(
     path: &Path,
     signal: &[Vec<i64>],
@@ -90,6 +116,7 @@ pub fn write_file(
 }
 
 /// Write a complete LML v1 container file with explicit LPC mode.
+#[cfg(feature = "legacy-encode")]
 pub fn write_file_with_mode(
     path: &Path,
     signal: &[Vec<i64>],
@@ -126,6 +153,7 @@ pub fn write_file_with_mode(
 /// readers (`decode`, `export`, `info`) work unchanged — only the per-window
 /// payloads carry the track-2 mode flag.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "legacy-encode")]
 pub fn write_file_bounded_mae(
     path: &Path,
     signal: &[Vec<i64>],
@@ -182,6 +210,7 @@ pub fn write_file_bounded_mae(
 /// (minimize distortion s.t. the bits-per-sample ceiling). Standard `.lml`
 /// container — all readers work unchanged.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "legacy-encode")]
 pub fn write_file_target_bps(
     path: &Path,
     signal: &[Vec<i64>],
@@ -245,6 +274,7 @@ pub fn write_file_target_bps(
 /// attachment point; Phase 0.7 streams windows incrementally so a
 /// slow sink can apply backpressure window-by-window instead of all
 /// at once at the end.
+#[cfg(feature = "legacy-encode")]
 pub fn write_into<W: std::io::Write>(
     sink: &mut W,
     signal: &[Vec<i64>],
@@ -296,11 +326,13 @@ pub fn write_into<W: std::io::Write>(
 /// `ContainerStats::compressed_size` field stays accurate without a
 /// follow-up `fs::metadata` round-trip (Audit-2026-05-11 Fix-#53 was
 /// the race window in the old impl).
+#[cfg(feature = "legacy-encode")]
 struct CountingWriter<'w, W: std::io::Write + ?Sized> {
     inner: &'w mut W,
     count: u64,
 }
 
+#[cfg(feature = "legacy-encode")]
 impl<'w, W: std::io::Write + ?Sized> std::io::Write for CountingWriter<'w, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
@@ -317,6 +349,7 @@ impl<'w, W: std::io::Write + ?Sized> std::io::Write for CountingWriter<'w, W> {
 /// sink). Refactored out of the former so the sink-generic path
 /// reuses the same encode loop with zero copy-paste.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "legacy-encode")]
 fn encode_into<W: std::io::Write + ?Sized>(
     sink: &mut W,
     signal: &[Vec<i64>],
@@ -1025,6 +1058,8 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
     Ok((signal, metadata))
 }
 
+/// Write-side result summary — only the write functions construct it.
+#[cfg(feature = "legacy-encode")]
 pub struct ContainerStats {
     pub n_windows: usize,
     pub n_channels: usize,
@@ -1039,6 +1074,7 @@ pub struct ContainerStats {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "legacy-encode")]
     fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut sig = vec![Vec::with_capacity(t); n_ch];
@@ -1061,6 +1097,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_writes_footer_with_flag_bit_set() {
         // Phase 0.6: every new file carries the LMLFOOT1 footer and
         // has FLAG_HAS_FOOTER set in header byte 21.
@@ -1088,6 +1125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn decode_skips_footer_silently() {
         // The new footer is at EOF; decode_buffer must ignore it and
         // still recover the full signal byte-exact. This is the
@@ -1118,6 +1156,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn footer_offsets_point_at_real_window_payloads() {
         // The OffsetTable's abs_offset values must point at each
         // window's u32 length-prefix bytes in the file. Verify by
@@ -1141,6 +1180,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn read_bytes_rejects_oversized_total_samples() {
         // A header claiming far more total_samples than n_windows*window_size
         // must be rejected BEFORE the signal matrix is allocated — otherwise
@@ -1159,6 +1199,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_into_vec_then_read_from_cursor_roundtrip() {
         // Phase 0.5: write_into → Vec<u8> sink, read_from → Cursor.
         // Verifies the generic-sink path produces byte-identical output
@@ -1194,6 +1235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_into_byte_identical_to_write_file() {
         // Same input → same output via both paths.
         let sig = synth_signal(2, 300, 7);
@@ -1219,14 +1261,17 @@ mod tests {
 
     /// A `Read` that yields one byte per call — locally defined (the shared helper
     /// lived in `lamquant-lossless::io`, which stays in that crate).
+    #[cfg(feature = "legacy-encode")]
     struct ByteAtATime<'a> {
         src: &'a [u8],
     }
+    #[cfg(feature = "legacy-encode")]
     impl<'a> ByteAtATime<'a> {
         fn new(src: &'a [u8]) -> Self {
             Self { src }
         }
     }
+    #[cfg(feature = "legacy-encode")]
     impl std::io::Read for ByteAtATime<'_> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.src.is_empty() || buf.is_empty() {
@@ -1239,6 +1284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn read_from_handles_partial_reads() {
         // Force one-byte-per-read; read_to_end inside read_from must
         // still pull the whole container.
@@ -1251,6 +1297,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_then_read_roundtrip_byte_exact() {
         let sig = synth_signal(4, 512, 42);
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1272,6 +1319,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_rejects_zero_channels() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let empty: Vec<Vec<i64>> = vec![];
@@ -1283,6 +1331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_rejects_zero_samples() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let empty = vec![vec![], vec![]];
@@ -1294,6 +1343,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_rejects_zero_window_size() {
         // sample_rate=250 with window_size=0 → actual_window=0 → reject.
         let sig = synth_signal(2, 64, 1);
@@ -1402,6 +1452,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn metadata_string_preserved() {
         let sig = synth_signal(2, 256, 5);
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1419,6 +1470,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn read_window_from_bytes_matches_full_decode() {
         // Write an 8-window container (256 samples / 32-window = 8 windows).
         let sig = synth_signal(4, 256, 7);
@@ -1452,6 +1504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn read_bytes_into_f32_calibrated_matches_python_formula() {
         // Synthesize 3-channel 128-sample int signal, write container,
         // then decode via the streaming f32 path. Per-channel calibration
@@ -1486,6 +1539,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn read_bytes_into_f32_calibrated_handles_degenerate_calibration() {
         let sig = synth_signal(2, 64, 10);
         let mut buf: Vec<u8> = Vec::new();
@@ -1503,6 +1557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn read_window_from_bytes_rejects_oob_idx() {
         let sig = synth_signal(2, 128, 8);
         let mut buf: Vec<u8> = Vec::new();
@@ -1515,6 +1570,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn noise_bits_lossy_path_recovers_shifted() {
         let sig = synth_signal(2, 256, 6);
         let tmp = tempfile::NamedTempFile::new().unwrap();

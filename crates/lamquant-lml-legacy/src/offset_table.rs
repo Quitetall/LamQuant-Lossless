@@ -146,6 +146,11 @@ impl OffsetTable {
     ///
     /// `current_offset` is the absolute file offset where this serialise
     /// begins; needed for the footer's `table_start` field.
+    ///
+    /// WRITE-only (ADR 0069 L5(c)) — the v1 oracle encoder's seek-table
+    /// writer. `read_from_buffer` (below) is the FROZEN reader half and
+    /// stays under `legacy-decode`.
+    #[cfg(feature = "legacy-encode")]
     pub fn write_into<W: std::io::Write + ?Sized>(
         &self,
         sink: &mut W,
@@ -326,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_then_read_roundtrip() {
         let table = synth_table(5);
         let mut buf: Vec<u8> = Vec::new();
@@ -357,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn read_returns_err_on_crc_mismatch() {
         let table = synth_table(3);
         let mut buf: Vec<u8> = vec![0xAA; 500];
@@ -386,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-encode")]
     fn write_returns_err_on_too_many_windows() {
         let table = OffsetTable::new(
             (0..(MAX_FOOTER_WINDOWS as usize + 1))

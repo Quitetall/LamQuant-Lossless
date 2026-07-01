@@ -121,6 +121,10 @@ archive = [
     "lamquant-lml-desktop/fast",
     "dep:lamquant-lml-legacy",
     "lamquant-lml-legacy/legacy-decode",
+    # ADR 0069 L5(c): the CLI write path (`lml compress` et al) still
+    # dispatches through the v1 oracle encoder until Step B ships the
+    # ABIR encoder — link the encode half too, not just the frozen reader.
+    "lamquant-lml-legacy/legacy-encode",
     # Desktop ships the LMO encoder as standard (ADR 0052).
     "lamquant-lml-optimum/encode",
     "lamquant-common/host",
