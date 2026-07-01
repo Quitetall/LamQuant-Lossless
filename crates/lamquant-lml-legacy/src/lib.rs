@@ -1,0 +1,23 @@
+//! LamQuant LML — the **LEGACY v1 wire** (ADR 0069 L3/L4).
+//!
+//! Sequesters the structurally-suboptimal old container/wire scaffolding so the
+//! clean ABIR path (`lamquant-lossless`) grows cruft-free. Two features:
+//!   * `legacy-decode` — the **FROZEN v1 reader**; **DEFAULT ON forever** (old
+//!     `.lml`/`.lma` must decode). Host/std. On-MCU v1 back-compat is the separate
+//!     kernel packet decoder + `SAW_LEGACY_CRC`, which stays in `lamquant-lml-mcu`.
+//!   * `legacy-encode` — the retiring v1 writer; the differential **ORACLE**,
+//!     demoted out of the default profile at cutover.
+//!
+//! The kernels (lifting / lpc / golomb / rans / crc) and their hardening are NOT
+//! legacy — they stay in `lamquant-lml-mcu` and are *called* from here. Only the
+//! structurally-suboptimal scaffolding (the 32-byte-header + JSON-metadata + window
+//! -index wire, the `Signal=Vec<Vec<i64>>` currency, the metadata builders) lives
+//! in this crate.
+//!
+//! **L3: empty scaffold** — proves the crate + workspace + feature graph compile.
+//! **L4** moves `container.rs` / `offset_table.rs` / `stream.rs` in and splits the
+//! read half (`legacy-decode`, frozen) from the write half (`legacy-encode`, oracle),
+//! re-exported at the stable `lamquant_core::container` path so every call site + the
+//! S1 golden + `legacy_crc_decode` + the L1 oracle stay byte-identical by construction.
+
+// (modules land in L4)

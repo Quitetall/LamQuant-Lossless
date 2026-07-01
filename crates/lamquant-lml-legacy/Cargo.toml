@@ -1,0 +1,29 @@
+[package]
+# LamQuant LML — the LEGACY v1 wire (ADR 0069 L3/L4). Sequesters the
+# structurally-suboptimal old container/wire scaffolding so the clean ABIR path
+# (lamquant-lossless) grows cruft-free. The kernels (lifting/lpc/golomb/rans) +
+# hardening stay in lamquant-lml-mcu and are CALLED from here; only the old
+# scaffolding lives in this crate. Host-only (the v1 container is std-bound;
+# firmware never decodes v1 *containers*, only per-window packets via the kernel).
+name = "lamquant-lml-legacy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "LamQuant LML — LEGACY v1 wire (ADR 0069): the sequestered old container/wire behind features — legacy-decode (the FROZEN v1 reader, old .lml/.lma decode forever) and legacy-encode (the retiring differential-oracle encoder). Kernels + hardening stay in lamquant-lml-mcu."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+
+[lib]
+name = "lamquant_lml_legacy"
+crate-type = ["rlib"]
+
+[features]
+# The FROZEN v1 DECODER — default ON forever (old .lml/.lma must decode).
+default = ["legacy-decode"]
+legacy-decode = []
+# The retiring v1 ENCODER — the differential ORACLE; demoted out of default at cutover,
+# kept gated for Step-B forensics, deletable only after Step B ships its own goldens.
+legacy-encode = ["legacy-decode"]
+
+[dependencies]
+# (mcu kernels + host deps land in L4 when container.rs / offset_table.rs / stream.rs move in.)
