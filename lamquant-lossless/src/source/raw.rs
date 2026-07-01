@@ -29,6 +29,9 @@
 
 use crate::error::{LmlError, LmlResult};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use lamquant_abir::{Abir, Channel, Column};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
@@ -388,6 +391,150 @@ impl SignalSourceReader for RawReader {
         bundle.validate()?;
         Ok(bundle)
     }
+
+    /// ADR 0069 L7: specialize to the sidecar's declared `dtype` instead
+    /// of the trait default's all-`I64` `Abir` (the memory win —
+    /// `Column::I16`/`I32` instead of always widening to `i64`).
+    ///
+    /// Independent of `read_bundle`: re-parses the (tiny) sidecar JSON,
+    /// then decodes the `.raw` binary payload directly into native-width
+    /// buffers via `from_le_bytes` element-wise, mirroring
+    /// `read_bundle`'s index math exactly per `(Dtype, Orientation)` arm
+    /// — locked by this module's `lower_to_abir_*_matches_read_bundle`
+    /// tests. No calibration/transform is folded into the sample lane
+    /// (`phys_min`/`phys_max` come straight from the sidecar JSON as
+    /// channel metadata, never touch the raw ints), so narrowing back
+    /// with `as i16`/`as i32` exactly inverts the widen.
+    fn lower_to_abir(&mut self) -> LmlResult<Abir> {
+        let sidecar_path = self
+            .sidecar_override
+            .clone()
+            .or_else(|| locate_sidecar(&self.raw_path))
+            .ok_or_else(|| {
+                LmlError::InvalidHeader(format!(
+                    "raw reader: no sidecar JSON found next to {} \
+                     (tried <stem>.json, <stem>.meta.json, <path>.json)",
+                    self.raw_path.display()
+                ))
+            })?;
+        let sidecar_meta = std::fs::metadata(&sidecar_path).map_err(LmlError::Io)?;
+        if sidecar_meta.len() > MAX_SIDECAR_BYTES {
+            return Err(LmlError::InvalidHeader(format!(
+                "raw sidecar {} too large ({} bytes, max {})",
+                sidecar_path.display(),
+                sidecar_meta.len(),
+                MAX_SIDECAR_BYTES
+            )));
+        }
+        let sidecar_bytes = std::fs::read(&sidecar_path).map_err(LmlError::Io)?;
+        let sidecar_text = std::str::from_utf8(&sidecar_bytes)
+            .map_err(|e| LmlError::InvalidHeader(format!("raw sidecar: invalid UTF-8 ({e})")))?;
+        let sc = parse_raw_sidecar(sidecar_text)?;
+
+        let raw_meta = std::fs::metadata(&self.raw_path).map_err(LmlError::Io)?;
+        let raw_len = raw_meta.len() as usize;
+        let bps = sc.dtype.bytes_per_sample();
+        if raw_len % (sc.n_channels * bps) != 0 {
+            return Err(LmlError::InvalidHeader(format!(
+                "raw {}: length {} not multiple of n_channels * bps ({} * {})",
+                self.raw_path.display(),
+                raw_len,
+                sc.n_channels,
+                bps
+            )));
+        }
+        let n_samples = raw_len / (sc.n_channels * bps);
+        let raw_bytes = std::fs::read(&self.raw_path).map_err(LmlError::Io)?;
+
+        let channels: Vec<Channel> = match sc.dtype {
+            Dtype::Int16 => {
+                let mut cols: Vec<Vec<i16>> = (0..sc.n_channels)
+                    .map(|_| Vec::with_capacity(n_samples))
+                    .collect();
+                match sc.orientation {
+                    Orientation::Multiplexed => {
+                        for s in 0..n_samples {
+                            let base = s * sc.n_channels * 2;
+                            for ch in 0..sc.n_channels {
+                                let off = base + ch * 2;
+                                cols[ch]
+                                    .push(i16::from_le_bytes([raw_bytes[off], raw_bytes[off + 1]]));
+                            }
+                        }
+                    }
+                    Orientation::Vectorized => {
+                        for ch in 0..sc.n_channels {
+                            let ch_base = ch * n_samples * 2;
+                            for s in 0..n_samples {
+                                let off = ch_base + s * 2;
+                                cols[ch]
+                                    .push(i16::from_le_bytes([raw_bytes[off], raw_bytes[off + 1]]));
+                            }
+                        }
+                    }
+                }
+                cols.into_iter()
+                    .enumerate()
+                    .map(|(j, col)| Channel {
+                        label: Arc::from(sc.channels[j].as_str()),
+                        data: Column::I16(Arc::from(col)),
+                        phys_min: sc.phys_min[j],
+                        phys_max: sc.phys_max[j],
+                    })
+                    .collect()
+            }
+            Dtype::Int32 => {
+                let mut cols: Vec<Vec<i32>> = (0..sc.n_channels)
+                    .map(|_| Vec::with_capacity(n_samples))
+                    .collect();
+                match sc.orientation {
+                    Orientation::Multiplexed => {
+                        for s in 0..n_samples {
+                            let base = s * sc.n_channels * 4;
+                            for ch in 0..sc.n_channels {
+                                let off = base + ch * 4;
+                                cols[ch].push(i32::from_le_bytes([
+                                    raw_bytes[off],
+                                    raw_bytes[off + 1],
+                                    raw_bytes[off + 2],
+                                    raw_bytes[off + 3],
+                                ]));
+                            }
+                        }
+                    }
+                    Orientation::Vectorized => {
+                        for ch in 0..sc.n_channels {
+                            let ch_base = ch * n_samples * 4;
+                            for s in 0..n_samples {
+                                let off = ch_base + s * 4;
+                                cols[ch].push(i32::from_le_bytes([
+                                    raw_bytes[off],
+                                    raw_bytes[off + 1],
+                                    raw_bytes[off + 2],
+                                    raw_bytes[off + 3],
+                                ]));
+                            }
+                        }
+                    }
+                }
+                cols.into_iter()
+                    .enumerate()
+                    .map(|(j, col)| Channel {
+                        label: Arc::from(sc.channels[j].as_str()),
+                        data: Column::I32(Arc::from(col)),
+                        phys_min: sc.phys_min[j],
+                        phys_max: sc.phys_max[j],
+                    })
+                    .collect()
+            }
+        };
+
+        Ok(Abir {
+            channels,
+            sample_rate: sc.sample_rate,
+            n_samples,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +616,78 @@ mod tests {
         match reader.read_bundle() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("no sidecar JSON")),
             other => panic!("expected InvalidHeader, got {other:?}"),
+        }
+    }
+
+    // ─── ADR 0069 L7 gate: lower_to_abir byte-exactness ─────────────
+
+    #[test]
+    fn lower_to_abir_int16_multiplexed_matches_read_bundle_i64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let n_ch = 3usize;
+        let n_samples = 200usize;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n_ch * n_samples * 2);
+        for s in 0..n_samples {
+            for ch in 0..n_ch {
+                let v = (s as i16).wrapping_mul(ch as i16 + 1).wrapping_sub(30);
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let raw = tmp.path().join("data.raw");
+        let json = tmp.path().join("data.json");
+        std::fs::write(&raw, &bytes).unwrap();
+        std::fs::write(&json, good_sidecar(n_ch, "int16", "multiplexed")).unwrap();
+
+        let bundle = RawReader::new(&raw).read_bundle().unwrap();
+        let abir = RawReader::new(&raw).lower_to_abir().unwrap();
+
+        assert_eq!(abir.n_channels(), n_ch);
+        assert_eq!(abir.n_samples, n_samples);
+        for (j, ch) in abir.channels.iter().enumerate() {
+            assert!(
+                matches!(ch.data, Column::I16(_)),
+                "int16 must specialize to Column::I16"
+            );
+            let widened = ch.data.window_i64(0, abir.n_samples);
+            assert_eq!(
+                widened.as_ref(),
+                bundle.signal[j].as_slice(),
+                "channel {j} mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_to_abir_int32_vectorized_matches_read_bundle_i64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let n_ch = 2usize;
+        let n_samples = 150usize;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n_ch * n_samples * 4);
+        for ch in 0..n_ch {
+            for s in 0..n_samples {
+                let v = (s as i32).wrapping_mul(70_000).wrapping_add(ch as i32) - 500_000;
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let raw = tmp.path().join("data32.raw");
+        let json = tmp.path().join("data32.json");
+        std::fs::write(&raw, &bytes).unwrap();
+        std::fs::write(&json, good_sidecar(n_ch, "int32", "vectorized")).unwrap();
+
+        let bundle = RawReader::new(&raw).read_bundle().unwrap();
+        let abir = RawReader::new(&raw).lower_to_abir().unwrap();
+
+        for (j, ch) in abir.channels.iter().enumerate() {
+            assert!(
+                matches!(ch.data, Column::I32(_)),
+                "int32 must specialize to Column::I32"
+            );
+            let widened = ch.data.window_i64(0, abir.n_samples);
+            assert_eq!(
+                widened.as_ref(),
+                bundle.signal[j].as_slice(),
+                "channel {j} mismatch"
+            );
         }
     }
 }
