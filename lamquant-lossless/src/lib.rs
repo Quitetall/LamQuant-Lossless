@@ -155,6 +155,13 @@ pub mod pass;
 pub mod pipeline_dsl;
 #[cfg(feature = "archive")]
 pub mod range;
+// `source::descriptor` (ADR 0069 Pillar 3 / S5 Increment 3, task #20) is
+// declared inside `source/mod.rs`, not here — it's a submodule of
+// `source` (file lives at `src/source/descriptor.rs`), gated by this
+// same `archive` feature via the parent `pub mod source;` below. See
+// `source::descriptor`'s module docs for the `FormatDescriptor` schema
+// and the G5 gotchas (F32 refusal, first-class endian, reciprocal
+// sample-rate transform).
 #[cfg(feature = "archive")]
 pub mod source;
 #[cfg(feature = "archive")]

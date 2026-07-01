@@ -22,6 +22,13 @@ pub mod bitstream;
 pub mod brainvision;
 pub mod bundle;
 pub mod cnt;
+// ADR 0069 Pillar 3 / S5 Increment 3 (task #20): the format-description
+// DSL — declares a fixed-layout reader as `serde`-derivable DATA
+// (`FormatDescriptor`) instead of hand-written Rust, interpreted by
+// `read_bundle_from_descriptor` / `lower_to_abir_from_descriptor`. Same
+// `archive`-feature gate as every other module here (inherited from
+// `pub mod source;` in lib.rs); no additional cfg needed.
+pub mod descriptor;
 #[cfg(feature = "dicom")]
 pub mod dicom;
 pub mod edf_reader;
@@ -32,6 +39,11 @@ pub mod reader;
 pub use brainvision::BrainVisionReader;
 pub use bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 pub use cnt::CntReader;
+pub use descriptor::{
+    ChannelCount, ChannelModality, ChannelModalityRule, DescriptorDtype, DescriptorError,
+    DescriptorOrientation, Endian, FormatDescriptor, SampleRateSpec, lower_to_abir_from_descriptor,
+    read_bundle_from_descriptor,
+};
 #[cfg(feature = "dicom")]
 pub use dicom::DicomWaveformReader;
 pub use edf_reader::EdfReader;
