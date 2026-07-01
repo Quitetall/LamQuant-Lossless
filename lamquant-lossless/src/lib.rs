@@ -147,6 +147,12 @@ pub mod pipeline;
 // `Stage`, so it needs everything `archive` already turns on.
 #[cfg(feature = "archive")]
 pub mod pass;
+// ADR 0069 Pillar 3 / S5 Increment 2 (task #20): the textual pass-pipeline
+// DSL built on top of `pass` — parses a pipeline-text config into a
+// `PipelineSpec` and resolves it against a `PassRegistry`, reusing
+// `run_in_lml`/`DynPass` UNCHANGED (including the runtime Lossy refusal).
+#[cfg(feature = "archive")]
+pub mod pipeline_dsl;
 #[cfg(feature = "archive")]
 pub mod range;
 #[cfg(feature = "archive")]
