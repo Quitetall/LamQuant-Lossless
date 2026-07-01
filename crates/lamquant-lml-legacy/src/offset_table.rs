@@ -147,10 +147,15 @@ impl OffsetTable {
     /// `current_offset` is the absolute file offset where this serialise
     /// begins; needed for the footer's `table_start` field.
     ///
-    /// WRITE-only (ADR 0069 L5(c)) — the v1 oracle encoder's seek-table
-    /// writer. `read_from_buffer` (below) is the FROZEN reader half and
-    /// stays under `legacy-decode`.
-    #[cfg(feature = "legacy-encode")]
+    /// WRITE-only (ADR 0069 L5(c)), but NOT legacy-encode-only: this is a
+    /// nontrivial CRC'd binary seek-table serializer that the LIVE
+    /// `write_abir` path (`lamquant-lossless::abir_container`) also needs —
+    /// duplicating it there would itself be a wire-format-fork risk (see
+    /// that module's docs). ADR 0069 L8: moved from `legacy-encode` to
+    /// `legacy-decode` (available whenever this module is compiled) so the
+    /// clean writer can call it without linking the retiring `encode_into`/
+    /// `write_into` v1 writer. `read_from_buffer` (below) is the FROZEN
+    /// reader half and has always been under `legacy-decode`.
     pub fn write_into<W: std::io::Write + ?Sized>(
         &self,
         sink: &mut W,

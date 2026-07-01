@@ -29,19 +29,50 @@
 //! `ContainerStats`-computing `write_into` wrapper, so no `CountingWriter` is
 //! needed here). The offset-table / footer serializer (`OffsetEntry` /
 //! `OffsetTable::write_into`) is REUSED from `crate::offset_table` (re-exported
-//! from `lamquant-lml-legacy`, gated by the `legacy-encode` feature that
-//! `archive` already turns on) rather than re-cloned: it's a nontrivial CRC'd
+//! from `lamquant-lml-legacy`) rather than re-cloned: it's a nontrivial CRC'd
 //! binary seek-table serializer, not a "small helper", and duplicating it here
-//! would itself be a wire-format-fork risk. **L8 note:** full legacy
-//! independence needs `OffsetTable` relocated to a non-legacy-gated crate (or
-//! copied here) — tracked, not resolved by L6.2.
+//! would itself be a wire-format-fork risk. **L8 (cutover):** `OffsetTable::write_into`
+//! and `ContainerStats` were moved off the `legacy-encode` gate onto
+//! `legacy-decode` (crates/lamquant-lml-legacy) precisely so this module can
+//! reuse them WITHOUT linking the retiring `encode_into`/`write_into` v1
+//! writer — `legacy-encode` is no longer part of the live `archive` feature
+//! (see `Cargo.toml`; it now lives only under `oracle`, which the
+//! differential-oracle test links directly and independently).
+//!
+//! **L8 — full `container` facade.** Below `write_abir`/`write_abir_to_vec`,
+//! this module also exposes `write_into`/`write_file`/`write_file_with_mode`/
+//! `write_file_bounded_mae`/`write_file_target_bps` shims with the EXACT
+//! legacy signatures (each builds an `Abir` from the caller's `&[Vec<i64>]`
+//! and calls `write_abir`), plus a re-export of the legacy crate's frozen
+//! READ side (`read_file`, `read_bytes`, `read_from`, `parse_header`,
+//! `ContainerHeader`, `read_window_from_bytes`,
+//! `read_bytes_into_f32_calibrated`) and shared types (`ContainerStats`,
+//! `OffsetEntry`, `OffsetTable`). `lamquant_core::container` (`lib.rs`) is
+//! aliased to `abir_container` at the cutover, so every existing
+//! `container::*` call site keeps compiling unchanged while the write half
+//! now goes through `write_abir`.
 
 use crate::deployment::LosslessMode;
 use crate::error::{LmlError, LmlResult};
 use crate::lml;
 use crate::lpc::LpcMode;
-use crate::offset_table::{OffsetEntry, OffsetTable};
 use lamquant_abir::Abir;
+use std::path::Path;
+
+// Re-exported at `abir_container::{OffsetEntry, OffsetTable}` (this `pub use`
+// both imports them for `write_abir`'s own use below AND makes them resolve
+// as `container::{OffsetEntry, OffsetTable}` post-cutover, per the L8 facade
+// contract above).
+pub use crate::offset_table::{OffsetEntry, OffsetTable};
+
+// The FROZEN v1 reader + shared write-result/parse types, re-exported
+// verbatim from `lamquant-lml-legacy` (always available under
+// `legacy-decode`, which `archive` keeps on). These are unchanged by the
+// cutover — only the WRITE half moves to `write_abir` below.
+pub use lamquant_lml_legacy::container::{
+    parse_header, read_bytes, read_bytes_into_f32_calibrated, read_file, read_from,
+    read_window_from_bytes, ContainerHeader, ContainerStats,
+};
 
 // Cloned verbatim from `lamquant-lml-legacy::container` (VERSION_MAJOR/MINOR,
 // FLAG_HAS_FOOTER) — these are wire-format constants, not implementation
@@ -329,4 +360,228 @@ pub fn write_abir<W: std::io::Write + ?Sized>(
 
     sink.flush().map_err(LmlError::Io)?;
     Ok(n_windows)
+}
+
+// ─────────────────────── L8: the `container::*` write shims ───────────────────────
+//
+// Everything below is new at the cutover. Each shim has the EXACT legacy
+// `lamquant_lml_legacy::container` signature (same params, same
+// `LmlResult<ContainerStats>` return) so the ~20 existing call sites
+// (bin/lml.rs, lma.rs, async_io.rs, codec_stages.rs, range.rs, lamquant-py)
+// keep compiling unchanged after `lib.rs` re-points `container` at this
+// module. Each builds an `Abir` from the caller's `&[Vec<i64>]` (one bulk
+// `.to_vec()`, not zero-copy — callers that already hold an `Abir`, e.g. the
+// L7 `lower_to_abir` readers, should call `write_abir` directly instead) and
+// delegates the actual encode to `write_abir` above.
+
+/// Internal: byte-counting writer, mirroring the pattern in the legacy
+/// `write_into` (`lamquant-lml-legacy::container::CountingWriter`) so
+/// `ContainerStats::compressed_size` is exact without a `fs::metadata()`
+/// round-trip. A second, independent copy — kept local so this module stays
+/// self-contained (see module docs); it is NOT the retiring writer's
+/// `CountingWriter`, which stays `legacy-encode`-gated in the legacy crate.
+struct CountingWriter<'w, W: std::io::Write + ?Sized> {
+    inner: &'w mut W,
+    count: u64,
+}
+
+impl<'w, W: std::io::Write + ?Sized> std::io::Write for CountingWriter<'w, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.count += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Internal: build the same `ContainerStats` shape the legacy writer
+/// returns, from a signal + the encoder's own `n_windows`/`compressed_size`
+/// results. Cloned verbatim from `lamquant-lml-legacy::container`'s
+/// `write_into`/`write_file_bounded_mae`/`write_file_target_bps` tail
+/// (identical arithmetic — `raw_size` is `n_channels * total_samples * 2`,
+/// matching the legacy 16-bit-sample convention, not `size_of::<i64>()`).
+fn stats_from(
+    n_windows: usize,
+    signal: &[Vec<i64>],
+    compressed_size: usize,
+    sample_rate: f64,
+) -> ContainerStats {
+    let n_channels = signal.len();
+    let total_samples = signal.first().map(|ch| ch.len()).unwrap_or(0);
+    let raw_size = n_channels * total_samples * 2;
+    ContainerStats {
+        n_windows,
+        n_channels,
+        total_samples,
+        compressed_size,
+        raw_size,
+        cr: if compressed_size > 0 {
+            raw_size as f64 / compressed_size as f64
+        } else {
+            0.0
+        },
+        duration_s: if sample_rate > 0.0 {
+            total_samples as f64 / sample_rate
+        } else {
+            0.0
+        },
+    }
+}
+
+/// Write a complete LML v1 container into any [`std::io::Write`] sink.
+/// Same signature/semantics as the legacy
+/// `lamquant_lml_legacy::container::write_into`; sourced from `signal` via
+/// an `Abir::from_channels_i64` build, encoded through [`write_abir`].
+pub fn write_into<W: std::io::Write>(
+    sink: &mut W,
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    noise_bits: u8,
+    metadata_json: &str,
+    lpc_mode: LpcMode,
+) -> LmlResult<ContainerStats> {
+    let abir = Abir::from_channels_i64(signal.to_vec(), sample_rate);
+    let mut cw = CountingWriter {
+        inner: sink,
+        count: 0,
+    };
+    let n_windows = write_abir(
+        &mut cw,
+        &abir,
+        sample_rate,
+        window_size,
+        noise_bits,
+        metadata_json,
+        lpc_mode,
+        None,
+        None,
+    )?;
+    let compressed_size = cw.count as usize;
+    Ok(stats_from(n_windows, signal, compressed_size, sample_rate))
+}
+
+/// Write a complete LML v1 container file (default LPC mode). Thin wrapper
+/// over [`write_file_with_mode`] — mirrors the legacy shim exactly.
+pub fn write_file(
+    path: &Path,
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    noise_bits: u8,
+    metadata_json: &str,
+) -> LmlResult<ContainerStats> {
+    write_file_with_mode(
+        path,
+        signal,
+        sample_rate,
+        window_size,
+        noise_bits,
+        metadata_json,
+        LpcMode::default(),
+    )
+}
+
+/// Write a complete LML v1 container file with explicit LPC mode.
+pub fn write_file_with_mode(
+    path: &Path,
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    noise_bits: u8,
+    metadata_json: &str,
+    lpc_mode: LpcMode,
+) -> LmlResult<ContainerStats> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(LmlError::Io)?;
+    let mut f = std::fs::File::create(path).map_err(LmlError::Io)?;
+    let stats = write_into(
+        &mut f,
+        signal,
+        sample_rate,
+        window_size,
+        noise_bits,
+        metadata_json,
+        lpc_mode,
+    )?;
+    // Durability — flush the kernel page cache to disk before returning
+    // (mirrors the legacy writer's `f.sync_all()`).
+    f.sync_all().map_err(LmlError::Io)?;
+    Ok(stats)
+}
+
+/// Write a complete LML container file in **bounded-MAE near-lossless**
+/// mode (ADR 0051 track 2): every window is encoded with a guaranteed
+/// `max|orig-recon| <= delta`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_file_bounded_mae(
+    path: &Path,
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    delta: u64,
+    metadata_json: &str,
+    lpc_mode: LpcMode,
+) -> LmlResult<ContainerStats> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(LmlError::Io)?;
+    let mut f = std::fs::File::create(path).map_err(LmlError::Io)?;
+    let abir = Abir::from_channels_i64(signal.to_vec(), sample_rate);
+    let mut cw = CountingWriter {
+        inner: &mut f,
+        count: 0,
+    };
+    let n_windows = write_abir(
+        &mut cw,
+        &abir,
+        sample_rate,
+        window_size,
+        0, // noise_bits unused in bounded mode
+        metadata_json,
+        lpc_mode,
+        Some(delta),
+        None,
+    )?;
+    let compressed_size = cw.count as usize;
+    f.sync_all().map_err(LmlError::Io)?;
+    Ok(stats_from(n_windows, signal, compressed_size, sample_rate))
+}
+
+/// Write a complete LML container file in **target-BPS rate-controlled
+/// lossy** mode (ADR 0051 track 2 P2): each window is rate-controlled to
+/// `target_bps`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_file_target_bps(
+    path: &Path,
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    target_bps: f64,
+    metadata_json: &str,
+    lpc_mode: LpcMode,
+) -> LmlResult<ContainerStats> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(LmlError::Io)?;
+    let mut f = std::fs::File::create(path).map_err(LmlError::Io)?;
+    let abir = Abir::from_channels_i64(signal.to_vec(), sample_rate);
+    let mut cw = CountingWriter {
+        inner: &mut f,
+        count: 0,
+    };
+    let n_windows = write_abir(
+        &mut cw,
+        &abir,
+        sample_rate,
+        window_size,
+        0,
+        metadata_json,
+        lpc_mode,
+        None,
+        Some(target_bps),
+    )?;
+    let compressed_size = cw.count as usize;
+    f.sync_all().map_err(LmlError::Io)?;
+    Ok(stats_from(n_windows, signal, compressed_size, sample_rate))
 }

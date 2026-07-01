@@ -13,6 +13,19 @@
 //! parse, G hardening-rejects. (Synthetic 18/20-byte header variants + the
 //! `specs/conformance/vectors` port are a tracked fast-follow.)
 //!
+//! **ADR 0069 L8 (post-cutover) — oracle-integrity note.** `lamquant_core::container`
+//! (`lamquant_core::{container, ...}`) now ALIASES the clean `abir_container`
+//! facade, whose write half dispatches through `write_abir` — the very thing this
+//! oracle is supposed to check independently. So every `container::*` call in this
+//! file imports `lamquant_lml_legacy::container` DIRECTLY (below), bypassing that
+//! alias entirely, and every `write_abir` comparison is against genuinely
+//! independent code: `lamquant_lml_legacy::container::{write_into,write_file_bounded_mae,
+//! write_file_target_bps}` (the retiring `encode_into`-based v1 writer, linked via
+//! the `oracle` feature's `lamquant-lml-legacy/legacy-encode`) vs
+//! `lamquant_core::abir_container::write_abir_to_vec` (sourced from `Abir`). Two
+//! separate implementations, asserted byte-equal against each other AND the frozen
+//! S1/ORACLE goldens — not `write_abir` vs itself.
+//!
 //! Run: `cargo test --features oracle --test oracle_diff`
 //! Regen the B/C/D determinism shas after an INTENTIONAL change:
 //!   `LAMQUANT_REGEN_ORACLE=1 cargo test --features oracle --test oracle_diff -- --nocapture`
@@ -21,8 +34,15 @@
 use lamquant_abir::Abir;
 use lamquant_core::abir_container::write_abir_to_vec;
 use lamquant_core::error::LmlError;
+use lamquant_core::lml;
 use lamquant_core::lpc::LpcMode;
-use lamquant_core::{container, lml};
+// ADR 0069 L8: the INDEPENDENT legacy reference — deliberately NOT
+// `lamquant_core::container` (that alias now resolves to `abir_container`,
+// i.e. `write_abir` itself post-cutover). Every `container::*` call below is
+// the retiring `legacy-encode` v1 writer / frozen v1 reader, linked directly
+// so the diff against `write_abir_to_vec` stays a real two-implementation
+// check. See module docs above.
+use lamquant_lml_legacy::container;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
 

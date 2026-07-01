@@ -94,12 +94,22 @@ pub mod async_io;
 pub mod abir_container;
 #[cfg(feature = "archive")]
 pub mod codec_stages;
-// ADR 0069 L4: the LML-v1 wire (container/offset_table/stream) is sequestered in
-// `lamquant-lml-legacy`; re-exported here at the stable `lamquant_core::container`
-// path so every call site + the S1 golden + legacy_crc_decode + the L1 oracle stay
-// byte-identical by construction.
+// ADR 0069 L8 (cutover): `lamquant_core::container` now aliases the clean
+// `abir_container` facade, NOT the legacy crate directly. The write half
+// (`write_into`/`write_file*`) dispatches through `write_abir`
+// (byte-identical to the legacy `encode_into` by construction — see L1
+// oracle); the read half + shared types (`read_file`, `read_bytes`,
+// `ContainerHeader`, `ContainerStats`, `OffsetEntry`, `OffsetTable`, ...) are
+// re-exported by `abir_container` straight from `lamquant_lml_legacy::container`
+// (frozen, unchanged). Every call site + the S1 golden + legacy_crc_decode +
+// the L1 oracle stay byte-identical by construction — the goldens are the
+// cutover proof, not a re-generation target. `lamquant-lml-legacy`'s
+// `legacy-encode` (the retiring `encode_into`/`write_into` v1 writer) is no
+// longer part of `archive` (see Cargo.toml); it now lives under `oracle`
+// only, where `tests/oracle_diff.rs` links it DIRECTLY (not through this
+// alias) to keep the differential oracle a real two-implementation check.
 #[cfg(feature = "archive")]
-pub use lamquant_lml_legacy::container;
+pub use crate::abir_container as container;
 #[cfg(feature = "archive")]
 pub mod edf;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).

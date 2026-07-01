@@ -128,11 +128,14 @@ archive = [
     # is sourced from `lamquant_abir::Abir` instead of `Vec<Vec<i64>>`.
     "dep:lamquant-abir",
     "dep:lamquant-lml-legacy",
+    # ADR 0069 L8 (cutover): the live path only needs the FROZEN v1 reader —
+    # `container::{read_file,read_bytes,...}` + the shared `ContainerHeader`/
+    # `ContainerStats`/`OffsetEntry`/`OffsetTable` types the `abir_container`
+    # facade re-exports/reuses. The retiring `encode_into`/`write_into` v1
+    # WRITER (`legacy-encode`) is demoted OUT of `archive` — the live write
+    # path is `write_abir` now. `legacy-encode` lives under `oracle` only
+    # (below), which links it directly for the differential check.
     "lamquant-lml-legacy/legacy-decode",
-    # ADR 0069 L5(c): the CLI write path (`lml compress` et al) still
-    # dispatches through the v1 oracle encoder until Step B ships the
-    # ABIR encoder — link the encode half too, not just the frozen reader.
-    "lamquant-lml-legacy/legacy-encode",
     # Desktop ships the LMO encoder as standard (ADR 0052).
     "lamquant-lml-optimum/encode",
     "lamquant-common/host",
@@ -148,13 +151,17 @@ archive = [
     "dep:filetime",
 ]
 
-# ── oracle: READ-ONLY differential oracle test (ADR 0069 L1) ─────────────────
+# ── oracle: differential oracle test (ADR 0069 L1, L8 cutover) ───────────────
 # Pins the LML-v1 container byte-identity + round-trip + decode-old-files KAT +
-# hardening reference BEFORE the legacy-crate carve. Read-only — only the
-# existing decode/encode surface (no new encoder), so it just needs `archive`
-# (container / lml / sha2 / tempfile). Run:
+# hardening reference. Needs `archive` (container / lml / sha2 / tempfile) PLUS
+# the retiring `legacy-encode` writer (`lamquant_lml_legacy::container::write_into`
+# et al) — `archive` alone no longer links it post-cutover (see above). The
+# oracle test (`tests/oracle_diff.rs`) imports `lamquant_lml_legacy::container`
+# DIRECTLY (not via the `lamquant_core::container` alias, which now points at
+# `write_abir`) so it stays a real two-implementation differential, not
+# write_abir-vs-itself. Run:
 #   cargo test --features oracle --test oracle_diff
-oracle = ["archive"]
+oracle = ["archive", "lamquant-lml-legacy/legacy-encode"]
 
 # ── Level 2: cli — archive + command-line interface ──────────────────────────
 # Enables: clap, shell completions, man pages, progress bars, structured

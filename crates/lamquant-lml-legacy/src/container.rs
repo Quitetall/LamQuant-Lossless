@@ -1059,7 +1059,14 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
 }
 
 /// Write-side result summary — only the write functions construct it.
-#[cfg(feature = "legacy-encode")]
+///
+/// ADR 0069 L8: moved from `legacy-encode` to `legacy-decode` (always
+/// available). The type itself carries no encode logic — it's a plain data
+/// summary — but the LIVE `write_abir` facade shims
+/// (`lamquant-lossless::abir_container::{write_into,write_file,...}`) need
+/// to construct instances of the SAME type the retiring `legacy-encode`
+/// writer returns, so downstream call sites (`ContainerStats::compressed_size`
+/// etc.) keep resolving to one type regardless of which writer produced it.
 pub struct ContainerStats {
     pub n_windows: usize,
     pub n_channels: usize,
