@@ -293,7 +293,44 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
                     lml::compress_with_mode_views(&views, noise_bits, lpc_mode)?
                 }
                 crate::backend::ComputeBackend::Desktop => {
-                    crate::compress_with_mode_parallel_views(&views, noise_bits, lpc_mode)?
+                    // task #32 (SAFE close, option b — see docs/proposals or
+                    // the task ledger for the full writeup). `LpcMode::
+                    // Anytime{deadline: Some(_)}` is a LIVE wall-clock
+                    // deadline: `analyze_anytime_host` (lamquant-lml-mcu/
+                    // src/lpc.rs) re-reads `Instant::now()` PER SUBBAND. The
+                    // serial encoder crosses that deadline at a monotonic,
+                    // single-thread channel/subband index; the rayon-
+                    // parallel encoder has each worker sample the clock at
+                    // its own independent schedule time, so the "time still
+                    // remains" decision (adaptive vs fixed-order fallback)
+                    // can differ PER SUBBAND between the two — and can even
+                    // differ run-to-run on the SAME backend. That would make
+                    // Desktop and Firmware emit DIFFERENT `.lml` bytes for
+                    // the identical logical input, violating the
+                    // byte-equal cross-backend invariant
+                    // (`byte_equal_backends.rs`). It is latent today (no
+                    // in-repo caller passes `Some(deadline)`; every golden
+                    // vector is clock-free `None`/`Fixed`/`Adaptive`), so
+                    // this is a hardening close, not a regression fix.
+                    //
+                    // Route a live-deadline Anytime mode to the SAME serial
+                    // path Firmware uses, so both backends make the
+                    // identical time-remaining decision at the identical
+                    // (single-threaded) point in the loop and agree
+                    // byte-for-byte. Every clock-free mode (`Anytime{
+                    // deadline: None}`, `Fixed`, `Adaptive`, and the
+                    // bounded-MAE / target-BPS arms above) is UNTOUCHED and
+                    // keeps the parallel path. Threading an explicit
+                    // per-channel `time_remaining` signal through the
+                    // parallel kernel (so it can match serial exactly even
+                    // WITH a live deadline, instead of falling back to
+                    // running serially) is the tracked follow-up — out of
+                    // scope for this minimal safe close.
+                    if matches!(lpc_mode, LpcMode::Anytime { deadline: Some(_), .. }) {
+                        lml::compress_with_mode_views(&views, noise_bits, lpc_mode)?
+                    } else {
+                        crate::compress_with_mode_parallel_views(&views, noise_bits, lpc_mode)?
+                    }
                 }
             }
         };
@@ -594,4 +631,120 @@ pub fn write_file_target_bps(
     let compressed_size = cw.count as usize;
     f.sync_all().map_err(LmlError::Io)?;
     Ok(stats_from(n_windows, signal, compressed_size, sample_rate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{set_global_backend, ComputeBackend};
+    use std::sync::{Mutex, OnceLock};
+
+    /// Guards mutation of the process-wide `GLOBAL_BACKEND` selector so
+    /// this test's Firmware/Desktop toggling has deterministic
+    /// before/after state regardless of what else runs concurrently in
+    /// this test binary (mirrors the `env_lock()` pattern in
+    /// `tests/config_save.rs`). Note this is belt-and-braces, not a
+    /// correctness requirement for OTHER tests: every `LpcMode` other
+    /// than a live-deadline `Anytime` is backend-invariant by
+    /// construction (the entire point of `ComputeBackend` — see
+    /// `byte_equal_backends.rs`), so a concurrently-running test
+    /// observing a transiently-different backend mid-encode would still
+    /// get byte-identical output for its own (non-live-deadline) mode.
+    fn backend_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn two_channel_signal() -> Vec<Vec<i64>> {
+        vec![
+            (0..600i64).map(|t| ((t * 37) % 4001) - 2000).collect(),
+            (0..600i64).map(|t| ((t * 53) % 3001) - 1500).collect(),
+        ]
+    }
+
+    /// Task #32 fix B (SAFE close, option b): a LIVE `Anytime` deadline
+    /// must now produce identical `.lml` bytes on the `Firmware` and
+    /// `Desktop` backend dispatch, because the `ComputeBackend::Desktop`
+    /// arm above routes `Anytime{deadline: Some(_)}` through the same
+    /// serial `compress_with_mode_views` kernel Firmware uses, instead of
+    /// the rayon-parallel one.
+    ///
+    /// The deadline here is already in the past, which makes this test
+    /// 100% deterministic: `analyze_anytime_host` reads `time_remains =
+    /// Instant::now() < deadline`, and once `deadline` is behind "now",
+    /// EVERY subsequent read of `Instant::now()` (on any thread, at any
+    /// later point) is guaranteed to keep evaluating `false` — so both
+    /// backends take the "budget exhausted -> Fixed schedule" branch on
+    /// every subband, with no dependency on real-time scheduling.
+    ///
+    /// This intentionally does NOT reproduce the actual pre-fix race
+    /// (which needs a deadline that expires MID-encode, at a point that
+    /// differs between a monotonic serial loop and independently-
+    /// scheduled rayon workers) — that is inherently non-deterministic
+    /// without mocking `Instant::now()`, which the task #32 safe close
+    /// explicitly defers (see the `ComputeBackend::Desktop` arm's doc
+    /// comment above). This test instead locks the FIXED behavior: the
+    /// routing added for task #32 must keep producing byte-identical
+    /// output across backends for a live deadline, today and going
+    /// forward.
+    #[test]
+    fn write_abir_anytime_live_deadline_matches_across_backends() {
+        let _guard = backend_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        let signal = two_channel_signal();
+        let abir = Abir::from_channels_i64(signal, 250.0);
+        let past_deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let mode = LpcMode::Anytime {
+            max_order: 16,
+            deadline: Some(past_deadline),
+        };
+
+        set_global_backend(ComputeBackend::Firmware);
+        let firmware = write_abir_to_vec(&abir, 250.0, 250, 0, "{}", mode, None, None)
+            .expect("firmware encode");
+
+        set_global_backend(ComputeBackend::Desktop);
+        let desktop = write_abir_to_vec(&abir, 250.0, 250, 0, "{}", mode, None, None)
+            .expect("desktop encode");
+
+        set_global_backend(ComputeBackend::default());
+
+        assert_eq!(
+            firmware, desktop,
+            "task #32: a live-deadline Anytime input must route Desktop through \
+             the same serial path as Firmware, so both backends agree byte-for-byte"
+        );
+    }
+
+    /// Sibling sanity check: the clock-free `Anytime{deadline: None}`
+    /// path is UNCHANGED by the task #32 routing fix — `write_abir`'s
+    /// `ComputeBackend::Desktop` arm still takes the parallel path for
+    /// it. `byte_equal_backends.rs` already locks this at the lower
+    /// (`compress_with_mode_parallel_views`) kernel level; this test
+    /// confirms `write_abir`'s own dispatch didn't accidentally start
+    /// special-casing `None` too (the `matches!` guard is specifically
+    /// `deadline: Some(_)`).
+    #[test]
+    fn write_abir_anytime_no_deadline_still_matches_across_backends() {
+        let _guard = backend_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        let signal = two_channel_signal();
+        let abir = Abir::from_channels_i64(signal, 250.0);
+        let mode = LpcMode::Anytime {
+            max_order: 16,
+            deadline: None,
+        };
+
+        set_global_backend(ComputeBackend::Firmware);
+        let firmware = write_abir_to_vec(&abir, 250.0, 250, 0, "{}", mode, None, None)
+            .expect("firmware encode");
+
+        set_global_backend(ComputeBackend::Desktop);
+        let desktop = write_abir_to_vec(&abir, 250.0, 250, 0, "{}", mode, None, None)
+            .expect("desktop encode");
+
+        set_global_backend(ComputeBackend::default());
+
+        assert_eq!(firmware, desktop);
+    }
 }

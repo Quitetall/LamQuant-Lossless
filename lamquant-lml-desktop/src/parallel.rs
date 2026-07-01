@@ -7,6 +7,12 @@
 //! `assemble_lml_packet` / `parse_lml_channels`, `synthesize_channel_signal`);
 //! only the per-channel loop runs across rayon workers instead of serially. The
 //! `byte_equal_backends` gate (now in this crate's tests) locks the invariant.
+//!
+//! Exception: `LpcMode::Anytime{deadline: Some(_)}` (a live wall-clock
+//! deadline) is NOT covered by the "by construction" claim above — see the
+//! task #32 caveat on [`compress_with_mode_parallel_views`] for why, and
+//! `abir_container::write_abir` (in `lamquant-lossless`) for the caller-side
+//! routing that works around it today.
 
 use rayon::prelude::*;
 
@@ -64,6 +70,25 @@ pub fn compress_with_mode_parallel(
 /// same logical input — only the per-channel loop runs across rayon workers
 /// instead of serially. Locked by the `views == vecs` extension of
 /// `byte_equal_backends.rs`.
+///
+/// **Caveat (task #32):** the byte-identity claim above holds for every
+/// CLOCK-FREE `mode` (`Fixed`, `Adaptive`, `Anytime{deadline: None}`) —
+/// which is everything `byte_equal_backends.rs`'s `GOLDEN_VECTORS` exercise
+/// today. It does NOT hold for `LpcMode::Anytime{deadline: Some(_)}` (a
+/// LIVE wall-clock deadline): `encode_one_channel`'s inner
+/// `analyze_anytime_host` re-reads `Instant::now()` per subband, and this
+/// function's rayon workers each sample that clock at their own
+/// independent schedule time — a different "time remains" decision per
+/// subband than the serial caller's monotonic single-thread read, and
+/// potentially different run-to-run on this SAME function. Callers with a
+/// live deadline must NOT rely on this function agreeing byte-for-byte
+/// with the serial path; `abir_container::write_abir`'s `ComputeBackend::
+/// Desktop` arm accounts for this by routing `Anytime{deadline: Some(_)}`
+/// to the serial `compress_with_mode_views` instead of calling this
+/// function at all. The full fix — thread an explicit per-channel
+/// `time_remaining` signal through this kernel so it matches serial even
+/// WITH a live deadline — is the tracked follow-up, deliberately not done
+/// here (minimal safe close, not the kernel refactor).
 ///
 /// `noise_bits == 0` (hot, lossless — the only mode `write_abir` dispatches
 /// today): the rayon closure borrows directly from `windows`, so this is
