@@ -459,13 +459,31 @@ pub struct EncodePrep<'a> {
     pub signal: alloc::borrow::Cow<'a, [Vec<i64>]>,
 }
 
-/// Validate dimensions, strip `noise_bits`, resolve level depth + the
-/// experimental encoder flags. Shared by the serial (MCU) and parallel (Desktop)
-/// orchestrators so both agree on header fields and candidate selection.
+/// Validated encode-shape output shared by every entry point:
+/// dimension-checked `n_ch`/`t`, the resolved wavelet depth `n_levels`, and
+/// the experimental encoder flags `(try_arithmetic, try_bit_pack,
+/// try_extended_lpc)`. Carries no signal data — [`prepare_encode`] (owns the
+/// `noise_bits` shift) and [`crate::lml::compress_with_mode_views`] /
+/// the Desktop parallel-views orchestrator (borrow-only, no shift when
+/// `noise_bits == 0`) both build on top of this so every caller agrees on
+/// header fields and candidate selection (ADR 0069 L6.3).
 #[doc(hidden)]
-pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePrep<'_>> {
-    let n_ch = signal.len();
-    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+#[derive(Debug, Clone, Copy)]
+pub struct EncodeShape {
+    pub n_ch: usize,
+    pub t: usize,
+    pub n_levels: u8,
+    /// (try_arithmetic, try_bit_pack, try_extended_lpc)
+    pub flags: (bool, bool, bool),
+}
+
+/// Validate `n_ch`/`t`/`noise_bits` ranges and resolve level depth + the
+/// experimental encoder flags. Pulled out of [`prepare_encode`] so the
+/// zero-copy views entry points (`compress_with_mode_views` and the Desktop
+/// parallel-views orchestrator) can run the identical checks without forcing
+/// a `Vec<Vec<i64>>` materialization first (ADR 0069 L6.3).
+#[doc(hidden)]
+pub fn validate_and_levels(n_ch: usize, t: usize, noise_bits: u8) -> LmlResult<EncodeShape> {
     if n_ch == 0 || n_ch > 1024 {
         return Err(LmlError::InvalidHeader(format!(
             "n_ch={} out of range 1..=1024",
@@ -485,16 +503,6 @@ pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePr
             noise_bits
         )));
     }
-    let signal = if noise_bits > 0 {
-        alloc::borrow::Cow::Owned(
-            signal
-                .iter()
-                .map(|ch| ch.iter().map(|&v| v >> noise_bits).collect())
-                .collect(),
-        )
-    } else {
-        alloc::borrow::Cow::Borrowed(signal)
-    };
     let try_arithmetic = {
         #[cfg(feature = "experimental_arithmetic")]
         {
@@ -526,11 +534,37 @@ pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePr
         }
     };
     let n_levels = compute_n_levels(t);
-    Ok(EncodePrep {
+    Ok(EncodeShape {
         n_ch,
         t,
         n_levels,
         flags: (try_arithmetic, try_bit_pack, try_extended_lpc),
+    })
+}
+
+/// Validate dimensions, strip `noise_bits`, resolve level depth + the
+/// experimental encoder flags. Shared by the serial (MCU) and parallel (Desktop)
+/// orchestrators so both agree on header fields and candidate selection.
+#[doc(hidden)]
+pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePrep<'_>> {
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    let shape = validate_and_levels(n_ch, t, noise_bits)?;
+    let signal = if noise_bits > 0 {
+        alloc::borrow::Cow::Owned(
+            signal
+                .iter()
+                .map(|ch| ch.iter().map(|&v| v >> noise_bits).collect())
+                .collect(),
+        )
+    } else {
+        alloc::borrow::Cow::Borrowed(signal)
+    };
+    Ok(EncodePrep {
+        n_ch: shape.n_ch,
+        t: shape.t,
+        n_levels: shape.n_levels,
+        flags: shape.flags,
         signal,
     })
 }
@@ -609,6 +643,37 @@ pub fn assemble_lml_packet(
     out
 }
 
+/// The post-`prepare_encode` core shared by every serial encode entry point:
+/// per-channel `encode_one_channel` over BORROWED slices, then
+/// `finalize_channels` + `assemble_lml_packet`. Extracted (ADR 0069 L6.3) so
+/// [`compress_with_mode`] (owns a `Vec<Vec<i64>>`) and
+/// [`compress_with_mode_views`] (owns `&[&[i64]]` — no per-window memcpy) both
+/// funnel through the exact same bytes-producing code, keeping them
+/// byte-identical by construction rather than by parallel maintenance.
+/// `channels.len()` MUST equal `n_ch`; callers control both, so this is not
+/// re-validated here (the public entry points validate via
+/// [`validate_and_levels`] before calling in).
+fn encode_channels_core(
+    channels: &[&[i64]],
+    n_ch: usize,
+    t: usize,
+    n_levels: u8,
+    noise_bits: u8,
+    flags: (bool, bool, bool),
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let mut per_channel = Vec::with_capacity(n_ch);
+    for &ch in channels.iter() {
+        per_channel.push(encode_one_channel(
+            ch, n_levels, mode, flags.0, flags.1, flags.2,
+        )?);
+    }
+    let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
+    Ok(assemble_lml_packet(
+        n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload,
+    ))
+}
+
 /// Compress [n_ch][T] signal → LML1 packet bytes with explicit LPC mode.
 ///
 /// `mode` controls the speed / CR trade-off the encoder makes per
@@ -627,27 +692,74 @@ pub fn compress_with_mode(
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
     let prep = prepare_encode(signal, noise_bits)?;
-    let mut per_channel = Vec::with_capacity(prep.n_ch);
-    for ch_idx in 0..prep.n_ch {
-        per_channel.push(encode_one_channel(
-            &prep.signal[ch_idx],
-            prep.n_levels,
-            mode,
-            prep.flags.0,
-            prep.flags.1,
-            prep.flags.2,
-        )?);
-    }
-    let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
-    Ok(assemble_lml_packet(
+    let views: Vec<&[i64]> = prep.signal.iter().map(|v| v.as_slice()).collect();
+    encode_channels_core(
+        &views,
         prep.n_ch,
         prep.t,
         prep.n_levels,
         noise_bits,
-        wins,
-        &lpc_meta,
-        &payload,
-    ))
+        prep.flags,
+        mode,
+    )
+}
+
+/// Zero-copy compress: `windows` are already-sliced `&[i64]` views (e.g.
+/// [`lamquant_abir::Abir::window_views`]) — no per-window `Vec<Vec<i64>>`
+/// materialization (ADR 0069 L6.3, the negative-cost payoff over
+/// [`compress_with_mode`]).
+///
+/// `noise_bits == 0` (the lossless hot path — the only mode `write_abir`
+/// dispatches today) walks `windows` directly through
+/// [`encode_channels_core`]: TRUE zero-copy, no allocation beyond the
+/// output packet + per-subband encode scratch that every path pays.
+///
+/// `noise_bits > 0` (cold: near-lossless / QAT-truncated inputs) pre-shifts
+/// each channel into an owned `Vec<Vec<i64>>` (`v >> noise_bits`) — this
+/// copy is unavoidable since the shift produces new values — then runs the
+/// SAME [`encode_channels_core`] over the shifted borrows, passing the
+/// *original* `noise_bits` through to the header/CRC (NOT 0: the wire
+/// `noise_bits` field is what tells the decoder to left-shift back on
+/// decode, so it must reflect the true value regardless of where the
+/// right-shift physically happened). This is exactly what
+/// [`prepare_encode`]'s `noise_bits > 0` branch does internally, so output
+/// is byte-identical to `compress_with_mode(&owned_signal, noise_bits,
+/// mode)` for the same logical input — proven in
+/// `lamquant-lml-desktop/tests/byte_equal_backends.rs`.
+pub fn compress_with_mode_views(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let n_ch = windows.len();
+    let t = windows.first().map(|w| w.len()).unwrap_or(0);
+    let shape = validate_and_levels(n_ch, t, noise_bits)?;
+    if noise_bits == 0 {
+        encode_channels_core(
+            windows,
+            shape.n_ch,
+            shape.t,
+            shape.n_levels,
+            noise_bits,
+            shape.flags,
+            mode,
+        )
+    } else {
+        let shifted: Vec<Vec<i64>> = windows
+            .iter()
+            .map(|w| w.iter().map(|&v| v >> noise_bits).collect())
+            .collect();
+        let shifted_views: Vec<&[i64]> = shifted.iter().map(|v| v.as_slice()).collect();
+        encode_channels_core(
+            &shifted_views,
+            shape.n_ch,
+            shape.t,
+            shape.n_levels,
+            noise_bits,
+            shape.flags,
+            mode,
+        )
+    }
 }
 
 /// Compress [n_ch][T] → LML1 **bounded-MAE near-lossless** packet (ADR 0051

@@ -30,6 +30,11 @@ crate-type = ["rlib"]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
 lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops" }
+# ADR 0069 L6.3 bench: `benches/codec.rs`'s `write_abir` arm builds an
+# `Abir` directly (the zero-copy currency `abir_container::write_abir`
+# reads from) to measure the killed per-window materialize vs the legacy
+# `Vec<Vec<i64>>`-based `container::write_into` path.
+lamquant-abir = { version = "0.1.0", path = "../crates/lamquant-abir" }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.

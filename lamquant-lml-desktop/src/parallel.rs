@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use lamquant_lml_mcu::error::LmlResult;
 use lamquant_lml_mcu::lml::{
     self, encode_one_channel, finalize_channels, parse_lml_channels, prepare_encode,
-    synthesize_channel_signal, DecodePlan,
+    synthesize_channel_signal, validate_and_levels, DecodePlan,
 };
 use lamquant_lml_mcu::lpc::LpcMode;
 
@@ -45,6 +45,82 @@ pub fn compress_with_mode_parallel(
         prep.n_ch,
         prep.t,
         prep.n_levels,
+        noise_bits,
+        wins,
+        &lpc_meta,
+        &payload,
+    ))
+}
+
+/// Parallel zero-copy LML encode: `windows` are already-sliced `&[i64]`
+/// views (e.g. `lamquant_abir::Abir::window_views` — this crate doesn't
+/// depend on `lamquant-abir` directly, so that's plain text, not a doc
+/// link) — no per-window `Vec<Vec<i64>>` materialization (ADR 0069 L6.3). Mirrors
+/// [`compress_with_mode_parallel`]'s rayon-per-channel split over the SAME
+/// primitives (`validate_and_levels`, `encode_one_channel`,
+/// `finalize_channels`, `assemble_lml_packet`), so it is byte-identical to
+/// [`lamquant_lml_mcu::lml::compress_with_mode_views`] (the serial views
+/// entry point) and to [`lamquant_lml_mcu::lml::compress_with_mode`] for the
+/// same logical input — only the per-channel loop runs across rayon workers
+/// instead of serially. Locked by the `views == vecs` extension of
+/// `byte_equal_backends.rs`.
+///
+/// `noise_bits == 0` (hot, lossless — the only mode `write_abir` dispatches
+/// today): the rayon closure borrows directly from `windows`, so this is
+/// TRUE zero-copy. `noise_bits > 0` (cold): pre-shift each channel into an
+/// owned `Vec<Vec<i64>>` (`v >> noise_bits`, an unavoidable copy — the shift
+/// produces new values) and rayon-map over THOSE borrows, still passing the
+/// *original* `noise_bits` to `assemble_lml_packet` so the wire header
+/// matches what the decoder needs to left-shift back (same reasoning as
+/// `compress_with_mode_views`'s cold path — do NOT delegate to
+/// `compress_with_mode_parallel(&shifted, 0, mode)`, which would write a
+/// wrong `noise_bits=0` header field).
+pub fn compress_with_mode_parallel_views(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let n_ch = windows.len();
+    let t = windows.first().map(|w| w.len()).unwrap_or(0);
+    let shape = validate_and_levels(n_ch, t, noise_bits)?;
+    let per_channel = if noise_bits == 0 {
+        windows
+            .par_iter()
+            .map(|&ch| {
+                encode_one_channel(
+                    ch,
+                    shape.n_levels,
+                    mode,
+                    shape.flags.0,
+                    shape.flags.1,
+                    shape.flags.2,
+                )
+            })
+            .collect::<LmlResult<Vec<_>>>()?
+    } else {
+        let shifted: Vec<Vec<i64>> = windows
+            .iter()
+            .map(|w| w.iter().map(|&v| v >> noise_bits).collect())
+            .collect();
+        shifted
+            .par_iter()
+            .map(|ch| {
+                encode_one_channel(
+                    ch,
+                    shape.n_levels,
+                    mode,
+                    shape.flags.0,
+                    shape.flags.1,
+                    shape.flags.2,
+                )
+            })
+            .collect::<LmlResult<Vec<_>>>()?
+    };
+    let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
+    Ok(lml::assemble_lml_packet(
+        shape.n_ch,
+        shape.t,
+        shape.n_levels,
         noise_bits,
         wins,
         &lpc_meta,

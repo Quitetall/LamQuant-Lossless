@@ -63,7 +63,9 @@ pub use lamquant_lml_desktop as desktop;
 #[cfg(feature = "archive")]
 pub use lamquant_lml_desktop::backend;
 #[cfg(feature = "archive")]
-pub use lamquant_lml_desktop::{compress_with_mode_parallel, decompress_parallel};
+pub use lamquant_lml_desktop::{
+    compress_with_mode_parallel, compress_with_mode_parallel_views, decompress_parallel,
+};
 
 // The Optimum (LMO) tier. Re-exported as `lamquant_core::optimum`; it ships the
 // LMO decoder always and the encoder under `archive` (which needs the MCU tier's

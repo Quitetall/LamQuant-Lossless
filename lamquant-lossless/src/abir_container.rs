@@ -1,4 +1,4 @@
-//! ABIR container writer (ADR 0069 L6.2).
+//! ABIR container writer (ADR 0069 L6.2, zero-copy kernel L6.3).
 //!
 //! A clean, faithful clone of the legacy v1 `encode_into` writer
 //! (`lamquant-lml-legacy::container::encode_into`), sourced from
@@ -6,12 +6,17 @@
 //! writer by construction — proven by extending the L1 differential oracle
 //! (`tests/oracle_diff.rs`).
 //!
-//! **The ONE change** vs the legacy encode loop: the per-window signal is built
-//! via [`lamquant_abir::Abir::window_views`] (a `Cow`-backed O(1) sub-slice on the
-//! `I64` lane) instead of `signal.iter().map(|ch| ch[start..end].to_vec())`. The
-//! views are still immediately materialized into an owned `Vec<Vec<i64>>` here —
-//! the kernels (`lml::compress_*`) take `&[Vec<i64>]` wholesale, so a real
-//! zero-copy kernel is a later step (L6.3). Materialize, don't optimize: every
+//! **The lossless dispatch is zero-copy (L6.3).** The per-window signal is
+//! built via [`lamquant_abir::Abir::window_views`] (a `Cow`-backed O(1)
+//! sub-slice on the `I64` lane); the `&[i64]` borrows off those `Cow`s are
+//! handed straight to `lml::compress_with_mode_views` /
+//! `compress_with_mode_parallel_views` — no `.to_vec()`, no per-window
+//! `Vec<Vec<i64>>` materialization. That was the L6.2-era memcpy; L6.3 kills
+//! it on the hot (lossless, `noise_bits == 0`) path. The cold bounded-MAE /
+//! target-BPS arms still materialize an owned `Vec<Vec<i64>>` from the same
+//! `Cow`s — those kernels (`compress_bounded_mae`/`compress_target_bps`)
+//! take `&[Vec<i64>]` wholesale and are RD-search paths, not the hot loop;
+//! a view-taking variant for them is a tracked fast-follow, not L6.3. Every
 //! other byte (header, metadata, offset table, footer) is produced by logic
 //! cloned verbatim from the legacy writer, so the output is bit-for-bit
 //! unchanged.
@@ -224,27 +229,30 @@ pub fn write_abir<W: std::io::Write + ?Sized>(
     for w in 0..n_windows {
         let start = w * actual_window;
         let end = (start + actual_window).min(total_samples);
-        // ADR 0069 L6.2: the ONE change vs the legacy loop — build the window
-        // from `Abir::window_views` (Cow-backed O(1) sub-slice on the I64 lane)
-        // instead of `signal.iter().map(|ch| ch[start..end].to_vec())`. Still
-        // materializes an owned `Vec<Vec<i64>>` here; the kernels below take
-        // `&[Vec<i64>]` wholesale. Zero-copy kernel dispatch is L6.3.
-        let window: Vec<Vec<i64>> = abir
-            .window_views(start, end)
-            .iter()
-            .map(|c| c.to_vec())
-            .collect();
+        // ADR 0069 L6.3: the zero-copy kernel dispatch. `Abir::window_views`
+        // returns `Vec<Cow<'_, [i64]>>` — `Cow::Borrowed` on an all-`I64`
+        // `Abir` (the whole point). We take `&[i64]` borrows off the `Cow`s
+        // and hand THOSE straight to `compress_with_mode_views` /
+        // `compress_with_mode_parallel_views` — no `.to_vec()`, no per-window
+        // `Vec<Vec<i64>>` materialization (that was the L6.2-era memcpy this
+        // step kills). The bounded-MAE / target-BPS arms below are cold RD
+        // paths untouched by this step — they still materialize (tracked
+        // fast-follow, not this commit).
+        let cows = abir.window_views(start, end);
+        let views: Vec<&[i64]> = cows.iter().map(|c| c.as_ref()).collect();
         let compressed = if let Some(tb) = target_bps {
+            let window: Vec<Vec<i64>> = cows.iter().map(|c| c.to_vec()).collect();
             lml::compress_target_bps(&window, tb, lpc_mode)?
         } else if let Some(d) = delta {
+            let window: Vec<Vec<i64>> = cows.iter().map(|c| c.to_vec()).collect();
             lml::compress_bounded_mae(&window, d, lpc_mode)?
         } else {
             match backend {
                 crate::backend::ComputeBackend::Firmware => {
-                    lml::compress_with_mode(&window, noise_bits, lpc_mode)?
+                    lml::compress_with_mode_views(&views, noise_bits, lpc_mode)?
                 }
                 crate::backend::ComputeBackend::Desktop => {
-                    crate::compress_with_mode_parallel(&window, noise_bits, lpc_mode)?
+                    crate::compress_with_mode_parallel_views(&views, noise_bits, lpc_mode)?
                 }
             }
         };

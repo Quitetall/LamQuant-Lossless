@@ -36,6 +36,8 @@
 use lamquant_lml_desktop::backend::{
     compress_with_backend, decompress_with_backend, ComputeBackend,
 };
+use lamquant_lml_desktop::compress_with_mode_parallel_views;
+use lamquant_lml_desktop::lml::{compress_with_mode, compress_with_mode_views};
 use lamquant_lml_desktop::lpc::LpcMode;
 use sha2::{Digest, Sha256};
 
@@ -279,4 +281,69 @@ fn desktop_backend_decode_matches_firmware() {
             v.name
         );
     }
+}
+
+/// ADR 0069 L6.3 — the zero-copy view kernel gate: `compress_with_mode_views`
+/// (serial, `lamquant-lml-mcu`) and `compress_with_mode_parallel_views`
+/// (rayon, `lamquant-lml-desktop`) MUST produce byte-identical output to the
+/// reference `compress_with_mode(&vecs, ...)` for the same logical input —
+/// same `GOLDEN_VECTORS` shapes as the backend-drift gate above, but this
+/// pins the vecs-vs-views seam instead of the firmware-vs-desktop seam.
+/// Covers `noise_bits ∈ {0, 3}`: 0 exercises the true zero-copy (`Cow::
+/// Borrowed`) hot path `write_abir` dispatches; 3 exercises the cold
+/// pre-shift path (`Cow::Owned` in `compress_with_mode`'s `prepare_encode`,
+/// vs an explicit `v >> noise_bits` shift in the views entry points) — the
+/// header's `noise_bits` field must still land as the true value (3), not 0,
+/// in both view variants, or this test fails on the very first byte
+/// (`assemble_lml_packet`'s `flags` byte encodes it).
+#[test]
+#[cfg(feature = "fast")]
+fn views_match_vecs_serial_and_parallel() {
+    let mut failures = Vec::new();
+    for v in GOLDEN_VECTORS {
+        let signal = synth_signal(v.n_ch, v.t, v.seed);
+        for &noise_bits in &[0u8, 3u8] {
+            let vecs_ref = compress_with_mode(&signal, noise_bits, v.lpc_mode)
+                .unwrap_or_else(|e| panic!("vector `{}` reference compress failed: {e:?}", v.name));
+
+            let views: Vec<&[i64]> = signal.iter().map(|ch| ch.as_slice()).collect();
+
+            let serial_views = compress_with_mode_views(&views, noise_bits, v.lpc_mode)
+                .unwrap_or_else(|e| {
+                    panic!("vector `{}` serial-views compress failed: {e:?}", v.name)
+                });
+            if serial_views != vecs_ref {
+                failures.push(format!(
+                    "vector `{}` noise_bits={} SERIAL views diverged from vecs ({} vs {} bytes; sha {} vs {})",
+                    v.name,
+                    noise_bits,
+                    serial_views.len(),
+                    vecs_ref.len(),
+                    sha256_hex(&serial_views),
+                    sha256_hex(&vecs_ref),
+                ));
+            }
+
+            let parallel_views = compress_with_mode_parallel_views(&views, noise_bits, v.lpc_mode)
+                .unwrap_or_else(|e| {
+                    panic!("vector `{}` parallel-views compress failed: {e:?}", v.name)
+                });
+            if parallel_views != vecs_ref {
+                failures.push(format!(
+                    "vector `{}` noise_bits={} PARALLEL views diverged from vecs ({} vs {} bytes; sha {} vs {})",
+                    v.name,
+                    noise_bits,
+                    parallel_views.len(),
+                    vecs_ref.len(),
+                    sha256_hex(&parallel_views),
+                    sha256_hex(&vecs_ref),
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "views entry points diverged from compress_with_mode(vecs):\n{}",
+        failures.join("\n")
+    );
 }
