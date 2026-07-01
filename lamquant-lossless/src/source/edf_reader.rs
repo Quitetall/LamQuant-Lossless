@@ -106,11 +106,7 @@ impl SignalSourceReader for EdfReader {
                 }
             })
             .collect();
-        Ok(Abir {
-            channels,
-            sample_rate,
-            n_samples,
-        })
+        Ok(Abir::from_parts(channels, sample_rate, n_samples))
     }
 }
 

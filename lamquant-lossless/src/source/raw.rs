@@ -529,11 +529,7 @@ impl SignalSourceReader for RawReader {
             }
         };
 
-        Ok(Abir {
-            channels,
-            sample_rate: sc.sample_rate,
-            n_samples,
-        })
+        Ok(Abir::from_parts(channels, sc.sample_rate, n_samples))
     }
 }
 

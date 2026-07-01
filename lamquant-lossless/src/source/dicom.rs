@@ -375,11 +375,7 @@ impl SignalSourceReader for DicomWaveformReader {
             })
             .collect();
 
-        Ok(Abir {
-            channels,
-            sample_rate: base_rate,
-            n_samples,
-        })
+        Ok(Abir::from_parts(channels, base_rate, n_samples))
     }
 }
 

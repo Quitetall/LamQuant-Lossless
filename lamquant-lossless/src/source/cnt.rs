@@ -274,11 +274,11 @@ impl SignalSourceReader for CntReader {
             })
             .collect();
 
-        Ok(Abir {
+        Ok(Abir::from_parts(
             channels,
-            sample_rate: sample_rate_u16 as f64,
-            n_samples: total_samples,
-        })
+            sample_rate_u16 as f64,
+            total_samples,
+        ))
     }
 }
 

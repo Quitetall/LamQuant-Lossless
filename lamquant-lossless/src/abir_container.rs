@@ -56,7 +56,7 @@ use crate::deployment::LosslessMode;
 use crate::error::{LmlError, LmlResult};
 use crate::lml;
 use crate::lpc::LpcMode;
-use lamquant_abir::Abir;
+use lamquant_abir::{Abir, Modality};
 use std::path::Path;
 
 // Re-exported at `abir_container::{OffsetEntry, OffsetTable}` (this `pub use`
@@ -137,9 +137,15 @@ fn metadata_with_codec_mode(
 }
 
 /// Write a complete LML v1 container from an [`Abir`] into a fresh `Vec<u8>`.
+///
+/// Generic over the modality marker `M` (ADR 0069 S3a) — the encoder egress
+/// is modality-blind by design (see `lamquant_abir::modality`), so this
+/// accepts `&Abir<M>` for ANY `M: Modality`, `Untyped` (the default,
+/// pre-S3a behavior) included. Purely a forward-compat signature widening:
+/// no byte of the emitted wire format depends on `M`.
 #[allow(clippy::too_many_arguments)]
-pub fn write_abir_to_vec(
-    abir: &Abir,
+pub fn write_abir_to_vec<M: Modality>(
+    abir: &Abir<M>,
     sample_rate: f64,
     window_size: usize,
     noise_bits: u8,
@@ -175,10 +181,14 @@ pub fn write_abir_to_vec(
 /// (`n_channels()`/`n_samples`); `sample_rate` is taken as an explicit
 /// parameter (mirrors the legacy writer, which never reads a sample rate off
 /// the signal currency itself).
+///
+/// Generic over the modality marker `M` (ADR 0069 S3a) — see
+/// [`write_abir_to_vec`] for why: the encoder is modality-blind, this is a
+/// forward-compat widening, not a behavior change.
 #[allow(clippy::too_many_arguments)]
-pub fn write_abir<W: std::io::Write + ?Sized>(
+pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
     sink: &mut W,
-    abir: &Abir,
+    abir: &Abir<M>,
     sample_rate: f64,
     window_size: usize,
     noise_bits: u8,

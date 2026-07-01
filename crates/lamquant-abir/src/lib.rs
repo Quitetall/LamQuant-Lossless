@@ -18,6 +18,13 @@ use alloc::vec::Vec;
 pub mod atoms;
 pub use atoms::{Abir, Channel, Column};
 
+/// The modality trust model — the `Abir<M>` typestate (Pillar 1, ADR 0069 S3a).
+pub mod modality;
+pub use modality::{
+    Accel, Ecg, Ecog, Eeg, Emg, Eog, Ieeg, Modality, ModalityProvenance, ModalitySource, Other,
+    Resp, Seeg, Untyped, VerifyError,
+};
+
 /// Which deterministic wire format a stream is, decided by its leading magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

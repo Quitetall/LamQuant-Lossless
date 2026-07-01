@@ -615,11 +615,7 @@ impl SignalSourceReader for BrainVisionReader {
         };
 
         let sample_rate = 1_000_000.0 / hdr.sample_interval_us;
-        Ok(Abir {
-            channels,
-            sample_rate,
-            n_samples,
-        })
+        Ok(Abir::from_parts(channels, sample_rate, n_samples))
     }
 }
 
