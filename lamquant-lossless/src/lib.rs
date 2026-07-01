@@ -136,6 +136,11 @@ pub mod ir;
 pub use lamquant_common::paths;
 #[cfg(feature = "archive")]
 pub mod pipeline;
+// ADR 0069 Pillar 3 / S3c: the Reversible/Lossy `Pass` framework built on
+// top of `pipeline::Stage`. Same gate as `pipeline` — a `Pass` IS a
+// `Stage`, so it needs everything `archive` already turns on.
+#[cfg(feature = "archive")]
+pub mod pass;
 #[cfg(feature = "archive")]
 pub mod range;
 #[cfg(feature = "archive")]

@@ -21,6 +21,11 @@
 //!
 //! Bible R1 (Unix philosophy): each stage does ONE thing. Composition
 //! handles the rest.
+//!
+//! See [`crate::pass`] for the `Reversible`/`Lossy` tagging layer built on
+//! top of `Stage` (ADR 0069 Pillar 3): a `Pass` is a `Stage` additionally
+//! tagged with its reversibility, and LML's reversible-only builder
+//! statically refuses to accept a `Lossy` one.
 
 use crate::error::LmlResult;
 
