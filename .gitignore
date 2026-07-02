@@ -129,3 +129,7 @@ graphify-out/
 # bench harness in tools/hazard3_bench). Each subdir is pulled by
 # the runbook in tools/bench_rp2350_silicon.md.
 external/
+
+# .claude/ — local Claude Code state (agent worktrees, session settings);
+# never repo content.
+.claude/
