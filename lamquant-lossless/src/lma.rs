@@ -3378,6 +3378,45 @@ pub fn unpack_archive(
 ///                        Pass these bytes straight to `lml::decompress`.
 ///                        Use `unpack_archive` if you want EDF bytes back.
 ///
+/// A coarse classification of an LMA read error, for callers (e.g. the PyO3
+/// bindings) that must map to their own error taxonomy. The LMA layer uses
+/// `Box<dyn Error>` (stringly-typed) rather than a structured enum, so this
+/// classifier lives HERE, next to the error strings it matches — a single
+/// source of truth co-located with the code that produces the messages, so a
+/// wording change is visible alongside the classifier (MiMo #16). A full
+/// structured `LmaError` enum across every `.into()` site is the eventual fix;
+/// this removes the duplicated + inconsistent substring-matching that had crept
+/// into the PyO3 layer in the meantime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LmaErrorKind {
+    /// The named entry is not in the archive manifest.
+    NotFound,
+    /// Not an LMA archive / unsupported version / corrupt or oversized manifest.
+    InvalidArchive,
+    /// I/O failure, zstd decompression failure, or anything else.
+    Io,
+}
+
+/// Classify an LMA read error ([`read_entry`] / [`read_entry_headers_path`]).
+/// Matches the error's message once, here, so the substring set lives beside the
+/// error strings rather than being duplicated in every downstream binding.
+pub fn classify_error(e: &(dyn std::error::Error + Send + Sync)) -> LmaErrorKind {
+    let msg = e.to_string();
+    if msg.contains("not found") {
+        LmaErrorKind::NotFound
+    } else if msg.contains("Not an LMA archive")
+        || msg.contains("not supported")
+        || msg.contains("Manifest")
+        || msg.contains("exceeds")
+        || msg.contains("corrupt")
+        || msg.contains("too small")
+    {
+        LmaErrorKind::InvalidArchive
+    } else {
+        LmaErrorKind::Io
+    }
+}
+
 /// Errors:
 ///   - Archive too small / bad magic / unsupported version.
 ///   - Manifest length above cap (likely corrupt or malicious).

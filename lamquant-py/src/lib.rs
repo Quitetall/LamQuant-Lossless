@@ -19,6 +19,21 @@ fn extract_bytes(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     }
 }
 
+/// Map an LMA read error to the right Python exception via the classifier that
+/// lives in `lml::lma` (co-located with the error strings — single source of
+/// truth, MiMo #16). Replaces the substring-matching that had been duplicated,
+/// with divergent substring sets, across the LMA pyfunctions. `NotFound` →
+/// `KeyError`, `InvalidArchive` (bad magic / unsupported / corrupt / oversized
+/// manifest) → `ValueError`, everything else → `IOError`.
+fn lma_err_to_py(e: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
+    let msg = e.to_string();
+    match lml::lma::classify_error(&*e) {
+        lml::lma::LmaErrorKind::NotFound => pyo3::exceptions::PyKeyError::new_err(msg),
+        lml::lma::LmaErrorKind::InvalidArchive => pyo3::exceptions::PyValueError::new_err(msg),
+        lml::lma::LmaErrorKind::Io => pyo3::exceptions::PyIOError::new_err(msg),
+    }
+}
+
 #[pyfunction]
 fn golomb_encode_dense<'py>(
     py: Python<'py>,
@@ -269,20 +284,7 @@ fn lma_read_entry<'py>(
     entry_name: &str,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let bytes = lml::lma::read_entry(std::path::Path::new(archive_path), entry_name)
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                pyo3::exceptions::PyKeyError::new_err(msg)
-            } else if msg.contains("Not an LMA archive")
-                || msg.contains("not supported")
-                || msg.contains("Manifest")
-                || msg.contains("exceeds")
-            {
-                pyo3::exceptions::PyValueError::new_err(msg)
-            } else {
-                pyo3::exceptions::PyIOError::new_err(msg)
-            }
-        })?;
+        .map_err(lma_err_to_py)?;
     Ok(PyBytes::new(py, &bytes))
 }
 
@@ -308,20 +310,7 @@ fn lma_entry_headers<'py>(
         &names,
         n_bytes,
     )
-    .map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("Not an LMA archive")
-            || msg.contains("not supported")
-            || msg.contains("Manifest")
-            || msg.contains("exceeds")
-            || msg.contains("corrupt")
-            || msg.contains("too small")
-        {
-            pyo3::exceptions::PyValueError::new_err(msg)
-        } else {
-            pyo3::exceptions::PyIOError::new_err(msg)
-        }
-    })?;
+    .map_err(lma_err_to_py)?;
     Ok(results
         .into_iter()
         .map(|opt| opt.map(|b| PyBytes::new(py, &b)))
