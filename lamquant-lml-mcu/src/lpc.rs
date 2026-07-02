@@ -373,7 +373,7 @@ pub fn analyze(subband: &[i64], order: usize, ctx_len: usize) -> (Vec<i32>, Vec<
             break;
         }
         let k = -lam / e;
-        a_next.iter_mut().for_each(|x| *x = 0.0);
+        a_next.fill(0.0);
         a_next[m] = k;
         for j in 0..m {
             a_next[j] = a[j] + k * a[m - 1 - j];

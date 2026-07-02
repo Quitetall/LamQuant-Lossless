@@ -692,6 +692,13 @@ fn assemble_track2_packet(
     lpc_meta: &[u8],
     payload: &[u8],
 ) -> Vec<u8> {
+    // Wire-width invariants the header fields assume — all callers validate via
+    // `validate_track2_dims` first, so these are cheap insurance against a
+    // future misuse (MiMo review), not a live check.
+    debug_assert!(n_ch <= u16::MAX as usize);
+    debug_assert!(t <= u16::MAX as usize);
+    debug_assert!(lpc_meta.len() <= u32::MAX as usize);
+    debug_assert!(payload.len() <= u32::MAX as usize);
     let flags: u8 = FLAG_BIT_TRACK2_MODE;
     let mut header_var = [0u8; 14];
     header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
