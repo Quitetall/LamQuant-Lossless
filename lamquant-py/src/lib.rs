@@ -3,7 +3,7 @@ use lamquant_abir::{
     Modality, ModalitySource, Other, Resp, Seeg, Untyped, BCS1_MAGIC,
 };
 use std::sync::Arc;
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict};
 
@@ -624,6 +624,53 @@ fn container_read_bytes_abir(data: &[u8]) -> PyResult<PyAbir> {
     build_pyabir(data, signal, &metadata)
 }
 
+/// ADR 0069 S7b: the LMQ training normalization DSP, in Rust. Takes the
+/// already-channel-selected `[n_ch, T]` float32 signal (channel-select is a
+/// pure gather with no parity concern, so it stays in Python) + its original
+/// sample rate, and returns the `[n_ch, T']` float32 array `decode_lma_signal`
+/// produces: resample→250 → 0.5 Hz zero-phase HP → Q31 → the f32 round-trip.
+///
+/// Returns `None` for an all-flat signal (matches the Python `max_abs < 1e-12`
+/// skip). Raises `NotImplementedError` for a sample rate that needs the FFT
+/// resample branch (not yet ported) so the caller can fall back to the Python
+/// path. Bit-exact to `decode_lma_signal`'s tail (parity-gated in
+/// `lamquant-lossless/tests/normalize_parity.rs`).
+#[pyfunction]
+fn normalize_eeg_f32<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray2<'py, f32>,
+    orig_sr: f64,
+) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+    let arr = data.as_array();
+    let (n_ch, t) = (arr.shape()[0], arr.shape()[1]);
+    let signal: Vec<Vec<f64>> = (0..n_ch)
+        .map(|c| (0..t).map(|j| arr[[c, j]] as f64).collect())
+        .collect();
+
+    match lml::normalize::normalize_eeg_signal_f32(&signal, orig_sr) {
+        Ok(Some(out)) => {
+            let n_out = out.len();
+            let t_out = out.first().map(|r| r.len()).unwrap_or(0);
+            let arr = PyArray2::<f32>::zeros(py, [n_out, t_out], false);
+            // Safe: freshly allocated, GIL held, contiguous C-order.
+            let slice = unsafe { arr.as_slice_mut() }.map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
+            })?;
+            for (c, row) in out.iter().enumerate() {
+                slice[c * t_out..c * t_out + row.len()].copy_from_slice(row);
+            }
+            Ok(Some(arr))
+        }
+        Ok(None) => Ok(None),
+        Err(lml::normalize::NormalizeError::FftResampleUnsupported { orig_sr }) => {
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(format!(
+                "resample {orig_sr} Hz → 250 Hz needs the scipy FFT branch (not ported); \
+                 fall back to the Python normalization for this rate"
+            )))
+        }
+    }
+}
+
 #[pymodule]
 fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(golomb_encode_dense, m)?)?;
@@ -638,6 +685,7 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAbir>()?;
     m.add_function(wrap_pyfunction!(container_read_abir, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_bytes_abir, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_eeg_f32, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_window_np, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_phys_f32, m)?)?;
     m.add_function(wrap_pyfunction!(container_metadata, m)?)?;
