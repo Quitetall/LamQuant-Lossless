@@ -698,6 +698,20 @@ pub fn bcs1_parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
         return Err(LmlError::InvalidHeader("zero windows".into()));
     }
     let window_size = header.window_size as usize;
+    // Cross-field consistency (MiMo #34 review): total_samples can never
+    // legitimately exceed n_windows * window_size. Guard it here — the
+    // calibrated-f32 and window read paths parse through this fn, so without
+    // it they'd lack the protection the whole-decode `bcs1_read_bytes` already
+    // has (a crafted header would allocate an oversized output and silently
+    // zero-fill the tail into garbage training data).
+    let max_samples = (n_windows as u64)
+        .checked_mul(window_size as u64)
+        .ok_or_else(|| LmlError::InvalidHeader("n_windows * window_size overflows u64".into()))?;
+    if total_samples as u64 > max_samples {
+        return Err(LmlError::InvalidHeader(format!(
+            "total_samples {total_samples} exceeds n_windows*window_size {max_samples}"
+        )));
+    }
 
     if header.codec_descriptor != CodecDescriptor::Lml53.to_u8() {
         return Err(LmlError::InvalidHeader(format!(
@@ -709,21 +723,31 @@ pub fn bcs1_parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
 
     let meta_len = header.metadata_length as usize;
     let hdr_end = BCS1_HEADER_LEN;
-    if hdr_end + meta_len > data.len() {
+    // checked_* on the offset arithmetic (MiMo #34 review): `metadata_length`
+    // is an attacker-controllable u32. On the 64-bit host these can't actually
+    // wrap usize, but this matches the discipline in
+    // `bcs1_read_window_from_bytes` and keeps the truncation guard sound if
+    // abir_container ever moves to a 32-bit (no_std) target.
+    let meta_end = hdr_end
+        .checked_add(meta_len)
+        .ok_or_else(|| LmlError::InvalidHeader("metadata offset overflow".into()))?;
+    if meta_end > data.len() {
         return Err(LmlError::Truncated {
-            expected: hdr_end + meta_len,
+            expected: meta_end,
             actual: data.len(),
             context: "metadata",
         });
     }
-    let metadata = std::str::from_utf8(&data[hdr_end..hdr_end + meta_len])
+    let metadata = std::str::from_utf8(&data[hdr_end..meta_end])
         .map_err(|e| LmlError::InvalidHeader(format!("metadata is not valid UTF-8: {e}")))?
         .to_string();
 
     // Window-length index (n_windows × u32) sits immediately after the metadata; the
     // first payload's length prefix begins right after it. Identical relative layout to
     // the legacy reader — only the fixed header length (40 vs 32/20/18) differs.
-    let payload_start = hdr_end + meta_len + n_windows * 4;
+    let payload_start = meta_end
+        .checked_add(n_windows * 4)
+        .ok_or_else(|| LmlError::InvalidHeader("payload_start overflow".into()))?;
 
     Ok(ContainerHeader {
         n_ch,
@@ -1162,6 +1186,27 @@ mod bcs1_read_tests {
 
         // Out-of-range index is a clean error, not a panic.
         assert!(read_window_from_bytes(&bytes, hdr.n_windows).is_err());
+    }
+
+    /// #34 (MiMo review): a crafted BCS1 header whose total_samples exceeds
+    /// n_windows*window_size is rejected by `bcs1_parse_header`, not silently
+    /// decoded into a zero-padded oversized buffer.
+    #[test]
+    fn bcs1_parse_header_rejects_inconsistent_total_samples() {
+        let signal = two_channel_signal();
+        let abir = Abir::from_channels_i64(signal, 250.0);
+        let mut bytes =
+            write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None)
+                .expect("write_abir_to_vec");
+        // total_samples is the u32 at BCS1 header bytes 16..20 — inflate it far
+        // past n_windows*window_size.
+        bytes[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        // `ContainerHeader` (Ok side) isn't `Debug`, so match instead of expect_err.
+        let err = match parse_header(&bytes) {
+            Err(e) => e,
+            Ok(_) => panic!("inconsistent total_samples must be rejected, got Ok"),
+        };
+        assert!(matches!(err, LmlError::InvalidHeader(_)), "got: {err:?}");
     }
 
     #[test]
