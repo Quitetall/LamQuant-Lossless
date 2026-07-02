@@ -43,6 +43,7 @@ import collections
 import io
 import json
 import logging
+import os
 import random
 import sys
 from pathlib import Path
@@ -404,6 +405,23 @@ def decode_lma_signal(lma_path: str, stem: str,
         padded = np.zeros((n_target, data.shape[1]), dtype=data.dtype)
         padded[: min(data.shape[0], n_target)] = data[: min(data.shape[0], n_target)]
         data = padded
+
+    # ADR 0069 S7b cutover: optionally run the normalization DSP (resample→250 →
+    # 0.5 Hz zero-phase HP → Q31 → f32) in Rust (`src/normalize.rs`) instead of
+    # scipy, so LML + LMQ share one definition. Bit-exact to the Python path
+    # below (parity-gated: normalize_parity.rs + test_normalize.py). Opt-in via
+    # LAMQUANT_RUST_NORMALIZE=1; the default stays Python until the Rust path is
+    # validated on the full corpus. The scipy FFT resample branch is not ported,
+    # so those (rare) rates raise NotImplementedError and fall through to scipy.
+    if os.environ.get("LAMQUANT_RUST_NORMALIZE", "") in ("1", "true", "yes"):
+        try:
+            # Returns the [21, T'] float32 array (or None on an all-flat signal,
+            # matching the max_abs guard below).
+            return _LAZY["lamquant_core"].normalize_eeg_f32(
+                np.ascontiguousarray(data, dtype=np.float32), original_sr
+            )
+        except NotImplementedError:
+            pass  # FFT-branch rate → fall through to the scipy path below
 
     if abs(original_sr - TARGET_SR) > 0.5:
         # ADR 0069 S7b: resample in float64, not float32. Previously `data` was
