@@ -62,6 +62,16 @@ jobs:
       # it cannot silently vanish if default features change.
       - name: L1 differential oracle (oracle)
         run: cargo test -p lamquant-lml --features oracle --test oracle_diff
+      # ADR 0074 M0: the DAG-reference==fused split contract. archive-gated, so it
+      # only runs when NAMED (the workspace step runs default features). Pin it, or
+      # it silently never fires and stops guarding the migration's split.
+      - name: ADR-0074 M0 DAG-reference==fused gate (archive)
+        run: cargo test -p lamquant-lml --features archive --test dag_reference_equals_fused
+      # S7b normalization parity (ADR 0069): Rust normalize.rs == Python scipy
+      # pipeline on committed Q31 goldens. Also archive-gated → pin by name (it was
+      # added without a CI line and was silently absent).
+      - name: S7b normalization parity gate (archive)
+        run: cargo test -p lamquant-lml --features archive --test normalize_parity
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR

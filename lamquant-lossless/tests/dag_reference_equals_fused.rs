@@ -73,6 +73,7 @@ fn ref_channel(sig: &[i64], n_levels: u8, mode: LpcMode) -> (Vec<u8>, Vec<u8>) {
 /// then all payloads) >> assemble_lml_packet`. Mirrors `encode_channels_core`
 /// (lml.rs:739-755) + `finalize_channels` (lml.rs:576, default branch: wins=false).
 fn ref_packet(signal: &[Vec<i64>], mode: LpcMode) -> Vec<u8> {
+    assert!(!signal.is_empty(), "ref_packet needs ≥1 channel (the codec rejects n_ch=0)");
     let n_ch = signal.len();
     let t = signal[0].len();
     let n_levels = compute_n_levels(t);
