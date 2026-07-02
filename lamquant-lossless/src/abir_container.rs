@@ -92,7 +92,10 @@ use crate::deployment::LosslessMode;
 use crate::error::{LmlError, LmlResult};
 use crate::lml;
 use crate::lpc::LpcMode;
-use abir::{Abir, Bcs1Header, CodecDescriptor, Modality, BCS1_HEADER_LEN, BCS1_MAGIC};
+use abir::{
+    Abir, Bcs1Header, CodecDescriptor, Column, Modality, BCS1_HEADER_LEN, BCS1_MAGIC,
+    BCS1_VERSION_MAJOR,
+};
 use std::path::Path;
 
 // Re-exported at `abir_container::{OffsetEntry, OffsetTable}` (this `pub use`
@@ -266,6 +269,24 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
     let total_samples = abir.n_samples;
     if total_samples == 0 {
         return Err(LmlError::InvalidHeader("0 samples".into()));
+    }
+
+    // Max-precision invariant (2026-07-02): the integer LML codec must never
+    // SILENTLY lose precision. An `F32` (float) column would truncate toward
+    // zero when `window_views` widens it to i64 — a silent, un-reviewed loss.
+    // The data-driven descriptor path already refuses F32 (G5, `descriptor.rs`);
+    // this guards the codec boundary itself so ANY caller that hand-builds an
+    // F32-column Abir fails LOUD here instead. Float channels must route to the
+    // lossless zstd/LMA path, not the integer codec.
+    if let Some(ch) = abir
+        .channels
+        .iter()
+        .position(|c| matches!(c.data, Column::F32(_)))
+    {
+        return Err(LmlError::InvalidHeader(format!(
+            "channel {ch} is an F32 (float) column — the integer LML codec would \
+             silently truncate it; route float channels to the zstd/LMA path"
+        )));
     }
 
     // Audit-2026-05-11 Fix-#17: reject NaN/Inf sample_rate before letting them
@@ -503,6 +524,34 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
 // read_file/read_bytes become a magic DISPATCHER") peek the leading 4 bytes
 // and route to whichever reader understands them.
 
+/// Fail-closed decode gate on a parsed BCS1 header (task #36): this build
+/// decodes only `version_major` ≤ 1, `decode_capability` 0 (the integer floor),
+/// and `codec_descriptor` `Lml53`. GOLDEN-NEUTRAL — v1 / cap0 / Lml53 headers
+/// (all the L9 writer emits) pass unchanged; a future/incompatible header
+/// fails closed (`UnsupportedVersion` / `InvalidHeader`) instead of being
+/// mis-decoded. NB `Bcs1Header::parse` stays permissive (any version/cap parses
+/// into the struct) so inspection tools can still read a future header; the gate
+/// lives here on the DECODE path.
+fn bcs1_gate_decodable(header: &Bcs1Header) -> LmlResult<()> {
+    if header.version_major > BCS1_VERSION_MAJOR {
+        return Err(LmlError::UnsupportedVersion(header.version_major));
+    }
+    if header.decode_capability > 0 {
+        return Err(LmlError::InvalidHeader(format!(
+            "BCS1 decode_capability {} exceeds this reader's max (0 = integer floor)",
+            header.decode_capability
+        )));
+    }
+    if header.codec_descriptor != CodecDescriptor::Lml53.to_u8() {
+        return Err(LmlError::InvalidHeader(format!(
+            "BCS1 codec_descriptor {} not wired to a decoder in this build \
+             (only CODEC_LML_53=0 decodes today; LMO/LMQ descriptors are deferred)",
+            header.codec_descriptor
+        )));
+    }
+    Ok(())
+}
+
 /// Decode a `BCS1` container from in-memory bytes into `(signal,
 /// metadata_json)` — the BCS1 counterpart of
 /// `lamquant_lml_legacy::container::read_bytes`. Parses the 40-byte typed
@@ -566,13 +615,7 @@ pub fn bcs1_read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
     // `stream::LmlReader`-style seek access is out of this minimal scope).
     pos += n_windows * 4;
 
-    if header.codec_descriptor != CodecDescriptor::Lml53.to_u8() {
-        return Err(LmlError::InvalidHeader(format!(
-            "BCS1 codec_descriptor {} not wired to a decoder in this build \
-             (only CODEC_LML_53=0 decodes today; LMO/LMQ descriptors are deferred)",
-            header.codec_descriptor
-        )));
-    }
+    bcs1_gate_decodable(&header)?;
 
     // Decompress windows — identical loop to
     // `lamquant_lml_legacy::container::read_bytes`'s tail (the per-window
@@ -713,13 +756,7 @@ pub fn bcs1_parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
         )));
     }
 
-    if header.codec_descriptor != CodecDescriptor::Lml53.to_u8() {
-        return Err(LmlError::InvalidHeader(format!(
-            "BCS1 codec_descriptor {} not wired to a decoder in this build \
-             (only CODEC_LML_53=0 decodes today; LMO/LMQ descriptors are deferred)",
-            header.codec_descriptor
-        )));
-    }
+    bcs1_gate_decodable(&header)?;
 
     let meta_len = header.metadata_length as usize;
     let hdr_end = BCS1_HEADER_LEN;
@@ -1221,6 +1258,49 @@ mod bcs1_read_tests {
             matches!(err, LmlError::InvalidHeader(_)),
             "unwired codec_descriptor must be a clean InvalidHeader: {err:?}"
         );
+    }
+
+    /// Max-precision invariant: write_abir must REFUSE an F32 (float) column
+    /// rather than silently truncate it through the integer codec.
+    #[test]
+    fn write_abir_refuses_f32_columns() {
+        let ch = abir::Channel {
+            label: alloc::sync::Arc::from("Fp1"),
+            data: Column::F32(alloc::sync::Arc::from(vec![1.5f32, -2.5, 3.5].as_slice())),
+            phys_min: 0.0,
+            phys_max: 0.0,
+        };
+        let a = Abir::from_parts(vec![ch], 250.0, 3);
+        let err = write_abir_to_vec(&a, 250.0, 128, 0, "{}", LpcMode::default(), None, None)
+            .expect_err("F32 column must be refused, not silently truncated");
+        assert!(
+            matches!(err, LmlError::InvalidHeader(ref m) if m.contains("F32") || m.contains("float")),
+            "expected an F32-refusal InvalidHeader, got: {err:?}"
+        );
+    }
+
+    /// #36: decode fails closed on a future header version (golden-neutral —
+    /// version_major=1 still decodes; a v2 header is rejected).
+    #[test]
+    fn bcs1_decode_rejects_future_version() {
+        let abir = Abir::from_channels_i64(two_channel_signal(), 250.0);
+        let mut bytes =
+            write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None).unwrap();
+        bytes[4] = 2; // version_major = 2 (a future header layout)
+        assert!(matches!(bcs1_read_bytes(&bytes), Err(LmlError::UnsupportedVersion(2))));
+        assert!(matches!(parse_header(&bytes), Err(LmlError::UnsupportedVersion(2))));
+    }
+
+    /// #36: decode fails closed on a decode_capability above this reader's max
+    /// (0 = integer floor). Golden-neutral — cap0 files still decode.
+    #[test]
+    fn bcs1_decode_rejects_unsupported_capability() {
+        let abir = Abir::from_channels_i64(two_channel_signal(), 250.0);
+        let mut bytes =
+            write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None).unwrap();
+        bytes[11] = 1; // decode_capability = 1 (> reader max 0)
+        assert!(matches!(bcs1_read_bytes(&bytes), Err(LmlError::InvalidHeader(_))));
+        assert!(matches!(parse_header(&bytes), Err(LmlError::InvalidHeader(_))));
     }
 }
 
