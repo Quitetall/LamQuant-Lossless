@@ -19,5 +19,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 lml = { package = "lamquant-lml", version = "0.9.3", path = "../lamquant-lossless", features = ["archive"] }
+# ADR 0069 S7a: the typed ABIR IR, exposed to Python as `PyAbir`. Only a
+# transitive dep of `lml` today (via its `archive` feature), so it isn't
+# nameable without a direct declaration. `std` default (ON) gates the
+# `std::error::Error` impls on `VerifyError` used for PyO3 error mapping.
+lamquant-abir = { version = "0.1.0", path = "../crates/lamquant-abir" }
 pyo3 = { version = "0.25", features = ["extension-module"] }
 numpy = "0.25"
+# Parse the container metadata JSON (channel labels + sample_rate) Rust-side
+# when building a born-typed `PyAbir` from a decoded container.
+serde_json = "1"

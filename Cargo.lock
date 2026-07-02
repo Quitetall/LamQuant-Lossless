@@ -3365,9 +3365,11 @@ dependencies = [
 name = "lamquant-py"
 version = "0.9.3"
 dependencies = [
+ "lamquant-abir",
  "lamquant-lml",
  "numpy",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]
