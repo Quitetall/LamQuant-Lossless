@@ -124,12 +124,197 @@ pub fn q31_normalize(data: &[Vec<f64>]) -> Option<Vec<Vec<i32>>> {
 }
 
 /// EEG normalization for a signal ALREADY at 250 Hz with channels already in
-/// the 21-target order (channel-select + resample are identity here — those
-/// stages land in later S7b increments). Per-channel zero-phase HP → Q31.
-/// Returns `None` on an all-flat signal.
+/// the 21-target order (channel-select + resample are identity here). Per-channel
+/// zero-phase HP → Q31. Returns `None` on an all-flat signal.
 pub fn normalize_eeg_250hz(data: &[Vec<f64>]) -> Option<Vec<Vec<i32>>> {
     let filtered: Vec<Vec<f64>> = data.iter().map(|ch| sosfiltfilt_hp(ch)).collect();
     q31_normalize(&filtered)
+}
+
+// ───────────────────────────── resample → 250 Hz ─────────────────────────────
+//
+// Port of `lma_dataset.py:408-421`. Branch on the gcd-reduced (up, down):
+// `resample_poly` (polyphase, the common EEG rates) when both ≤ 256, else
+// `scipy.signal.resample` (FFT) — the FFT branch is not yet ported (deferred;
+// see `NormalizeError::FftResampleUnsupported`). Unlike the bit-exact HP+Q31,
+// `resample_poly` uses transcendentals (sinc, Kaiser I0), so its match to scipy
+// is tolerance-bounded, not bit-exact.
+
+/// A normalization failure the caller must handle (rather than silently degrade).
+#[derive(Debug, Clone, PartialEq)]
+pub enum NormalizeError {
+    /// The gcd-reduced up/down exceeds 256 → scipy takes the FFT
+    /// (`scipy.signal.resample`) branch, which is not yet ported to Rust. The
+    /// caller (pyfunction / cutover) falls back to the Python path for this rate.
+    FftResampleUnsupported { orig_sr: f64 },
+}
+
+impl core::fmt::Display for NormalizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            NormalizeError::FftResampleUnsupported { orig_sr } => write!(
+                f,
+                "resample {orig_sr} Hz → 250 Hz needs the scipy FFT-resample branch (up/down > 256), \
+                 not yet ported to Rust"
+            ),
+        }
+    }
+}
+impl std::error::Error for NormalizeError {}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Modified Bessel function of the first kind, order 0 — the Kaiser-window
+/// weight function. Power series `Σ (x²/4)^k / (k!)²`; f64-accurate.
+fn i0(x: f64) -> f64 {
+    let y = x * x / 4.0;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut k = 1.0;
+    loop {
+        term *= y / (k * k);
+        sum += term;
+        if term <= 1e-18 * sum {
+            break;
+        }
+        k += 1.0;
+    }
+    sum
+}
+
+/// `sin(πx)/(πx)`, `sinc(0)=1` — the numpy `np.sinc` convention.
+fn sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        1.0
+    } else {
+        let px = core::f64::consts::PI * x;
+        px.sin() / px
+    }
+}
+
+/// `scipy.signal.firwin(numtaps, cutoff, window=('kaiser', beta))` for a single
+/// lowpass band `[0, cutoff]` (cutoff in Nyquist units, `pass_zero`, `scale=True`):
+/// a Kaiser-windowed sinc normalized to unity DC gain.
+fn firwin_lowpass_kaiser(numtaps: usize, cutoff: f64, beta: f64) -> Vec<f64> {
+    let alpha = 0.5 * (numtaps as f64 - 1.0);
+    let i0_beta = i0(beta);
+    let mut h: Vec<f64> = (0..numtaps)
+        .map(|i| {
+            let m = i as f64 - alpha; // symmetric about 0
+            let ideal = cutoff * sinc(cutoff * m);
+            // Kaiser window w[i] = I0(beta*sqrt(1-(m/alpha)^2)) / I0(beta)
+            let r = (1.0 - (m / alpha).powi(2)).max(0.0).sqrt();
+            ideal * (i0(beta * r) / i0_beta)
+        })
+        .collect();
+    let s: f64 = h.iter().sum();
+    for v in h.iter_mut() {
+        *v /= s;
+    }
+    h
+}
+
+/// `scipy.signal._upfirdn._output_len` — length of an `upfirdn(h, x, up, down)`.
+fn output_len(len_h: usize, n_in: usize, up: usize, down: usize) -> usize {
+    (((n_in - 1) * up + len_h) - 1) / down + 1
+}
+
+/// `scipy.signal.upfirdn(h, x, up, down)` — upsample x by `up` (zero-stuff),
+/// FIR-filter with `h`, downsample by `down`. Direct polyphase evaluation:
+/// `y[m] = Σ_k h[k] · x_up[m·down − k]` where `x_up[j] = x[j/up]` iff `j ≥ 0 ∧
+/// j mod up == 0 ∧ j/up < len(x)`, else 0. The inner loop steps `k` by `up`
+/// (only those k give a nonzero upsampled tap).
+fn upfirdn(h: &[f64], x: &[f64], up: usize, down: usize) -> Vec<f64> {
+    let n_in = x.len();
+    let len_h = h.len();
+    let out_len = output_len(len_h, n_in, up, down);
+    let mut y = vec![0.0f64; out_len];
+    for (m, ym) in y.iter_mut().enumerate() {
+        let base = m * down;
+        let mut acc = 0.0f64;
+        // k ≡ base (mod up) ⇒ (base-k) is a multiple of up ⇒ a real sample.
+        let mut k = base % up;
+        while k < len_h && k <= base {
+            let xi = (base - k) / up;
+            if xi < n_in {
+                acc += h[k] * x[xi];
+            }
+            k += up;
+        }
+        *ym = acc;
+    }
+    y
+}
+
+/// `scipy.signal.resample_poly(x, up, down, window=('kaiser', 5.0))` — polyphase
+/// rational resample with the center-trim padding scipy applies to remove the
+/// filter group delay. Matches scipy to a tolerance (transcendental filter design).
+pub fn resample_poly(x: &[f64], up: usize, down: usize) -> Vec<f64> {
+    let g = gcd(up, down);
+    let (up, down) = (up / g, down / g);
+    if up == 1 && down == 1 {
+        return x.to_vec();
+    }
+    let n_in = x.len();
+    let n_out = {
+        let raw = n_in * up;
+        raw / down + usize::from(raw % down != 0)
+    };
+    let max_rate = up.max(down);
+    let half_len = 10 * max_rate;
+    let mut h = firwin_lowpass_kaiser(2 * half_len + 1, 1.0 / max_rate as f64, 5.0);
+    for v in h.iter_mut() {
+        *v *= up as f64;
+    }
+    // scipy's center-trim padding (resample_poly source).
+    let n_pre_pad = down - (half_len % down);
+    let mut n_post_pad = 0usize;
+    let n_pre_remove = (half_len + n_pre_pad) / down;
+    while output_len(h.len() + n_pre_pad + n_post_pad, n_in, up, down) < n_out + n_pre_remove {
+        n_post_pad += 1;
+    }
+    let mut hp = vec![0.0f64; n_pre_pad];
+    hp.extend_from_slice(&h);
+    hp.extend(core::iter::repeat(0.0).take(n_post_pad));
+
+    let y = upfirdn(&hp, x, up, down);
+    y[n_pre_remove..n_pre_remove + n_out].to_vec()
+}
+
+/// Resample one channel to 250 Hz — `lma_dataset.py:408-421`. Identity when
+/// `|orig_sr − 250| ≤ 0.5`; else gcd-reduce (up=250, down=int(orig_sr)) and take
+/// the polyphase branch when both ≤ 256, otherwise error (FFT branch not ported).
+pub fn resample_to_250(x: &[f64], orig_sr: f64) -> Result<Vec<f64>, NormalizeError> {
+    if (orig_sr - TARGET_SR).abs() <= 0.5 {
+        return Ok(x.to_vec());
+    }
+    let up = TARGET_SR as usize; // 250
+    let down = orig_sr as usize; // int(orig_sr), truncates (matches Python int())
+    let g = gcd(up, down);
+    let (u, d) = (up / g, down / g);
+    if u > 256 || d > 256 {
+        return Err(NormalizeError::FftResampleUnsupported { orig_sr });
+    }
+    Ok(resample_poly(x, u, d))
+}
+
+/// Full EEG normalization for channels already in 21-target order: resample→250
+/// → 0.5 Hz zero-phase HP → Q31. `Ok(None)` on an all-flat signal;
+/// `Err(FftResampleUnsupported)` when the rate needs the unported FFT branch.
+pub fn normalize_eeg(data: &[Vec<f64>], orig_sr: f64) -> Result<Option<Vec<Vec<i32>>>, NormalizeError> {
+    let resampled: Vec<Vec<f64>> = data
+        .iter()
+        .map(|ch| resample_to_250(ch, orig_sr))
+        .collect::<Result<_, _>>()?;
+    let filtered: Vec<Vec<f64>> = resampled.iter().map(|ch| sosfiltfilt_hp(ch)).collect();
+    Ok(q31_normalize(&filtered))
 }
 
 #[cfg(test)]
@@ -174,6 +359,67 @@ mod tests {
         let flat = vec![vec![5.0f64; 64]; 3];
         let filtered: Vec<Vec<f64>> = flat.iter().map(|c| sosfiltfilt_hp(c)).collect();
         assert!(q31_normalize(&filtered).is_none());
+    }
+
+    /// Validate `resample_poly` against scipy 1.18.0 reference outputs on a
+    /// deterministic 64-sample signal (`x[t] = (t*3) % 101 - 50`), for the two
+    /// common branches 200→250 (up=5,down=4) and 500→250 (up=1,down=2).
+    #[test]
+    fn resample_poly_matches_scipy_oracle() {
+        let x: Vec<f64> = (0..64).map(|t| ((t * 3) % 101) as f64 - 50.0).collect();
+
+        let y_200 = resample_poly(&x, 5, 4);
+        assert_eq!(y_200.len(), 80, "200→250 output length");
+        let ref_200 = [-50.0325258, -50.8568344, -42.0090913, -44.9844302];
+        for (i, &e) in ref_200.iter().enumerate() {
+            assert!(
+                (y_200[i] - e).abs() < 1e-6,
+                "200→250[{i}]: got {}, want {e} (Δ={:.2e})",
+                y_200[i],
+                (y_200[i] - e).abs()
+            );
+        }
+
+        let y_500 = resample_poly(&x, 1, 2);
+        assert_eq!(y_500.len(), 32, "500→250 output length");
+        let ref_500 = [-37.0421411, -47.4262811, -36.2815836, -33.0847358];
+        for (i, &e) in ref_500.iter().enumerate() {
+            assert!(
+                (y_500[i] - e).abs() < 1e-6,
+                "500→250[{i}]: got {}, want {e} (Δ={:.2e})",
+                y_500[i],
+                (y_500[i] - e).abs()
+            );
+        }
+    }
+
+    /// Tight-tolerance check on the exact parity input (160-sample synth, ch0)
+    /// to surface any Rust-specific resample bug the looser oracle missed.
+    #[test]
+    fn resample_poly_tight_on_parity_input() {
+        let x: Vec<f64> = (0..160).map(|t| (((t * 5) % 4001) as i64 - 2000) as f64).collect();
+        let y = resample_poly(&x, 5, 4);
+        assert_eq!(y.len(), 200);
+        let refv = [-2001.301033, -2121.074965, -1868.163585, -2071.997204];
+        let mut maxd = 0.0f64;
+        for (i, &e) in refv.iter().enumerate() {
+            maxd = maxd.max((y[i] - e).abs());
+        }
+        assert!(maxd < 1e-4, "resample tight: max|Δ|={maxd:.6e}; y[:4]={:?}", &y[..4]);
+    }
+
+    /// `resample_to_250` is identity within ±0.5 Hz and errors on the FFT branch.
+    #[test]
+    fn resample_to_250_branch_logic() {
+        let x: Vec<f64> = (0..32).map(|t| t as f64).collect();
+        assert_eq!(resample_to_250(&x, 250.0).unwrap(), x); // exact
+        assert_eq!(resample_to_250(&x, 250.4).unwrap(), x); // within tolerance
+        assert_eq!(resample_to_250(&x, 500.0).unwrap().len(), 16); // poly branch
+        // 257 Hz: gcd(250,257)=1 → down=257 > 256 → FFT branch (unported).
+        assert!(matches!(
+            resample_to_250(&x, 257.0),
+            Err(NormalizeError::FftResampleUnsupported { .. })
+        ));
     }
 
     /// Q31 truncates toward zero (not round), left-to-right f64 multiply.

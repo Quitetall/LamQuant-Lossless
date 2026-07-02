@@ -21,55 +21,42 @@
 use std::path::PathBuf;
 
 const N_CH: usize = 21;
-const T: usize = 128;
-/// Documented tolerance: max |Δ| between the Rust and scipy int32 Q31 outputs.
-/// Both run the identical f64 filtfilt algorithm, so this is FP-order slack at
-/// the truncation boundary, not an algorithmic gap. Tighten if it ever drifts.
-/// i64 so the delta of two near-±i32::MAX Q31 values can't overflow (MiMo review).
-const TOL: i64 = 2;
 
-/// MUST match `make_input` in `tools/dump_normalize_golden.py`.
-fn synth_input() -> Vec<Vec<f64>> {
+/// MUST match `make_input(t)` in `tools/dump_normalize_golden.py`.
+fn synth_input(t: usize) -> Vec<Vec<f64>> {
     (0..N_CH)
         .map(|c| {
-            (0..T)
-                .map(|t| (((c * 37 + t * 5) % 4001) as i64 - 2000) as f64)
+            (0..t)
+                .map(|tt| (((c * 37 + tt * 5) % 4001) as i64 - 2000) as f64)
                 .collect()
         })
         .collect()
 }
 
-fn golden() -> Vec<i32> {
+fn golden(name: &str) -> Vec<i32> {
     let path: PathBuf = [
         env!("CARGO_MANIFEST_DIR"),
         "tests",
         "fixtures",
         "normalize",
-        "eeg_250hz_hp_q31.i32",
+        &format!("{name}.i32"),
     ]
     .iter()
     .collect();
-    let bytes = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("read golden {}: {e} (run tools/dump_normalize_golden.py)", path.display()));
-    assert_eq!(bytes.len(), N_CH * T * 4, "golden byte length");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+        panic!("read golden {}: {e} (run tools/dump_normalize_golden.py)", path.display())
+    });
     bytes
         .chunks_exact(4)
         .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
 
-#[test]
-fn rust_normalization_matches_python_golden_within_tolerance() {
-    let input = synth_input();
-    let out =
-        lamquant_core::normalize::normalize_eeg_250hz(&input).expect("non-flat input normalizes");
-    assert_eq!(out.len(), N_CH);
-    assert_eq!(out[0].len(), T);
-
-    let flat: Vec<i32> = out.into_iter().flatten().collect();
-    let gold = golden();
-    assert_eq!(flat.len(), gold.len());
-
+/// Compare a flat Rust Q31 output against the named golden; assert max|Δ| ≤ tol.
+/// i64 deltas so two near-±i32::MAX Q31 values can't overflow (MiMo review).
+fn assert_parity(flat: Vec<i32>, name: &str, tol: i64) {
+    let gold = golden(name);
+    assert_eq!(flat.len(), gold.len(), "{name}: length");
     let mut max_delta = 0i64;
     let mut n_mismatch = 0usize;
     let mut worst_at = 0usize;
@@ -84,15 +71,37 @@ fn rust_normalization_matches_python_golden_within_tolerance() {
         }
     }
     assert!(
-        max_delta <= TOL,
-        "Rust vs Python Q31 parity exceeded tolerance: max|Δ|={max_delta} (>{TOL}) at index {worst_at} \
-         (rust={}, python={}); {n_mismatch}/{} samples differ",
+        max_delta <= tol,
+        "{name}: Rust vs Python Q31 parity exceeded tolerance: max|Δ|={max_delta} (>{tol}) at \
+         index {worst_at} (rust={}, python={}); {n_mismatch}/{} samples differ",
         flat[worst_at],
         gold[worst_at],
         flat.len()
     );
-    eprintln!(
-        "normalize parity OK: max|Δ|={max_delta} (tol {TOL}), {n_mismatch}/{} samples differ",
-        flat.len()
-    );
+    eprintln!("{name} parity OK: max|Δ|={max_delta} (tol {tol}), {n_mismatch}/{} differ", flat.len());
+}
+
+/// 250 Hz: resample is identity, so this is the bit-exact HP+Q31 chain — expect
+/// max|Δ|=0 (tol 2 is FP-order headroom that is currently unused).
+#[test]
+fn parity_250hz_hp_q31() {
+    let out = lamquant_core::normalize::normalize_eeg(&synth_input(128), 250.0)
+        .expect("no FFT branch")
+        .expect("non-flat input normalizes");
+    assert_parity(out.into_iter().flatten().collect(), "eeg_250hz_hp_q31", 2);
+}
+
+/// 200 Hz: exercises the polyphase resample branch (up=5, down=4). Now BOTH
+/// sides resample in f64 (the S7b fix — production `lma_dataset.py` no longer
+/// resamples in float32), so this is bit-exact TODAY (max|Δ|=0). The small
+/// tolerance is headroom for cross-libm ULP drift in the transcendental filter
+/// design (`sinc`/`i0` call `sin`, which IEEE-754 does not require correctly
+/// rounded); the reported actual delta monitors it. Contrast the 250 Hz case,
+/// which uses only +,−,× and is bit-exact by IEEE determinism.
+#[test]
+fn parity_200hz_resample_hp_q31() {
+    let out = lamquant_core::normalize::normalize_eeg(&synth_input(160), 200.0)
+        .expect("poly branch, no FFT")
+        .expect("non-flat input normalizes");
+    assert_parity(out.into_iter().flatten().collect(), "eeg_200hz_resample_hp_q31", 4);
 }

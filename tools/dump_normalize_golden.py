@@ -19,64 +19,90 @@ from pathlib import Path
 
 import numpy as np
 import scipy
-from scipy.signal import butter, sosfiltfilt
+from scipy.signal import butter, resample_poly, sosfiltfilt
 
 N_CH = 21
-T = 128
-SAMPLE_RATE = 250.0  # skips resample (|sr-250| <= 0.5)
 
 OUT_DIR = Path(__file__).resolve().parents[1] / "lamquant-lossless" / "tests" / "fixtures" / "normalize"
 
 
-def make_input() -> np.ndarray:
+def make_input(t: int) -> np.ndarray:
     """Deterministic integer µV signal — MUST match the Rust `synth_input`."""
-    x = np.empty((N_CH, T), dtype=np.float32)
+    x = np.empty((N_CH, t), dtype=np.float32)
     for c in range(N_CH):
-        for t in range(T):
-            x[c, t] = float(((c * 37 + t * 5) % 4001) - 2000)
+        for tt in range(t):
+            x[c, tt] = float(((c * 37 + tt * 5) % 4001) - 2000)
     return x
 
 
-def normalize_250hz(data_f32: np.ndarray) -> np.ndarray:
-    """The `decode_lma_signal` tail for the 250 Hz case: 0.5 Hz zero-phase HP → Q31."""
-    sos = butter(2, 0.5, btype="high", fs=SAMPLE_RATE, output="sos")
-    data = sosfiltfilt(sos, data_f32, axis=1)
+def normalize(data_f32: np.ndarray, orig_sr: float) -> np.ndarray:
+    """The `decode_lma_signal` tail: resample→250 (poly branch) → 0.5 Hz zero-phase HP → Q31."""
+    data = data_f32
+    if abs(orig_sr - 250.0) > 0.5:
+        from math import gcd
+
+        # S7b: resample in float64 (matches the fixed lma_dataset.py + the Rust port).
+        data = data.astype(np.float64)
+        up, down = 250, int(orig_sr)
+        g = gcd(up, down)
+        up, down = up // g, down // g
+        assert up <= 256 and down <= 256, "this dumper only covers the poly branch"
+        data = resample_poly(data, up, down, axis=1)
+    sos = butter(2, 0.5, btype="high", fs=250.0, output="sos")
+    data = sosfiltfilt(sos, data, axis=1)
     max_abs = float(np.max(np.abs(data)))
     assert max_abs >= 1e-12, "flat input"
     gain = 0.72 / max_abs
     return (data * gain * 2147483647.0).astype(np.int32)
 
 
-def main() -> None:
-    x = make_input()
-    q31 = normalize_250hz(x)
-    assert q31.shape == (N_CH, T) and q31.dtype == np.int32
+def dump(name: str, t_in: int, orig_sr: float, pipeline: str) -> None:
+    x = make_input(t_in)
+    q31 = normalize(x, orig_sr)
+    assert q31.dtype == np.int32 and q31.shape[0] == N_CH
+    t_out = q31.shape[1]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # raw int32 little-endian, row-major [N_CH, T]
-    (OUT_DIR / "eeg_250hz_hp_q31.i32").write_bytes(
+    (OUT_DIR / f"{name}.i32").write_bytes(
         struct.pack(f"<{q31.size}i", *q31.flatten(order="C").tolist())
     )
-    (OUT_DIR / "eeg_250hz_hp_q31.manifest.json").write_text(
+    (OUT_DIR / f"{name}.manifest.json").write_text(
         json.dumps(
             {
                 "adr": "0069-S7b",
                 "n_ch": N_CH,
-                "t": T,
-                "sample_rate": SAMPLE_RATE,
-                "pipeline": "channel-select(identity) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+                "t_in": t_in,
+                "t_out": t_out,
+                "orig_sr": orig_sr,
+                "target_sr": 250.0,
+                "pipeline": pipeline,
                 "input_formula": "x[c][t] = ((c*37 + t*5) %% 4001) - 2000  (float, µV)",
-                "layout": "raw int32 LE, row-major [n_ch, t]",
+                "layout": "raw int32 LE, row-major [n_ch, t_out]",
                 "scipy_version": scipy.__version__,
                 "numpy_version": np.__version__,
-                "note": "Rust f64 port vs scipy f64 (f32 input upcast losslessly); tolerance in the gate.",
             },
             indent=2,
         )
         + "\n"
     )
-    print(f"wrote golden [{N_CH},{T}] int32 (scipy {scipy.__version__}) to {OUT_DIR}")
-    print(f"  range [{int(q31.min())}, {int(q31.max())}]")
+    print(f"wrote {name} [{N_CH},{t_out}] int32 (scipy {scipy.__version__}); range [{int(q31.min())}, {int(q31.max())}]")
+
+
+def main() -> None:
+    # 250 Hz: resample is identity (the bit-exact HP+Q31 case).
+    dump(
+        "eeg_250hz_hp_q31",
+        t_in=128,
+        orig_sr=250.0,
+        pipeline="channel-select(identity) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+    )
+    # 200 Hz: exercises the polyphase resample branch (up=5, down=4).
+    dump(
+        "eeg_200hz_resample_hp_q31",
+        t_in=160,
+        orig_sr=200.0,
+        pipeline="channel-select(identity) -> resample_poly(5,4) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+    )
 
 
 if __name__ == "__main__":

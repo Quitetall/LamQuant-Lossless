@@ -406,6 +406,13 @@ def decode_lma_signal(lma_path: str, stem: str,
         data = padded
 
     if abs(original_sr - TARGET_SR) > 0.5:
+        # ADR 0069 S7b: resample in float64, not float32. Previously `data` was
+        # float32 here (channel-select preserves the f32 calibration), so
+        # `resample_poly`/`resample` ran in float32 and the `.astype(float64)`
+        # only upcast AFTER the precision loss. Casting up FRONT makes the Rust
+        # f64 port (src/normalize.rs) bit-exact to this path and removes a
+        # ~2e-7-relative artifact (below the ADC noise floor, but free to fix).
+        data = data.astype(np.float64)
         up = int(TARGET_SR)
         down = int(original_sr)
         g = gcd(up, down)
@@ -418,7 +425,7 @@ def decode_lma_signal(lma_path: str, stem: str,
                 resampled[ch] = resample(data[ch], new_len)
             data = resampled
         else:
-            data = _LAZY["resample_poly"](data, up, down, axis=1).astype(np.float64)
+            data = _LAZY["resample_poly"](data, up, down, axis=1)
 
     data = sosfiltfilt(_highpass_sos(), data, axis=1)
 
