@@ -25,6 +25,12 @@ pub use modality::{
     ModalitySource, Other, Resp, Seeg, Untyped, VerifyError,
 };
 
+/// The reversibility markers — the `Reversible`/`Lossy` typestate (Pillar 3).
+/// The no_std vocabulary; the host `Pass`/`LmlPipeline` machinery that gates on
+/// it stays in `lamquant-lossless` (ADR 0074).
+pub mod reversibility;
+pub use reversibility::{Lossy, Reversibility, Reversible};
+
 /// The BCS1 neutral wire header (ADR 0069/0071 L9) — the ONE deliberate byte
 /// change: a 40-byte typed header (born-typed modality + codec descriptor +
 /// mode + tier) wrapping the byte-unchanged JSON metadata → window index →

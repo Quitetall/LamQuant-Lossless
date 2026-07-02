@@ -35,39 +35,16 @@ use std::collections::HashMap;
 // `Box`/`String`/`Vec` come from the std prelude (this module is gated
 // behind `archive`, which implies `std`) — no explicit import needed.
 
-// ─── Reversibility markers ─────────────────────────────────────────────
-
-/// Marker trait distinguishing whether a [`Pass`] tagged with it may
-/// discard information. Implemented only by [`Reversible`] and [`Lossy`]
-/// below — those two are the entire universe of tags; there is no third
-/// option and no way to fake reversibility (the marker is a distinct
-/// zero-sized type, not a runtime bool a `Pass` impl could get wrong).
-pub trait Reversibility {
-    /// `true` if a pass tagged with this marker may throw information
-    /// away. `Reversible::LOSSY == false`, `Lossy::LOSSY == true`. This is
-    /// the single boolean [`DynPass::lossy`] surfaces to runtime callers.
-    const LOSSY: bool;
-}
-
-/// Tag: a [`Pass`] whose `process` is invertible bit-exactly via
-/// [`ReversiblePass::unprocess`]. The only marker [`LmlPipeline`] (the
-/// LML/lossless builder) accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reversible;
-
-impl Reversibility for Reversible {
-    const LOSSY: bool = false;
-}
-
-/// Tag: a [`Pass`] that may discard information. LMQ (neural/lossy) may
-/// run these; LML refuses them both statically ([`LmlPipeline`]) and
-/// dynamically ([`run_in_lml`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Lossy;
-
-impl Reversibility for Lossy {
-    const LOSSY: bool = true;
-}
+// ─── Reversibility markers (ADR 0074: relocated to the no_std `abir` crate) ───
+//
+// The pure ZST tags [`Reversible`]/[`Lossy`] + the [`Reversibility`] trait now
+// live in `abir` (no_std), co-located with the modality markers — the two
+// typestate families that make the codecs safe. Re-exported here UNCHANGED so
+// `lamquant_core::pass::{Reversibility, Reversible, Lossy}`, every
+// `Pass<Rev = Reversible>` bound, and the `compile_fail` doctest below all
+// resolve exactly as before. The `Pass`/`LmlPipeline` machinery that gates on
+// these (and composes the host [`Stage`]) stays in this host-gated module.
+pub use abir::{Lossy, Reversibility, Reversible};
 
 // ─── Pass ───────────────────────────────────────────────────────────────
 
