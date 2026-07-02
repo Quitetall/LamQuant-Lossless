@@ -462,7 +462,7 @@ impl SignalSourceReader for BrainVisionReader {
             phys_max,
             duration_s,
             metadata: SourceMetadata {
-                source_file: self.vhdr_path.display().to_string(),
+                source_file: crate::source::bundle::source_basename(&self.vhdr_path),
                 format: "BRAINVISION".to_string(),
                 patient_id: String::new(),
                 recording_info: String::new(),

@@ -12,11 +12,23 @@
 //! them back into the rich format-specific type when needed (e.g.
 //! `lml decode --to-edf`).
 
+/// The privacy-safe `source_file` value for a reader: the file's BASENAME,
+/// never its absolute path (#30 — embedding the full host path in the encoded
+/// metadata leaks provenance/PII and makes the container non-portable). `""`
+/// for a pathless source. Every reader that sets [`SourceMetadata::source_file`]
+/// from a path MUST route through this (EDF already does the equivalent inline).
+pub(crate) fn source_basename(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 /// Provenance + channel-level facts that every reader can supply.
 #[derive(Debug, Clone)]
 pub struct SourceMetadata {
-    /// Absolute or relative path the bytes came from. `"<stdin>"` /
-    /// `"<s3://...>"` for non-file sources.
+    /// The BASENAME of the file the bytes came from — never the absolute path
+    /// (#30). `"<stdin>"` / `"<s3://...>"` for non-file sources. Set via
+    /// [`source_basename`].
     pub source_file: String,
     /// Source format identifier: `"EDF"`, `"EDF+C"`, `"EDF+D"`, `"BDF"`,
     /// `"BRAINVISION"`, `"CNT"`, `"DICOM"`, `"RAW"`, …
@@ -168,6 +180,17 @@ impl SignalBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #30: source_basename returns ONLY the file name, never the absolute path,
+    /// so the encoded metadata can't leak the host directory tree / PII.
+    #[test]
+    fn source_basename_strips_the_directory() {
+        use std::path::Path;
+        assert_eq!(source_basename(Path::new("/home/alice/data/patient001.edf")), "patient001.edf");
+        assert_eq!(source_basename(Path::new("rec.vhdr")), "rec.vhdr");
+        assert_eq!(source_basename(Path::new("../scratch/sub 02.set")), "sub 02.set");
+        assert_eq!(source_basename(Path::new("/")), "");
+    }
 
     fn make_bundle(n_ch: usize, n_samples: usize) -> SignalBundle {
         SignalBundle {

@@ -341,7 +341,7 @@ impl SignalSourceReader for EeglabReader {
             phys_max,
             duration_s,
             metadata: SourceMetadata {
-                source_file: self.set_path.display().to_string(),
+                source_file: crate::source::bundle::source_basename(&self.set_path),
                 format: if self.lossy_int16 {
                     "EEGLAB_LOSSY_I16".to_string()
                 } else {
