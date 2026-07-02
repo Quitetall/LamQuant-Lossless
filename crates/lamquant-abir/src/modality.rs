@@ -105,6 +105,30 @@ modality_marker!(
     Other, 9, "other"
 );
 
+/// Map a modality wire tag ([`Modality::TAG`]) to its name ([`Modality::NAME`]),
+/// or `None` for an unknown tag. The SINGLE SOURCE OF TRUTH for the tag→name
+/// mapping: the table references the same `TAG`/`NAME` associated constants the
+/// `modality_marker!` invocations above generate, so a marker whose tag or name
+/// changes tracks automatically. Adding a NEW marker requires one new row here,
+/// co-located with the definitions (a foreign crate — e.g. `lamquant-py`'s
+/// `PyAbir.modality()` — must call this rather than keep its own copy).
+pub fn name_for_tag(tag: u8) -> Option<&'static str> {
+    const TABLE: &[(u8, &str)] = &[
+        (Untyped::TAG, Untyped::NAME),
+        (Eeg::TAG, Eeg::NAME),
+        (Ieeg::TAG, Ieeg::NAME),
+        (Ecog::TAG, Ecog::NAME),
+        (Seeg::TAG, Seeg::NAME),
+        (Ecg::TAG, Ecg::NAME),
+        (Emg::TAG, Emg::NAME),
+        (Eog::TAG, Eog::NAME),
+        (Resp::TAG, Resp::NAME),
+        (Accel::TAG, Accel::NAME),
+        (Other::TAG, Other::NAME),
+    ];
+    TABLE.iter().find(|(t, _)| *t == tag).map(|(_, n)| *n)
+}
+
 /// How a modality assignment was decided — carried alongside the tag in
 /// [`ModalityProvenance`] so a `verify()` failure (or an audit) can explain
 /// WHY a stream ended up typed the way it did.
@@ -408,6 +432,25 @@ mod tests {
         assert_eq!(Resp::TAG, 7);
         assert_eq!(Accel::TAG, 8);
         assert_eq!(Other::TAG, 9);
+    }
+
+    #[test]
+    fn name_for_tag_round_trips_every_marker() {
+        // Single source of truth: name_for_tag(M::TAG) == M::NAME for every
+        // marker; an unknown tag is None (never a stale hard-coded name).
+        assert_eq!(name_for_tag(Untyped::TAG), Some(Untyped::NAME));
+        assert_eq!(name_for_tag(Eeg::TAG), Some(Eeg::NAME));
+        assert_eq!(name_for_tag(Ieeg::TAG), Some(Ieeg::NAME));
+        assert_eq!(name_for_tag(Ecog::TAG), Some(Ecog::NAME));
+        assert_eq!(name_for_tag(Seeg::TAG), Some(Seeg::NAME));
+        assert_eq!(name_for_tag(Ecg::TAG), Some(Ecg::NAME));
+        assert_eq!(name_for_tag(Emg::TAG), Some(Emg::NAME));
+        assert_eq!(name_for_tag(Eog::TAG), Some(Eog::NAME));
+        assert_eq!(name_for_tag(Resp::TAG), Some(Resp::NAME));
+        assert_eq!(name_for_tag(Accel::TAG), Some(Accel::NAME));
+        assert_eq!(name_for_tag(Other::TAG), Some(Other::NAME));
+        assert_eq!(name_for_tag(10), None);
+        assert_eq!(name_for_tag(254), None);
     }
 
     #[test]

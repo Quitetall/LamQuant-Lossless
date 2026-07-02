@@ -1,6 +1,6 @@
 use lamquant_abir::{
-    Abir, Accel, Channel, Column, Ecg, Ecog, Eeg, Emg, Eog, Ieeg, Modality, ModalitySource, Other,
-    Resp, Seeg, Untyped,
+    name_for_tag, Abir, Accel, Bcs1Header, Channel, Column, Ecg, Ecog, Eeg, Emg, Eog, Ieeg,
+    Modality, ModalitySource, Other, Resp, Seeg, Untyped, BCS1_MAGIC,
 };
 use std::sync::Arc;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
@@ -414,17 +414,21 @@ impl PyAbir {
         let t = abir.n_samples();
         let arr = PyArray2::<i64>::zeros(py, [n_ch, t], false);
         let cows = abir.window_views(0, t);
-        // Safe: arr just allocated, no aliasing, GIL held, contiguous C-order.
-        unsafe {
-            let slice = arr.as_slice_mut().map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
-            })?;
-            for (ch, cow) in cows.iter().enumerate() {
-                let row = cow.as_ref();
-                let copy = row.len().min(t);
-                let dst = ch * t;
-                slice[dst..dst + copy].copy_from_slice(&row[..copy]);
-            }
+        // Only `as_slice_mut` is the unsafe intrinsic: safe here because `arr`
+        // was just allocated (no aliasing), the GIL is held, and `zeros` gives a
+        // contiguous C-order buffer. The fill loop below operates on the safe
+        // `&mut [i64]`.
+        let slice = unsafe { arr.as_slice_mut() }.map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
+        })?;
+        for (ch, cow) in cows.iter().enumerate() {
+            let row = cow.as_ref();
+            // All channels of a verified `Abir` share `n_samples`, so `copy == t`
+            // in practice; the `.min` is a defensive clamp (never truncates real,
+            // uniform-length data) so a malformed handle can't index OOB.
+            let copy = row.len().min(t);
+            let dst = ch * t;
+            slice[dst..dst + copy].copy_from_slice(&row[..copy]);
         }
         Ok(arr)
     }
@@ -453,8 +457,20 @@ impl PyAbir {
 #[pymethods]
 impl PyAbir {
     /// The born-typed modality name ("eeg"/"ecg"/…/"untyped"), from provenance.
+    /// Uses `lamquant_abir::name_for_tag` (single source of truth) — an unknown
+    /// tag reports "unknown" rather than a stale hard-coded name.
     fn modality(&self) -> &'static str {
-        modality_name_for_tag(self.inner.provenance().tag)
+        name_for_tag(self.inner.provenance().tag).unwrap_or("unknown")
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PyAbir(modality={:?}, n_channels={}, n_samples={}, sample_rate={})",
+            self.modality(),
+            self.inner.n_channels(),
+            self.inner.n_samples(),
+            self.inner.sample_rate,
+        )
     }
 
     /// How the modality was decided ("channel_label"/"format_declared"/"manual").
@@ -527,34 +543,35 @@ impl PyAbir {
     }
 }
 
-/// Map a born-typed modality `TAG` to its wire name (mirrors the
-/// `modality_marker!` NAMEs in `lamquant_abir::modality`).
-fn modality_name_for_tag(tag: u8) -> &'static str {
-    match tag {
-        0 => "eeg",
-        1 => "ieeg",
-        2 => "ecog",
-        3 => "seeg",
-        4 => "ecg",
-        5 => "emg",
-        6 => "eog",
-        7 => "resp",
-        8 => "accel",
-        9 => "other",
-        255 => "untyped",
-        _ => "unknown",
-    }
-}
-
-/// Build a born-typed `PyAbir` from a decoded container's `(signal,
-/// metadata_json)`. Channel labels + sample_rate come from the metadata JSON;
+/// Build a born-typed `PyAbir` from a decoded container's raw bytes + `(signal,
+/// metadata_json)`. Channel labels come from the metadata JSON; sample_rate is
+/// taken from the authoritative BCS1 header when present (else the JSON);
 /// modality is inferred from the labels (`with_inferred_modality`) — the same
 /// deterministic inference the reader ran at born-typing, so `.eeg()`/`.ecg()`
 /// check against the modality the file was written as.
-fn build_pyabir(signal: Vec<Vec<i64>>, metadata_json: &str) -> PyResult<PyAbir> {
+fn build_pyabir(data: &[u8], signal: Vec<Vec<i64>>, metadata_json: &str) -> PyResult<PyAbir> {
     let meta: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("metadata JSON: {e}")))?;
-    let sample_rate = meta.get("sample_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    // sample_rate: prefer the authoritative BCS1 header field (write_abir stores
+    // it there as milli-Hz, NOT in the JSON), fall back to the metadata JSON
+    // (legacy LML1 carries it only there), then validate. A zero/absent rate is a
+    // broken container, not a usable default — it would silently break any
+    // Hz-normalizing downstream pass (e.g. S7b resampling).
+    let header_sr = if data.len() >= 4 && data[0..4] == *BCS1_MAGIC {
+        Bcs1Header::parse(data)
+            .ok()
+            .map(|h| h.sample_rate_mhz as f64 / 1000.0)
+    } else {
+        None
+    };
+    let sample_rate = header_sr
+        .filter(|r| *r > 0.0)
+        .or_else(|| meta.get("sample_rate").and_then(|v| v.as_f64()).filter(|r| *r > 0.0))
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "container has no valid sample_rate (absent/zero in both the BCS1 header and metadata JSON)",
+            )
+        })?;
     let labels: Vec<String> = meta
         .get("channels")
         .and_then(|v| v.as_array())
@@ -601,9 +618,12 @@ fn build_pyabir(signal: Vec<Vec<i64>>, metadata_json: &str) -> PyResult<PyAbir> 
 /// whose `.eeg()`/`.ecg()` accessors enforce modality at the boundary.
 #[pyfunction]
 fn container_read_abir(path: &str) -> PyResult<PyAbir> {
-    let (signal, metadata) = lml::container::read_file(std::path::Path::new(path))
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    build_pyabir(signal, &metadata)
+    // Read the bytes once, decode via the BCS1-aware `read_bytes` dispatch, and
+    // keep the bytes so `build_pyabir` can read the authoritative header sample_rate.
+    let data = std::fs::read(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let (signal, metadata) = lml::container::read_bytes(&data)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    build_pyabir(&data, signal, &metadata)
 }
 
 /// Read an LML/BCS1 container from in-memory bytes → a typed `PyAbir` (ADR 0069
@@ -612,7 +632,7 @@ fn container_read_abir(path: &str) -> PyResult<PyAbir> {
 fn container_read_bytes_abir(data: &[u8]) -> PyResult<PyAbir> {
     let (signal, metadata) = lml::container::read_bytes(data)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    build_pyabir(signal, &metadata)
+    build_pyabir(data, signal, &metadata)
 }
 
 #[pymodule]

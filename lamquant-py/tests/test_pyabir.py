@@ -62,8 +62,7 @@ def test_eeg_accessor_returns_samples(eeg_container):
     assert arr.shape == (6, 512)
     assert arr.dtype == np.int64
     # samples are byte-exact to what was written (lossless round-trip)
-    assert int(arr[0, 0]) == signal[0][0]
-    assert int(arr[3, 7]) == signal[3][7]
+    assert np.array_equal(arr, np.array(signal, dtype=np.int64))
 
 
 def test_eeg_rejects_wrong_modality_accessor(eeg_container):
@@ -80,6 +79,28 @@ def test_blind_egress_always_available(eeg_container):
     blind = a.samples_i64()
     assert blind.shape == (6, 512)
     assert blind.dtype == np.int64
+
+
+def test_sample_rate_from_bcs1_header_when_json_omits_it(tmp_path):
+    """write_abir stamps sample_rate into the BCS1 header (milli-Hz), NOT the
+    JSON. A container whose metadata JSON omits sample_rate must still report it
+    from the authoritative header field (MiMo S7a review finding 1)."""
+    path = str(tmp_path / "no_sr.lml")
+    n_ch, T = 4, 256
+    signal = [[((c + t) % 100) - 50 for t in range(T)] for c in range(n_ch)]
+    meta = json.dumps({"channels": ["Fp1", "Fp2", "C3", "C4"]})  # NO sample_rate
+    lc.container_write(path, signal, 333.0, 128, 0, meta)
+
+    a = lc.container_read_abir(path)
+    assert a.sample_rate() == pytest.approx(333.0)
+    assert a.modality() == "eeg"
+
+
+def test_repr(eeg_container):
+    path, _ = eeg_container
+    a = lc.container_read_abir(path)
+    r = repr(a)
+    assert "PyAbir" in r and "eeg" in r and "256" in r
 
 
 def test_ecg_handle_and_cross_modality_block(ecg_container):

@@ -21,8 +21,8 @@ pub use atoms::{Abir, Channel, Column};
 /// The modality trust model — the `Abir<M>` typestate (Pillar 1, ADR 0069 S3a).
 pub mod modality;
 pub use modality::{
-    Accel, Ecg, Ecog, Eeg, Emg, Eog, Ieeg, Modality, ModalityProvenance, ModalitySource, Other,
-    Resp, Seeg, Untyped, VerifyError,
+    name_for_tag, Accel, Ecg, Ecog, Eeg, Emg, Eog, Ieeg, Modality, ModalityProvenance,
+    ModalitySource, Other, Resp, Seeg, Untyped, VerifyError,
 };
 
 /// The BCS1 neutral wire header (ADR 0069/0071 L9) — the ONE deliberate byte
