@@ -92,6 +92,11 @@ pub mod async_io;
 // `lamquant-lml-legacy`.
 #[cfg(feature = "archive")]
 pub mod abir_container;
+// ADR 0069 S7b: the LMQ training normalization pipeline (channel-select →
+// resample → 0.5 Hz zero-phase HP → Q31), hoisted from Python. Host-only Lossy
+// DSP — see module docs (non-causal filtfilt ⇒ no MCU variant).
+#[cfg(feature = "archive")]
+pub mod normalize;
 // ADR 0069/0071 L9 (read-side completion): the BCS1-aware streaming reader
 // (`Bcs1StreamReader`) + the magic-dispatching `AnyLmlReader` facade that
 // `range::RangeReader` and `bin/lml.rs`'s streaming decode paths use instead

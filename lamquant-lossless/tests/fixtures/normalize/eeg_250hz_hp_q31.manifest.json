@@ -1,0 +1,12 @@
+{
+  "adr": "0069-S7b",
+  "n_ch": 21,
+  "t": 128,
+  "sample_rate": 250.0,
+  "pipeline": "channel-select(identity) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+  "input_formula": "x[c][t] = ((c*37 + t*5) %% 4001) - 2000  (float, \u00b5V)",
+  "layout": "raw int32 LE, row-major [n_ch, t]",
+  "scipy_version": "1.18.0",
+  "numpy_version": "2.5.0",
+  "note": "Rust f64 port vs scipy f64 (f32 input upcast losslessly); tolerance in the gate."
+}
