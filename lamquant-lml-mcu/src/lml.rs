@@ -643,6 +643,82 @@ pub fn assemble_lml_packet(
     out
 }
 
+/// The dimension checks the three track-2 (lossy) entry points share: scalar
+/// `n_ch`/`T` bounds + the ragged-channel guard (the header carries a single
+/// `T`). `validate_and_levels` covers the same scalar bounds for the lossless
+/// path but also resolves `n_levels`/experimental flags the track-2 path does
+/// not want (bounded-MAE forces `n_levels = 0`), so this is the scalar-only
+/// variant + the ragged check. Error strings are byte-identical to the former
+/// inline copies — this is a pure dedup, not a behavior change (MiMo review).
+fn validate_track2_dims(signal: &[Vec<i64>], n_ch: usize, t: usize) -> LmlResult<()> {
+    if n_ch == 0 || n_ch > 1024 {
+        return Err(LmlError::InvalidHeader(format!(
+            "n_ch={} out of range 1..=1024",
+            n_ch
+        )));
+    }
+    if t == 0 || t > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader(format!(
+            "T={} out of range 1..={}",
+            t,
+            u16::MAX
+        )));
+    }
+    // All channels must share the window length (header carries one T).
+    for (c, ch) in signal.iter().enumerate() {
+        if ch.len() != t {
+            return Err(LmlError::InvalidHeader(format!(
+                "ragged channels: ch {} has {} samples, expected {}",
+                c,
+                ch.len(),
+                t
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Assemble a track-2 (lossy) LML1 packet: the same framing as
+/// [`assemble_lml_packet`] but with the fixed `FLAG_BIT_TRACK2_MODE` flag and a
+/// caller-supplied `mode_label` (`"near-lossless"` / `"lossy-bps"`). Shared by
+/// `compress_bounded_mae` / `compress_target_bps` / `compress_target_bps_pcrd`
+/// so their header + CRC + output assembly can't drift — byte-identical to the
+/// former inline tails (MiMo review; verified by `byte_equal_backends`).
+fn assemble_track2_packet(
+    n_ch: usize,
+    t: usize,
+    n_levels: u8,
+    mode_label: &str,
+    lpc_meta: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    let flags: u8 = FLAG_BIT_TRACK2_MODE;
+    let mut header_var = [0u8; 14];
+    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
+    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
+    header_var[4] = n_levels;
+    header_var[5] = flags;
+    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
+    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+
+    let mut crc_state = CRC32_INIT;
+    crc_state = crc32_update(crc_state, &header_var);
+    crc_state = crc32_update(crc_state, lpc_meta);
+    crc_state = crc32_update(crc_state, payload);
+    let crc = crc_state ^ CRC32_INIT;
+
+    let prefix = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode_label);
+    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(prefix.as_bytes());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&header_var);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(lpc_meta);
+    out.extend_from_slice(payload);
+    out
+}
+
 /// The post-`prepare_encode` core shared by every serial encode entry point:
 /// per-channel `encode_one_channel` over BORROWED slices, then
 /// `finalize_channels` + `assemble_lml_packet`. Extracted (ADR 0069 L6.3) so
@@ -786,30 +862,7 @@ pub fn compress_bounded_mae(
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
 
-    if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(format!(
-            "n_ch={} out of range 1..=1024",
-            n_ch
-        )));
-    }
-    if t == 0 || t > u16::MAX as usize {
-        return Err(LmlError::InvalidHeader(format!(
-            "T={} out of range 1..={}",
-            t,
-            u16::MAX
-        )));
-    }
-    // All channels must share the window length (header carries one T).
-    for (c, ch) in signal.iter().enumerate() {
-        if ch.len() != t {
-            return Err(LmlError::InvalidHeader(format!(
-                "ragged channels: ch {} has {} samples, expected {}",
-                c,
-                ch.len(),
-                t
-            )));
-        }
-    }
+    validate_track2_dims(signal, n_ch, t)?;
     // q = 2δ+1 must not overflow i64. δ is an error budget in raw sample
     // units — anything beyond i32 range is already absurd for real signals;
     // bound it well below the overflow point and fail-closed otherwise.
@@ -847,32 +900,8 @@ pub fn compress_bounded_mae(
         payload.extend_from_slice(&encode_subband_payload(&indices)?);
     }
 
-    let flags: u8 = FLAG_BIT_TRACK2_MODE;
-    let n_levels: u8 = 0; // unused in track-2 bounded mode
-    let mut header_var = [0u8; 14];
-    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
-    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
-    header_var[4] = n_levels;
-    header_var[5] = flags;
-    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
-    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-
-    let mut crc_state = CRC32_INIT;
-    crc_state = crc32_update(crc_state, &header_var);
-    crc_state = crc32_update(crc_state, &lpc_meta);
-    crc_state = crc32_update(crc_state, &payload);
-    let crc = crc_state ^ CRC32_INIT;
-
-    let prefix = format!("LML | {}ch | near-lossless | CRC-32\n", n_ch);
-    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(prefix.as_bytes());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&header_var);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&lpc_meta);
-    out.extend_from_slice(&payload);
-    Ok(out)
+    // n_levels = 0 (unused in track-2 bounded mode).
+    Ok(assemble_track2_packet(n_ch, t, 0, "near-lossless", &lpc_meta, &payload))
 }
 
 /// Forward lifting of one channel into its ordered subbands for the given
@@ -924,20 +953,7 @@ pub fn compress_target_bps(
 
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
-    if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(format!("n_ch={} out of range 1..=1024", n_ch)));
-    }
-    if t == 0 || t > u16::MAX as usize {
-        return Err(LmlError::InvalidHeader(format!("T={} out of range 1..={}", t, u16::MAX)));
-    }
-    for (c, ch) in signal.iter().enumerate() {
-        if ch.len() != t {
-            return Err(LmlError::InvalidHeader(format!(
-                "ragged channels: ch {} has {} samples, expected {}",
-                c, ch.len(), t
-            )));
-        }
-    }
+    validate_track2_dims(signal, n_ch, t)?;
     if !(target_bps.is_finite() && target_bps > 0.0) {
         return Err(LmlError::InvalidHeader(format!(
             "target_bps must be finite > 0, got {}",
@@ -1026,31 +1042,7 @@ pub fn compress_target_bps(
     }
     lpc_meta.extend_from_slice(&meta_body);
 
-    let flags: u8 = FLAG_BIT_TRACK2_MODE;
-    let mut header_var = [0u8; 14];
-    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
-    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
-    header_var[4] = n_levels;
-    header_var[5] = flags;
-    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
-    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-
-    let mut crc_state = CRC32_INIT;
-    crc_state = crc32_update(crc_state, &header_var);
-    crc_state = crc32_update(crc_state, &lpc_meta);
-    crc_state = crc32_update(crc_state, &payload);
-    let crc = crc_state ^ CRC32_INIT;
-
-    let prefix = format!("LML | {}ch | lossy-bps | CRC-32\n", n_ch);
-    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(prefix.as_bytes());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&header_var);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&lpc_meta);
-    out.extend_from_slice(&payload);
-    Ok(out)
+    Ok(assemble_track2_packet(n_ch, t, n_levels, "lossy-bps", &lpc_meta, &payload))
 }
 
 /// ADR 0054 Phase 3 — per-subband **Lagrangian PCRD** rate allocation.
@@ -1188,31 +1180,7 @@ pub fn compress_target_bps_pcrd(
     }
     lpc_meta.extend_from_slice(&meta_body);
 
-    let flags: u8 = FLAG_BIT_TRACK2_MODE;
-    let mut header_var = [0u8; 14];
-    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
-    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
-    header_var[4] = n_levels;
-    header_var[5] = flags;
-    header_var[6..10].copy_from_slice(&(lpc_meta.len() as u32).to_le_bytes());
-    header_var[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-
-    let mut crc_state = CRC32_INIT;
-    crc_state = crc32_update(crc_state, &header_var);
-    crc_state = crc32_update(crc_state, &lpc_meta);
-    crc_state = crc32_update(crc_state, &payload);
-    let crc = crc_state ^ CRC32_INIT;
-
-    let prefix = format!("LML | {}ch | lossy-bps | CRC-32\n", n_ch);
-    let total = prefix.len() + HEADER_SIZE + lpc_meta.len() + payload.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(prefix.as_bytes());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&header_var);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&lpc_meta);
-    out.extend_from_slice(&payload);
-    Ok(out)
+    Ok(assemble_track2_packet(n_ch, t, n_levels, "lossy-bps", &lpc_meta, &payload))
 }
 
 
@@ -1531,22 +1499,10 @@ pub fn encode_one_channel(
     try_bit_pack: bool,
     try_extended_lpc: bool,
 ) -> LmlResult<ChannelEncodeOutput> {
-    let subbands: Vec<Vec<i64>> = match n_levels {
-        3 => {
-            let (a3, d3, d2, d1) = lifting::forward_3level(signal_ch);
-            vec![a3, d3, d2, d1]
-        }
-        2 => {
-            let (l1a, l1d) = lifting::forward(signal_ch);
-            let (l2a, l2d) = lifting::forward(&l1a);
-            vec![l2a, l2d, l1d]
-        }
-        1 => {
-            let (a, d) = lifting::forward(signal_ch);
-            vec![a, d]
-        }
-        _ => vec![signal_ch.to_vec()],
-    };
+    // Same split as the lossy target-BPS path (MiMo #10 dedup — `forward_subbands`
+    // was extracted from this very match, its doc notes it "Mirrors
+    // encode_one_channel's split"; now this calls it instead of re-inlining).
+    let subbands: Vec<Vec<i64>> = forward_subbands(signal_ch, n_levels);
 
     let mut local_meta = Vec::with_capacity(subbands.len() * 40);
     #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]

@@ -356,8 +356,13 @@ pub fn analyze(subband: &[i64], order: usize, ctx_len: usize) -> (Vec<i32>, Vec<
         return (vec![0i32; order], residual);
     }
 
-    // Levinson-Durbin (O(order^2), order is 1-3 so trivial)
+    // Levinson-Durbin (O(order^2)). Double-buffered: `a_next` is allocated once
+    // and reused each iteration instead of a fresh `vec![0.0; order]` per step
+    // (MiMo #17 — analyze reaches order up to 16, not just the 1-3 the old
+    // comment assumed). Zeroing a_next before filling [0..=m] keeps indices > m
+    // at 0, so the result is bit-identical to the former fresh-alloc version.
     let mut a = vec![0.0f64; order];
+    let mut a_next = vec![0.0f64; order];
     let mut e = r[0];
     for m in 0..order {
         let mut lam = r[m + 1];
@@ -368,12 +373,12 @@ pub fn analyze(subband: &[i64], order: usize, ctx_len: usize) -> (Vec<i32>, Vec<
             break;
         }
         let k = -lam / e;
-        let mut a_new = vec![0.0f64; order];
-        a_new[m] = k;
+        a_next.iter_mut().for_each(|x| *x = 0.0);
+        a_next[m] = k;
         for j in 0..m {
-            a_new[j] = a[j] + k * a[m - 1 - j];
+            a_next[j] = a[j] + k * a[m - 1 - j];
         }
-        a = a_new;
+        core::mem::swap(&mut a, &mut a_next);
         e *= 1.0 - k * k;
         if e <= 0.0 {
             e = 1e-10;
@@ -445,15 +450,12 @@ pub fn analyze_adaptive(
     let max_order = max_order.min(t.saturating_sub(1)).min(t / 4).max(1);
 
     let seg_len = (t / 2).clamp(1, 256);
-    let mut r = vec![0.0f64; max_order + 1];
-    for lag in 0..=max_order {
-        let mut s = 0.0f64;
-        let end = seg_len.saturating_sub(lag);
-        for i in 0..end {
-            s += subband[i] as f64 * subband[i + lag] as f64;
-        }
-        r[lag] = s;
-    }
+    // Same SIMD-dispatched autocorr `analyze` uses — AVX2 on x86_64 hosts,
+    // scalar elsewhere, bit-identical by construction (see `autocorr_avx2`).
+    // Previously this inlined the scalar loop, so the adaptive path never got
+    // SIMD (MiMo #11). `autocorr(_, max_order, _)` returns the same
+    // length-(max_order+1) `r` with the identical per-lag accumulation order.
+    let r = autocorr(subband, max_order, seg_len);
 
     if r[0].abs() <= 1e-12 {
         let mut residual = subband.to_vec();
@@ -847,6 +849,32 @@ fn bias_restore(data: &mut [i64], ctx_len: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The byte-equality invariant `analyze`/`analyze_adaptive` rely on when
+    /// dispatching to `autocorr_avx2` (MiMo #11 + task #24): the AVX2 kernel is
+    /// bit-identical to the scalar kernel, so MCU (scalar) and host (AVX2)
+    /// produce the same `.lml` bytes. Asserts exact f64 equality across lags,
+    /// orders, and segment lengths.
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[test]
+    fn autocorr_avx2_bit_identical_to_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return; // no AVX2 on this host → only the scalar path runs anyway
+        }
+        for &t in &[8usize, 33, 128, 512] {
+            let signal: Vec<i64> =
+                (0..t).map(|i| (((i * 131 + 7) % 4001) as i64) - 2000).collect();
+            let seg_len = (t / 2).clamp(1, 256);
+            for &order in &[1usize, 2, 3, 8, 16] {
+                let scalar = autocorr_scalar(&signal, order, seg_len);
+                // SAFETY: AVX2 confirmed available above.
+                let simd = unsafe { autocorr_avx2(&signal, order, seg_len) };
+                let scalar_bits: Vec<u64> = scalar.iter().map(|x| x.to_bits()).collect();
+                let simd_bits: Vec<u64> = simd.iter().map(|x| x.to_bits()).collect();
+                assert_eq!(scalar_bits, simd_bits, "autocorr mismatch t={t} order={order}");
+            }
+        }
+    }
 
     #[test]
     fn roundtrip_orders() {
