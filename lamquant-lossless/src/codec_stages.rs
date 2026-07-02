@@ -213,7 +213,7 @@ mod tests {
         // ADR 0069/0071 L9: `CompressStage` routes through `write_abir`,
         // which now emits the `BCS1` typed header (wrapping the
         // byte-unchanged `LML1` per-window payloads inside) instead of a
-        // bare `LML1`-prefixed container — see `lamquant_abir::bcs1`.
+        // bare `LML1`-prefixed container — see `abir::bcs1`.
         let bundle = synth_bundle(2, 256);
         let mut stage = CompressStage::new(250.0);
         let encoded = stage.process(bundle).unwrap();

@@ -1,11 +1,11 @@
 [package]
 # ABIR — the Atomic Biosignal Intermediate Representation (ADR 0069). The
 # foundational, modality-typed, no_std-first crate both LamQuant codecs depend
-# DOWN on (graph: lamquant-common <- lamquant-abir <- {LML tiers, LMQ} <- py).
+# DOWN on (graph: lamquant-common <- abir <- {LML tiers, LMQ} <- py).
 # S2a seeds it with the two self-contained codec-seam enums (Format/Mode); the
 # typed IR atoms, width-typed columns, modality types, and the shared Codec
 # trait land in later increments.
-name = "lamquant-abir"
+name = "abir"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
@@ -14,7 +14,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/LamQuant-Lossless"
 
 [lib]
-name = "lamquant_abir"
+name = "abir"
 crate-type = ["rlib"]
 
 [features]

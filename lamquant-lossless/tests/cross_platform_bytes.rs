@@ -102,7 +102,7 @@ fn container_endianness_invariants() {
     // prefix). This assertion is updated to the new offset — it is a
     // structural wire-layout check (little-endian-ness), not a frozen sha
     // golden, so it reflects the CURRENT header layout rather than being
-    // left pinned to the pre-L9 one. See `lamquant_abir::bcs1` for the full
+    // left pinned to the pre-L9 one. See `abir::bcs1` for the full
     // layout.
     let sig = synth_signal(7, 128, 11);
     let mut sink = Vec::new();

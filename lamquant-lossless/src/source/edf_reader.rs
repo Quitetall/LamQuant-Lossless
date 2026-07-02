@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::edf::{read_edf, EdfFile};
 use crate::error::{LmlError, LmlResult};
-use lamquant_abir::{Abir, Channel, Column};
+use abir::{Abir, Channel, Column};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn lower_to_abir_infers_eeg_from_edf_channel_label() {
-        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+        use abir::{Ecg, Eeg, Modality, ModalitySource};
 
         // The synth fixture's single channel is labeled "EEG ch0" (see
         // `synth_single_channel_edf`) — an explicit "EEG" substring match.

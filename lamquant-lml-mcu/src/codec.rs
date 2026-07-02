@@ -40,13 +40,13 @@ pub const LML_MAGIC: &[u8; 4] = lml::MAGIC;
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";
 
 // The codec seam — `Format`, `Mode`, the `Codec` trait, and the format-agnostic
-// `CodecError` — lives in the foundational `lamquant-abir` crate (ADR 0069 S2a/L2).
+// `CodecError` — lives in the foundational `abir` crate (ADR 0069 S2a/L2).
 // Re-exported here so `lamquant_lml_mcu::codec::{Format, Mode, Codec, CodecError}` —
 // and every downstream path (`lamquant_core::codec::*`, `lamquant_lml_optimum::*`,
 // firmware) — keeps resolving with zero consumer edits. L2 decoupled `CodecError`
 // from `LmlError`: the LML/LMO impls map their kernel error into
 // `CodecError::Backend(_)` at the boundary via [`lml_err`].
-pub use lamquant_abir::{Codec, CodecError, Format, Mode};
+pub use abir::{Codec, CodecError, Format, Mode};
 
 /// Map a kernel [`LmlError`] into the format-agnostic [`CodecError`] at the seam
 /// boundary (ADR 0069 L2: the contract no longer wraps `LmlError`). Uses the

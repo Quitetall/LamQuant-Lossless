@@ -250,7 +250,7 @@ impl Abir<Untyped> {
     /// **type error**, caught at compile time, not a runtime bug:
     ///
     /// ```compile_fail
-    /// use lamquant_abir::{Abir, Ecg, Eeg, ModalitySource};
+    /// use abir::{Abir, Ecg, Eeg, ModalitySource};
     ///
     /// fn train(_abir: &Abir<Eeg>) {}
     ///
@@ -262,7 +262,7 @@ impl Abir<Untyped> {
     /// The matching modality compiles and runs cleanly:
     ///
     /// ```
-    /// use lamquant_abir::{Abir, Eeg, ModalitySource};
+    /// use abir::{Abir, Eeg, ModalitySource};
     ///
     /// fn train(_abir: &Abir<Eeg>) {}
     ///
@@ -300,7 +300,7 @@ impl Abir<Untyped> {
     /// was recorded vs. what was asked for.
     ///
     /// ```
-    /// use lamquant_abir::{Abir, Ecg, Eeg, ModalitySource};
+    /// use abir::{Abir, Ecg, Eeg, ModalitySource};
     ///
     /// let untyped = Abir::from_channels_i64(vec![vec![1i64, 2, 3]], 250.0)
     ///     .with_inferred_modality(&["Fp1", "Fp2", "Cz"], None);

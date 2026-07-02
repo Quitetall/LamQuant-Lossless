@@ -13,7 +13,7 @@
 //!   checks the returned `SignalBundle` invariants.
 
 use crate::error::LmlResult;
-use lamquant_abir::Abir;
+use abir::Abir;
 
 use super::bundle::SignalBundle;
 

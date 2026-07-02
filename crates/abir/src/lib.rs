@@ -2,7 +2,7 @@
 //! ABIR — the Atomic Biosignal Intermediate Representation (ADR 0069).
 //!
 //! Foundational, **no_std-first** crate that both LamQuant codecs depend DOWN on
-//! (graph: `lamquant-common` ← `lamquant-abir` ← {LML tiers, LMQ} ← py). S2a seeds
+//! (graph: `lamquant-common` ← `abir` ← {LML tiers, LMQ} ← py). S2a seeds
 //! it with the two self-contained codec-seam enums — [`Format`] (the wire-format
 //! discriminator) and [`Mode`] (the codec operation mode). The typed IR atoms,
 //! width-typed columns, modality types, and the shared `Codec` trait land in later

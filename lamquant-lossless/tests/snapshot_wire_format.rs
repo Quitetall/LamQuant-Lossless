@@ -64,7 +64,7 @@ fn lma_header_magic_version_count() {
 /// signal, 250 Hz, 256-sample windows, `noise_bits=0`, `LpcMode::default()`
 /// (`Anytime{deadline:None}`, never reads a clock), `"{}"` metadata (so
 /// `metadata_length` is the deterministic codec-stamp JSON's own byte
-/// count, not caller-supplied content). See `lamquant_abir::bcs1` for the
+/// count, not caller-supplied content). See `abir::bcs1` for the
 /// field-by-field layout.
 ///
 /// **NEW snapshot — no `.snap` committed yet.** Per the L9 STRICT-DISCIPLINE

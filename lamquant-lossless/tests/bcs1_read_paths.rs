@@ -28,7 +28,7 @@
 
 #![cfg(feature = "archive")]
 
-use lamquant_abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
+use abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
 use lamquant_core::container;
 use std::path::{Path, PathBuf};
 use std::process::Command;

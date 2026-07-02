@@ -2,14 +2,14 @@
 //!
 //! A clean, faithful clone of the legacy v1 `encode_into` writer
 //! (`lamquant-lml-legacy::container::encode_into`), sourced from
-//! `lamquant_abir::Abir` instead of `&[Vec<i64>]`. Through L8 this was
+//! `abir::Abir` instead of `&[Vec<i64>]`. Through L8 this was
 //! BYTE-IDENTICAL to the legacy writer by construction — proven by extending
 //! the L1 differential oracle (`tests/oracle_diff.rs`).
 //!
 //! **L9 (ADR 0069/0071) — the ONE deliberate byte change.** `write_abir` no
 //! longer reproduces the legacy 32-byte `LML1` header. It now emits the new
 //! `BCS1` 40-byte TYPED header (born-typed modality + codec descriptor + mode
-//! + tier — see `lamquant_abir::bcs1`), wrapping the exact same
+//! + tier — see `abir::bcs1`), wrapping the exact same
 //! byte-unchanged tail: JSON metadata → window index → per-window `LML1`
 //! payloads → `LMLFOOT1` footer. `lamquant_lml_legacy::container::write_into`
 //! (the retiring v1 writer, oracle-only) is UNCHANGED and still emits `LML1`
@@ -20,7 +20,7 @@
 //! instead of `write_abir(x) == write_into(x)`.
 //!
 //! **The lossless dispatch is zero-copy (L6.3).** The per-window signal is
-//! built via [`lamquant_abir::Abir::window_views`] (a `Cow`-backed O(1)
+//! built via [`abir::Abir::window_views`] (a `Cow`-backed O(1)
 //! sub-slice on the `I64` lane); the `&[i64]` borrows off those `Cow`s are
 //! handed straight to `lml::compress_with_mode_views` /
 //! `compress_with_mode_parallel_views` — no `.to_vec()`, no per-window
@@ -38,7 +38,7 @@
 //! **Self-containment (L6.2):** this module does NOT call
 //! `lamquant_lml_legacy::container::encode_into`. The small write-only helpers
 //! (`metadata_with_codec_mode`, `lossless_mode_for_lpc_mode`) are cloned here
-//! verbatim; the header itself is built from `lamquant_abir::Bcs1Header`
+//! verbatim; the header itself is built from `abir::Bcs1Header`
 //! (L9) rather than cloned legacy header-writing code. `write_abir` itself
 //! mirrors `encode_into`'s signature/body directly (it IS the encode-loop level, not the
 //! `ContainerStats`-computing `write_into` wrapper, so no `CountingWriter` is
@@ -92,7 +92,7 @@ use crate::deployment::LosslessMode;
 use crate::error::{LmlError, LmlResult};
 use crate::lml;
 use crate::lpc::LpcMode;
-use lamquant_abir::{Abir, Bcs1Header, CodecDescriptor, Modality, BCS1_HEADER_LEN, BCS1_MAGIC};
+use abir::{Abir, Bcs1Header, CodecDescriptor, Modality, BCS1_HEADER_LEN, BCS1_MAGIC};
 use std::path::Path;
 
 // Re-exported at `abir_container::{OffsetEntry, OffsetTable}` (this `pub use`
@@ -197,7 +197,7 @@ fn metadata_with_codec_mode(
 /// Write a complete LML v1 container from an [`Abir`] into a fresh `Vec<u8>`.
 ///
 /// Generic over the modality marker `M` (ADR 0069 S3a) — the encoder egress
-/// is modality-blind by design (see `lamquant_abir::modality`), so this
+/// is modality-blind by design (see `abir::modality`), so this
 /// accepts `&Abir<M>` for ANY `M: Modality`, `Untyped` (the default,
 /// pre-S3a behavior) included. Purely a forward-compat signature widening:
 /// no byte of the emitted wire format depends on `M`.
@@ -513,7 +513,7 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
 /// Only `CodecDescriptor::Lml53` (=0) is wired to an actual decoder today —
 /// the LMO/LMQ descriptors are parseable (the header round-trips cleanly)
 /// but deliberately NOT decodable yet (ADR 0069 L9 minimal scope; see
-/// `lamquant_abir::bcs1` module docs). An unrecognized or not-yet-wired
+/// `abir::bcs1` module docs). An unrecognized or not-yet-wired
 /// descriptor is a clean `LmlError::InvalidHeader`, never a silent
 /// mis-decode or a panic.
 pub fn bcs1_read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {

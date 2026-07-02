@@ -34,7 +34,7 @@ lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops" }
 # `Abir` directly (the zero-copy currency `abir_container::write_abir`
 # reads from) to measure the killed per-window materialize vs the legacy
 # `Vec<Vec<i64>>`-based `container::write_into` path.
-lamquant-abir = { version = "0.1.0", path = "../crates/lamquant-abir" }
+abir = { version = "0.1.0", path = "../crates/abir" }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.
@@ -125,8 +125,8 @@ archive = [
     "dep:lamquant-lml-desktop",
     "lamquant-lml-desktop/fast",
     # ADR 0069 L6.2: the ABIR container writer (`abir_container::write_abir`)
-    # is sourced from `lamquant_abir::Abir` instead of `Vec<Vec<i64>>`.
-    "dep:lamquant-abir",
+    # is sourced from `abir::Abir` instead of `Vec<Vec<i64>>`.
+    "dep:abir",
     "dep:lamquant-lml-legacy",
     # ADR 0069 L8 (cutover): the live path only needs the FROZEN v1 reader —
     # `container::{read_file,read_bytes,...}` + the shared `ContainerHeader`/
@@ -256,7 +256,7 @@ lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-fe
 # currency `abir_container::write_abir` reads windows from. Optional; enabled
 # by `archive` (the ABIR writer is host-only today, mirroring the legacy
 # writer it clones).
-lamquant-abir = { version = "0.1.0", path = "../crates/lamquant-abir", default-features = false, optional = true }
+abir = { version = "0.1.0", path = "../crates/abir", default-features = false, optional = true }
 # ADR 0052 Tier 3 / ADR 0054: the Optimum (LMO) codec. The facade IS the Desktop
 # profile, so it links the LMO DECODER always (no_std-capable, cheap) and turns
 # on the host LMO ENCODER under the facade's `archive` feature (which already

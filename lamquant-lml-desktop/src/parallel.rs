@@ -59,8 +59,8 @@ pub fn compress_with_mode_parallel(
 }
 
 /// Parallel zero-copy LML encode: `windows` are already-sliced `&[i64]`
-/// views (e.g. `lamquant_abir::Abir::window_views` — this crate doesn't
-/// depend on `lamquant-abir` directly, so that's plain text, not a doc
+/// views (e.g. `abir::Abir::window_views` — this crate doesn't
+/// depend on `abir` directly, so that's plain text, not a doc
 /// link) — no per-window `Vec<Vec<i64>>` materialization (ADR 0069 L6.3). Mirrors
 /// [`compress_with_mode_parallel`]'s rayon-per-channel split over the SAME
 /// primitives (`validate_and_levels`, `encode_one_channel`,

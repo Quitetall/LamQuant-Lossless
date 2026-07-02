@@ -88,7 +88,7 @@ pub fn decode(bytes: &[u8]) -> Result<codec::Signal, codec::CodecError> {
 pub mod async_io;
 // ADR 0069 L6.2: the clean, self-contained ABIR container writer — a
 // byte-identical clone of the legacy v1 `encode_into`, sourced from
-// `lamquant_abir::Abir`. See module docs for what's cloned vs reused from
+// `abir::Abir`. See module docs for what's cloned vs reused from
 // `lamquant-lml-legacy`.
 #[cfg(feature = "archive")]
 pub mod abir_container;

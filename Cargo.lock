@@ -3,6 +3,10 @@
 version = 3
 
 [[package]]
+name = "abir"
+version = "0.1.0"
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3207,10 +3211,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
-name = "lamquant-abir"
-version = "0.1.0"
-
-[[package]]
 name = "lamquant-common"
 version = "0.1.3"
 dependencies = [
@@ -3241,6 +3241,7 @@ dependencies = [
 name = "lamquant-lml"
 version = "0.9.3"
 dependencies = [
+ "abir",
  "aes-gcm",
  "argon2",
  "arrow-array",
@@ -3267,7 +3268,6 @@ dependencies = [
  "indicatif",
  "insta",
  "keyring",
- "lamquant-abir",
  "lamquant-common",
  "lamquant-config",
  "lamquant-lml-desktop",
@@ -3335,8 +3335,8 @@ dependencies = [
 name = "lamquant-lml-mcu"
 version = "0.9.3"
 dependencies = [
+ "abir",
  "constriction",
- "lamquant-abir",
  "lamquant-common",
  "libm",
  "probability",
@@ -3365,7 +3365,7 @@ dependencies = [
 name = "lamquant-py"
 version = "0.9.3"
 dependencies = [
- "lamquant-abir",
+ "abir",
  "lamquant-lml",
  "numpy",
  "pyo3",

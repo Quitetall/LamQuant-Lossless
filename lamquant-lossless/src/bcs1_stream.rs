@@ -12,8 +12,8 @@
 //!
 //! [`Bcs1StreamReader`] is that counterpart: a small, deliberate CLONE of
 //! `LmlReader`'s window-streaming machinery with the ONE byte that changed
-//! threaded through — header length 32 -> [`lamquant_abir::BCS1_HEADER_LEN`]
-//! (40), header fields read off [`lamquant_abir::Bcs1Header::parse`] instead
+//! threaded through — header length 32 -> [`abir::BCS1_HEADER_LEN`]
+//! (40), header fields read off [`abir::Bcs1Header::parse`] instead
 //! of hand-rolled byte offsets. Everything AFTER the header — metadata JSON,
 //! window-length index, per-window `LML1` packets, `LMLFOOT1` footer — is
 //! byte-identical to the legacy wire (see `abir_container` module docs), so
@@ -34,7 +34,7 @@ use crate::error::{LmlError, LmlResult};
 use crate::lml;
 use crate::offset_table::{OffsetTable, ENTRY_SIZE, FOOTER_MAGIC, FOOTER_SIZE};
 use crate::stream::{ContainerHeader, LmlReader};
-use lamquant_abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
+use abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;

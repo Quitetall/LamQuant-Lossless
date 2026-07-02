@@ -31,7 +31,7 @@ use crate::error::{LmlError, LmlResult};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lamquant_abir::{Abir, Channel, Column};
+use abir::{Abir, Channel, Column};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn lower_to_abir_infers_eeg_from_electrode_labels() {
-        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+        use abir::{Ecg, Eeg, Modality, ModalitySource};
 
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("named.cnt");

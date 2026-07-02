@@ -325,7 +325,7 @@ mod tests {
     fn codec_descriptor_matches_lmo_transform_id_values() {
         // Numerically identical to lamquant-lml-optimum/src/lmo.rs's
         // TRANSFORM_LML_53=0 / TRANSFORM_LMO_97=1 / TRANSFORM_OPTIMUM_LOSSLESS=2
-        // (checked by inspection there, since lamquant-abir must not depend
+        // (checked by inspection there, since abir must not depend
         // UP on lamquant-lml-optimum — see the crate dependency graph note
         // in lib.rs).
         assert_eq!(CodecDescriptor::Lml53.to_u8(), 0);

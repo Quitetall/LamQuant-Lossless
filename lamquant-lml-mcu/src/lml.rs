@@ -788,7 +788,7 @@ pub fn compress_with_mode(
 }
 
 /// Zero-copy compress: `windows` are already-sliced `&[i64]` views (e.g.
-/// [`lamquant_abir::Abir::window_views`]) — no per-window `Vec<Vec<i64>>`
+/// [`abir::Abir::window_views`]) — no per-window `Vec<Vec<i64>>`
 /// materialization (ADR 0069 L6.3, the negative-cost payoff over
 /// [`compress_with_mode`]).
 ///

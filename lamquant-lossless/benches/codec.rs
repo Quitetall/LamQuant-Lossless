@@ -25,7 +25,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use std::time::Duration;
 
-use lamquant_abir::Abir;
+use abir::Abir;
 use lamquant_core::abir_container::write_abir_to_vec;
 use lamquant_core::backend::{compress_with_backend, ComputeBackend};
 use lamquant_core::container;

@@ -1,4 +1,4 @@
-use lamquant_abir::{
+use abir::{
     name_for_tag, Abir, Accel, Bcs1Header, Channel, Column, Ecg, Ecog, Eeg, Emg, Eog, Ieeg,
     Modality, ModalitySource, Other, Resp, Seeg, Untyped, BCS1_MAGIC,
 };
@@ -446,7 +446,7 @@ impl PyAbir {
 #[pymethods]
 impl PyAbir {
     /// The born-typed modality name ("eeg"/"ecg"/…/"untyped"), from provenance.
-    /// Uses `lamquant_abir::name_for_tag` (single source of truth) — an unknown
+    /// Uses `abir::name_for_tag` (single source of truth) — an unknown
     /// tag reports "unknown" rather than a stale hard-coded name.
     fn modality(&self) -> &'static str {
         name_for_tag(self.inner.provenance().tag).unwrap_or("unknown")

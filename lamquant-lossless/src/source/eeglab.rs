@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn lower_to_abir_infers_eeg_from_channel_labels() {
-        use lamquant_abir::{Ecg, Eeg, Modality, ModalitySource};
+        use abir::{Ecg, Eeg, Modality, ModalitySource};
 
         let tmp = tempfile::tempdir().unwrap();
         let set = tmp.path().join("e.set");

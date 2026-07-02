@@ -91,7 +91,7 @@
 
 use std::sync::Arc;
 
-use lamquant_abir::{Abir, Channel, Column};
+use abir::{Abir, Channel, Column};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LmlError, LmlResult};
@@ -1205,7 +1205,7 @@ mod tests {
 
     #[test]
     fn channel_modality_rule_selects_format_hint() {
-        use lamquant_abir::{Ecg, Modality};
+        use abir::{Ecg, Modality};
 
         let mut d = descriptor_for(DescriptorDtype::I16, DescriptorOrientation::Multiplexed);
         d.channel_count = ChannelCount::Fixed(3);

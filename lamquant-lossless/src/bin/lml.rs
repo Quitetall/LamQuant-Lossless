@@ -5295,10 +5295,10 @@ fn cmd_info(input: &Path) -> R {
     // `hdr[0..3] != b"LML"` guard below would reject it. Reads the
     // remaining bytes to complete the 40-byte typed header (32 already
     // buffered above).
-    if &hdr[0..4] == lamquant_abir::BCS1_MAGIC {
-        let mut rest = [0u8; lamquant_abir::BCS1_HEADER_LEN - 32];
+    if &hdr[0..4] == abir::BCS1_MAGIC {
+        let mut rest = [0u8; abir::BCS1_HEADER_LEN - 32];
         f.read_exact(&mut rest)?;
-        let mut full = [0u8; lamquant_abir::BCS1_HEADER_LEN];
+        let mut full = [0u8; abir::BCS1_HEADER_LEN];
         full[..32].copy_from_slice(&hdr);
         full[32..].copy_from_slice(&rest);
         return cmd_info_bcs1(input, &mut f, file_size, &full);
@@ -5474,7 +5474,7 @@ fn print_footer_probe(
 
 /// `lml info` for a `BCS1` file (ADR 0069/0071 L9) — the BCS1 counterpart
 /// of the legacy tail of [`cmd_info`] above, sourced from
-/// [`lamquant_abir::Bcs1Header`]'s parsed fields instead of hand-rolled
+/// [`abir::Bcs1Header`]'s parsed fields instead of hand-rolled
 /// 32-byte offsets. `hdr_bytes` is the already-buffered 40-byte header
 /// (`cmd_info` reads it before dispatching here); `f` is positioned right
 /// after it, ready for the metadata read below.
@@ -5482,10 +5482,10 @@ fn cmd_info_bcs1(
     input: &Path,
     f: &mut std::fs::File,
     file_size: u64,
-    hdr_bytes: &[u8; lamquant_abir::BCS1_HEADER_LEN],
+    hdr_bytes: &[u8; abir::BCS1_HEADER_LEN],
 ) -> R {
     use std::io::Read as _;
-    let header = lamquant_abir::Bcs1Header::parse(hdr_bytes)
+    let header = abir::Bcs1Header::parse(hdr_bytes)
         .map_err(|e| format!("invalid BCS1 header: {e}"))?;
 
     let raw = header.n_channels as f64 * header.total_samples as f64 * 2.0;
@@ -5540,7 +5540,7 @@ fn cmd_info_bcs1(
 
     let meta_len = header.metadata_length;
     if meta_len > 0
-        && (lamquant_abir::BCS1_HEADER_LEN as u64).saturating_add(meta_len as u64) <= file_size
+        && (abir::BCS1_HEADER_LEN as u64).saturating_add(meta_len as u64) <= file_size
     {
         let read_len = (meta_len as usize).min(4096);
         let mut meta_buf = vec![0u8; read_len];
@@ -6479,13 +6479,13 @@ fn read_lml_header_info(
     // only caller) previously hard-parsed a 32-byte LML1 header and
     // rejected everything else, including `BCS1` files (write_abir's
     // default output today). Dispatch on magic first.
-    if magic == *lamquant_abir::BCS1_MAGIC {
-        let mut rest = [0u8; lamquant_abir::BCS1_HEADER_LEN - 4];
+    if magic == *abir::BCS1_MAGIC {
+        let mut rest = [0u8; abir::BCS1_HEADER_LEN - 4];
         f.read_exact(&mut rest)?;
-        let mut hdr = [0u8; lamquant_abir::BCS1_HEADER_LEN];
+        let mut hdr = [0u8; abir::BCS1_HEADER_LEN];
         hdr[0..4].copy_from_slice(&magic);
         hdr[4..].copy_from_slice(&rest);
-        let header = lamquant_abir::Bcs1Header::parse(&hdr)
+        let header = abir::Bcs1Header::parse(&hdr)
             .map_err(|e| format!("invalid BCS1 header: {e}"))?;
         let sr = header.sample_rate_mhz as f64 / 1000.0;
         let total_samples = header.total_samples as usize;
@@ -8896,7 +8896,7 @@ fn cmd_manpage() -> R {
 /// the magic is now checked FIRST, before any field offset is read.
 ///   - `b"BCS1"` (the 40-byte typed header `write_abir` emits today) reads
 ///     `sample_rate_mhz` from its OWN offset, 22..26 (see
-///     `lamquant_abir::bcs1` layout docs) — NOT the legacy 16..20 offset,
+///     `abir::bcs1` layout docs) — NOT the legacy 16..20 offset,
 ///     which in the BCS1 layout holds `total_samples` instead.
 ///   - `b"LML*"` (the legacy 32-byte header) keeps the original probe +
 ///     offset: `hdr[4..6]` must equal `1` (the byte-exact 32-byte-header
@@ -8913,7 +8913,7 @@ fn cmd_manpage() -> R {
 fn read_sample_rate_from_header(
     lml_path: &Path,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
+    use abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
     use std::io::Read as _;
     let mut f = std::fs::File::open(lml_path)?;
     let mut magic = [0u8; 4];

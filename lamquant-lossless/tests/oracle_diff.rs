@@ -46,7 +46,7 @@
 //! `LAMQUANT_REGEN_ORACLE=1 -- --nocapture`).
 #![cfg(feature = "oracle")]
 
-use lamquant_abir::Abir;
+use abir::Abir;
 use lamquant_core::abir_container::{bcs1_read_bytes, write_abir_to_vec};
 use lamquant_core::error::LmlError;
 use lamquant_core::lml;
@@ -270,7 +270,7 @@ fn arm_a_lossless_golden() {
             .expect("write_abir_to_vec");
         assert_eq!(
             &abir_bytes[0..4],
-            lamquant_abir::BCS1_MAGIC,
+            abir::BCS1_MAGIC,
             "write_abir must emit the BCS1 magic: {name}"
         );
         // same-process determinism (BCS1 writer)
@@ -319,7 +319,7 @@ fn arm_b_lpc_modes_lossless() {
                 .expect("write_abir_to_vec");
             assert_eq!(
                 &abir_bytes[0..4],
-                lamquant_abir::BCS1_MAGIC,
+                abir::BCS1_MAGIC,
                 "write_abir must emit the BCS1 magic: {key}"
             );
             check_bcs1_oracle_sha(&key, &sha_bytes(&abir_bytes));
@@ -371,7 +371,7 @@ fn arm_c_bounded_mae() {
             .expect("write_abir_to_vec");
             assert_eq!(
                 &abir_bytes[0..4],
-                lamquant_abir::BCS1_MAGIC,
+                abir::BCS1_MAGIC,
                 "write_abir must emit the BCS1 magic: {key}"
             );
             check_bcs1_oracle_sha(&key, &sha_bytes(&abir_bytes));
@@ -445,7 +445,7 @@ fn arm_d_target_bps() {
         .expect("write_abir_to_vec");
         assert_eq!(
             &abir_bytes[0..4],
-            lamquant_abir::BCS1_MAGIC,
+            abir::BCS1_MAGIC,
             "write_abir must emit the BCS1 magic: {key}"
         );
         check_bcs1_oracle_sha(&key, &sha_bytes(&abir_bytes));
