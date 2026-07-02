@@ -148,14 +148,16 @@ fn container_read_bytes(data: &[u8]) -> PyResult<(Vec<Vec<i64>>, String)> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
-/// Parse the LML container header from in-memory bytes — metadata
+/// Parse the LML/BCS1 container header from in-memory bytes — metadata
 /// only, no window decode.
 ///
 /// Returns `(metadata_json, n_ch, n_windows, total_samples,
-/// window_size)`. Cheap: ~32 byte header read + UTF-8 metadata
-/// parse. Use this when you need only the calibration / sample-rate
-/// dict, not the signal — saves the ~5 MB / ~50 ms cost of
-/// decoding a window just for its metadata side-channel.
+/// window_size)`. Cheap: a fixed-size header read (legacy 32/20/18-byte
+/// LML1 or the 40-byte BCS1 header — `lml::container::parse_header`
+/// dispatches on magic, task #34) + UTF-8 metadata parse. Use this when
+/// you need only the calibration / sample-rate dict, not the signal —
+/// saves the ~5 MB / ~50 ms cost of decoding a window just for its
+/// metadata side-channel.
 #[pyfunction]
 fn container_metadata(data: &[u8]) -> PyResult<(String, usize, usize, usize, usize)> {
     let header = lml::container::parse_header(data)

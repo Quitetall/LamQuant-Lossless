@@ -343,8 +343,11 @@ def decode_lma_signal(lma_path: str, stem: str,
 
     # Header-only metadata parse (V4 Pro 2026-05-18 review #4): the
     # previous code decoded window 0 (~5 MB int64 + DWT) just to read
-    # the JSON header. `container_metadata` parses the 32-byte header
-    # + UTF-8 metadata and returns immediately.
+    # the JSON header. `container_metadata` parses the container header
+    # (legacy 32/20/18-byte LML1 *or* the 40-byte BCS1 header — the Rust
+    # side dispatches on magic, task #34) + UTF-8 metadata and returns
+    # immediately, so a BCS1-re-archived corpus loads instead of being
+    # silently dropped.
     try:
         meta_json, _n_ch, _n_win, _total, _ws = lc.container_metadata(lml_bytes)
     except Exception as e:
