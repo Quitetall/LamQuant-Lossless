@@ -103,6 +103,28 @@ def main() -> None:
         orig_sr=200.0,
         pipeline="channel-select(identity) -> resample_poly(5,4) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
     )
+    # 500 Hz: the simplest downsample ratio (up=1, down=2).
+    dump(
+        "eeg_500hz_resample_hp_q31",
+        t_in=512,
+        orig_sr=500.0,
+        pipeline="channel-select(identity) -> resample_poly(1,2) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+    )
+    # 512 Hz: the poly-branch EDGE case — up=125, down=256 (down == 256, still ≤256,
+    # so poly not FFT); a 5121-tap firwin, the longest common filter.
+    dump(
+        "eeg_512hz_resample_hp_q31",
+        t_in=512,
+        orig_sr=512.0,
+        pipeline="channel-select(identity) -> resample_poly(125,256) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+    )
+    # 1000 Hz: up=1, down=4.
+    dump(
+        "eeg_1000hz_resample_hp_q31",
+        t_in=1024,
+        orig_sr=1000.0,
+        pipeline="channel-select(identity) -> resample_poly(1,4) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+    )
 
 
 if __name__ == "__main__":

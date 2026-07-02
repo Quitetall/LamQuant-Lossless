@@ -105,3 +105,23 @@ fn parity_200hz_resample_hp_q31() {
         .expect("non-flat input normalizes");
     assert_parity(out.into_iter().flatten().collect(), "eeg_200hz_resample_hp_q31", 4);
 }
+
+/// The remaining common poly-branch rates (500/512/1000 Hz). 512 is the
+/// poly-branch EDGE (up=125, down=256 — the longest, 5121-tap firwin). All run
+/// in f64 and are bit-exact by construction; the small tolerance is
+/// cross-libm `sin`-ULP headroom (same as 200 Hz). This is the technical
+/// readiness for #37's flip-to-default: every common EEG rate the corpus uses
+/// (200/250/256... wait 256 → up=125,down=128 also poly) resamples bit-exactly.
+#[test]
+fn parity_common_poly_rates() {
+    for (name, orig_sr, t_in) in [
+        ("eeg_500hz_resample_hp_q31", 500.0f64, 512usize),
+        ("eeg_512hz_resample_hp_q31", 512.0, 512),
+        ("eeg_1000hz_resample_hp_q31", 1000.0, 1024),
+    ] {
+        let out = lamquant_core::normalize::normalize_eeg(&synth_input(t_in), orig_sr)
+            .expect("poly branch, no FFT")
+            .expect("non-flat input normalizes");
+        assert_parity(out.into_iter().flatten().collect(), name, 4);
+    }
+}

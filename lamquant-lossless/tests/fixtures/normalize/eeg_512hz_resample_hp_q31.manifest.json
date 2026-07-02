@@ -1,0 +1,13 @@
+{
+  "adr": "0069-S7b",
+  "n_ch": 21,
+  "t_in": 512,
+  "t_out": 250,
+  "orig_sr": 512.0,
+  "target_sr": 250.0,
+  "pipeline": "channel-select(identity) -> resample_poly(125,256) -> sosfiltfilt(butter(2,0.5,fs=250,high)) -> q31",
+  "input_formula": "x[c][t] = ((c*37 + t*5) %% 4001) - 2000  (float, \u00b5V)",
+  "layout": "raw int32 LE, row-major [n_ch, t_out]",
+  "scipy_version": "1.18.0",
+  "numpy_version": "2.5.0"
+}
