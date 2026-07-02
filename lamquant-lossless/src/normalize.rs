@@ -317,6 +317,34 @@ pub fn normalize_eeg(data: &[Vec<f64>], orig_sr: f64) -> Result<Option<Vec<Vec<i
     Ok(q31_normalize(&filtered))
 }
 
+/// The Q31 → float32 round-trip that `decode_lma_signal` actually RETURNS
+/// (`lma_dataset.py:438`): `(q31.astype(f32) / 2147483647.0) * 1000.0`, computed
+/// entirely in f32 (numpy NEP-50: the python scalars are weak, so a float32
+/// array stays float32). This is NOT a no-op despite the int32 detour — it
+/// reproduces the Q31 fixed-point quantization the DEPLOYED codec applies, so the
+/// model trains on the same representation it sees on-device (MiMo #1: the detour
+/// is deployment-quantization simulation, not waste). `q as f32` matches numpy's
+/// `astype(float32)` round-to-nearest-even, so this is bit-exact to the Python.
+pub fn q31_to_signal_f32(q31: &[Vec<i32>]) -> Vec<Vec<f32>> {
+    q31.iter()
+        .map(|row| {
+            row.iter()
+                .map(|&q| (q as f32 / 2_147_483_647.0_f32) * 1000.0_f32)
+                .collect()
+        })
+        .collect()
+}
+
+/// The full `decode_lma_signal` tail as the model consumes it: resample→250 → HP
+/// → Q31 → the float32 round-trip. `Ok(None)` on an all-flat signal. This is the
+/// exact array `decode_lma_signal` returns (the int32 is an internal boundary).
+pub fn normalize_eeg_signal_f32(
+    data: &[Vec<f64>],
+    orig_sr: f64,
+) -> Result<Option<Vec<Vec<f32>>>, NormalizeError> {
+    Ok(normalize_eeg(data, orig_sr)?.map(|q31| q31_to_signal_f32(&q31)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +377,19 @@ mod tests {
                 y[i],
                 (y[i] - e).abs()
             );
+        }
+    }
+
+    /// `q31_to_signal_f32` is bit-exact to numpy's
+    /// `(q31.astype(f32) / 2147483647.0) * 1000.0` (NEP-50 f32). Reference
+    /// values dumped from numpy 2.5.0.
+    #[test]
+    fn q31_to_signal_f32_matches_numpy() {
+        let q31 = vec![vec![123456789i32, -2000000000, 0, 715827882]];
+        let out = q31_to_signal_f32(&q31);
+        let expect: [f32; 4] = [57.48904800415039, -931.3225708007812, 0.0, 333.3333435058594];
+        for (i, &e) in expect.iter().enumerate() {
+            assert_eq!(out[0][i].to_bits(), e.to_bits(), "sample {i}: {} != {e}", out[0][i]);
         }
     }
 
