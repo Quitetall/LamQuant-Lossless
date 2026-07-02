@@ -7572,25 +7572,34 @@ fn cmd_recover(input: &Path, output: &Path) -> R {
     let hdr =
         container::parse_header(&data).map_err(|e| format!("invalid container header: {}", e))?;
 
-    // Parse sample_rate from the metadata JSON. container::write_file
-    // takes sample_rate as a separate argument and the header stores
-    // it via the window-length-index, so we recover it via the
-    // metadata blob (encoder writes it there). Defaults to 250 Hz
-    // ONLY if the metadata genuinely lacks the field, with a stderr
-    // warning so the operator knows the rate was a guess.
-    let sample_rate: f64 = match serde_json::from_str::<serde_json::Value>(&hdr.metadata)
-        .ok()
-        .and_then(|v| v.get("sample_rate").and_then(|sr| sr.as_f64()))
-    {
-        Some(sr) if sr.is_finite() && sr > 0.0 => sr,
-        _ => {
+    // Recover sample_rate (#35): prefer the AUTHORITATIVE BCS1 header field
+    // (`sample_rate_mhz`, milli-Hz) when the input is a BCS1 container — legacy
+    // LML1 has no header rate, so for it (and a BCS1 file whose header rate is
+    // missing) fall back to the metadata JSON, then 250 Hz with a warning.
+    // `container::parse_header` already dispatched BCS1-vs-legacy above (#34);
+    // this only adds the header-rate preference for BCS1 inputs.
+    let header_sr: Option<f64> = if data.len() >= 4 && &data[0..4] == abir::BCS1_MAGIC {
+        abir::Bcs1Header::parse(&data)
+            .ok()
+            .map(|h| h.sample_rate_mhz as f64 / 1000.0)
+            .filter(|r| r.is_finite() && *r > 0.0)
+    } else {
+        None
+    };
+    let sample_rate: f64 = header_sr
+        .or_else(|| {
+            serde_json::from_str::<serde_json::Value>(&hdr.metadata)
+                .ok()
+                .and_then(|v| v.get("sample_rate").and_then(|sr| sr.as_f64()))
+                .filter(|sr| sr.is_finite() && *sr > 0.0)
+        })
+        .unwrap_or_else(|| {
             eprintln!(
-                "  WARNING: cmd_recover: metadata lacks finite positive sample_rate; \
-                 defaulting to 250 Hz (output will be tagged 250 Hz regardless of source)"
+                "  WARNING: cmd_recover: no finite positive sample_rate in the BCS1 header \
+                 or metadata; defaulting to 250 Hz (output tagged 250 Hz regardless of source)"
             );
             250.0
-        }
-    };
+        });
 
     // Real per-window stride scales with sample_rate. The encoder
     // packs `actual_window = window_size * sample_rate / 250.0`
