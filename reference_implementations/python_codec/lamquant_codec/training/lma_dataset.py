@@ -421,7 +421,13 @@ def decode_lma_signal(lma_path: str, stem: str,
                 np.ascontiguousarray(data, dtype=np.float32), original_sr
             )
         except NotImplementedError:
-            pass  # FFT-branch rate → fall through to the scipy path below
+            # FFT-branch rate (not ported to Rust) → fall through to scipy below.
+            LOG.debug(
+                "LAMQUANT_RUST_NORMALIZE: %.1f Hz needs the FFT resample branch; "
+                "using the scipy path for %s",
+                original_sr,
+                stem,
+            )
 
     if abs(original_sr - TARGET_SR) > 0.5:
         # ADR 0069 S7b: resample in float64, not float32. Previously `data` was
