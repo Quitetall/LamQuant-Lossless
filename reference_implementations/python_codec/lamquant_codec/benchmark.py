@@ -134,14 +134,20 @@ class Benchmark:
         freqs = np.fft.rfftfreq(T, d=1.0 / sample_rate)
         results = {}
 
+        # Forward FFT is band-independent — compute each channel's rFFT
+        # once and reuse the cached spectra for every band (the band only
+        # selects a frequency `mask`, not the transform).
+        orig_ffts = [np.fft.rfft(original[c].astype(np.float64)) for c in range(C)]
+        recon_ffts = [np.fft.rfft(packet.signal[c].astype(np.float64)) for c in range(C)]
+
         for band_name, (lo, hi) in _BANDS.items():
             mask = (freqs >= lo) & (freqs < hi)
             band_prd_sum = 0.0
             band_norm_sum = 0.0
 
             for c in range(C):
-                orig_fft = np.fft.rfft(original[c].astype(np.float64))
-                recon_fft = np.fft.rfft(packet.signal[c].astype(np.float64))
+                orig_fft = orig_ffts[c]
+                recon_fft = recon_ffts[c]
 
                 orig_band = np.zeros_like(orig_fft)
                 recon_band = np.zeros_like(recon_fft)
