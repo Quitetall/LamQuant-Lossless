@@ -25,7 +25,8 @@ const T: usize = 128;
 /// Documented tolerance: max |Δ| between the Rust and scipy int32 Q31 outputs.
 /// Both run the identical f64 filtfilt algorithm, so this is FP-order slack at
 /// the truncation boundary, not an algorithmic gap. Tighten if it ever drifts.
-const TOL: i32 = 2;
+/// i64 so the delta of two near-±i32::MAX Q31 values can't overflow (MiMo review).
+const TOL: i64 = 2;
 
 /// MUST match `make_input` in `tools/dump_normalize_golden.py`.
 fn synth_input() -> Vec<Vec<f64>> {
@@ -69,11 +70,11 @@ fn rust_normalization_matches_python_golden_within_tolerance() {
     let gold = golden();
     assert_eq!(flat.len(), gold.len());
 
-    let mut max_delta = 0i32;
+    let mut max_delta = 0i64;
     let mut n_mismatch = 0usize;
     let mut worst_at = 0usize;
     for (i, (&r, &g)) in flat.iter().zip(gold.iter()).enumerate() {
-        let d = (r - g).abs();
+        let d = (r as i64 - g as i64).abs();
         if d > 0 {
             n_mismatch += 1;
         }

@@ -25,8 +25,11 @@ pub const HIGHPASS_HZ: f64 = 0.5;
 
 /// `scipy.signal.butter(2, 0.5, btype='high', fs=250.0, output='sos')` — a
 /// single second-order section `[b0, b1, b2, a0, a1, a2]`, dumped verbatim from
-/// scipy 1.18.0. Fixed operating point (250 Hz / 0.5 Hz HP); regenerate (and
-/// re-dump the golden) if either changes. `a0 == 1.0`.
+/// scipy 1.18.0. Fixed operating point (250 Hz / 0.5 Hz HP = [`HIGHPASS_HZ`] /
+/// [`TARGET_SR`]); regenerate (and re-dump the golden) if either changes.
+/// `a0 == 1.0`. These are NOT derived from the symbolic consts at runtime (no
+/// Rust `butter` impl); the `sosfiltfilt_matches_scipy_oracle_on_ramp20` test
+/// is the guard — wrong coeffs make its output diverge from the scipy oracle.
 const HP_B: [f64; 3] = [0.991153595101663, -1.982307190203326, 0.991153595101663];
 const HP_A: [f64; 3] = [1.0, -1.9822289297925284, 0.9823854506141251];
 /// `scipy.signal.sosfilt_zi(sos)` for the section above — the steady-state
@@ -38,7 +41,10 @@ const HP_PADLEN: usize = 9;
 
 /// Odd extension of `x` by `n` samples each end — `scipy.signal._arraytools.odd_ext`:
 /// left = `2*x[0] - x[n..1]`, right = `2*x[-1] - x[-2..-(n+1)]`. Requires `x.len() > n`.
+/// Private; the sole caller (`sosfiltfilt_hp`) enforces the precondition — the
+/// `debug_assert` makes the contract explicit if that ever changes.
 fn odd_ext(x: &[f64], n: usize) -> Vec<f64> {
+    debug_assert!(x.len() > n, "odd_ext requires x.len() ({}) > n ({n})", x.len());
     let len = x.len();
     let mut out = Vec::with_capacity(len + 2 * n);
     // left: 2*x[0] - x[n], 2*x[0] - x[n-1], …, 2*x[0] - x[1]
