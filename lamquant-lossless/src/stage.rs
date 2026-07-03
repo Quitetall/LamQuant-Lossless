@@ -30,6 +30,8 @@ use crate::lml::{
     compute_n_levels, decompress, forward_subbands, lpc_max_order, scope_lpc_mode, BIAS_CTX,
 };
 use crate::lpc::{self, LpcMode};
+use crate::pass::{LmlPipeline, Lossy, Pass, Reversible};
+use crate::pipeline::Stage;
 use crate::quant;
 
 // ─── Objects (the IR's types) ────────────────────────────────────────────────
@@ -278,7 +280,16 @@ pub fn predict<M: Modality>(q: Quantized<M>, mode: LpcMode) -> Residuals<M> {
 /// **Entropy** morphism `Residuals → Coded` (Reversible). Serializes
 /// `[order:u8][coeffs_i32_LE…]` into `meta` and delegates the residual to
 /// `golomb::encode_dense` into `payload` — exactly `encode_one_channel`'s body.
-pub fn entropy<M: Modality>(r: Residuals<M>, n_ch: usize, t: usize) -> LmlResult<Coded<M>> {
+/// `n_ch`/`t` (needed by the header) are DERIVED: `n_ch` is the channel count and
+/// `t` is a channel's total residual length (lift + LPC are length-preserving, so
+/// the per-channel residuals sum to the original window length) — so `entropy`
+/// depends only on `Residuals` and can be a single-input `Stage`.
+pub fn entropy<M: Modality>(r: Residuals<M>) -> LmlResult<Coded<M>> {
+    let n_ch = r.per_channel.len();
+    let t = r
+        .per_channel
+        .first()
+        .map_or(0, |subs| subs.iter().map(|sb| sb.residual.len()).sum());
     let mut per_channel = Vec::with_capacity(r.per_channel.len());
     for subbands in &r.per_channel {
         let mut meta = Vec::new();
@@ -327,12 +338,10 @@ pub fn assemble<M: Modality>(c: Coded<M>, noise_bits: u8) -> Packet<M> {
 /// Proven byte-identical to `lower_encode` / `compress_with_mode_views` — that
 /// equality (arm H) is what licenses the scheduler to run the fused form.
 pub fn encode_lossless<M: Modality>(raw: &Raw<M>, mode: LpcMode) -> LmlResult<Packet<M>> {
-    let n_ch = raw.abir.n_channels();
-    let t = raw.abir.n_samples();
     let transformed = transform(raw);
     let quantized = quantize_identity(transformed);
     let residuals = predict(quantized, mode);
-    let coded = entropy(residuals, n_ch, t)?;
+    let coded = entropy(residuals)?;
     Ok(assemble(coded, /* noise_bits = */ 0))
 }
 
@@ -418,6 +427,165 @@ pub fn dequantize_deadzone<M: Modality>(q: Quantized<M>, steps: &[i64]) -> Trans
     Transformed { per_channel, n_levels: q.n_levels, _m: PhantomData }
 }
 
+// ─── The morphisms as `Pass` impls — the compile-time lossless↔lossy firewall ──
+//
+// Wrapping each morphism as a `Stage` + `Pass` lets the lossless codec compose
+// through `LmlPipeline`, whose `start`/`then` are bounded `Rev = Reversible`. A
+// `Lossy` pass (e.g. `DeadzoneQuantizePass`) therefore CANNOT be composed into the
+// lossless pipeline — a COMPILE error, not a convention. This is "lossless can
+// never hide a lossy step" expressed in the type system.
+
+/// `Transform` (`Raw → Transformed`), Reversible.
+#[derive(Debug)]
+pub struct LiftPass<M>(PhantomData<M>);
+impl<M> Default for LiftPass<M> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+impl<M: Modality> Stage for LiftPass<M> {
+    type Input = Raw<M>;
+    type Output = Transformed<M>;
+    fn process(&mut self, raw: Raw<M>) -> LmlResult<Transformed<M>> {
+        Ok(transform(&raw))
+    }
+}
+impl<M: Modality> Pass for LiftPass<M> {
+    type Rev = Reversible;
+    const NAME: &'static str = "lift";
+}
+
+/// `Quantize = Identity` (`Transformed → Quantized`), Reversible — the lossless quantizer.
+#[derive(Debug)]
+pub struct IdentityQuantizePass<M>(PhantomData<M>);
+impl<M> Default for IdentityQuantizePass<M> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+impl<M: Modality> Stage for IdentityQuantizePass<M> {
+    type Input = Transformed<M>;
+    type Output = Quantized<M>;
+    fn process(&mut self, t: Transformed<M>) -> LmlResult<Quantized<M>> {
+        Ok(quantize_identity(t))
+    }
+}
+impl<M: Modality> Pass for IdentityQuantizePass<M> {
+    type Rev = Reversible;
+    const NAME: &'static str = "quantize_identity";
+}
+
+/// `Quantize = deadzone` (`Transformed → Quantized`), **Lossy** — refused by `LmlPipeline`.
+#[derive(Debug)]
+pub struct DeadzoneQuantizePass<M> {
+    steps: Vec<i64>,
+    _m: PhantomData<M>,
+}
+impl<M> DeadzoneQuantizePass<M> {
+    pub fn new(steps: Vec<i64>) -> Self {
+        Self { steps, _m: PhantomData }
+    }
+}
+impl<M: Modality> Stage for DeadzoneQuantizePass<M> {
+    type Input = Transformed<M>;
+    type Output = Quantized<M>;
+    fn process(&mut self, t: Transformed<M>) -> LmlResult<Quantized<M>> {
+        Ok(quantize_deadzone(t, &self.steps))
+    }
+}
+impl<M: Modality> Pass for DeadzoneQuantizePass<M> {
+    type Rev = Lossy;
+    const NAME: &'static str = "quantize_deadzone";
+}
+
+/// `Predict` (`Quantized → Residuals`), Reversible (carries coeffs+order).
+#[derive(Debug)]
+pub struct PredictPass<M> {
+    mode: LpcMode,
+    _m: PhantomData<M>,
+}
+impl<M> PredictPass<M> {
+    pub fn new(mode: LpcMode) -> Self {
+        Self { mode, _m: PhantomData }
+    }
+}
+impl<M: Modality> Stage for PredictPass<M> {
+    type Input = Quantized<M>;
+    type Output = Residuals<M>;
+    fn process(&mut self, q: Quantized<M>) -> LmlResult<Residuals<M>> {
+        Ok(predict(q, self.mode))
+    }
+}
+impl<M: Modality> Pass for PredictPass<M> {
+    type Rev = Reversible;
+    const NAME: &'static str = "predict";
+}
+
+/// `Entropy` (`Residuals → Coded`), Reversible.
+#[derive(Debug)]
+pub struct EntropyPass<M>(PhantomData<M>);
+impl<M> Default for EntropyPass<M> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+impl<M: Modality> Stage for EntropyPass<M> {
+    type Input = Residuals<M>;
+    type Output = Coded<M>;
+    fn process(&mut self, r: Residuals<M>) -> LmlResult<Coded<M>> {
+        entropy(r)
+    }
+}
+impl<M: Modality> Pass for EntropyPass<M> {
+    type Rev = Reversible;
+    const NAME: &'static str = "entropy";
+}
+
+/// `Assemble` (`Coded → Packet`), Reversible — the fan-in.
+#[derive(Debug)]
+pub struct AssemblePass<M> {
+    noise_bits: u8,
+    _m: PhantomData<M>,
+}
+impl<M> AssemblePass<M> {
+    pub fn new(noise_bits: u8) -> Self {
+        Self { noise_bits, _m: PhantomData }
+    }
+}
+impl<M: Modality> Stage for AssemblePass<M> {
+    type Input = Coded<M>;
+    type Output = Packet<M>;
+    fn process(&mut self, c: Coded<M>) -> LmlResult<Packet<M>> {
+        Ok(assemble(c, self.noise_bits))
+    }
+}
+impl<M: Modality> Pass for AssemblePass<M> {
+    type Rev = Reversible;
+    const NAME: &'static str = "assemble";
+}
+
+/// The lossless codec composed through the **reversible-only** [`LmlPipeline`] —
+/// the SAME five morphisms as [`encode_lossless`], but now a `Lossy` pass anywhere
+/// in the chain is a compile error. Byte-identical to `encode_lossless`.
+///
+/// The firewall in action — swapping the Identity quantizer for the deadzone
+/// (Lossy) one does not compile:
+///
+/// ```compile_fail
+/// use lamquant_core::stage::{DeadzoneQuantizePass, LiftPass};
+/// use lamquant_core::pass::LmlPipeline;
+/// let _ = LmlPipeline::start(LiftPass::<abir::Eeg>::default())
+///     .then(DeadzoneQuantizePass::<abir::Eeg>::new(vec![9])); // Rev = Lossy → rejected
+/// ```
+pub fn encode_lossless_pipeline<M: Modality>(raw: Raw<M>, mode: LpcMode) -> LmlResult<Packet<M>> {
+    let mut pipe = LmlPipeline::start(LiftPass::<M>::default())
+        .then(IdentityQuantizePass::<M>::default())
+        .then(PredictPass::<M>::new(mode))
+        .then(EntropyPass::<M>::default())
+        .then(AssemblePass::<M>::new(0));
+    pipe.process(raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +655,21 @@ mod tests {
             let got: Vec<Vec<i64>> =
                 back.abir().window_views(0, n).iter().map(|c| c.as_ref().to_vec()).collect();
             assert_eq!(got, sig, "lower_decode round-trip lost samples ({mode:?})");
+        }
+    }
+
+    #[test]
+    fn lml_pipeline_composition_equals_chain_and_fused() {
+        // The reversible-only LmlPipeline composition (the compile-firewalled form)
+        // produces the SAME bytes as the free morphism chain AND the fused kernel.
+        let sig = synth(4, 2500);
+        for mode in [LpcMode::Fixed, LpcMode::Anytime { max_order: 16, deadline: None }] {
+            let via_pipeline = encode_lossless_pipeline(eeg_raw(sig.clone()), mode).unwrap();
+            let via_chain = encode_lossless(&eeg_raw(sig.clone()), mode).unwrap();
+            let views: Vec<&[i64]> = sig.iter().map(|c| c.as_slice()).collect();
+            let fused = compress_with_mode_views(&views, 0, mode).unwrap();
+            assert_eq!(via_pipeline.bytes(), via_chain.bytes(), "pipeline != chain ({mode:?})");
+            assert_eq!(via_pipeline.bytes(), fused.as_slice(), "pipeline != fused ({mode:?})");
         }
     }
 
