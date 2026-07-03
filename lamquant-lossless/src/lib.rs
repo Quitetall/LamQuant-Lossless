@@ -158,6 +158,11 @@ pub mod pass;
 // `run_in_lml`/`DynPass` UNCHANGED (including the runtime Lossy refusal).
 #[cfg(feature = "archive")]
 pub mod pipeline_dsl;
+// ADR 0074 Track M: the typed stage-DAG authoring layer. Owned newtypes
+// (`Raw<M>` … `Coded<M>`) generic over modality; `lower_*` dispatches to the
+// fused kernel (never reimplements the DSP). Host-only like `pass`.
+#[cfg(feature = "archive")]
+pub mod stage;
 #[cfg(feature = "archive")]
 pub mod range;
 // `source::descriptor` (ADR 0069 Pillar 3 / S5 Increment 3, task #20) is
