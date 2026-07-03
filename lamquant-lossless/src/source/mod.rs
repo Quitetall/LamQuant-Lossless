@@ -29,6 +29,10 @@ pub mod cnt;
 // `archive`-feature gate as every other module here (inherited from
 // `pub mod source;` in lib.rs); no additional cfg needed.
 pub mod descriptor;
+// ADR 0074 Track I: the per-dataset ingest manifest (serde JSON → authoritative
+// modality). Host-only — `serde_json` is linked under `archive`.
+#[cfg(feature = "archive")]
+pub mod ingest_manifest;
 #[cfg(feature = "dicom")]
 pub mod dicom;
 pub mod edf_reader;
