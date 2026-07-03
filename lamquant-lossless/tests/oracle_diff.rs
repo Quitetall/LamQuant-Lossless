@@ -594,3 +594,44 @@ fn arm_g_hardening_rejects() {
         "18-byte truncation must be Truncated, not a panic"
     );
 }
+
+/// Arm H (ADR 0074 M3b): the stage-DAG lossless morphism chain is a THIRD
+/// independent encoder in this differential oracle (alongside the legacy
+/// container writer and `write_abir`). For each fixture × mode the explicit typed
+/// chain `Raw → Transform → Quantize(Identity) → Predict → Entropy → Assemble`
+/// (`stage::encode_lossless`) must be BYTE-IDENTICAL to the fused
+/// `compress_with_mode_views`, and decode back to `x`. This equality is what
+/// licenses the scheduler to run the fused form as the shipped path.
+///
+/// (NB the plan's "DAG as a 5th `byte_equal_backends` backend" is architecturally
+/// impossible — that gate lives in `lamquant-lml-desktop`, *below* this crate in
+/// the dep graph, so it cannot see `stage`. The oracle is the correct home, and
+/// adding a third *independent implementation* here is stronger than a backend.)
+#[test]
+fn arm_h_stage_dag_equals_fused_and_round_trips() {
+    use lamquant_core::stage::{encode_lossless, Raw};
+    assert_clean_env();
+    for (name, signal) in fixtures() {
+        // Modality-blind (the codec is): `from_channels_i64` yields `Abir<Untyped>`.
+        let raw = Raw::new(Abir::from_channels_i64(signal.clone(), 250.0));
+        let views: Vec<&[i64]> = signal.iter().map(|c| c.as_slice()).collect();
+        for mode in [
+            LpcMode::Fixed,
+            LpcMode::Adaptive { max_order: 16 },
+            LpcMode::Anytime { max_order: 16, deadline: None },
+        ] {
+            let dag = encode_lossless(&raw, mode).expect("dag encode");
+            let fused = lml::compress_with_mode_views(&views, 0, mode).expect("fused");
+            assert_eq!(
+                dag.bytes(),
+                fused.as_slice(),
+                "arm H: stage DAG != fused kernel ({name}, {mode:?})"
+            );
+            assert_eq!(
+                lml::decompress(dag.bytes()).expect("decode"),
+                signal,
+                "arm H: DAG round-trip failed ({name}, {mode:?})"
+            );
+        }
+    }
+}
