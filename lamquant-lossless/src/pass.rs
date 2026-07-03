@@ -256,9 +256,18 @@ where
 /// TUI panel, a DSL config service) the moment it has more than one
 /// caller, and retrofitting the bound later is a breaking API change for
 /// every registered constructor. Cheaper to require it from the start.
+#[allow(clippy::type_complexity)]
 #[derive(Default)]
 pub struct PassRegistry {
     ctors: HashMap<String, Box<dyn Fn() -> Box<dyn DynPass + Send + Sync> + Send + Sync>>,
+    /// Param-aware constructors (ADR 0074 M6): receive the DSL's parsed
+    /// `key=value` params and may fail on a bad value.
+    param_ctors: HashMap<
+        String,
+        Box<
+            dyn Fn(&[(String, String)]) -> LmlResult<Box<dyn DynPass + Send + Sync>> + Send + Sync,
+        >,
+    >,
 }
 
 impl PassRegistry {
@@ -277,9 +286,42 @@ impl PassRegistry {
         self.ctors.insert(name.into(), Box::new(ctor));
     }
 
-    /// `true` if a constructor is registered under `name`.
+    /// Register a named constructor that BINDS the DSL's parsed `key=value`
+    /// params (ADR 0074 M6 — closes the G3 gap, where params were validated
+    /// syntactically but then discarded). The constructor is fallible: a bad or
+    /// out-of-range param value is a build error, never a silent default.
+    pub fn register_with<F>(&mut self, name: impl Into<String>, ctor: F)
+    where
+        F: Fn(&[(String, String)]) -> LmlResult<Box<dyn DynPass + Send + Sync>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.param_ctors.insert(name.into(), Box::new(ctor));
+    }
+
+    /// `true` if a (param-less or param-aware) constructor is registered.
     pub fn contains(&self, name: &str) -> bool {
-        self.ctors.contains_key(name)
+        self.ctors.contains_key(name) || self.param_ctors.contains_key(name)
+    }
+
+    /// Build a pass by name, BINDING the parsed params: a param-aware constructor
+    /// ([`register_with`](Self::register_with)) receives them; a param-less one
+    /// ([`register`](Self::register)) ignores them (back-compat). Unknown → error.
+    pub fn build_with(
+        &self,
+        name: &str,
+        params: &[(String, String)],
+    ) -> LmlResult<Box<dyn DynPass + Send + Sync>> {
+        if let Some(ctor) = self.param_ctors.get(name) {
+            ctor(params)
+        } else if let Some(ctor) = self.ctors.get(name) {
+            Ok(ctor())
+        } else {
+            Err(LmlError::InvalidHeader(std::format!(
+                "PassRegistry: no pass registered under name {name:?}"
+            )))
+        }
     }
 
     /// Build a fresh dyn-erased pass instance by name.

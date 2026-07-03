@@ -100,6 +100,10 @@ pub enum PipelineDslError {
     /// both statically, via `LmlPipeline`'s trait bound, and here,
     /// dynamically, via this runtime check).
     LossyPassInLml { name: String },
+    /// A param-aware constructor ([`PassRegistry::register_with`], ADR 0074 M6)
+    /// rejected this step's bound params — e.g. an out-of-range or unparseable
+    /// value. `detail` carries the constructor's message.
+    BadParamValue { name: String, detail: String },
 }
 
 impl core::fmt::Display for PipelineDslError {
@@ -124,6 +128,9 @@ impl core::fmt::Display for PipelineDslError {
                 "LML (lossless) pipeline refuses Lossy pass {name:?} \
                  (ADR 0069 Pillar 3: LML statically + dynamically refuses Lossy passes)"
             ),
+            Self::BadParamValue { name, detail } => {
+                write!(f, "pass {name:?} rejected its params: {detail}")
+            }
         }
     }
 }
@@ -329,14 +336,17 @@ pub fn build_lml_pipeline(
                 name: step.name.clone(),
             });
         }
-        // `contains` just returned true for this exact name, so `build`
-        // cannot itself fail with "not found" here; unwrap the LmlResult
-        // via a defensive UnknownPass fallback rather than panicking if
-        // that invariant is ever violated (e.g. a future registry impl
-        // with a race between contains/build).
-        let built = registry.build(&step.name).map_err(|_| PipelineDslError::UnknownPass {
-            name: step.name.clone(),
-        })?;
+        // ADR 0074 M6: BIND the parsed params via `build_with` (the G3 fix — a
+        // `register_with` constructor now receives `step.params`; a param-less
+        // `register` one still ignores them). `contains` guaranteed the name
+        // resolves, so a failure here is a rejected param VALUE, surfaced as
+        // `BadParamValue` (not the misleading `UnknownPass`).
+        let built = registry
+            .build_with(&step.name, &step.params)
+            .map_err(|e| PipelineDslError::BadParamValue {
+                name: step.name.clone(),
+                detail: e.to_string(),
+            })?;
         if built.lossy() {
             return Err(PipelineDslError::LossyPassInLml {
                 name: step.name.clone(),
@@ -581,6 +591,60 @@ xor_cipher key=66
         assert_eq!(
             out_a, out_b,
             "ctor ignores DSL params (G3): both must use the registered key=0x5A"
+        );
+    }
+
+    /// M6 (ADR 0074): the positive successor to the G3 test — `register_with`
+    /// BINDS the parsed params, so different values yield different passes, and a
+    /// bad value fails the build instead of silently defaulting.
+    #[test]
+    fn m6_register_with_binds_params_through_the_dsl() {
+        use crate::error::{LmlError, LmlResult};
+
+        struct ParamXor {
+            key: u8,
+        }
+        impl DynPass for ParamXor {
+            fn name(&self) -> &str {
+                "param_xor"
+            }
+            fn lossy(&self) -> bool {
+                false
+            }
+            fn run(&mut self, input: ErasedPayload) -> LmlResult<ErasedPayload> {
+                Ok(input.into_iter().map(|b| b ^ self.key).collect())
+            }
+        }
+
+        let mut reg = PassRegistry::new();
+        reg.register_with("param_xor", |params| {
+            let key: u8 = params
+                .iter()
+                .find(|(k, _)| k == "key")
+                .map(|(_, v)| v.parse())
+                .transpose()
+                .map_err(|_| LmlError::InvalidHeader("param_xor: key must be a u8".into()))?
+                .unwrap_or(0);
+            Ok(Box::new(ParamXor { key }))
+        });
+
+        // Via the DSL: different key values → different output (contrast G3, where
+        // both produced identical output because the ctor ignored the params).
+        let mut pa =
+            build_lml_pipeline(&parse_pipeline("param_xor key=1\n").unwrap(), &reg).unwrap();
+        let mut pb =
+            build_lml_pipeline(&parse_pipeline("param_xor key=255\n").unwrap(), &reg).unwrap();
+        let out_a = pa.run(vec![0u8, 0, 0]).unwrap();
+        let out_b = pb.run(vec![0u8, 0, 0]).unwrap();
+        assert_eq!(out_a, vec![1u8, 1, 1]);
+        assert_eq!(out_b, vec![255u8, 255, 255]);
+        assert_ne!(out_a, out_b, "M6: params must BIND — different key ⇒ different output");
+
+        // A bad param VALUE is a build error (BadParamValue), not a silent default.
+        let bad = build_lml_pipeline(&parse_pipeline("param_xor key=notau8\n").unwrap(), &reg);
+        assert!(
+            matches!(bad, Err(PipelineDslError::BadParamValue { .. })),
+            "a bad param value must fail the build, got {bad:?}"
         );
     }
 }
