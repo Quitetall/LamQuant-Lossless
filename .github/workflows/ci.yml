@@ -72,6 +72,10 @@ jobs:
       # added without a CI line and was silently absent).
       - name: S7b normalization parity gate (archive)
         run: cargo test -p lamquant-lml --features archive --test normalize_parity
+      # ADR 0074 Track I: modality typing changes only BCS1 header byte 6, never
+      # the payload — the byte-neutrality the whole ingest config rests on.
+      - name: ADR-0074 Track I provenance-neutrality gate (archive)
+        run: cargo test -p lamquant-lml --features archive --test modality_provenance_snapshot
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
