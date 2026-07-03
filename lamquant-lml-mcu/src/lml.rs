@@ -914,7 +914,12 @@ pub fn compress_bounded_mae(
 /// Forward lifting of one channel into its ordered subbands for the given
 /// `n_levels` (`[approx, detail_top, ..., detail_1]`). Mirrors
 /// `encode_one_channel`'s split + `quant::inverse_for_levels`.
-fn forward_subbands(signal_ch: &[i64], n_levels: u8) -> Vec<Vec<i64>> {
+///
+/// `#[doc(hidden)] pub` (ADR 0074 Track M): the **Transform** stage morphism of
+/// the ABIR stage-DAG delegates to this directly — "delegate, don't reimplement"
+/// — so the DAG's Transform can never drift from the kernel's own split.
+#[doc(hidden)]
+pub fn forward_subbands(signal_ch: &[i64], n_levels: u8) -> Vec<Vec<i64>> {
     match n_levels {
         3 => {
             let (a3, d3, d2, d1) = lifting::forward_3level(signal_ch);

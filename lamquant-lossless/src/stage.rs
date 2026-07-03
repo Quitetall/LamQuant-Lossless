@@ -1,38 +1,45 @@
-//! ADR 0074 · Track M — the typed stage-DAG authoring layer (host-only, `archive`).
+//! ADR 0074 · Track M — the codec as a typed morphism category (host-only, `archive`).
 //!
-//! The codec's stages become owned newtypes generic over modality `M`; a `lower_*`
-//! step **DISPATCHES** to the fused kernel — it never reimplements the DSP (ADR
-//! 0074's "dispatch, not codegen"), so its output is byte-identical to the shipped
-//! kernel by construction. This module holds the DAG's ENDPOINTS:
+//! An IR = **types + typed ops**. The *objects* are the data representations
+//! (`Raw → Transformed → Quantized → Residuals → Coded → Packet`); a *pass is a
+//! morphism* typed by its `(input, output)` endpoints; a *codec is any
+//! endpoint-matching chain* `Raw → Packet`. Every morphism **DISPATCHES** to the
+//! kernel — it never reimplements the DSP (ADR 0074's "dispatch, not codegen") —
+//! so a composed chain is byte-identical to the shipped kernel by construction.
 //!
-//!   * [`Raw<M>`]  — one window of the typed recording (the input), and
-//!   * [`Coded<M>`] — the compressed LML1 packet (the output),
+//! The canonical stage TYPES, in order, are `Transform → Quantize → Predict →
+//! Entropy → Assemble`. Lossless AND lossy are both first-class citizens of this
+//! ONE pipeline, differing only in the **Quantize** morphism: lossless uses
+//! `Identity` (Reversible, a no-op that lowers away → byte-identical to the fused
+//! kernel), rate-lossy uses a `deadzone` quantizer (Lossy). Coupled/fused coders
+//! (closed-loop DPCM, neural) enter later as *wider* morphisms (e.g. `Transformed
+//! → Residuals`) — no special-casing, because endpoint-typing already admits them.
 //!
-//! with a single `Raw → Coded` lowering ([`lower_encode`]) that equals
-//! `compress_with_mode_views`, and its inverse ([`lower_decode`]). The
-//! intermediate stages (`Subbands`/`Residuals`) and the reproduced assembler land
-//! in M3, proven byte-equal to the kernel by oracle arm H.
-//!
-//! Modality `M` threads through every stage: `Raw<Eeg>`, `Coded<Eeg>` and
-//! `Raw<Ecg>` are distinct types, so a stage function bound to one modality can
-//! never be handed another — see the `compile_fail` doctest on [`Raw`].
+//! M3 builds the objects + the LOSSLESS morphism chain and proves it byte-identical
+//! to `compress_with_mode_views`. The reverse morphisms, the `LmlPipeline`/`Pass`
+//! wiring, oracle arm H, and the lossy Quantize morphism follow.
 
 use core::marker::PhantomData;
 
 use abir::{Abir, Modality, ModalitySource};
 
 use crate::error::LmlResult;
-use crate::lml::{compress_with_mode_views, decompress};
-use crate::lpc::LpcMode;
+use crate::golomb;
+use crate::lml::{
+    assemble_lml_packet, compress_with_mode_views, compute_n_levels, decompress, forward_subbands,
+    lpc_max_order, scope_lpc_mode, BIAS_CTX,
+};
+use crate::lpc::{self, LpcMode};
+
+// ─── Objects (the IR's types) ────────────────────────────────────────────────
 
 /// The **Raw** stage — one window of the typed recording; the DAG's input. The
-/// whole `Abir` is treated as one window (`n_samples` samples × `n_channels`),
-/// matching the per-window kernel entry.
+/// whole `Abir` is treated as one window (`n_samples` × `n_channels`), matching
+/// the per-window kernel entry.
 ///
-/// Stage + modality are both in the type, so mixing them is a compile error.
-///
-/// A `Coded` is not a `Raw` (distinct stages) — a single `compile_fail` block
-/// stops at the first error, so the two properties get one block each:
+/// Stage + modality are both in the type, so mixing them is a compile error. A
+/// `Coded` is not a `Raw` (distinct stages) — a single `compile_fail` block stops
+/// at the first error, so the two properties get one block each:
 ///
 /// ```compile_fail
 /// use lamquant_core::stage::{Coded, Raw};
@@ -67,18 +74,106 @@ impl<M: Modality> Raw<M> {
     }
 }
 
-/// The **Coded** stage — the compressed LML1 packet; the DAG's output. Carries the
-/// modality type so [`lower_decode`] restores a typed `Raw<M>`. (The bytes
-/// themselves are the modality-blind codec payload; `M` is a compile-time-only
-/// tag — `Coded<M>` is `size_of == size_of::<Vec<u8>>`.)
+/// The **Transformed** stage — post-`Transform`: per-channel ordered subbands
+/// `[ch][subband][sample]` + the chosen `n_levels` (carried so the inverse lift
+/// can invert it).
+#[derive(Debug, Clone)]
+pub struct Transformed<M: Modality> {
+    per_channel: Vec<Vec<Vec<i64>>>,
+    n_levels: u8,
+    _m: PhantomData<M>,
+}
+
+impl<M: Modality> Transformed<M> {
+    /// The chosen wavelet level count.
+    pub fn n_levels(&self) -> u8 {
+        self.n_levels
+    }
+    /// The per-channel subbands.
+    pub fn subbands(&self) -> &[Vec<Vec<i64>>] {
+        &self.per_channel
+    }
+}
+
+/// The **Quantized** stage — post-`Quantize`: same shape as `Transformed`. For
+/// lossless the `Quantize` morphism is `Identity`, so this is the transformed
+/// coefficients unchanged; **M4 diverges** — rate-lossy holds deadzone-quantized
+/// indices here (a `Lossy` morphism), which is why this is a distinct type from
+/// `Transformed` even though the fields currently match.
+#[derive(Debug, Clone)]
+pub struct Quantized<M: Modality> {
+    per_channel: Vec<Vec<Vec<i64>>>,
+    n_levels: u8,
+    _m: PhantomData<M>,
+}
+
+/// One subband's LPC result — the product output that makes `Predict` reversible:
+/// the residual is the main lane, `(order, coeffs)` the carry lane the inverse
+/// re-synthesizes from.
+#[derive(Debug, Clone)]
+pub struct SubbandResidual {
+    pub order: usize,
+    pub coeffs: Vec<i32>,
+    pub residual: Vec<i64>,
+}
+
+/// The **Residuals** stage — post-`Predict`: per-channel, per-subband
+/// `{order, coeffs, residual}`.
+#[derive(Debug, Clone)]
+pub struct Residuals<M: Modality> {
+    per_channel: Vec<Vec<SubbandResidual>>,
+    n_levels: u8,
+    _m: PhantomData<M>,
+}
+
+impl<M: Modality> Residuals<M> {
+    /// The per-channel, per-subband LPC results (inspection).
+    pub fn per_channel(&self) -> &[Vec<SubbandResidual>] {
+        &self.per_channel
+    }
+    /// The wavelet level count carried from `Transformed`.
+    pub fn n_levels(&self) -> u8 {
+        self.n_levels
+    }
+}
+
+/// One channel's entropy-coded bytes: `meta = [order:u8][coeffs_i32_LE…]` per
+/// subband, `payload` = the concatenated Golomb streams.
+#[derive(Debug, Clone)]
+pub struct ChannelCoded {
+    pub meta: Vec<u8>,
+    pub payload: Vec<u8>,
+}
+
+/// The **Coded** stage — post-`Entropy`: per-channel `{meta, payload}` + the
+/// header dimensions `Assemble` needs.
 #[derive(Debug, Clone)]
 pub struct Coded<M: Modality> {
-    bytes: Vec<u8>,
+    per_channel: Vec<ChannelCoded>,
+    n_ch: usize,
+    t: usize,
+    n_levels: u8,
     _m: PhantomData<M>,
 }
 
 impl<M: Modality> Coded<M> {
-    /// The compressed packet bytes.
+    /// The per-channel entropy-coded `{meta, payload}` (inspection).
+    pub fn per_channel(&self) -> &[ChannelCoded] {
+        &self.per_channel
+    }
+}
+
+/// The **Packet** stage — post-`Assemble`: the framed LML1 packet; the DAG's
+/// output. Carries the modality type so decode can restore a typed `Raw<M>`.
+/// (`M` is a compile-time-only tag — `size_of::<Packet<M>>() == size_of::<Vec<u8>>()`.)
+#[derive(Debug, Clone)]
+pub struct Packet<M: Modality> {
+    bytes: Vec<u8>,
+    _m: PhantomData<M>,
+}
+
+impl<M: Modality> Packet<M> {
+    /// The framed packet bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -88,10 +183,11 @@ impl<M: Modality> Coded<M> {
     }
 }
 
-/// Lower `Raw → Coded` by **dispatching** to the fused kernel over the zero-copy
-/// window views. This is the DAG's `lower()`: a dispatch to
-/// `compress_with_mode_views`, never a reimplementation of the DSP — so the output
-/// is byte-identical to the shipped kernel.
+// ─── The lowering (dispatch to the fused kernel) ─────────────────────────────
+
+/// Lower `Raw → Packet` by **dispatching** to the fused kernel over the zero-copy
+/// window views — the DAG's `lower()`: a dispatch to `compress_with_mode_views`,
+/// never a reimplementation, so it is byte-identical to the shipped kernel.
 ///
 /// ```
 /// use lamquant_core::stage::{lower_encode, lower_decode, Raw};
@@ -101,30 +197,142 @@ impl<M: Modality> Coded<M> {
 /// let sig = vec![vec![10i64, -20, 30, -40, 50, -60, 70, -80]; 4];
 /// let raw: Raw<Eeg> =
 ///     Raw::new(Abir::from_channels_i64(sig, 250.0).into_modality::<Eeg>(ModalitySource::Manual));
-/// let coded = lower_encode(&raw, 0, LpcMode::Fixed).unwrap();
-/// let back = lower_decode(&coded, 250.0).unwrap();
+/// let packet = lower_encode(&raw, 0, LpcMode::Fixed).unwrap();
+/// let back = lower_decode(&packet, 250.0).unwrap();
 /// assert_eq!(back.abir().n_channels(), 4);
 /// ```
 pub fn lower_encode<M: Modality>(
     raw: &Raw<M>,
     noise_bits: u8,
     mode: LpcMode,
-) -> LmlResult<Coded<M>> {
+) -> LmlResult<Packet<M>> {
     let n = raw.abir.n_samples();
     let views = raw.abir.window_views(0, n);
     let refs: Vec<&[i64]> = views.iter().map(|c| c.as_ref()).collect();
     let bytes = compress_with_mode_views(&refs, noise_bits, mode)?;
-    Ok(Coded { bytes, _m: PhantomData })
+    Ok(Packet { bytes, _m: PhantomData })
 }
 
-/// Lower `Coded → Raw` (decode), restoring the modality type `M`. `sample_rate` is
-/// supplied by the caller: the LML1 packet does not carry it (it lives in the BCS1
-/// container header), so the decode is parameterized on it. Provenance is stamped
-/// `Manual` — the modality is asserted by the caller's type argument `M`.
-pub fn lower_decode<M: Modality>(coded: &Coded<M>, sample_rate: f64) -> LmlResult<Raw<M>> {
-    let channels = decompress(coded.bytes())?;
-    let abir = Abir::from_channels_i64(channels, sample_rate).into_modality::<M>(ModalitySource::Manual);
+/// Lower `Packet → Raw` (decode), restoring the modality type `M`. `sample_rate`
+/// is caller-supplied (the LML1 packet doesn't carry it — it lives in the BCS1
+/// header). `into_modality::<M>` runs before return, so no `Untyped` window
+/// escapes; the modality is asserted by the caller's type argument.
+pub fn lower_decode<M: Modality>(packet: &Packet<M>, sample_rate: f64) -> LmlResult<Raw<M>> {
+    let channels = decompress(packet.bytes())?;
+    let abir =
+        Abir::from_channels_i64(channels, sample_rate).into_modality::<M>(ModalitySource::Manual);
     Ok(Raw::new(abir))
+}
+
+// ─── The lossless morphism chain (each delegates to the kernel) ───────────────
+
+/// **Transform** morphism `Raw → Transformed` (Reversible). Delegates to the
+/// kernel's `forward_subbands` per channel; `n_levels` chosen by `compute_n_levels`
+/// exactly as `validate_and_levels` does.
+pub fn transform<M: Modality>(raw: &Raw<M>) -> Transformed<M> {
+    let n = raw.abir.n_samples();
+    let n_levels = compute_n_levels(n);
+    let views = raw.abir.window_views(0, n);
+    let per_channel = views
+        .iter()
+        .map(|c| forward_subbands(c.as_ref(), n_levels))
+        .collect();
+    Transformed { per_channel, n_levels, _m: PhantomData }
+}
+
+/// **Quantize = Identity** morphism `Transformed → Quantized` (Reversible). The
+/// lossless quantizer: a no-op that lowers away. (Rate-lossy replaces this with a
+/// deadzone quantizer — a `Lossy` morphism — without touching any other stage.)
+pub fn quantize_identity<M: Modality>(t: Transformed<M>) -> Quantized<M> {
+    Quantized { per_channel: t.per_channel, n_levels: t.n_levels, _m: PhantomData }
+}
+
+/// **Predict** morphism `Quantized → Residuals` (Reversible *because* it carries
+/// `coeffs`+`order`). Delegates to `lpc::analyze_with_mode` per subband with the
+/// same per-subband ceiling (`lpc_max_order`) + `scope_lpc_mode` the kernel uses.
+pub fn predict<M: Modality>(q: Quantized<M>, mode: LpcMode) -> Residuals<M> {
+    let per_channel = q
+        .per_channel
+        .iter()
+        .map(|subbands| {
+            subbands
+                .iter()
+                .enumerate()
+                .map(|(sb_idx, sub)| {
+                    // `sb_idx` is the subband's position in `forward_subbands`'s
+                    // output order — it MUST match the kernel's own loop
+                    // (`encode_one_channel` lml.rs:1524); the arm-H byte-identity
+                    // test is what guards that coupling.
+                    let scoped = scope_lpc_mode(mode, lpc_max_order(sub.len()));
+                    let (coeffs, residual, order) =
+                        lpc::analyze_with_mode(sub, sb_idx, scoped, BIAS_CTX, /* time_remaining = */ None);
+                    SubbandResidual { order, coeffs, residual }
+                })
+                .collect()
+        })
+        .collect();
+    Residuals { per_channel, n_levels: q.n_levels, _m: PhantomData }
+}
+
+/// **Entropy** morphism `Residuals → Coded` (Reversible). Serializes
+/// `[order:u8][coeffs_i32_LE…]` into `meta` and delegates the residual to
+/// `golomb::encode_dense` into `payload` — exactly `encode_one_channel`'s body.
+pub fn entropy<M: Modality>(r: Residuals<M>, n_ch: usize, t: usize) -> LmlResult<Coded<M>> {
+    let mut per_channel = Vec::with_capacity(r.per_channel.len());
+    for subbands in &r.per_channel {
+        let mut meta = Vec::new();
+        let mut payload = Vec::new();
+        for sb in subbands {
+            // The wire stores the order in one byte (same cast as the kernel,
+            // lml.rs:1557); orders are bounded by `lpc_max_order` in practice.
+            debug_assert!(sb.order <= u8::MAX as usize, "LPC order {} exceeds the u8 wire field", sb.order);
+            meta.push(sb.order as u8);
+            for &c in &sb.coeffs {
+                meta.extend_from_slice(&c.to_le_bytes());
+            }
+            payload.extend_from_slice(&golomb::encode_dense(&sb.residual)?);
+        }
+        per_channel.push(ChannelCoded { meta, payload });
+    }
+    Ok(Coded { per_channel, n_ch, t, n_levels: r.n_levels, _m: PhantomData })
+}
+
+/// **Assemble** morphism `Coded → Packet` (Reversible) — the fan-in reduce node.
+/// Concatenates all channels' meta then all channels' payload (the
+/// `finalize_channels` reorder) and delegates the framing (header + CRC) to
+/// `assemble_lml_packet`. `noise_bits` is a parameter (0 for pure lossless; the
+/// near-lossless noise-shaping variant sets it) so the morphism's signature is
+/// stable when M4's lossy chains reuse it.
+pub fn assemble<M: Modality>(c: Coded<M>, noise_bits: u8) -> Packet<M> {
+    let mut lpc_meta = Vec::new();
+    let mut payload = Vec::new();
+    for ch in &c.per_channel {
+        lpc_meta.extend_from_slice(&ch.meta);
+    }
+    for ch in &c.per_channel {
+        payload.extend_from_slice(&ch.payload);
+    }
+    // `any_bit_pack_wins = false`: the experimental per-subband entropy
+    // *selection* (Golomb vs arith vs bit-pack) is not modeled here yet — the
+    // default build is flat Golomb, the byte-locked reference.
+    let bytes =
+        assemble_lml_packet(c.n_ch, c.t, c.n_levels, noise_bits, false, &lpc_meta, &payload);
+    Packet { bytes, _m: PhantomData }
+}
+
+/// The composed **lossless codec** as an explicit morphism chain
+/// `Raw → Transform → Quantize(Identity) → Predict → Entropy → Assemble → Packet`.
+/// Materializes each stage (the authoring path); the fused kernel is the schedule.
+/// Proven byte-identical to `lower_encode` / `compress_with_mode_views` — that
+/// equality (arm H) is what licenses the scheduler to run the fused form.
+pub fn encode_lossless<M: Modality>(raw: &Raw<M>, mode: LpcMode) -> LmlResult<Packet<M>> {
+    let n_ch = raw.abir.n_channels();
+    let t = raw.abir.n_samples();
+    let transformed = transform(raw);
+    let quantized = quantize_identity(transformed);
+    let residuals = predict(quantized, mode);
+    let coded = entropy(residuals, n_ch, t)?;
+    Ok(assemble(coded, /* noise_bits = */ 0))
 }
 
 #[cfg(test)]
@@ -143,47 +351,64 @@ mod tests {
     }
 
     #[test]
-    fn lower_encode_is_byte_identical_to_the_fused_kernel() {
-        for &(n_ch, t) in &[(1usize, 100usize), (4, 2500), (8, 313)] {
+    fn lossless_morphism_chain_is_byte_identical_to_the_fused_kernel() {
+        // The heart of M3 / arm H at the smallest granularity: the explicit typed
+        // chain equals the fused kernel byte-for-byte across n_levels 0..3 + modes.
+        let shapes = [(1usize, 4usize), (1, 8), (1, 20), (4, 2500), (8, 313), (32, 2500)];
+        let modes =
+            [LpcMode::Fixed, LpcMode::Adaptive { max_order: 16 }, LpcMode::Anytime { max_order: 16, deadline: None }];
+        for &(n_ch, t) in &shapes {
             let sig = synth(n_ch, t);
             let raw = eeg_raw(sig.clone());
-            for mode in [LpcMode::Fixed, LpcMode::Anytime { max_order: 16, deadline: None }] {
-                let coded = lower_encode(&raw, 0, mode).expect("lower_encode");
-                let views: Vec<&[i64]> = sig.iter().map(|c| c.as_slice()).collect();
+            let views: Vec<&[i64]> = sig.iter().map(|c| c.as_slice()).collect();
+            for mode in modes {
+                let dag = encode_lossless(&raw, mode).expect("morphism chain");
                 let fused = compress_with_mode_views(&views, 0, mode).expect("fused");
-                assert_eq!(coded.bytes(), fused.as_slice(), "lower_encode != fused ({n_ch}x{t})");
+                assert_eq!(
+                    dag.bytes(),
+                    fused.as_slice(),
+                    "M3 morphism-chain DRIFT vs fused ({n_ch}ch × {t}, {mode:?})"
+                );
+                assert_eq!(decompress(dag.bytes()).expect("decode"), sig, "roundtrip ({mode:?})");
             }
         }
     }
 
     #[test]
-    fn round_trip_through_the_typed_endpoints() {
+    fn intermediate_objects_are_inspectable_and_well_formed() {
+        let raw = eeg_raw(synth(4, 2500));
+        let transformed = transform(&raw);
+        assert_eq!(transformed.n_levels(), 3, "t=2500 → 3 levels");
+        assert_eq!(transformed.subbands().len(), 4, "4 channels");
+        assert_eq!(transformed.subbands()[0].len(), 4, "3 levels → 4 subbands (a3,d3,d2,d1)");
+        let residuals = predict(quantize_identity(transformed), LpcMode::Fixed);
+        assert_eq!(residuals.per_channel().len(), 4);
+        assert_eq!(residuals.per_channel()[0].len(), 4, "one residual set per subband");
+        // Every subband carries the coeffs that make Predict reversible.
+        let sb0 = &residuals.per_channel()[0][0];
+        assert_eq!(sb0.coeffs.len(), sb0.order);
+    }
+
+    #[test]
+    fn typed_endpoint_lower_decode_round_trips() {
+        // Covers lower_encode → lower_decode (the into_modality::<M> restore path),
+        // both the fixed and the reproducible-anytime mode.
         let sig = synth(4, 2500);
         let raw = eeg_raw(sig.clone());
-        // Both the fixed and the (reproducible, deadline-free) anytime path.
         for mode in [LpcMode::Fixed, LpcMode::Anytime { max_order: 16, deadline: None }] {
-            let coded = lower_encode(&raw, 0, mode).expect("encode");
-            let back = lower_decode(&coded, 250.0).expect("decode");
+            let packet = lower_encode(&raw, 0, mode).expect("encode");
+            let back = lower_decode(&packet, 250.0).expect("decode");
             assert_eq!(back.abir().n_channels(), 4);
             assert_eq!(back.abir().n_samples(), 2500);
-            // Sample-level fidelity (the LML floor is lossless).
             let n = back.abir().n_samples();
-            let got: Vec<Vec<i64>> = back
-                .abir()
-                .window_views(0, n)
-                .iter()
-                .map(|c| c.as_ref().to_vec())
-                .collect();
-            assert_eq!(got, sig, "typed-endpoint round-trip lost samples ({mode:?})");
+            let got: Vec<Vec<i64>> =
+                back.abir().window_views(0, n).iter().map(|c| c.as_ref().to_vec()).collect();
+            assert_eq!(got, sig, "lower_decode round-trip lost samples ({mode:?})");
         }
     }
 
     #[test]
-    fn coded_phantom_is_zero_overhead() {
-        // `M` on Coded is a compile-time-only tag: same size as the bytes it wraps.
-        assert_eq!(
-            core::mem::size_of::<Coded<Eeg>>(),
-            core::mem::size_of::<Vec<u8>>()
-        );
+    fn packet_phantom_is_zero_overhead() {
+        assert_eq!(core::mem::size_of::<Packet<Eeg>>(), core::mem::size_of::<Vec<u8>>());
     }
 }
