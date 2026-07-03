@@ -21,15 +21,16 @@
 
 use core::marker::PhantomData;
 
-use abir::{Abir, Modality, ModalitySource};
+use abir::{Abir, Modality, ModalitySource, Mode};
 
 use crate::error::LmlResult;
 use crate::golomb;
 use crate::lml::{
-    assemble_lml_packet, compress_with_mode_views, compute_n_levels, decompress, forward_subbands,
-    lpc_max_order, scope_lpc_mode, BIAS_CTX,
+    assemble_lml_packet, compress_bounded_mae, compress_target_bps, compress_with_mode_views,
+    compute_n_levels, decompress, forward_subbands, lpc_max_order, scope_lpc_mode, BIAS_CTX,
 };
 use crate::lpc::{self, LpcMode};
+use crate::quant;
 
 // ─── Objects (the IR's types) ────────────────────────────────────────────────
 
@@ -335,6 +336,88 @@ pub fn encode_lossless<M: Modality>(raw: &Raw<M>, mode: LpcMode) -> LmlResult<Pa
     Ok(assemble(coded, /* noise_bits = */ 0))
 }
 
+// ─── Lossy: the Mode-aware lowering + the deadzone Quantize morphism ──────────
+
+/// Lower `Raw → Packet` for ANY codec [`Mode`] by **dispatching** to the matching
+/// kernel — the lossy counterpart of [`lower_encode`], making lossless and lossy
+/// equally first-class: `Lossless` → `compress_with_mode_views`, `BoundedMae(δ)`
+/// → `compress_bounded_mae`, `TargetBps` → `compress_target_bps`. Byte-identical
+/// to the kernel by construction (it IS the kernel); the lossy arms materialize
+/// the window (the cold path already does). The rate-controller search
+/// (`TargetBps`) is a *schedule* concern that lives inside the kernel — the DAG
+/// dispatches the whole optimized encode, it does not model the search.
+///
+/// This is the *dispatch* lowering; [`encode_lossless`] is the *decomposed*
+/// authoring chain. They coexist by design (algorithm vs schedule), and their
+/// byte-equality for `Mode::Lossless` is exactly oracle arm H.
+pub fn lower_encode_mode<M: Modality>(
+    raw: &Raw<M>,
+    mode: Mode,
+    lpc_mode: LpcMode,
+) -> LmlResult<Packet<M>> {
+    let n = raw.abir.n_samples();
+    let views = raw.abir.window_views(0, n);
+    let bytes = match mode {
+        Mode::Lossless => {
+            let refs: Vec<&[i64]> = views.iter().map(|c| c.as_ref()).collect();
+            compress_with_mode_views(&refs, 0, lpc_mode)?
+        }
+        // The lossy kernels take `&[Vec<i64>]`, so own here (cold lossy path).
+        Mode::BoundedMae(delta) => {
+            let signal: Vec<Vec<i64>> = views.iter().map(|c| c.as_ref().to_vec()).collect();
+            compress_bounded_mae(&signal, delta, lpc_mode)?
+        }
+        Mode::TargetBps(bps) => {
+            let signal: Vec<Vec<i64>> = views.iter().map(|c| c.as_ref().to_vec()).collect();
+            compress_target_bps(&signal, bps, lpc_mode)?
+        }
+    };
+    Ok(Packet { bytes, _m: PhantomData })
+}
+
+/// **Quantize = deadzone** morphism `Transformed → Quantized` — the LOSSY variant
+/// of the Quantize slot (delegates `quant::quantize` per subband). This is the
+/// ONLY morphism in the pipeline that discards information; swapping it for
+/// [`quantize_identity`] is the entire lossless↔lossy difference. `steps[i]` is
+/// the per-subband deadzone step (finer where synthesis gain amplifies error —
+/// see `quant::steps_for_scale`); the last step repeats if fewer than the subband
+/// count. A `Lossy` morphism: it must never enter the lossless builder (enforced
+/// once the morphisms become `Pass` impls, M5).
+pub fn quantize_deadzone<M: Modality>(t: Transformed<M>, steps: &[i64]) -> Quantized<M> {
+    debug_assert!(!steps.is_empty(), "quantize_deadzone: steps must be non-empty");
+    let per_channel = t
+        .per_channel
+        .iter()
+        .map(|subbands| {
+            subbands
+                .iter()
+                .enumerate()
+                .map(|(i, sub)| quant::quantize(sub, steps[i.min(steps.len() - 1)]))
+                .collect()
+        })
+        .collect();
+    Quantized { per_channel, n_levels: t.n_levels, _m: PhantomData }
+}
+
+/// The (lossy) inverse of [`quantize_deadzone`] — `idx * q` per subband. NOT a
+/// true inverse: `dequantize(quantize(x))` is within `⌈q/2⌉` of `x` (round-to-
+/// nearest), which is the near-lossless bound the property test checks.
+pub fn dequantize_deadzone<M: Modality>(q: Quantized<M>, steps: &[i64]) -> Transformed<M> {
+    debug_assert!(!steps.is_empty(), "dequantize_deadzone: steps must be non-empty");
+    let per_channel = q
+        .per_channel
+        .iter()
+        .map(|subbands| {
+            subbands
+                .iter()
+                .enumerate()
+                .map(|(i, idx)| quant::dequantize(idx, steps[i.min(steps.len() - 1)]))
+                .collect()
+        })
+        .collect();
+    Transformed { per_channel, n_levels: q.n_levels, _m: PhantomData }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +493,67 @@ mod tests {
     #[test]
     fn packet_phantom_is_zero_overhead() {
         assert_eq!(core::mem::size_of::<Packet<Eeg>>(), core::mem::size_of::<Vec<u8>>());
+    }
+
+    #[test]
+    fn lossy_lowering_is_byte_identical_to_the_kernels() {
+        // Both modes first-class: the Mode-aware lowering dispatches faithfully.
+        let sig = synth(4, 2500);
+        let raw = eeg_raw(sig.clone());
+        let views: Vec<&[i64]> = sig.iter().map(|c| c.as_slice()).collect();
+        assert_eq!(
+            lower_encode_mode(&raw, Mode::Lossless, LpcMode::Fixed).unwrap().bytes(),
+            compress_with_mode_views(&views, 0, LpcMode::Fixed).unwrap().as_slice(),
+            "Lossless lowering != kernel"
+        );
+        assert_eq!(
+            lower_encode_mode(&raw, Mode::BoundedMae(8), LpcMode::Fixed).unwrap().bytes(),
+            compress_bounded_mae(&sig, 8, LpcMode::Fixed).unwrap().as_slice(),
+            "BoundedMae lowering != kernel"
+        );
+        assert_eq!(
+            lower_encode_mode(&raw, Mode::TargetBps(4.0), LpcMode::Fixed).unwrap().bytes(),
+            compress_target_bps(&sig, 4.0, LpcMode::Fixed).unwrap().as_slice(),
+            "TargetBps lowering != kernel"
+        );
+    }
+
+    #[test]
+    fn bounded_mae_respects_the_error_bound() {
+        let sig = synth(4, 2500);
+        let raw = eeg_raw(sig.clone());
+        let delta = 8u64;
+        let packet = lower_encode_mode(&raw, Mode::BoundedMae(delta), LpcMode::Fixed).unwrap();
+        let decoded = decompress(packet.bytes()).unwrap();
+        let mut max_err = 0i64;
+        for (c, ch) in sig.iter().enumerate() {
+            for (i, &orig) in ch.iter().enumerate() {
+                max_err = max_err.max((orig - decoded[c][i]).abs());
+            }
+        }
+        assert!(max_err as u64 <= delta, "bounded-MAE δ={delta} violated: max|Δ|={max_err}");
+    }
+
+    #[test]
+    fn deadzone_quantize_round_trips_within_ceil_half_step() {
+        // The Lossy Quantize morphism: dequantize(quantize(x)) within ⌈q/2⌉
+        // (round-to-nearest). Swapping quantize_identity → quantize_deadzone is the
+        // whole lossless↔lossy difference in the ONE pipeline.
+        let raw = eeg_raw(synth(4, 2500));
+        let transformed = transform(&raw);
+        let q = 9i64;
+        let bound = (q + 1) / 2; // ⌈q/2⌉
+        let back = dequantize_deadzone(quantize_deadzone(transformed.clone(), &[q]), &[q]);
+        for (ch_o, ch_b) in transformed.subbands().iter().zip(back.subbands()) {
+            for (sb_o, sb_b) in ch_o.iter().zip(ch_b) {
+                for (i, &o) in sb_o.iter().enumerate() {
+                    assert!(
+                        (o - sb_b[i]).abs() <= bound,
+                        "deadzone error {} > ⌈q/2⌉={bound}",
+                        (o - sb_b[i]).abs()
+                    );
+                }
+            }
+        }
     }
 }
