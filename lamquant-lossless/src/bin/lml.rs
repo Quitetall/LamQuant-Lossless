@@ -326,6 +326,12 @@ SOURCE FORMATS:
         /// the per-file error-tolerant behaviour for scripts.
         #[arg(long = "continue-on-error", conflicts_with = "fail_fast")]
         continue_on_error: bool,
+        /// ADR 0074 Track I — per-dataset ingest manifest (JSON): declares the
+        /// authoritative modality per dataset so encoded files are born-typed in
+        /// the BCS1 header (byte 6), instead of Untyped. Absent or non-matching =
+        /// today's behavior, byte-for-byte. Byte-neutral apart from that one byte.
+        #[arg(long = "modality-manifest")]
+        modality_manifest: Option<PathBuf>,
     },
     /// Decode LML file(s) to raw signal (int32 LE binary)
     Decode {
@@ -1527,6 +1533,7 @@ fn main() {
                 lpc_mode,
                 fail_fast,
                 continue_on_error: _,
+                modality_manifest,
             } => {
                 if let Err(e) = reject_explicit_lossless_with_non_lossless(
                     lossless_mode.as_deref(),
@@ -1663,6 +1670,7 @@ fn main() {
                                             fail_fast,
                                             &include_globs,
                                             &exclude_globs,
+                                            modality_manifest.as_deref(),
                                         )
                                     }
                                 }
@@ -2975,7 +2983,7 @@ fn encode_one_eeglab(
     })
 }
 
-fn encode_one(
+fn encode_one_inner(
     edf_path: &Path,
     lml_path: &Path,
     verify: bool,
@@ -3346,7 +3354,80 @@ fn encode_one(
     })
 }
 
+/// Stamp an authoritative modality `tag` onto a freshly-written single `.lml`
+/// (BCS1) file, in place (ADR 0074 Track I). Provably byte-neutral apart from the
+/// one provenance byte — the `modality_provenance_snapshot` gate pins that typing
+/// changes ONLY header byte 6 (this is the same result as `write_into_with_modality`,
+/// reached without threading the tag through all six format encoders). Fail-closed:
+/// touches only a BCS1 container whose tag byte is still `Untyped` (255), so it can
+/// never corrupt an archive, a legacy file, or an already-typed one.
+fn patch_bcs1_modality_tag(lml_path: &Path, tag: u8) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    const MODALITY_TAG_OFFSET: u64 = 6; // abir::bcs1 header byte 6
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(lml_path)?;
+    let mut head = [0u8; 8];
+    f.read_exact(&mut head)?;
+    // b"BCS1" == abir::BCS1_MAGIC; 255 == abir::Untyped::TAG.
+    if &head[0..4] != b"BCS1" || head[MODALITY_TAG_OFFSET as usize] != 255 {
+        return Ok(()); // not a single born-Untyped BCS1 container — leave it alone
+    }
+    f.seek(SeekFrom::Start(MODALITY_TAG_OFFSET))?;
+    f.write_all(&[tag])?;
+    Ok(())
+}
+
+/// Dispatch encode ([`encode_one_inner`]) then, per the ingest manifest (ADR 0074
+/// Track I), stamp the declared modality on the written `.lml`. `modality_tag =
+/// None` reproduces the born-`Untyped` output byte-for-byte, so an absent or
+/// non-matching manifest is exactly today's behavior.
 #[allow(clippy::too_many_arguments)]
+fn encode_one(
+    edf_path: &Path,
+    lml_path: &Path,
+    verify: bool,
+    cross_validate: bool,
+    noise_bits: u8,
+    window_size: usize,
+    lpc_mode: lamquant_core::lpc::LpcMode,
+    modality_tag: Option<u8>,
+) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
+    let metrics = encode_one_inner(
+        edf_path,
+        lml_path,
+        verify,
+        cross_validate,
+        noise_bits,
+        window_size,
+        lpc_mode,
+    )?;
+    if let Some(tag) = modality_tag {
+        patch_bcs1_modality_tag(lml_path, tag)?;
+    }
+    Ok(metrics)
+}
+
+/// Load the per-dataset ingest manifest from `path` (ADR 0074 Track I), or `None`.
+fn load_ingest_manifest(
+    path: Option<&Path>,
+) -> Result<Option<lamquant_core::source::ingest_manifest::IngestManifest>, Box<dyn std::error::Error + Send + Sync>>
+{
+    match path {
+        Some(p) => {
+            let text = std::fs::read_to_string(p)?;
+            Ok(Some(lamquant_core::source::ingest_manifest::IngestManifest::from_json(&text)?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The manifest-declared modality tag for `path`, or `None` (→ born-Untyped).
+fn modality_tag_for(
+    manifest: Option<&lamquant_core::source::ingest_manifest::IngestManifest>,
+    path: &Path,
+) -> Option<u8> {
+    manifest.and_then(|m| m.resolve(path)).map(|d| d.tag())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_encode(
     input: &Path,
@@ -3365,7 +3446,11 @@ fn cmd_encode(
     fail_fast: bool,
     include_globs: &[String],
     exclude_globs: &[String],
+    modality_manifest: Option<&Path>,
 ) -> R {
+    // ADR 0074 Track I: the per-dataset modality manifest (born-typed ingest).
+    // Absent / non-matching → born-Untyped, byte-for-byte today's output.
+    let ingest_manifest = load_ingest_manifest(modality_manifest)?;
     // v1.2 I — compile `--include` / `--exclude` glob sets once
     // upfront. Empty include list = include everything (standard
     // tar/gitignore semantics).
@@ -3619,6 +3704,7 @@ fn cmd_encode(
                 noise_bits,
                 window_size,
                 lpc_mode,
+                modality_tag_for(ingest_manifest.as_ref(), &edfs[0]),
             )?
         } else {
             // Default: per-EDF `.lma` bundling. Stage to a tempdir so
@@ -3638,6 +3724,7 @@ fn cmd_encode(
                 noise_bits,
                 window_size,
                 lpc_mode,
+                modality_tag_for(ingest_manifest.as_ref(), &edfs[0]),
             )?;
             // The user's `-o` is the final `.lma` path. Pack the tempdir
             // contents (this EDF's .lml + its sibling sidecars) into it.
@@ -3883,6 +3970,7 @@ fn cmd_encode(
                     noise_bits,
                     window_size,
                     lpc_mode,
+                    modality_tag_for(ingest_manifest.as_ref(), edf_path),
                 )
                 .and_then(|m| {
                     if let Some(p) = lma_out.parent() {
@@ -3908,6 +3996,7 @@ fn cmd_encode(
                     noise_bits,
                     window_size,
                     lpc_mode,
+                    modality_tag_for(ingest_manifest.as_ref(), edf_path),
                 );
                 (r, out.clone())
             };
@@ -5955,6 +6044,7 @@ fn roundtrip_one(edf_path: &Path) -> RoundtripResult {
         0,     // noise_bits — 0 = lossless
         2500,  // window_size — match the CLI default
         lamquant_core::lpc::LpcMode::default(),
+        None,  // modality_tag — throwaway verify re-encode, provenance irrelevant
     ) {
         return make_err("ERROR", format!("encode: {}", e));
     }
