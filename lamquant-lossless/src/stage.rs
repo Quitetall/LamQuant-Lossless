@@ -290,6 +290,12 @@ pub fn entropy<M: Modality>(r: Residuals<M>) -> LmlResult<Coded<M>> {
         .per_channel
         .first()
         .map_or(0, |subs| subs.iter().map(|sb| sb.residual.len()).sum());
+    debug_assert!(
+        r.per_channel
+            .iter()
+            .all(|subs| subs.iter().map(|sb| sb.residual.len()).sum::<usize>() == t),
+        "entropy: channels disagree on the derived window length t={t}"
+    );
     let mut per_channel = Vec::with_capacity(r.per_channel.len());
     for subbands in &r.per_channel {
         let mut meta = Vec::new();
@@ -425,6 +431,43 @@ pub fn dequantize_deadzone<M: Modality>(q: Quantized<M>, steps: &[i64]) -> Trans
         })
         .collect();
     Transformed { per_channel, n_levels: q.n_levels, _m: PhantomData }
+}
+
+// ─── The reversible DSP inverses (Transform⁻¹, Predict⁻¹) ─────────────────────
+//
+// These are the `unprocess` of the two morphisms that DO the reversible integer
+// math; each delegates to the kernel's own inverse primitive so it can never drift
+// from the forward transform. (The serialization inverses — Entropy⁻¹ Golomb-decode
+// and Assemble⁻¹ packet-parse — are the kernel's tested `decompress`; a typed
+// reproduction of those is a follow-up. `lower_decode` already gives the full
+// Packet→Raw decode via the kernel.)
+
+/// **Transform⁻¹** `Transformed → per-channel samples` — inverse lifting
+/// (delegates `quant::inverse_for_levels`). `inverse_transform(transform(raw))`
+/// recovers the samples EXACTLY (5/3 integer lifting is bit-exact reversible).
+pub fn inverse_transform<M: Modality>(t: &Transformed<M>) -> Vec<Vec<i64>> {
+    t.per_channel
+        .iter()
+        .map(|subs| quant::inverse_for_levels(t.n_levels, subs))
+        .collect()
+}
+
+/// **Predict⁻¹** `Residuals → Quantized` — LPC synthesis per subband (delegates
+/// `lpc::synthesize` with the carried coeffs+order). `unpredict(predict(q))`
+/// recovers the quantized subbands EXACTLY — the coeffs+order carried in
+/// `Residuals` are precisely what makes `predict` reversible.
+pub fn unpredict<M: Modality>(r: Residuals<M>) -> Quantized<M> {
+    let per_channel = r
+        .per_channel
+        .iter()
+        .map(|subbands| {
+            subbands
+                .iter()
+                .map(|sb| lpc::synthesize(&sb.residual, &sb.coeffs, sb.order, BIAS_CTX))
+                .collect()
+        })
+        .collect();
+    Quantized { per_channel, n_levels: r.n_levels, _m: PhantomData }
 }
 
 // ─── The morphisms as `Pass` impls — the compile-time lossless↔lossy firewall ──
@@ -670,6 +713,27 @@ mod tests {
             let fused = compress_with_mode_views(&views, 0, mode).unwrap();
             assert_eq!(via_pipeline.bytes(), via_chain.bytes(), "pipeline != chain ({mode:?})");
             assert_eq!(via_pipeline.bytes(), fused.as_slice(), "pipeline != fused ({mode:?})");
+        }
+    }
+
+    #[test]
+    fn dsp_morphisms_are_reversible() {
+        // Closes the "reversibility declared, not proven" hole for the DSP
+        // morphisms: unprocess(process(x)) == x, checked directly on the stage data.
+        let raw = eeg_raw(synth(4, 2500));
+        let n = raw.abir().n_samples();
+        let orig: Vec<Vec<i64>> =
+            raw.abir().window_views(0, n).iter().map(|c| c.as_ref().to_vec()).collect();
+
+        // Transform⁻¹ ∘ Transform == identity (on samples).
+        assert_eq!(inverse_transform(&transform(&raw)), orig, "inverse_transform ∘ transform ≠ id");
+
+        // Predict⁻¹ ∘ Predict == identity (on the quantized subbands), all modes.
+        for mode in [LpcMode::Fixed, LpcMode::Adaptive { max_order: 16 }, LpcMode::Anytime { max_order: 16, deadline: None }] {
+            let q = quantize_identity(transform(&raw));
+            let before = q.per_channel.clone();
+            let after = unpredict(predict(q, mode));
+            assert_eq!(after.per_channel, before, "unpredict ∘ predict ≠ id ({mode:?})");
         }
     }
 
