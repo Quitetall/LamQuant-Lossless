@@ -283,6 +283,25 @@ impl Abir<Untyped> {
         }
     }
 
+    /// Stamp an authoritative `Manual` modality TAG on the wire provenance WITHOUT
+    /// changing the compile-time modality type (ADR 0074 Track I).
+    ///
+    /// This is for the modality-blind ENCODER path: the CLI writes bytes, and the
+    /// born-typed BCS1 header (byte 6 = this tag, byte 7 = `Manual`) is what a typed
+    /// reader (`PyAbir::eeg()`, training) re-verifies at its boundary. The encoder's
+    /// own compile-time `M` is irrelevant there — the `Abir` is serialized, never
+    /// consumed as `Abir<M>` — so a runtime tag is the honest, minimal thing.
+    /// Prefer [`into_modality`](Abir::into_modality) wherever the compile-time TYPE
+    /// carries the modality (typed consumers, `Codec<M>`). Byte-neutral: only the
+    /// header provenance byte changes (proven by `modality_provenance_snapshot`).
+    pub fn with_manual_modality_tag(mut self, tag: u8) -> Self {
+        self.prov = ModalityProvenance {
+            source: ModalitySource::Manual,
+            tag,
+        };
+        self
+    }
+
     /// VERIFIED promotion (ADR 0069 S3b): promote to `Abir<M>` only if the
     /// RECORDED inference (`self.prov.tag`, set by
     /// [`with_inferred_modality`](Abir::with_inferred_modality) or a prior

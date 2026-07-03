@@ -1385,7 +1385,40 @@ pub fn write_into<W: std::io::Write>(
     metadata_json: &str,
     lpc_mode: LpcMode,
 ) -> LmlResult<ContainerStats> {
+    write_into_with_modality(
+        sink,
+        signal,
+        sample_rate,
+        window_size,
+        noise_bits,
+        metadata_json,
+        lpc_mode,
+        None,
+    )
+}
+
+/// Like [`write_into`] but stamps an authoritative `Manual` modality TAG on the
+/// BCS1 header (ADR 0074 Track I) — the born-typed ingest path. `modality_tag =
+/// Some(t)` sets header byte 6 to `t` (source = `Manual`); `None` reproduces
+/// today's born-`Untyped` bytes EXACTLY (the wrapper above). Byte-neutral apart
+/// from the one provenance byte — proven by `modality_provenance_snapshot` — so it
+/// applies uniformly to a single `.lml` and to every `.lma` archive entry.
+#[allow(clippy::too_many_arguments)]
+pub fn write_into_with_modality<W: std::io::Write>(
+    sink: &mut W,
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    noise_bits: u8,
+    metadata_json: &str,
+    lpc_mode: LpcMode,
+    modality_tag: Option<u8>,
+) -> LmlResult<ContainerStats> {
     let abir = Abir::from_channels_i64(signal.to_vec(), sample_rate);
+    let abir = match modality_tag {
+        Some(tag) => abir.with_manual_modality_tag(tag),
+        None => abir,
+    };
     let mut cw = CountingWriter {
         inner: sink,
         count: 0,

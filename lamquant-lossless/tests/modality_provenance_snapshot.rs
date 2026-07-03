@@ -59,3 +59,34 @@ fn modality_typing_touches_only_header_byte_6_and_never_the_payload() {
     assert_eq!(&b_eeg[40..], &b_untyped[40..], "payload must be byte-identical regardless of modality");
     assert_eq!(&b_ecg[40..], &b_untyped[40..], "payload must be byte-identical regardless of modality");
 }
+
+#[test]
+fn write_into_with_modality_touches_only_the_provenance_byte_and_none_is_identity() {
+    use lamquant_core::abir_container::{write_into, write_into_with_modality};
+
+    let sig = synth();
+    let mut b_untyped = Vec::new();
+    write_into(&mut b_untyped, &sig, 250.0, 256, 0, "{}", LpcMode::Fixed).unwrap();
+    let mut b_eeg = Vec::new();
+    write_into_with_modality(&mut b_eeg, &sig, 250.0, 256, 0, "{}", LpcMode::Fixed, Some(Eeg::TAG))
+        .unwrap();
+
+    // The CLI ingest path (write_into) is born-Untyped; the typed variant changes
+    // ONLY byte 6 (the tag), leaving byte 7 (Manual) and everything else identical.
+    assert_eq!(b_untyped[6], Untyped::TAG);
+    assert_eq!(b_eeg[6], Eeg::TAG);
+    assert_eq!(b_untyped[7], b_eeg[7], "source byte (Manual) unchanged");
+    assert_eq!(b_eeg.len(), b_untyped.len());
+    for i in 0..b_untyped.len() {
+        if i == 6 {
+            continue;
+        }
+        assert_eq!(b_eeg[i], b_untyped[i], "write_into_with_modality changed byte {i} (only 6 allowed)");
+    }
+
+    // `None` must reproduce `write_into` EXACTLY (back-compat — the whole existing
+    // corpus / gate suite depends on this).
+    let mut b_none = Vec::new();
+    write_into_with_modality(&mut b_none, &sig, 250.0, 256, 0, "{}", LpcMode::Fixed, None).unwrap();
+    assert_eq!(b_none, b_untyped, "write_into_with_modality(None) must equal write_into");
+}
