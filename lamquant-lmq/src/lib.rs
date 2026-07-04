@@ -24,4 +24,5 @@ extern crate alloc;
 
 pub mod backend;
 pub mod body;
+pub mod rust_backend;
 pub mod shell;
