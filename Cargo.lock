@@ -3353,6 +3353,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lamquant-lmq"
+version = "0.0.1"
+dependencies = [
+ "abir",
+ "lamquant-common",
+ "lamquant-lml-mcu",
+]
+
+[[package]]
 name = "lamquant-ops"
 version = "0.1.0"
 dependencies = [

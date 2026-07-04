@@ -31,9 +31,19 @@ pub enum BodyError {
     BadVersion(u8),
     /// Empty / zero-sum frequency model — no valid rANS alphabet.
     EmptyModel,
+    /// Malformed frequency model from an untrusted body: a negative count, or a
+    /// total that exceeds [`MAX_MODEL_TOTAL`] (would drive the `cum2sym`
+    /// allocation huge / overflow the cumulative `i32`). Fail-closed.
+    BadModel,
     /// The entropy coder rejected the stream/model.
     Rans,
 }
+
+/// Upper bound on the rANS total (Σ counts). The real FSQ model normalizes to
+/// ~4096; `1 << 20` is a generous ceiling that (a) bounds the `cum2sym`
+/// allocation against a crafted body and (b) keeps the cumulative sum well under
+/// `i32::MAX`, so the `start` table can never wrap.
+pub const MAX_MODEL_TOTAL: u64 = 1 << 20;
 
 /// Frame FSQ `tokens` (symbols in `[0, counts.len())`), the per-timestep
 /// `schedule`, and the frequency `counts` (the rANS model) into a self-describing
@@ -42,7 +52,9 @@ pub fn encode_body(tokens: &[i64], schedule: &[u8], counts: &[i32]) -> Result<Ve
     let (freq, start, m) = build_tables(counts)?;
     let rans_bytes = rans::encode(tokens, &freq, &start, m).map_err(|_| BodyError::Rans)?;
 
-    let mut out = Vec::with_capacity(11 + counts.len() * 4 + schedule.len() + rans_bytes.len());
+    // Fixed prefix is 15 bytes (version 1 + n_symbols 4 + alphabet 2 + sched_len
+    // 4 + rans_len 4) + the counts + schedule + rANS.
+    let mut out = Vec::with_capacity(15 + counts.len() * 4 + schedule.len() + rans_bytes.len());
     out.push(LMQ_BODY_VERSION);
     out.extend_from_slice(&(tokens.len() as u32).to_le_bytes());
     out.extend_from_slice(&(counts.len() as u16).to_le_bytes());
@@ -97,11 +109,25 @@ fn build_tables(counts: &[i32]) -> Result<(Vec<i32>, Vec<i32>, u64), BodyError> 
     let mut start = vec![0i32; counts.len()];
     let mut acc = 0i64;
     for (i, &c) in counts.iter().enumerate() {
+        // Untrusted on decode: reject a negative count (from a u32 > i32::MAX
+        // cast) — it would make `start`/`cum2sym` slots negative and panic.
+        if c < 0 {
+            return Err(BodyError::BadModel);
+        }
+        // Cap BEFORE the `as i32` so the cumulative `start` can never wrap, and
+        // the eventual `cum2sym` allocation stays bounded (MAX_MODEL_TOTAL <<
+        // i32::MAX).
+        if acc > MAX_MODEL_TOTAL as i64 {
+            return Err(BodyError::BadModel);
+        }
         start[i] = acc as i32;
         acc += c as i64;
     }
-    if acc <= 0 {
+    if acc == 0 {
         return Err(BodyError::EmptyModel);
+    }
+    if acc as u64 > MAX_MODEL_TOTAL {
+        return Err(BodyError::BadModel);
     }
     Ok((freq, start, acc as u64))
 }
@@ -167,5 +193,30 @@ mod tests {
     #[test]
     fn empty_model_is_rejected() {
         assert_eq!(encode_body(&[0], &[], &[]), Err(BodyError::EmptyModel));
+    }
+
+    #[test]
+    fn crafted_body_model_is_fail_closed_not_oom_or_panic() {
+        // Hand-craft a body with a 1-symbol alphabet whose count is a huge u32
+        // (0xFFFF_FFFF → -1 as i32, AND drives the total absurd). decode_body must
+        // reject it via BadModel — never allocate ~16 GB for cum2sym, never panic.
+        let mut body = Vec::new();
+        body.push(LMQ_BODY_VERSION);
+        body.extend_from_slice(&1u32.to_le_bytes()); // n_symbols
+        body.extend_from_slice(&1u16.to_le_bytes()); // alphabet = 1
+        body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // count = -1 as i32
+        body.extend_from_slice(&0u32.to_le_bytes()); // sched_len
+        body.extend_from_slice(&0u32.to_le_bytes()); // rans_len
+        assert_eq!(decode_body(&body), Err(BodyError::BadModel));
+
+        // A count just over the cap (positive) is also rejected before allocating.
+        let mut big = Vec::new();
+        big.push(LMQ_BODY_VERSION);
+        big.extend_from_slice(&1u32.to_le_bytes());
+        big.extend_from_slice(&1u16.to_le_bytes());
+        big.extend_from_slice(&((MAX_MODEL_TOTAL as u32) + 1).to_le_bytes());
+        big.extend_from_slice(&0u32.to_le_bytes());
+        big.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(decode_body(&big), Err(BodyError::BadModel));
     }
 }
