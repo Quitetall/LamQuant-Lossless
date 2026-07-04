@@ -23,7 +23,7 @@ use core::marker::PhantomData;
 
 use abir::{Abir, Modality, ModalitySource, Mode};
 
-use crate::error::LmlResult;
+use crate::error::{LmlError, LmlResult};
 use crate::golomb;
 use crate::lml::{
     assemble_lml_packet, compress_bounded_mae, compress_target_bps, compress_with_mode_views,
@@ -607,6 +607,56 @@ impl<M: Modality> Pass for AssemblePass<M> {
     const NAME: &'static str = "assemble";
 }
 
+/// **The neural codec as a WIDE `Lossy` DAG morphism** (ADR 0074 Track N): a single
+/// `Raw<M> → Packet<M>` pass spanning Transform+Quantize+Predict+Entropy+Assemble —
+/// the whole lossless chain is bypassed, because a neural codec is NOT a composition
+/// of the lossless morphisms. It delegates to the [`lamquant_lmq`] shell over a
+/// swappable [`NeuralBackend`](lamquant_lmq::backend::NeuralBackend); the produced
+/// `Packet` carries the lossy-signed BCS1-Lmq bytes.
+///
+/// `Rev = Lossy`, so — exactly like [`DeadzoneQuantizePass`] — it can NEVER be wired
+/// into the reversible-only [`LmlPipeline`]. The firewall is FREE (there is no
+/// `impl Pass for Chain` when a side is `Lossy`):
+///
+/// ```compile_fail
+/// use lamquant_core::stage::NeuralEncodePass;
+/// use lamquant_core::pass::LmlPipeline;
+/// use lamquant_lmq::backend::StubBackend;
+/// let pass = NeuralEncodePass::<abir::Eeg>::new(Box::new(StubBackend::default()));
+/// let _ = LmlPipeline::start(pass); // Rev = Lossy → no impl → compile error
+/// ```
+pub struct NeuralEncodePass<M: Modality> {
+    backend: Box<dyn lamquant_lmq::backend::NeuralBackend>,
+    _m: PhantomData<M>,
+}
+
+impl<M: Modality> NeuralEncodePass<M> {
+    /// Author the neural pass over a backend (Python now, Rust later — no wire change).
+    pub fn new(backend: Box<dyn lamquant_lmq::backend::NeuralBackend>) -> Self {
+        Self { backend, _m: PhantomData }
+    }
+}
+
+impl<M: Modality> Stage for NeuralEncodePass<M> {
+    type Input = Raw<M>;
+    type Output = Packet<M>;
+    fn process(&mut self, raw: Raw<M>) -> LmlResult<Packet<M>> {
+        // Reuses `InvalidHeader` for a host-layer codec-execution error — the same
+        // established pattern as `pass.rs` (PassRegistry::build / run_in_lml): the
+        // `LmlError` enum lives in the mcu kernel crate and isn't `#[non_exhaustive]`,
+        // so a dedicated `NeuralEncode`/`Backend` variant can't be added without
+        // touching that crate + every exhaustive match. The message stays explicit.
+        let bytes = lamquant_lmq::shell::encode(raw.abir(), &*self.backend)
+            .map_err(|e| LmlError::InvalidHeader(std::format!("neural encode failed: {e:?}")))?;
+        Ok(Packet { bytes, _m: PhantomData })
+    }
+}
+
+impl<M: Modality> Pass for NeuralEncodePass<M> {
+    type Rev = Lossy;
+    const NAME: &'static str = "neural_encode";
+}
+
 /// The lossless codec composed through the **reversible-only** [`LmlPipeline`] —
 /// the SAME five morphisms as [`encode_lossless`], but now a `Lossy` pass anywhere
 /// in the chain is a compile error. Byte-identical to `encode_lossless`.
@@ -638,6 +688,21 @@ mod tests {
         (0..n_ch)
             .map(|c| (0..t).map(|i| (((i * 3 + c * 7) % 512) as i64 - 256) * 40).collect())
             .collect()
+    }
+
+    #[test]
+    fn neural_encode_pass_produces_a_lossy_signed_packet() {
+        // ADR 0074 N1: the neural codec authored as a Lossy DAG pass. Its Packet
+        // carries the lossy-signed BCS1-Lmq wire (equal to the shell's own output).
+        use lamquant_lmq::backend::StubBackend;
+        let raw = eeg_raw(synth(4, 500));
+        let expect =
+            lamquant_lmq::shell::encode(raw.abir(), &StubBackend::default()).unwrap();
+        let mut pass = NeuralEncodePass::<Eeg>::new(Box::new(StubBackend::default()));
+        let packet = pass.process(raw).unwrap();
+        assert_eq!(&packet.bytes[0..4], b"BCS1");
+        assert_eq!(packet.bytes[8], abir::CODEC_LMQ_FSQ, "lossy-signed neural descriptor");
+        assert_eq!(packet.bytes, expect, "pass output == shell output");
     }
 
     fn eeg_raw(sig: Vec<Vec<i64>>) -> Raw<Eeg> {

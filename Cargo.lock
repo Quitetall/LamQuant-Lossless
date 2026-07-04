@@ -3274,6 +3274,7 @@ dependencies = [
  "lamquant-lml-legacy",
  "lamquant-lml-mcu",
  "lamquant-lml-optimum",
+ "lamquant-lmq",
  "lamquant-ops",
  "lamquant-tui",
  "loom",

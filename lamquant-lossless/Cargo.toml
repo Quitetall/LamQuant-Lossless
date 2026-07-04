@@ -138,6 +138,8 @@ archive = [
     "lamquant-lml-legacy/legacy-decode",
     # Desktop ships the LMO encoder as standard (ADR 0052).
     "lamquant-lml-optimum/encode",
+    "dep:lamquant-lmq",
+    "lamquant-lmq/std",
     "lamquant-common/host",
     "base64/std",
     "sha2/std",
@@ -263,6 +265,9 @@ abir = { version = "0.1.0", path = "../crates/abir", default-features = false, o
 # pulls core's RD-search `archive` path that LMO encode needs). Re-exported as
 # `lamquant_core::optimum`.
 lamquant-lml-optimum = { version = "0.0.1", path = "../lamquant-lml-optimum", default-features = false, features = ["decode"] }
+# ADR 0074 Track N: the neural (lossy) codec shell — the NeuralEncodePass Lossy DAG
+# morphism in stage.rs delegates to it. Host-only (archive).
+lamquant-lmq = { version = "0.0.1", path = "../lamquant-lmq", default-features = false, optional = true }
 # ADR 0056: the Desktop tier (host fast path). Optional + enabled by `archive`
 # so the no_std facade build stays no_std (desktop is std/rayon). Re-exported as
 # `lamquant_core::desktop`. The facade already reaches the parallel path via
