@@ -39,8 +39,8 @@ pub use reversibility::{Lossy, Reversibility, Reversible};
 pub mod bcs1;
 pub use bcs1::{
     Bcs1Header, Bcs1ParseError, CodecDescriptor, BCS1_FLAG_HAS_FOOTER, BCS1_HEADER_LEN,
-    BCS1_MAGIC, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LMO_97, CODEC_LMO_LOSSLESS,
-    CODEC_LML_53,
+    BCS1_MAGIC, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53, CODEC_LMO_97,
+    CODEC_LMO_LOSSLESS, CODEC_LMQ_FSQ,
 };
 
 /// Which deterministic wire format a stream is, decided by its leading magic.

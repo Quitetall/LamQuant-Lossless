@@ -74,11 +74,16 @@ pub const CODEC_LMO_97: u8 = 1;
 /// `codec_descriptor` = the Optimum LOSSLESS body (cross-channel + `lml`).
 /// Mirrors LMO's `transform_id=2`. Deferred — see [`CODEC_LMO_97`].
 pub const CODEC_LMO_LOSSLESS: u8 = 2;
-// `0x10..=0xFF` is reserved for the LMQ/neural descriptor family (deferred,
-// ADR 0069). No constant is defined for it yet — an unrecognized
-// `codec_descriptor` byte in that range parses fine (the header is still
-// well-formed) but `CodecDescriptor::from_u8` returns `None`, and the BCS1
-// reader refuses to DECODE it (still no silent mis-decode).
+/// `codec_descriptor` = the LMQ neural body: FSQ tokens entropy-coded with rANS
+/// (ADR 0074 Track N). The first member of the `0x10..=0xFF` LMQ/neural family.
+/// PERMANENTLY LOSSY: a BCS1 file carrying this descriptor is refused fail-closed
+/// by every lossless reader (`bcs1_gate_decodable` accepts only `CODEC_LML_53`),
+/// so it can never be silently mis-decoded as integer samples.
+pub const CODEC_LMQ_FSQ: u8 = 0x10;
+// `0x11..=0xFF` stays reserved for the rest of the LMQ/neural descriptor family
+// (future body variants). An unrecognized `codec_descriptor` byte in that range
+// parses fine (the header is well-formed) but `CodecDescriptor::from_u8` returns
+// `None`, and the reader refuses to DECODE it (still no silent mis-decode).
 
 /// Which body format `codec_descriptor` names. Values are numerically
 /// identical to LMO's `transform_id` (see module docs) so a future container
@@ -94,6 +99,10 @@ pub enum CodecDescriptor {
     /// `=2`. Optimum lossless body (cross-channel + `lml`). Parseable, not
     /// yet decodable via the BCS1 dispatch (deferred).
     LmoLossless,
+    /// `=0x10`. The LMQ neural body (FSQ tokens → rANS, ADR 0074 Track N).
+    /// Recognized so the reader can name + refuse it fail-closed; permanently
+    /// lossy, never decoded by a lossless reader.
+    LmqFsq,
 }
 
 impl CodecDescriptor {
@@ -103,17 +112,20 @@ impl CodecDescriptor {
             Self::Lml53 => CODEC_LML_53,
             Self::Lmo97 => CODEC_LMO_97,
             Self::LmoLossless => CODEC_LMO_LOSSLESS,
+            Self::LmqFsq => CODEC_LMQ_FSQ,
         }
     }
 
     /// Parse a wire byte into a known descriptor. `None` for anything
-    /// unrecognized (including the reserved `0x10+` LMQ range) — callers
-    /// must treat `None` as "cannot decode this body", never as CODEC_LML_53.
+    /// unrecognized (the still-reserved `0x11+` LMQ range) — callers must treat
+    /// `None` as "cannot decode this body", never as CODEC_LML_53. Note a
+    /// recognized `LmqFsq` is still refused by `bcs1_gate_decodable` (lossy).
     pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             CODEC_LML_53 => Some(Self::Lml53),
             CODEC_LMO_97 => Some(Self::Lmo97),
             CODEC_LMO_LOSSLESS => Some(Self::LmoLossless),
+            CODEC_LMQ_FSQ => Some(Self::LmqFsq),
             _ => None,
         }
     }
@@ -345,9 +357,13 @@ mod tests {
     }
 
     #[test]
-    fn codec_descriptor_from_u8_rejects_unknown_and_lmq_reserved_range() {
+    fn codec_descriptor_recognizes_lmq_fsq_and_rejects_the_rest() {
         assert_eq!(CodecDescriptor::from_u8(3), None);
-        assert_eq!(CodecDescriptor::from_u8(0x10), None);
+        // 0x10 is now the recognized LMQ neural descriptor (ADR 0074 Track N).
+        assert_eq!(CodecDescriptor::from_u8(CODEC_LMQ_FSQ), Some(CodecDescriptor::LmqFsq));
+        assert_eq!(CodecDescriptor::LmqFsq.to_u8(), 0x10);
+        // 0x11..=0xFF stays reserved (unrecognized).
+        assert_eq!(CodecDescriptor::from_u8(0x11), None);
         assert_eq!(CodecDescriptor::from_u8(0xFF), None);
     }
 
