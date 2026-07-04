@@ -3360,6 +3360,7 @@ dependencies = [
  "abir",
  "lamquant-common",
  "lamquant-lml-mcu",
+ "serde_json",
 ]
 
 [[package]]

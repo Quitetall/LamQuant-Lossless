@@ -13,8 +13,13 @@ crate-type = ["rlib"]
 default = ["std"]
 # Host build (default). The no_std firmware floor is `--no-default-features`.
 std = ["lamquant-lml-mcu/std", "abir/std", "lamquant-common/std"]
+# ADR 0074 N2: the PyBackend subprocess bridge (drives the Python SubbandCodec).
+# Host-only — needs std (process) + a JSON protocol. NOT part of `default`, so a
+# bare host build / firmware never pulls in the Python path.
+python = ["std", "dep:serde_json"]
 
 [dependencies]
 abir = { path = "../crates/abir", default-features = false }
 lamquant-lml-mcu = { path = "../lamquant-lml-mcu", default-features = false }
 lamquant-common = { path = "../crates/lamquant-common", default-features = false }
+serde_json = { version = "1", optional = true }
