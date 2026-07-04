@@ -41,7 +41,7 @@ fn lmq_body_wire_is_byte_stable_and_roundtrips() {
         "BCS1-Lmq body wire drifted from the frozen golden — if intended, regen \
          (--nocapture prints the new bytes); otherwise the neural wire broke."
     );
-    let (dt, ds) = decode_body(&body).expect("decode_body");
+    let (dt, ds, _alpha) = decode_body(&body).expect("decode_body");
     assert_eq!(dt, TOKENS, "tokens must round-trip");
     assert_eq!(ds, SCHEDULE, "schedule must round-trip");
 }

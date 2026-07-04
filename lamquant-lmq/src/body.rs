@@ -68,10 +68,11 @@ pub fn encode_body(tokens: &[i64], schedule: &[u8], counts: &[i32]) -> Result<Ve
     Ok(out)
 }
 
-/// Parse a neural body back into `(tokens, schedule)`. Standalone: the model is
-/// rebuilt from the in-band `counts`. Every length field is bounds-checked
-/// (no panic on a crafted body).
-pub fn decode_body(buf: &[u8]) -> Result<(Vec<i64>, Vec<u8>), BodyError> {
+/// Parse a neural body back into `(tokens, schedule, alphabet)`. Standalone: the
+/// model is rebuilt from the in-band `counts` (`alphabet == counts.len()`, which
+/// the shell needs to reconstruct `NeuralTokens`). Every length field is
+/// bounds-checked (no panic on a crafted body).
+pub fn decode_body(buf: &[u8]) -> Result<(Vec<i64>, Vec<u8>, u16), BodyError> {
     let mut off = 0usize;
     let version = *buf.get(off).ok_or(BodyError::Truncated)?;
     off += 1;
@@ -93,7 +94,7 @@ pub fn decode_body(buf: &[u8]) -> Result<(Vec<i64>, Vec<u8>), BodyError> {
     let cum2sym = build_cum2sym(&freq, &start, m);
     let tokens =
         rans::decode(rans_data, &freq, &start, &cum2sym, m, n_symbols).map_err(|_| BodyError::Rans)?;
-    Ok((tokens, schedule))
+    Ok((tokens, schedule, alphabet as u16))
 }
 
 // ── Model tables (the caller-supplied rANS model; `rans`'s own helpers are
@@ -176,9 +177,10 @@ mod tests {
         let counts: Vec<i32> = vec![3, 3, 3, 3, 4]; // per-symbol freq, Σ = 16
         let body = encode_body(&tokens, &schedule, &counts).unwrap();
         assert_eq!(body[0], LMQ_BODY_VERSION);
-        let (dt, ds) = decode_body(&body).unwrap();
+        let (dt, ds, alpha) = decode_body(&body).unwrap();
         assert_eq!(dt, tokens, "tokens must round-trip through rANS");
         assert_eq!(ds, schedule, "schedule must round-trip verbatim");
+        assert_eq!(alpha, 5, "alphabet (= counts.len()) must round-trip");
     }
 
     #[test]
