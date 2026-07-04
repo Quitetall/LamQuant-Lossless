@@ -17,6 +17,8 @@ use std::path::Path;
 use abir::{Accel, Ecg, Ecog, Eeg, Emg, Eog, Ieeg, Modality, Other, Resp, Seeg, Untyped};
 use serde::Deserialize;
 
+use super::descriptor::FormatDescriptor;
+
 /// A modality declaration — maps 1:1 to the sealed [`abir::Modality`] markers
 /// (serde `lowercase`, matching `Modality::NAME`: `eeg`, `ieeg`, `ecg`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -63,6 +65,13 @@ pub struct DatasetEntry {
     pub match_substr: String,
     /// The authoritative modality (stamped `ModalitySource::Manual` at ingest).
     pub modality: ModalityDecl,
+    /// Optional (ADR 0074 Track I / I3): parse this dataset with a declared
+    /// [`FormatDescriptor`] — a data-driven reader for a custom fixed-layout
+    /// binary — INSTEAD of the file-extension dispatch. Absent = extension
+    /// dispatch (EDF/BrainVision/RAW/CNT/…), today's behavior. This is what
+    /// finally wires the proven-but-unwired `FormatDescriptor` into production.
+    #[serde(default)]
+    pub descriptor: Option<FormatDescriptor>,
 }
 
 /// The only manifest schema version this build understands.
@@ -111,15 +120,18 @@ impl IngestManifest {
         Ok(m)
     }
 
-    /// Resolve a path to its declared modality (first match wins). `None` means no
-    /// rule matched → the caller keeps today's behavior (born `Untyped`), so an
-    /// absent or non-matching manifest is exactly byte-for-byte the current path.
-    pub fn resolve(&self, path: &Path) -> Option<ModalityDecl> {
+    /// Resolve a path to its full ingest rule (first match wins). `None` means no
+    /// rule matched → the caller keeps today's behavior (born `Untyped`, extension
+    /// dispatch), so an absent or non-matching manifest is byte-for-byte the
+    /// current path.
+    pub fn resolve_entry(&self, path: &Path) -> Option<&DatasetEntry> {
         let p = path.to_string_lossy();
-        self.datasets
-            .iter()
-            .find(|d| p.contains(&d.match_substr))
-            .map(|d| d.modality)
+        self.datasets.iter().find(|d| p.contains(&d.match_substr))
+    }
+
+    /// Resolve a path to its declared modality (first match wins).
+    pub fn resolve(&self, path: &Path) -> Option<ModalityDecl> {
+        self.resolve_entry(path).map(|d| d.modality)
     }
 }
 
@@ -144,6 +156,31 @@ mod tests {
         assert_eq!(ModalityDecl::Eeg.tag(), Eeg::TAG);
         assert_eq!(ModalityDecl::Ecg.tag(), Ecg::TAG);
         assert_eq!(ModalityDecl::Untyped.tag(), Untyped::TAG);
+    }
+
+    #[test]
+    fn resolves_a_dataset_with_a_format_descriptor() {
+        // I3: a dataset can declare a FormatDescriptor (custom binary layout).
+        let json = r#"{
+            "version": 1,
+            "datasets": [
+                { "match": "myraw", "modality": "eeg",
+                  "descriptor": {
+                      "format_name": "RAWBIN", "dtype": "I16", "endian": "Little",
+                      "orientation": "Multiplexed",
+                      "channel_count": {"Fixed": 2}, "sample_rate": {"Fixed": 256.0}
+                  } }
+            ]
+        }"#;
+        let m = IngestManifest::from_json(json).unwrap();
+        let entry = m.resolve_entry(Path::new("/data/myraw/rec.bin")).expect("match");
+        assert_eq!(entry.modality, ModalityDecl::Eeg);
+        assert_eq!(entry.descriptor.as_ref().expect("descriptor present").format_name, "RAWBIN");
+        // A dataset WITHOUT a descriptor → None (falls to the extension dispatch).
+        let plain =
+            IngestManifest::from_json(r#"{"version":1,"datasets":[{"match":"x","modality":"ecg"}]}"#)
+                .unwrap();
+        assert!(plain.resolve_entry(Path::new("/x/y")).unwrap().descriptor.is_none());
     }
 
     #[test]

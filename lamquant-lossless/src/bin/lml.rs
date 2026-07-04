@@ -3376,10 +3376,14 @@ fn patch_bcs1_modality_tag(lml_path: &Path, tag: u8) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Dispatch encode ([`encode_one_inner`]) then, per the ingest manifest (ADR 0074
-/// Track I), stamp the declared modality on the written `.lml`. `modality_tag =
-/// None` reproduces the born-`Untyped` output byte-for-byte, so an absent or
-/// non-matching manifest is exactly today's behavior.
+/// Dispatch encode per the ingest manifest rule (ADR 0074 Track I). With no rule
+/// (`ingest = None`) this reproduces the born-`Untyped`, extension-dispatched
+/// output byte-for-byte. With a rule:
+///   * a declared [`FormatDescriptor`](lamquant_core::source::FormatDescriptor)
+///     (I3) parses the file data-driven via [`encode_one_descriptor`], typed at
+///     write time;
+///   * otherwise the standard extension dispatch runs, and the declared modality
+///     is stamped on byte 6 afterward ([`patch_bcs1_modality_tag`]).
 #[allow(clippy::too_many_arguments)]
 fn encode_one(
     edf_path: &Path,
@@ -3389,8 +3393,23 @@ fn encode_one(
     noise_bits: u8,
     window_size: usize,
     lpc_mode: lamquant_core::lpc::LpcMode,
-    modality_tag: Option<u8>,
+    ingest: Option<&lamquant_core::source::ingest_manifest::DatasetEntry>,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
+    let modality_tag = ingest.map(|e| e.modality.tag());
+    // I3: a manifest-declared FormatDescriptor bypasses the extension dispatch and
+    // is typed at write time (no post-hoc patch needed).
+    if let Some(descriptor) = ingest.and_then(|e| e.descriptor.as_ref()) {
+        return encode_one_descriptor(
+            edf_path,
+            lml_path,
+            descriptor,
+            verify,
+            noise_bits,
+            window_size,
+            lpc_mode,
+            modality_tag,
+        );
+    }
     let metrics = encode_one_inner(
         edf_path,
         lml_path,
@@ -3420,12 +3439,144 @@ fn load_ingest_manifest(
     }
 }
 
-/// The manifest-declared modality tag for `path`, or `None` (→ born-Untyped).
-fn modality_tag_for(
-    manifest: Option<&lamquant_core::source::ingest_manifest::IngestManifest>,
+/// The manifest ingest rule for `path`, or `None` (→ born-Untyped, extension
+/// dispatch). Borrows from the manifest for the encode call's lifetime.
+fn resolve_entry_for<'a>(
+    manifest: Option<&'a lamquant_core::source::ingest_manifest::IngestManifest>,
     path: &Path,
-) -> Option<u8> {
-    manifest.and_then(|m| m.resolve(path)).map(|d| d.tag())
+) -> Option<&'a lamquant_core::source::ingest_manifest::DatasetEntry> {
+    manifest.and_then(|m| m.resolve_entry(path))
+}
+
+/// Minimal JSON string-body escaper (backslash, quote, and the C0 controls the
+/// spec requires escaped). The descriptor encoder builds its metadata JSON from
+/// USER-supplied sidecar strings (channel names, unit, path), so every one is run
+/// through this — a stray `\` in a unit like `mV\s` can't emit invalid JSON.
+fn escape_json_str(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// ADR 0074 I3 — encode a file whose byte layout is declared by a manifest
+/// [`FormatDescriptor`](lamquant_core::source::FormatDescriptor) (a data-driven
+/// reader for a custom fixed-layout binary), bypassing the file-extension
+/// dispatch. Mirrors `encode_one_raw`'s bundle→lml path but sources the bundle
+/// from `read_bundle_from_descriptor` and types it at write time via
+/// `write_into_with_modality` (so no post-hoc byte patch).
+#[allow(clippy::too_many_arguments)]
+fn encode_one_descriptor(
+    path: &Path,
+    lml_path: &Path,
+    descriptor: &lamquant_core::source::FormatDescriptor,
+    verify: bool,
+    noise_bits: u8,
+    window_size: usize,
+    lpc_mode: lamquant_core::lpc::LpcMode,
+    modality_tag: Option<u8>,
+) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
+    use lamquant_core::container;
+    use lamquant_core::source::read_bundle_from_descriptor;
+    let data = std::fs::read(path)?;
+    // The descriptor interpreter always parses the sidecar as JSON (to resolve any
+    // `FromSidecarField` channel-count / sample-rate). Use a sibling `<path>.json`
+    // if present, else a valid empty object — a Fixed-only descriptor needs no
+    // sidecar but still requires parseable JSON (empty bytes are an EOF error).
+    let sidecar = std::fs::read(path.with_extension("json")).unwrap_or_else(|_| b"{}".to_vec());
+    let bundle = read_bundle_from_descriptor(descriptor, &data, &sidecar)?;
+    let n_channels = bundle.signal.len() as u32;
+    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
+    let sample_rate = bundle.sample_rate;
+
+    let mut hasher = Sha256::new();
+    for ch in &bundle.signal {
+        for &sample in ch {
+            hasher.update(sample.to_le_bytes());
+        }
+    }
+    let sha256_hex = format!("{:x}", hasher.finalize());
+
+    let mut ch_json = String::from("[");
+    for (i, name) in bundle.channels.iter().enumerate() {
+        if i > 0 {
+            ch_json.push(',');
+        }
+        ch_json.push('"');
+        ch_json.push_str(&escape_json_str(name));
+        ch_json.push('"');
+    }
+    ch_json.push(']');
+    let pmin: Vec<String> = bundle.phys_min.iter().map(|v| format!("{v}")).collect();
+    let pmax: Vec<String> = bundle.phys_max.iter().map(|v| format!("{v}")).collect();
+
+    let metadata_json = format!(
+        "{{\"source_file\":\"{}\",\"format\":\"DESCRIPTOR\",\"n_channels\":{},\
+         \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
+         \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
+         \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
+        escape_json_str(&bundle.metadata.source_file),
+        n_channels,
+        sample_rate,
+        ch_json,
+        pmin.join(","),
+        pmax.join(","),
+        escape_json_str(&bundle.metadata.phys_dim),
+        sha256_hex,
+        env!("CARGO_PKG_VERSION"),
+        noise_bits,
+    );
+
+    if let Some(parent) = lml_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
+    let stats = container::write_into_with_modality(
+        &mut sink,
+        &bundle.signal,
+        sample_rate,
+        window_size,
+        noise_bits,
+        &metadata_json,
+        lpc_mode,
+        modality_tag,
+    )?;
+    let f = sink.into_inner().map_err(|e| {
+        let kind = e.error().kind();
+        std::io::Error::new(kind, "encode descriptor: BufWriter flush failed before sync_all")
+    })?;
+    f.sync_all()?;
+
+    let original_size = data.len() as u64;
+    let compressed_size = stats.compressed_size as u64;
+    let cr = if compressed_size > 0 {
+        original_size as f64 / compressed_size as f64
+    } else {
+        0.0
+    };
+
+    if verify {
+        let (recovered, _meta) = container::read_file(lml_path)?;
+        if recovered != bundle.signal {
+            return Err("verify (descriptor): decoded signal != source bundle".into());
+        }
+    }
+
+    Ok(EncodeMetrics {
+        raw_size: original_size as usize,
+        compressed_size: compressed_size as usize,
+        cr,
+        sha256: sha256_hex,
+        verified: verify,
+        samples: (n_channels as u64).saturating_mul(n_samples as u64),
+        duration_s: bundle.duration_s,
+        n_channels,
+        sample_rate: sample_rate as f32,
+        n_windows: stats.n_windows as u32,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3704,7 +3855,7 @@ fn cmd_encode(
                 noise_bits,
                 window_size,
                 lpc_mode,
-                modality_tag_for(ingest_manifest.as_ref(), &edfs[0]),
+                resolve_entry_for(ingest_manifest.as_ref(), &edfs[0]),
             )?
         } else {
             // Default: per-EDF `.lma` bundling. Stage to a tempdir so
@@ -3724,7 +3875,7 @@ fn cmd_encode(
                 noise_bits,
                 window_size,
                 lpc_mode,
-                modality_tag_for(ingest_manifest.as_ref(), &edfs[0]),
+                resolve_entry_for(ingest_manifest.as_ref(), &edfs[0]),
             )?;
             // The user's `-o` is the final `.lma` path. Pack the tempdir
             // contents (this EDF's .lml + its sibling sidecars) into it.
@@ -3970,7 +4121,7 @@ fn cmd_encode(
                     noise_bits,
                     window_size,
                     lpc_mode,
-                    modality_tag_for(ingest_manifest.as_ref(), edf_path),
+                    resolve_entry_for(ingest_manifest.as_ref(), edf_path),
                 )
                 .and_then(|m| {
                     if let Some(p) = lma_out.parent() {
@@ -3996,7 +4147,7 @@ fn cmd_encode(
                     noise_bits,
                     window_size,
                     lpc_mode,
-                    modality_tag_for(ingest_manifest.as_ref(), edf_path),
+                    resolve_entry_for(ingest_manifest.as_ref(), edf_path),
                 );
                 (r, out.clone())
             };
