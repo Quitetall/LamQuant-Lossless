@@ -1,0 +1,20 @@
+[package]
+name = "lamquant-lmq"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.81"
+description = "LamQuant LMQ — the Rust neural (lossy) codec shell (ADR 0074 Track N): the BCS1-Lmq wire body (FSQ tokens -> rANS) + a swappable NeuralBackend seam. no_std-first shell + entropy body; the Python backend is host-gated. Sits one layer above `abir`, sibling of the LML tiers."
+
+[lib]
+name = "lamquant_lmq"
+crate-type = ["rlib"]
+
+[features]
+default = ["std"]
+# Host build (default). The no_std firmware floor is `--no-default-features`.
+std = ["lamquant-lml-mcu/std", "abir/std", "lamquant-common/std"]
+
+[dependencies]
+abir = { path = "../crates/abir", default-features = false }
+lamquant-lml-mcu = { path = "../lamquant-lml-mcu", default-features = false }
+lamquant-common = { path = "../crates/lamquant-common", default-features = false }

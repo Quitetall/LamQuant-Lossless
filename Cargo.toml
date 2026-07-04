@@ -7,6 +7,7 @@ members = [
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
     "lamquant-lml-optimum",
+    "lamquant-lmq",
     "lamquant-lossless",
     "lamquant-py",
     # HDF5 H5Z filter cdylib (ADR 0051 Track 3). In `members` so it shares the
@@ -27,6 +28,7 @@ default-members = [
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
     "lamquant-lml-optimum",
+    "lamquant-lmq",
     "lamquant-lossless",
     "lamquant-py",
 ]
