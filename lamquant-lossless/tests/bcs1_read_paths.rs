@@ -28,7 +28,7 @@
 
 #![cfg(feature = "archive")]
 
-use abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
+use abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC, CODEC_LMQ_FSQ};
 use lamquant_core::container;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -383,4 +383,41 @@ fn legacy_lml1_conformance_vector_still_works_via_every_cli_path() {
         fixture_bytes,
         "legacy conformance fixture must not be mutated by this test"
     );
+}
+
+/// ADR 0074 Track N — the lossy-signing gate: a BCS1 file carrying the LMQ neural
+/// descriptor (`CODEC_LMQ_FSQ = 0x10`) is refused FAIL-CLOSED by the lossless
+/// reader — it can never be mis-decoded as integer samples. This pins the actual
+/// reader behavior (not just `bcs1_gate_decodable` in isolation): a `.lmq`
+/// produced by the neural shell is permanently un-decodable by every lossless path.
+#[test]
+fn lossless_reader_refuses_the_bcs1_lmq_neural_descriptor() {
+    let header = Bcs1Header {
+        version_major: 1,
+        version_minor: 0,
+        modality_tag: 0, // Eeg
+        modality_source: 2, // Manual
+        codec_descriptor: CODEC_LMQ_FSQ, // 0x10 — the neural body
+        mode: 0,
+        tier: 0,
+        decode_capability: 1, // also non-zero → a second fail-closed reason
+        n_channels: 2,
+        n_windows: 1,
+        total_samples: 10,
+        window_size: 5,
+        sample_rate_mhz: 256_000,
+        bit_depth: 16,
+        flags: 0,
+        metadata_length: 0,
+    };
+    let mut bytes = header.to_bytes().to_vec();
+    bytes.extend_from_slice(&[0u8; 16]); // a dummy neural body — never reached
+
+    // The lossless whole-file reader (magic dispatch → BCS1 → gate) must REFUSE it.
+    let via_dispatch = container::read_bytes(&bytes);
+    assert!(via_dispatch.is_err(), "lossless read_bytes must refuse the LMQ descriptor");
+    let via_bcs1 = container::bcs1_read_bytes(&bytes);
+    assert!(via_bcs1.is_err(), "bcs1_read_bytes must refuse the LMQ descriptor");
+    // Sanity: the descriptor byte really is at offset 8 and really is LmqFsq.
+    assert_eq!(bytes[8], CODEC_LMQ_FSQ);
 }
