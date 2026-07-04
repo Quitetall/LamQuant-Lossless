@@ -80,6 +80,7 @@ mod tests {
             alphabet: 2,
             n_channels: 1,
             n_samples: 1,
+            backend_meta: alloc::vec::Vec::new(),
         })
         .is_err());
     }

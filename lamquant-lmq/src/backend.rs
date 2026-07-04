@@ -25,6 +25,11 @@ pub struct NeuralTokens {
     pub n_channels: u16,
     /// Per-channel sample count of the source recording (reconstruction length).
     pub n_samples: u32,
+    /// Opaque backend state the DECODER needs but that isn't a token — e.g. the
+    /// Python codec's per-channel LPC/lifting preprocessing metadata, or latent
+    /// normalization. The shell carries it verbatim in the BCS1 header's metadata
+    /// section (never interprets it). Empty for backends that need none (Stub).
+    pub backend_meta: Vec<u8>,
 }
 
 /// A backend failure — a Python inference error, a shape mismatch, a missing
@@ -80,7 +85,14 @@ impl NeuralBackend for StubBackend {
             .collect();
         // One schedule entry per timestep (stand-in; the shell just carries it).
         let schedule = alloc::vec![self.alphabet as u8; n_samples as usize];
-        Ok(NeuralTokens { tokens, schedule, alphabet: self.alphabet, n_channels, n_samples })
+        Ok(NeuralTokens {
+            tokens,
+            schedule,
+            alphabet: self.alphabet,
+            n_channels,
+            n_samples,
+            backend_meta: Vec::new(), // the stub is self-contained; no metadata
+        })
     }
 
     fn decode(&self, t: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {

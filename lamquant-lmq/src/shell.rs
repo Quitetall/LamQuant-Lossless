@@ -92,11 +92,14 @@ pub fn encode<M: Modality>(abir: &Abir<M>, backend: &dyn NeuralBackend) -> Resul
         sample_rate_mhz: (abir.sample_rate * 1000.0) as u32,
         bit_depth: 16,
         flags: 0,
-        metadata_length: 0,
+        // The backend's opaque decode state rides in the metadata section, between
+        // the 40-byte header and the body. Keeps the N0 body format untouched.
+        metadata_length: tokens.backend_meta.len() as u32,
     };
 
-    let mut out = Vec::with_capacity(BCS1_HEADER_LEN + body.len());
+    let mut out = Vec::with_capacity(BCS1_HEADER_LEN + tokens.backend_meta.len() + body.len());
     out.extend_from_slice(&header.to_bytes());
+    out.extend_from_slice(&tokens.backend_meta);
     out.extend_from_slice(&body);
     Ok(out)
 }
@@ -108,7 +111,12 @@ pub fn decode(bytes: &[u8], backend: &dyn NeuralBackend) -> Result<Abir<Untyped>
     if header.codec_descriptor != CODEC_LMQ_FSQ {
         return Err(LmqError::NotLmq);
     }
-    let body = bytes.get(BCS1_HEADER_LEN..).ok_or(LmqError::Header)?;
+    // Split the metadata section (backend_meta) from the body. Both offsets are
+    // bounds-checked — a crafted metadata_length can't slice past the buffer.
+    let meta_len = header.metadata_length as usize;
+    let after_header = bytes.get(BCS1_HEADER_LEN..).ok_or(LmqError::Header)?;
+    let backend_meta = after_header.get(..meta_len).ok_or(LmqError::Header)?.to_vec();
+    let body = after_header.get(meta_len..).ok_or(LmqError::Header)?;
     let (tokens_i64, schedule, alphabet) = decode_body(body)?;
 
     // Defense-in-depth at the trust boundary: rANS decode only emits symbols in
@@ -129,6 +137,7 @@ pub fn decode(bytes: &[u8], backend: &dyn NeuralBackend) -> Result<Abir<Untyped>
         alphabet,
         n_channels: header.n_channels,
         n_samples: header.total_samples,
+        backend_meta,
     };
     let signal = backend.decode(&tokens).map_err(LmqError::Backend)?;
 
@@ -247,6 +256,41 @@ mod tests {
         let m: i64 = counts.iter().map(|&c| c as i64).sum();
         assert_eq!(m as u64, RANS_MODEL_TOTAL, "model total must be fixed, not token-count-scaled");
         assert!(counts.iter().all(|&c| c >= 1), "every symbol freq must be >= 1");
+    }
+
+    #[test]
+    fn backend_metadata_round_trips_through_the_header() {
+        // A metadata-bearing backend (mimics the Python codec, which needs its
+        // per-channel preprocessing state on decode). The meta must survive the
+        // wire verbatim and reach the backend's decode.
+        use crate::backend::{BackendError, NeuralTokens};
+        struct MetaStub;
+        const META: &[u8] = &[0xAB, 0xCD, 0xEF, 0x01];
+        impl NeuralBackend for MetaStub {
+            fn encode(&self, signal: &[Vec<i64>], _sr: f64) -> Result<NeuralTokens, BackendError> {
+                Ok(NeuralTokens {
+                    tokens: signal.iter().flat_map(|c| c.iter().map(|&s| s.rem_euclid(3) as i32)).collect(),
+                    schedule: vec![3u8; signal[0].len()],
+                    alphabet: 3,
+                    n_channels: signal.len() as u16,
+                    n_samples: signal[0].len() as u32,
+                    backend_meta: META.to_vec(),
+                })
+            }
+            fn decode(&self, t: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+                assert_eq!(t.backend_meta, META, "backend_meta must survive the wire verbatim");
+                let n_s = t.n_samples as usize;
+                Ok((0..t.n_channels as usize)
+                    .map(|c| t.tokens[c * n_s..(c + 1) * n_s].iter().map(|&x| x as i64).collect())
+                    .collect())
+            }
+        }
+        let abir = eeg_abir();
+        let bytes = encode(&abir, &MetaStub).unwrap();
+        // metadata_length (header bytes 28..32) records the meta length.
+        assert_eq!(u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]), META.len() as u32);
+        // decode delivers the meta back to the backend (its assert fires if not).
+        let _ = decode(&bytes, &MetaStub).unwrap();
     }
 
     #[test]
