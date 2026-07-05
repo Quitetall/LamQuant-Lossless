@@ -801,6 +801,27 @@ pub fn bcs1_parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
 /// `container_read_phys_f32`). Same per-channel digital→physical affine and same
 /// sequential window walk (one decoded i64 window transient + the caller's f32 output);
 /// only the header parse differs.
+/// Per-channel `(scale, offset)` from a `[n*4]` calibration buffer (dig_min, dig_max,
+/// phys_min, phys_max per channel), so a sample maps as `phys = dig * scale + offset` in
+/// one mul + one add. A degenerate `dig_range == 0` channel yields `(0, 0)`. Single source
+/// of truth for the full + selected f32 decode paths.
+fn calib_scale_offset(calib: &[f32], n: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut scale = vec![0.0f32; n];
+    let mut offset = vec![0.0f32; n];
+    for i in 0..n {
+        let dig_min = calib[i * 4];
+        let dig_max = calib[i * 4 + 1];
+        let phys_min = calib[i * 4 + 2];
+        let phys_max = calib[i * 4 + 3];
+        let dig_range = dig_max - dig_min;
+        if dig_range != 0.0 {
+            scale[i] = (phys_max - phys_min) / dig_range;
+            offset[i] = phys_min - dig_min * scale[i];
+        }
+    }
+    (scale, offset)
+}
+
 pub fn bcs1_read_bytes_into_f32_calibrated(
     data: &[u8],
     out: &mut [f32],
@@ -824,24 +845,9 @@ pub fn bcs1_read_bytes_into_f32_calibrated(
         )));
     }
 
-    // Per-channel scale + offset so we do one mul + one add per sample (identical to the
-    // legacy body — the degenerate `dig_range == 0` row emits zero).
-    let mut scale = vec![0.0f32; n_ch];
-    let mut offset = vec![0.0f32; n_ch];
-    for ch in 0..n_ch {
-        let dig_min = calib[ch * 4];
-        let dig_max = calib[ch * 4 + 1];
-        let phys_min = calib[ch * 4 + 2];
-        let phys_max = calib[ch * 4 + 3];
-        let dig_range = dig_max - dig_min;
-        if dig_range == 0.0 {
-            scale[ch] = 0.0;
-            offset[ch] = 0.0;
-        } else {
-            scale[ch] = (phys_max - phys_min) / dig_range;
-            offset[ch] = phys_min - dig_min * scale[ch];
-        }
-    }
+    // Per-channel scale + offset (one mul + one add per sample). Shared helper — the
+    // degenerate `dig_range == 0` channel emits zero.
+    let (scale, offset) = calib_scale_offset(calib, n_ch);
 
     let window_size = header.window_size;
     let mut pos = header.payload_start;
@@ -1044,23 +1050,8 @@ pub fn read_bytes_into_f32_calibrated_selected(
             }
         }
     }
-    // Per-selected-channel scale + offset — same formula as the full path.
-    let mut scale = vec![0.0f32; n_sel];
-    let mut offset = vec![0.0f32; n_sel];
-    for s in 0..n_sel {
-        let dig_min = calib[s * 4];
-        let dig_max = calib[s * 4 + 1];
-        let phys_min = calib[s * 4 + 2];
-        let phys_max = calib[s * 4 + 3];
-        let dig_range = dig_max - dig_min;
-        if dig_range == 0.0 {
-            scale[s] = 0.0;
-            offset[s] = 0.0;
-        } else {
-            scale[s] = (phys_max - phys_min) / dig_range;
-            offset[s] = phys_min - dig_min * scale[s];
-        }
-    }
+    // Per-selected-channel scale + offset — shared helper (same one the full path uses).
+    let (scale, offset) = calib_scale_offset(calib, n_sel);
     let window_size = header.window_size;
     for w in 0..header.n_windows {
         let (window, _wh) = read_window_from_bytes(data, w)?;
