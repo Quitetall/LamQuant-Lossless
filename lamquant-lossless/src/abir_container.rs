@@ -1023,11 +1023,25 @@ pub fn read_bytes_into_f32_calibrated_selected(
             n_sel * 4
         )));
     }
+    // `MISSING` (u16::MAX) marks a target the caller couldn't resolve (e.g. an absent
+    // optional electrode) — that output row is left zero-filled, matching
+    // `extract_channel_data`'s zero-fill. EEG channel counts are « u16::MAX, so a real
+    // index never collides with the sentinel.
+    const MISSING: u16 = u16::MAX;
     for &src_ch in channel_mask {
-        if src_ch as usize >= n_ch {
+        if src_ch != MISSING && src_ch as usize >= n_ch {
             return Err(LmlError::InvalidHeader(format!(
                 "channel_mask index {src_ch} out of range (n_ch={n_ch})"
             )));
+        }
+    }
+    // Zero the MISSING rows up front (the window loop never touches them) so the output
+    // is fully defined regardless of the caller's buffer init.
+    for sel in 0..n_sel {
+        if channel_mask[sel] == MISSING {
+            for v in &mut out[sel * total..(sel + 1) * total] {
+                *v = 0.0;
+            }
         }
     }
     // Per-selected-channel scale + offset — same formula as the full path.
@@ -1059,6 +1073,9 @@ pub fn read_bytes_into_f32_calibrated_selected(
         }
         let start = w * window_size;
         for sel in 0..n_sel {
+            if channel_mask[sel] == MISSING {
+                continue; // zero-filled up front
+            }
             let src = &window[channel_mask[sel] as usize];
             let copy_len = src.len().min(total.saturating_sub(start));
             let dst_off = sel * total + start;
@@ -1143,7 +1160,22 @@ mod bcs1_read_tests {
                 );
             }
         }
-        // Out-of-range mask index errors (n_ch=5, index 9 invalid).
+
+        // A MISSING sentinel (u16::MAX) zero-fills that output row; present rows still
+        // match. Init the buffer to a non-zero value to prove the zero-fill actually runs.
+        let mask_m: Vec<u16> = vec![2, u16::MAX, 0];
+        let mut calib_m = vec![0.0f32; mask_m.len() * 4];
+        calib_m[0..4].copy_from_slice(&calib_full[2 * 4..2 * 4 + 4]);
+        calib_m[8..12].copy_from_slice(&calib_full[0..4]); // MISSING row's calib is unused
+        let mut selm = vec![7.0f32; mask_m.len() * total];
+        read_bytes_into_f32_calibrated_selected(&buf, &mut selm, &calib_m, &mask_m).unwrap();
+        for i in 0..total {
+            assert_eq!(selm[i], full[2 * total + i], "present row 0 (ch2) sample {i}");
+            assert_eq!(selm[total + i], 0.0, "MISSING row must be zero-filled (was 7.0)");
+            assert_eq!(selm[2 * total + i], full[i], "present row 2 (ch0) sample {i}");
+        }
+
+        // Out-of-range mask index errors (n_ch=5, index 9 invalid; u16::MAX is allowed).
         let mut bad = vec![0.0f32; total];
         assert!(
             read_bytes_into_f32_calibrated_selected(&buf, &mut bad, &[0.0; 4], &[9u16]).is_err(),

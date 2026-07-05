@@ -5043,4 +5043,55 @@ mod tests {
         assert!(m.entry_bytes("data.txt").is_err(), "Zstd entry must not be borrowable");
         assert!(m.entry_bytes("nope.lml").is_err(), "missing entry must error");
     }
+
+    /// A3 (ADR 0075) — the mmap + selected decode (what `lma_mmap_read_phys_selected`
+    /// wraps: `MmapArchive::open` → `entry_bytes` → `read_bytes_into_f32_calibrated_selected`)
+    /// is bit-identical to the full decode's corresponding rows. This is the combined
+    /// path the canonical training decode now takes.
+    #[test]
+    fn mmap_selected_decode_matches_full() {
+        use crate::abir_container::{
+            parse_header, read_bytes_into_f32_calibrated, read_bytes_into_f32_calibrated_selected,
+            write_abir_to_vec,
+        };
+        let n_ch = 4usize;
+        let t = 500usize;
+        let sig: Vec<Vec<i64>> = (0..n_ch)
+            .map(|c| (0..t).map(|i| ((i as i64 * 31 + c as i64 * 7) % 2001) - 1000).collect())
+            .collect();
+        let abir = abir::Abir::from_channels_i64(sig, 250.0);
+        let lml = write_abir_to_vec(&abir, 250.0, 128, 0, "{}", crate::lpc::LpcMode::default(), None, None)
+            .expect("write_abir_to_vec");
+
+        // Pack the .lml into a .lma (Store method), then mmap it.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("rec.lml"), &lml).unwrap();
+        let archive = tempfile::NamedTempFile::new().unwrap();
+        pack_archive(src.path(), archive.path(), 9, false, None).unwrap();
+
+        let calib: Vec<f32> = (0..n_ch)
+            .flat_map(|c| [0.0f32, 100.0, c as f32, c as f32 + 10.0])
+            .collect();
+        let total = parse_header(&lml).unwrap().total_samples;
+        let mut full = vec![0.0f32; n_ch * total];
+        read_bytes_into_f32_calibrated(&lml, &mut full, &calib).unwrap();
+
+        // mmap the archive, borrow the entry, decode selected {2, 0}.
+        let m = MmapArchive::open(archive.path()).unwrap();
+        let data = m.entry_bytes("rec.lml").unwrap();
+        let mask: Vec<u16> = vec![2, 0];
+        let calib_sel: Vec<f32> = mask
+            .iter()
+            .flat_map(|&s| calib[s as usize * 4..s as usize * 4 + 4].to_vec())
+            .collect();
+        let mut sel = vec![0.0f32; mask.len() * total];
+        read_bytes_into_f32_calibrated_selected(data, &mut sel, &calib_sel, &mask).unwrap();
+
+        for (row, &s) in mask.iter().enumerate() {
+            let s = s as usize;
+            for i in 0..total {
+                assert_eq!(sel[row * total + i], full[s * total + i], "mmap+selected row {row} (ch {s})");
+            }
+        }
+    }
 }

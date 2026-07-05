@@ -279,6 +279,78 @@ fn container_read_phys_selected<'py>(
     Ok((arr, header.metadata, header.n_windows))
 }
 
+/// mmap + selected decode in one call (ADR 0075 A3). Opens the `.lma` as a memory map,
+/// borrows the entry's compressed bytes (NO ~1.4 GB copy — contrast `lma_read_entry` +
+/// `container_read_phys_f32`), and decodes only `channel_mask`'s channels into
+/// `[n_sel, total]` f32. The mmap borrow never crosses to Python. This is what the
+/// canonical training decode calls to collapse the fallback peak: it skips both the
+/// compressed-bytes copy and the all-channel `[n_ch, total]` array. `channel_mask[sel]
+/// == 65535` (u16::MAX) marks a missing target → that output row is zero-filled.
+#[pyfunction]
+fn lma_mmap_read_phys_selected<'py>(
+    py: Python<'py>,
+    lma_path: &str,
+    entry_name: &str,
+    calib_f32: PyReadonlyArray1<'py, f32>,
+    channel_mask: Vec<u16>,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, String, usize)> {
+    let archive =
+        lml::lma::MmapArchive::open(std::path::Path::new(lma_path)).map_err(lma_err_to_py)?;
+    let data = archive.entry_bytes(entry_name).map_err(lma_err_to_py)?;
+    let dims = lml::container::parse_header(data)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let total = dims.total_samples;
+    let n_sel = channel_mask.len();
+
+    let calib_slice = calib_f32.as_slice().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("calib not contiguous: {e:?}"))
+    })?;
+    if calib_slice.len() != n_sel * 4 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "calib length {} != n_sel*4 ({})",
+            calib_slice.len(),
+            n_sel * 4
+        )));
+    }
+
+    let arr = PyArray2::<f32>::zeros(py, [n_sel, total], false);
+    // Safe: freshly allocated, no aliasing, GIL held while the &mut [f32] aliases the
+    // PyArray2 heap buffer (no allow_threads). `archive` outlives the borrowed `data`.
+    let header = unsafe {
+        let out = arr.as_slice_mut().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
+        })?;
+        lml::container::read_bytes_into_f32_calibrated_selected(data, out, calib_slice, &channel_mask)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+    };
+
+    Ok((arr, header.metadata, header.n_windows))
+}
+
+/// mmap header/metadata peek (ADR 0075 A3): open the `.lma` map and parse just an entry's
+/// container header + metadata (touches only the header pages — no decode, no full-entry
+/// copy). Returns `(metadata_json, n_ch, n_windows, total_samples, window_size)`, the same
+/// shape as `container_metadata`, so the caller can resolve channels + build calibration
+/// BEFORE decoding the selected channels from the same map.
+#[pyfunction]
+fn lma_mmap_entry_metadata(
+    lma_path: &str,
+    entry_name: &str,
+) -> PyResult<(String, usize, usize, usize, usize)> {
+    let archive =
+        lml::lma::MmapArchive::open(std::path::Path::new(lma_path)).map_err(lma_err_to_py)?;
+    let data = archive.entry_bytes(entry_name).map_err(lma_err_to_py)?;
+    let header = lml::container::parse_header(data)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok((
+        header.metadata,
+        header.n_ch,
+        header.n_windows,
+        header.total_samples,
+        header.window_size,
+    ))
+}
+
 /// Random-access read of one window from an in-memory LML container.
 ///
 /// Returns `(window[n_ch, window_size_actual] int64, metadata_json,
@@ -731,6 +803,8 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(container_read_window_np, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_phys_f32, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_phys_selected, m)?)?;
+    m.add_function(wrap_pyfunction!(lma_mmap_read_phys_selected, m)?)?;
+    m.add_function(wrap_pyfunction!(lma_mmap_entry_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(container_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(lma_read_entry, m)?)?;
     m.add_function(wrap_pyfunction!(lma_entry_headers, m)?)?;

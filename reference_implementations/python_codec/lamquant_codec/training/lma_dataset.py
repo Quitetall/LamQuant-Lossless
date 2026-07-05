@@ -304,13 +304,15 @@ def decode_lma_signal(lma_path: str, stem: str,
     digital -> microvolts -> 21ch select -> 250 Hz resample
     -> 0.5 Hz highpass -> Q31 round-trip.
 
-    Memory: skips the historical ``Vec<Vec<i64>> -> np.asarray(int64) ->
-    np.float64`` chain that hit ~18 GB peak on an 8 hr 27-ch TUEG file.
-    The Rust ``container_read_phys_f32`` decodes per-window i64 in Rust
-    and writes f32 directly into a single preallocated PyArray2 with
-    per-channel calibration applied in-place (peak ≈ 4.7 GB for that
-    file). Same bit-exact output vs the legacy path, verified by parity
-    smoke.
+    Memory (ADR 0075 A3): a memory-mapped, selected-channel decode. The
+    container header is peeked via mmap (no full-entry copy), the 21
+    target channels are resolved to source indices up front, and ONLY
+    those channels are decoded straight from the map — skipping both the
+    ~1.4 GB compressed-entry copy and the ``[n_ch, total]`` all-channel
+    f32 array. Peak drops from ~4.7 GB to ~1.2 GB on an 8 hr 27-ch TUEG
+    file. BIT-IDENTICAL to the prior ``container_read_phys_f32`` +
+    ``extract_channel_data`` path (same resolver, calibration, and
+    missing-channel zero-fill).
 
     Args:
         lma_path: path to the ``.lma`` archive containing the LML.
@@ -336,23 +338,19 @@ def decode_lma_signal(lma_path: str, stem: str,
 
     lc = _LAZY["lamquant_core"]
     entry = lml_entry_name if lml_entry_name is not None else f"{stem}.lml"
-    try:
-        lml_bytes = lc.lma_read_entry(lma_path, entry)
-    except Exception as e:
-        LOG.warning("LMA read failed for %s (%s): %s", stem, entry, e)
-        return None
 
-    # Header-only metadata parse (V4 Pro 2026-05-18 review #4): the
-    # previous code decoded window 0 (~5 MB int64 + DWT) just to read
-    # the JSON header. `container_metadata` parses the container header
-    # (legacy 32/20/18-byte LML1 *or* the 40-byte BCS1 header — the Rust
-    # side dispatches on magic, task #34) + UTF-8 metadata and returns
-    # immediately, so a BCS1-re-archived corpus loads instead of being
-    # silently dropped.
+    # ADR 0075 A3 — mmap + selected-channel decode. Peek the container header/metadata via
+    # a memory map (touches only the header pages, no full-entry copy), resolve the 21
+    # TARGET_CHANNELS to source indices UP FRONT, then decode ONLY those channels straight
+    # from the map. This skips BOTH the ~1.4 GB compressed-entry copy AND the [n_ch, total]
+    # all-channel f32 array — the two allocations that drove the ~4.7 GB decode-fallback
+    # peak (→ ~1.2 GB). BIT-IDENTICAL to the old container_read_phys_f32 +
+    # extract_channel_data path: same resolver (channel_resolver.pick_channels), same
+    # per-channel calibration, same zero-fill of missing optional electrodes.
     try:
-        meta_json, _n_ch, _n_win, _total, _ws = lc.container_metadata(lml_bytes)
+        meta_json, _n_ch, _n_win, _total, _ws = lc.lma_mmap_entry_metadata(lma_path, entry)
     except Exception as e:
-        LOG.warning("LMA header peek failed for %s: %s", stem, e)
+        LOG.warning("LMA mmap header peek failed for %s (%s): %s", stem, entry, e)
         return None
     metadata = json.loads(meta_json)
     all_ch_names = metadata.get("channels", [])
@@ -361,42 +359,46 @@ def decode_lma_signal(lma_path: str, stem: str,
         LOG.warning("LMA %s has zero channels in metadata", stem)
         return None
 
-    # Build [n_ch, 4] f32 calibration buffer: dig_min, dig_max, phys_min,
-    # phys_max per channel. Defaults match the legacy
-    # `lml_digital_to_float` fallbacks (full int16 range).
-    dig_min = np.asarray(metadata.get("dig_min", [-32768.0] * n_ch), dtype=np.float32)
-    dig_max = np.asarray(metadata.get("dig_max", [32767.0] * n_ch), dtype=np.float32)
-    phys_min = np.asarray(metadata.get("phys_min", [-32768.0] * n_ch), dtype=np.float32)
-    phys_max = np.asarray(metadata.get("phys_max", [32767.0] * n_ch), dtype=np.float32)
-    calib = np.stack([dig_min, dig_max, phys_min, phys_max], axis=1).reshape(-1)
-    calib = np.ascontiguousarray(calib, dtype=np.float32)
-
-    try:
-        all_data, _meta_again, _n_win = lc.container_read_phys_f32(lml_bytes, calib)
-    except Exception as e:
-        LOG.warning("LMA decode failed for %s: %s", stem, e)
-        return None
-    # Release the compressed bytes now that we have the f32 signal —
-    # for an 8 hr TUEG this frees ~1.4 GB before resample/highpass run.
-    del lml_bytes
-    if all_data.size == 0:
-        return None
-
     original_sr = float(metadata.get("sample_rate", TARGET_SR))
     if not (original_sr > 0.0):
         LOG.warning("LMA %s reports non-positive sample_rate=%s; skipping.",
                     stem, original_sr)
         return None
 
-    # channel_resolver expects float64 historically; f32 works for the
-    # downstream consumers (sosfiltfilt, resample_poly) but a few legacy
-    # helpers cast back to float64 internally. Pass f32 through — bit-
-    # exact at the channel-select step (no arithmetic happens there).
-    data, missing = _LAZY["channel_resolver"].extract_channel_data(
-        all_data, all_ch_names
-    )
-    if data is None:
-        LOG.warning("LMA %s missing channels: %s", stem, missing)
+    # Resolve the 21 targets to source indices (the same resolver the old
+    # extract_channel_data used); None => too many required channels absent.
+    src_indices = _LAZY["channel_resolver"].pick_channels(all_ch_names)
+    if src_indices is None:
+        LOG.warning("LMA %s missing channels (unresolved)", stem)
+        return None
+    # -1 (missing optional electrode) => u16::MAX sentinel; the Rust decode zero-fills it.
+    _MISSING = 65535
+    channel_mask = [i if i >= 0 else _MISSING for i in src_indices]
+
+    # Per-channel calibration, selected + reordered to the 21 target rows. Defaults match
+    # the legacy `lml_digital_to_float` fallbacks (full int16 range). Missing rows get a
+    # harmless default — their output is zero-filled regardless.
+    dig_min = metadata.get("dig_min", [-32768.0] * n_ch)
+    dig_max = metadata.get("dig_max", [32767.0] * n_ch)
+    phys_min = metadata.get("phys_min", [-32768.0] * n_ch)
+    phys_max = metadata.get("phys_max", [32767.0] * n_ch)
+    calib_sel = np.zeros((len(channel_mask), 4), dtype=np.float32)
+    for row, src in enumerate(src_indices):
+        if src >= 0:
+            calib_sel[row] = (dig_min[src], dig_max[src], phys_min[src], phys_max[src])
+    calib_sel = np.ascontiguousarray(calib_sel.reshape(-1), dtype=np.float32)
+
+    # (Second mmap of the same archive — the header peek above already warmed the page
+    # cache, so re-opening + re-parsing the index is cheap; channel resolution must sit
+    # between the two calls, so they can't be fused without a stateful handle.)
+    try:
+        data, _meta_again, _n_win = lc.lma_mmap_read_phys_selected(
+            lma_path, entry, calib_sel, channel_mask
+        )
+    except Exception as e:
+        LOG.warning("LMA mmap selected decode failed for %s (%s): %s", stem, entry, e)
+        return None
+    if data.size == 0:
         return None
 
     target_chs = _LAZY["CHANNEL_PRESETS"][TARGET_CHANNELS]
