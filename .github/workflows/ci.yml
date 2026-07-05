@@ -90,6 +90,11 @@ jobs:
       # frozen golden (pack_layout_golden); never regen without a deliberate version bump.
       - name: LQTP1 tensor-pack format gate
         run: cargo test -p lamquant-lml --lib tensor_pack::tests
+      # The user-facing "does a fresh binary work?" check — encode→decode→verify a
+      # synthetic signal byte-exact. Regression-guards cmd_self_test (it silently broke
+      # once when the codec started stamping provenance onto metadata).
+      - name: lml self-test (fresh-binary sanity)
+        run: cargo run -p lamquant-lml --bin lml -- self-test
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR

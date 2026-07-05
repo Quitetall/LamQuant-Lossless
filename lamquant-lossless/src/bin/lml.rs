@@ -10069,8 +10069,14 @@ fn cmd_self_test() -> R {
         container::read_from(&mut cursor).map_err(|e| format!("decode failed: {e}"))?;
     let dec_ms = t1.elapsed().as_millis();
 
-    if meta != "{\"source\":\"self-test\"}" {
-        return Err(format!("metadata round-trip mismatch: {meta:?}").into());
+    // The codec stamps provenance (codec_mode, lossless_mode, lpc_mode, ...) onto the
+    // caller's metadata (see cli_metadata_snapshot), so verify the caller's field
+    // SURVIVED the round-trip rather than asserting exact-string equality (which the
+    // stamp intentionally breaks).
+    let parsed: serde_json::Value =
+        serde_json::from_str(&meta).map_err(|e| format!("decoded metadata is not JSON: {e}; got {meta:?}"))?;
+    if parsed.get("source").and_then(|v| v.as_str()) != Some("self-test") {
+        return Err(format!("metadata round-trip lost the caller's source field: {meta:?}").into());
     }
     if recovered.len() != n_ch {
         return Err(format!(
