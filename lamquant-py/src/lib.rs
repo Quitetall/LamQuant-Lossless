@@ -785,6 +785,142 @@ fn normalize_eeg_f32<'py>(
     }
 }
 
+/// LQTP1 training-pack writer (ADR 0075 B2). Streams BFP-quantized `[n_channels,
+/// window_len]` f32 windows to a pack file in manifest order; `finish()` atomically
+/// renames the `.partial` into place. `manifest_sha256` binds the pack to the ordered
+/// index the trainer will verify.
+#[pyclass]
+struct PyPackWriter {
+    inner: Option<lml::tensor_pack::PackWriter>,
+    n_channels: usize,
+    window_len: usize,
+}
+
+#[pymethods]
+impl PyPackWriter {
+    #[new]
+    fn new(
+        path: &str,
+        dtype: &str,
+        n_channels: usize,
+        window_len: usize,
+        n_windows: usize,
+        manifest_sha256: &[u8],
+    ) -> PyResult<Self> {
+        let dt = lml::tensor_pack::PackDtype::parse(dtype).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("bad pack dtype '{dtype}' (int8|int16|f32)"))
+        })?;
+        if manifest_sha256.len() != 32 {
+            return Err(pyo3::exceptions::PyValueError::new_err("manifest_sha256 must be 32 bytes"));
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(manifest_sha256);
+        let w = lml::tensor_pack::PackWriter::create(
+            std::path::Path::new(path),
+            dt,
+            n_channels,
+            window_len,
+            n_windows,
+            hash,
+        )
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner: Some(w), n_channels, window_len })
+    }
+
+    /// Append one `[n_channels, window_len]` f32 window at the next row (BFP-quantized).
+    fn write_window(&mut self, x: PyReadonlyArray2<f32>) -> PyResult<()> {
+        let w = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("writer already finished"))?;
+        let (r, c) = x.as_array().dim();
+        if r != self.n_channels || c != self.window_len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "window shape [{r}, {c}] != [{}, {}]",
+                self.n_channels, self.window_len
+            )));
+        }
+        let slice = x
+            .as_slice()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("window not contiguous: {e:?}")))?;
+        w.write_window(slice).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// Flush, fsync, and atomically finalize the pack. The writer is consumed.
+    fn finish(&mut self) -> PyResult<()> {
+        let w = self
+            .inner
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("writer already finished"))?;
+        w.finish().map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+}
+
+/// LQTP1 training-pack reader (ADR 0075 B3). Memory-maps the pack read-only (shared across
+/// DataLoader workers) and verifies the fail-closed `expected_sha256`. `dequantize(row)`
+/// returns a `[n_channels, window_len]` f32 window; the mmap pages are demand-loaded, so
+/// resident RSS is only the touched windows.
+#[pyclass]
+struct PyPackReader {
+    inner: lml::tensor_pack::PackReader,
+}
+
+#[pymethods]
+impl PyPackReader {
+    #[new]
+    #[pyo3(signature = (path, expected_sha256=None))]
+    fn new(path: &str, expected_sha256: Option<&[u8]>) -> PyResult<Self> {
+        let exp = match expected_sha256 {
+            Some(b) => {
+                if b.len() != 32 {
+                    return Err(pyo3::exceptions::PyValueError::new_err("expected_sha256 must be 32 bytes"));
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(b);
+                Some(h)
+            }
+            None => None,
+        };
+        let r = lml::tensor_pack::PackReader::open(std::path::Path::new(path), exp)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner: r })
+    }
+
+    #[getter]
+    fn n_windows(&self) -> usize {
+        self.inner.n_windows()
+    }
+
+    #[getter]
+    fn n_channels(&self) -> usize {
+        self.inner.header().n_channels
+    }
+
+    #[getter]
+    fn window_len(&self) -> usize {
+        self.inner.header().window_len
+    }
+
+    /// Dequantize window `row` to a `[n_channels, window_len]` f32 array.
+    fn dequantize<'py>(&self, py: Python<'py>, row: usize) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let v = self
+            .inner
+            .dequantize_window(row)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let n_ch = self.inner.header().n_channels;
+        let t = self.inner.header().window_len;
+        let arr = PyArray2::<f32>::zeros(py, [n_ch, t], false);
+        // Safe: freshly allocated, GIL held, no aliasing; v is exactly n_ch*t long.
+        unsafe {
+            let out = arr
+                .as_slice_mut()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}")))?;
+            out.copy_from_slice(&v);
+        }
+        Ok(arr)
+    }
+}
+
 #[pymodule]
 fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(golomb_encode_dense, m)?)?;
@@ -797,6 +933,8 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(container_read, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_bytes, m)?)?;
     m.add_class::<PyAbir>()?;
+    m.add_class::<PyPackWriter>()?;
+    m.add_class::<PyPackReader>()?;
     m.add_function(wrap_pyfunction!(container_read_abir, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_bytes_abir, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_eeg_f32, m)?)?;
