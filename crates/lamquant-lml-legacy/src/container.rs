@@ -1103,6 +1103,55 @@ mod tests {
         assert_eq!(VERSION_MINOR, 0);
     }
 
+    /// #28 — synthetic known-answer test for the HISTORICAL 18-byte and 20-byte
+    /// header layouts `parse_header` auto-detects. The 32-byte header is exercised
+    /// throughout this module; the older 18-byte (pre-version-field, `probe` IS the
+    /// channel count) and 20-byte (versioned, no bit-depth byte) layouts were never
+    /// directly pinned. Hand-crafted headers → known fields, so a regression in the
+    /// auto-detect branch (bit_depth discriminator / offsets) is caught.
+    #[test]
+    fn parse_header_kat_18_and_20_byte_layouts() {
+        // 18-byte: `probe != 1`, so `probe` IS n_channels (3); no version/bit-depth.
+        let mut h18 = Vec::new();
+        h18.extend_from_slice(MAGIC); // "LML1"
+        h18.extend_from_slice(&3u16.to_le_bytes()); // probe = n_channels = 3
+        h18.extend_from_slice(&2u16.to_le_bytes()); // n_windows = 2
+        h18.extend_from_slice(&100u32.to_le_bytes()); // total_samples = 100
+        h18.extend_from_slice(&50u16.to_le_bytes()); // window_size = 50
+        h18.extend_from_slice(&2u32.to_le_bytes()); // meta_len = 2  (hdr_end = 18)
+        h18.extend_from_slice(b"{}"); // metadata
+        h18.extend_from_slice(&[0u8; 8]); // window index (2 × u32 LE)
+        let h = parse_header(&h18).expect("18-byte header must parse");
+        assert_eq!(
+            (h.n_ch, h.n_windows, h.total_samples, h.window_size),
+            (3, 2, 100, 50),
+            "18-byte header fields"
+        );
+        assert_eq!(h.metadata, "{}");
+
+        // 20-byte: `probe == 1` (version marker) and byte[20] ∉ {16,24,32} (not a
+        // bit_depth), so the 20-byte branch is taken EVEN THOUGH the file is ≥ 32
+        // bytes — exercising the bit_depth discriminator, not just a length shortcut.
+        let mut h20 = Vec::new();
+        h20.extend_from_slice(MAGIC); // "LML1"
+        h20.extend_from_slice(&1u16.to_le_bytes()); // probe = 1 (version)
+        h20.extend_from_slice(&2u16.to_le_bytes()); // n_channels = 2
+        h20.extend_from_slice(&4u16.to_le_bytes()); // n_windows = 4
+        h20.extend_from_slice(&100u32.to_le_bytes()); // total_samples = 100
+        h20.extend_from_slice(&50u16.to_le_bytes()); // window_size = 50
+        h20.extend_from_slice(&2u32.to_le_bytes()); // meta_len = 2  (hdr_end = 20)
+        h20.extend_from_slice(b"{}"); // metadata; byte[20] = '{' (123) → 20-byte branch
+        h20.extend_from_slice(&[0u8; 16]); // window index (4 × u32) → total ≥ 32
+        assert!(h20.len() >= 32, "must be ≥ 32 to prove the discriminator, not length");
+        let h = parse_header(&h20).expect("20-byte header must parse");
+        assert_eq!(
+            (h.n_ch, h.n_windows, h.total_samples, h.window_size),
+            (2, 4, 100, 50),
+            "20-byte header fields"
+        );
+        assert_eq!(h.metadata, "{}");
+    }
+
     #[test]
     #[cfg(feature = "legacy-encode")]
     fn write_writes_footer_with_flag_bit_set() {

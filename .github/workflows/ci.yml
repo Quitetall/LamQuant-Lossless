@@ -81,6 +81,11 @@ jobs:
       # the property gates prove the bound; this pins the exact wire bytes.
       - name: Lossy-mode wire golden (archive)
         run: cargo test -p lamquant-lml --features archive --test lossy_wire_golden
+      # #28: the conformance vectors (specs/conformance/vectors) run in Rust —
+      # decode-forever: positive vectors decode to the specified shape, corruption
+      # vectors error with the specified kind, .lml bytes sha-pinned.
+      - name: Conformance vectors (archive)
+        run: cargo test -p lamquant-lml --features archive --test conformance_vectors
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
