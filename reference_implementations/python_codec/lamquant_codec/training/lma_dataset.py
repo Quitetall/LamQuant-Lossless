@@ -337,6 +337,15 @@ def decode_lma_signal(lma_path: str, stem: str,
     from math import gcd
 
     lc = _LAZY["lamquant_core"]
+    # ADR 0075 A3 requires the mmap+selected decode entry points. On a STALE extension a
+    # bare attribute miss would surface as an AttributeError caught below → every recording
+    # silently drops → training on empty data. Fail LOUD + actionable instead.
+    if not hasattr(lc, "lma_mmap_read_phys_selected"):
+        raise RuntimeError(
+            "lamquant_core is stale: decode_lma_signal (ADR 0075 A3) needs "
+            "lma_mmap_read_phys_selected / lma_mmap_entry_metadata — rebuild the extension "
+            "with `maturin develop` (or `pip install -e`)."
+        )
     entry = lml_entry_name if lml_entry_name is not None else f"{stem}.lml"
 
     # ADR 0075 A3 — mmap + selected-channel decode. Peek the container header/metadata via
