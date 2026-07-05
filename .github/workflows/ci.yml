@@ -54,7 +54,8 @@ jobs:
       # S1 byte-identity gate (ADR 0069): the front_end_bit_exact container/EDF
       # locks run in the workspace step above only via default=host→archive; pin
       # them EXPLICITLY so a future `default` trim can't silently delete the S1
-      # lock. (The sibling nwb lock is dormant — it needs libhdf5+h5py; tracked.)
+      # lock. (The sibling nwb lock now has its own lane — the `nwb-hdf5` job below,
+      # #24 — which installs libhdf5+h5py; no longer dormant.)
       - name: S1 front-end byte-identity gate (archive)
         run: cargo test -p lamquant-lml --features archive --test front_end_bit_exact
       # L1 differential oracle (ADR 0069): byte-identity + round-trip + decode-old-files
@@ -191,3 +192,31 @@ jobs:
         run: |
           cbindgen --config cbindgen.toml --crate lamquant-lossless --output include/lml.h
           git diff --exit-code include/lml.h
+
+  nwb-hdf5:
+    # #24: the NWB/HDF5 reader lane. Dormant until now — it needs system libhdf5
+    # (the `hdf5` crate links it) + h5py (the test writes the HDF5/NWB fixture the
+    # Rust reader then validates), so it never ran in CI. Install both and exercise
+    # the `nwb` feature so a regression in the HDF5 read path is caught.
+    name: NWB / HDF5 reader (libhdf5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # h5py/numpy via apt (python3-*) rather than pip — robust against the
+      # PEP 668 externally-managed-environment error on newer ubuntu images.
+      - name: Install libhdf5 + h5py
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhdf5-dev pkg-config python3-h5py python3-numpy
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nwb-hdf5-${{ hashFiles('Cargo.lock') }}
+      - name: cargo test --features nwb (nwb_reader)
+        run: cargo test -p lamquant-lml --features nwb --test nwb_reader

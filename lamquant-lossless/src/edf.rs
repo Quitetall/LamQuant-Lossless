@@ -15,6 +15,20 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+/// The dominant samples-per-record (the rate that enters the DWT+LPC pipeline):
+/// max total weight, **tie-broken by the LARGER rate**. Determinism gate (task
+/// #24): a `HashMap`'s randomized iteration order must NEVER decide which rate is
+/// dominant — on a weight tie (e.g. 4ch@500 vs 8ch@250, both weight 2000) a bare
+/// `max_by_key` would return a run-dependent rate, changing the encoded output.
+/// The `(weight, rate)` comparator is a total order over the distinct rate keys,
+/// so the pick is stable across platforms + runs. `None` on empty.
+fn pick_mode_ns(sr_weights: &HashMap<usize, usize>) -> Option<usize> {
+    sr_weights
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)))
+        .map(|(&n, _)| n)
+}
+
 pub struct EdfFile {
     pub signal: Vec<Vec<i64>>,
     pub channels: Vec<String>,
@@ -184,9 +198,9 @@ pub fn read_edf(path: &Path) -> LmlResult<EdfFile> {
         // Weight by samples-per-record (channels at the same rate accumulate).
         *sr_weights.entry(ns_per_rec[i]).or_insert(0) += ns_per_rec[i];
     }
-    let mode_ns = match sr_weights.iter().max_by_key(|&(_, w)| w) {
-        Some((&n, _)) if n > 0 => n,
-        Some((&n, _)) => {
+    let mode_ns = match pick_mode_ns(&sr_weights) {
+        Some(n) if n > 0 => n,
+        Some(n) => {
             return Err(LmlError::InvalidHeader(format!(
                 "EDF mode sample rate is {n} (must be > 0)"
             )));
@@ -542,3 +556,30 @@ pub fn read_edf(path: &Path) -> LmlResult<EdfFile> {
 // 24-bit read (`read_i24_le`) moved to `crate::source::ascii` and
 // `crate::source::bitstream` in Phase 0.2 so BrainVision/CNT/raw
 // readers can reuse them. EDF behaviour unchanged.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_ns_tie_break_is_deterministic() {
+        // 4ch@500 (weight 2000) tied with 8ch@250 (weight 2000): a bare
+        // `max_by_key` over the HashMap could pick either, run-dependently. The
+        // deterministic tie-break must resolve to the LARGER rate EVERY time,
+        // regardless of the map's randomized iteration order.
+        for _ in 0..100 {
+            // Rebuild each iteration so the map re-hashes with fresh iteration order.
+            let mut w = HashMap::new();
+            w.insert(500usize, 2000usize);
+            w.insert(250usize, 2000usize);
+            assert_eq!(pick_mode_ns(&w), Some(500), "tie must always resolve to the larger rate");
+        }
+        // A clear winner is unaffected by the tie-break.
+        let mut clear = HashMap::new();
+        clear.insert(250usize, 3000usize);
+        clear.insert(500usize, 1000usize);
+        assert_eq!(pick_mode_ns(&clear), Some(250));
+        // Empty → None (the "no countable sample rates" error path).
+        assert_eq!(pick_mode_ns(&HashMap::new()), None);
+    }
+}
