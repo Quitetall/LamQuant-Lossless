@@ -16,6 +16,9 @@
 //! reader. The offline builder (B2) and the PyO3 reader (B3) sit on top.
 
 use std::fmt;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 
 /// The mantissa dtype of a pack (block floating point unless `F32`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +183,258 @@ impl From<std::io::Error> for PackError {
     }
 }
 
+/// LQTP1 magic / version / fixed header length.
+pub const LQTP_MAGIC: &[u8; 4] = b"LQTP";
+pub const LQTP_VERSION: u8 = 1;
+pub const LQTP_HEADER_LEN: usize = 64;
+
+/// The fixed 64-byte LQTP1 header. The window index is IMPLICIT (manifest order: row `i`
+/// is manifest entry `i`), so the only stored index is `manifest_sha256` — the loader
+/// refuses a pack whose hash != the loaded manifest, making the v11-desync OOM class
+/// structurally impossible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackHeader {
+    pub dtype: PackDtype,
+    pub n_channels: usize,
+    pub window_len: usize,
+    pub n_windows: usize,
+    pub record_stride: usize,
+    pub manifest_sha256: [u8; 32],
+}
+
+impl PackHeader {
+    /// Bytes per window record: `n_ch` f32 scales, then `n_ch*window_len` mantissas.
+    pub fn record_stride(dtype: PackDtype, n_channels: usize, window_len: usize) -> usize {
+        n_channels * 4 + n_channels * window_len * dtype.mant_size()
+    }
+
+    /// Byte offset of window `row`'s record.
+    pub fn record_offset(&self, row: usize) -> usize {
+        LQTP_HEADER_LEN + row * self.record_stride
+    }
+
+    /// Total pack file length for `n_windows` records.
+    pub fn total_len(&self) -> usize {
+        LQTP_HEADER_LEN + self.n_windows * self.record_stride
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; LQTP_HEADER_LEN], PackError> {
+        // try_from (not `as`): a shape that overflows its wire width must ERROR, never
+        // wrap silently — a truncated n_windows would slip past the stride cross-check.
+        let n_ch = u16::try_from(self.n_channels)
+            .map_err(|_| PackError::ShapeMismatch(format!("n_channels {} > u16::MAX", self.n_channels)))?;
+        let win_len = u32::try_from(self.window_len)
+            .map_err(|_| PackError::ShapeMismatch(format!("window_len {} > u32::MAX", self.window_len)))?;
+        let n_win = u32::try_from(self.n_windows)
+            .map_err(|_| PackError::ShapeMismatch(format!("n_windows {} > u32::MAX", self.n_windows)))?;
+        let stride = u64::try_from(self.record_stride)
+            .map_err(|_| PackError::ShapeMismatch(format!("record_stride {} > u64::MAX", self.record_stride)))?;
+        let mut h = [0u8; LQTP_HEADER_LEN];
+        h[0..4].copy_from_slice(LQTP_MAGIC);
+        h[4] = LQTP_VERSION;
+        h[5] = self.dtype.to_u8();
+        h[6..8].copy_from_slice(&n_ch.to_le_bytes());
+        h[8..12].copy_from_slice(&win_len.to_le_bytes());
+        h[12..16].copy_from_slice(&n_win.to_le_bytes());
+        h[16..24].copy_from_slice(&stride.to_le_bytes());
+        h[24..56].copy_from_slice(&self.manifest_sha256);
+        // [56..64] reserved (zero).
+        Ok(h)
+    }
+
+    pub fn parse(data: &[u8]) -> Result<PackHeader, PackError> {
+        if data.len() < LQTP_HEADER_LEN {
+            return Err(PackError::Truncated { expected: LQTP_HEADER_LEN, actual: data.len() });
+        }
+        if &data[0..4] != LQTP_MAGIC {
+            return Err(PackError::BadMagic);
+        }
+        if data[4] != LQTP_VERSION {
+            return Err(PackError::BadVersion(data[4]));
+        }
+        let dtype = PackDtype::from_u8(data[5]).ok_or(PackError::BadDtype(data[5]))?;
+        let n_channels = u16::from_le_bytes([data[6], data[7]]) as usize;
+        let window_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let n_windows = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+        let record_stride = u64::from_le_bytes([
+            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
+        ]) as usize;
+        let mut manifest_sha256 = [0u8; 32];
+        manifest_sha256.copy_from_slice(&data[24..56]);
+        // Cross-check the stride against dtype/shape so a corrupt header can't drive an
+        // out-of-bounds record layout downstream.
+        let expected = Self::record_stride(dtype, n_channels, window_len);
+        if record_stride != expected {
+            return Err(PackError::ShapeMismatch(format!(
+                "record_stride {record_stride} != n_ch*4 + n_ch*t*{} = {expected}",
+                dtype.mant_size()
+            )));
+        }
+        Ok(PackHeader { dtype, n_channels, window_len, n_windows, record_stride, manifest_sha256 })
+    }
+}
+
+/// Sequential writer for an LQTP1 pack — writes the header, then `n_windows` BFP records in
+/// manifest order. `finish` refuses to close a short pack.
+pub struct PackWriter {
+    file: BufWriter<File>,
+    header: PackHeader,
+    written: usize,
+    partial_path: std::path::PathBuf,
+    final_path: std::path::PathBuf,
+}
+
+impl PackWriter {
+    pub fn create(
+        path: &Path,
+        dtype: PackDtype,
+        n_channels: usize,
+        window_len: usize,
+        n_windows: usize,
+        manifest_sha256: [u8; 32],
+    ) -> Result<Self, PackError> {
+        let header = PackHeader {
+            dtype,
+            n_channels,
+            window_len,
+            n_windows,
+            record_stride: PackHeader::record_stride(dtype, n_channels, window_len),
+            manifest_sha256,
+        };
+        // Write to a sibling `.partial` and rename into place only on finish(), so a
+        // dropped or aborted build never leaves a corrupt pack at the final path.
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".partial");
+        let partial_path = std::path::PathBuf::from(partial);
+        let mut file = BufWriter::new(File::create(&partial_path)?);
+        file.write_all(&header.to_bytes()?)?;
+        Ok(Self { file, header, written: 0, partial_path, final_path: path.to_path_buf() })
+    }
+
+    /// Quantize + append one `[n_ch, window_len]` (row-major) window at the next row.
+    pub fn write_window(&mut self, x: &[f32]) -> Result<(), PackError> {
+        if self.written >= self.header.n_windows {
+            return Err(PackError::ShapeMismatch(format!(
+                "wrote more than the declared {} windows",
+                self.header.n_windows
+            )));
+        }
+        if x.len() != self.header.n_channels * self.header.window_len {
+            return Err(PackError::ShapeMismatch(format!(
+                "window len {} != n_ch*window_len ({})",
+                x.len(),
+                self.header.n_channels * self.header.window_len
+            )));
+        }
+        let (scales, mant) =
+            quantize_window(x, self.header.n_channels, self.header.window_len, self.header.dtype);
+        for s in &scales {
+            self.file.write_all(&s.to_le_bytes())?;
+        }
+        self.file.write_all(&mant)?;
+        self.written += 1;
+        Ok(())
+    }
+
+    /// Flush, fsync, and atomically rename the `.partial` into place. Refuses a short pack
+    /// (a truncated build must fail, not ship silently — the `.partial` is left for
+    /// inspection and the final path is never created).
+    pub fn finish(self) -> Result<(), PackError> {
+        let PackWriter { file, header, written, partial_path, final_path } = self;
+        if written != header.n_windows {
+            return Err(PackError::ShapeMismatch(format!(
+                "wrote {written} of the declared {} windows",
+                header.n_windows
+            )));
+        }
+        let mut file = file;
+        file.flush()?;
+        let f = file.into_inner().map_err(|e| PackError::Io(e.into_error()))?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&partial_path, &final_path)?;
+        Ok(())
+    }
+}
+
+/// Memory-mapped, read-only, shared-across-workers LQTP1 reader. Verifies length + (if a
+/// manifest hash is supplied) the fail-closed `manifest_sha256`. `window_raw` returns
+/// BORROWED scale + mantissa slices of the map (zero-copy; the PyO3 layer hands these to
+/// numpy/torch and dequantizes on the GPU).
+pub struct PackReader {
+    mmap: memmap2::Mmap,
+    header: PackHeader,
+}
+
+impl PackReader {
+    pub fn open(path: &Path, expected_manifest_sha256: Option<[u8; 32]>) -> Result<Self, PackError> {
+        let file = File::open(path)?;
+        // SAFETY: read-only mapping of a file treated as immutable for this handle.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let header = PackHeader::parse(&mmap)?;
+        let total = header.total_len();
+        // Exact-length format (fail-closed): too short => Truncated; trailing bytes => a
+        // valid LQTP1 pack is exactly header + records, so reject the surplus too.
+        if mmap.len() != total {
+            return Err(if mmap.len() < total {
+                PackError::Truncated { expected: total, actual: mmap.len() }
+            } else {
+                PackError::ShapeMismatch(format!(
+                    "pack has {} trailing bytes past the {total} declared",
+                    mmap.len() - total
+                ))
+            });
+        }
+        if let Some(exp) = expected_manifest_sha256 {
+            if header.manifest_sha256 != exp {
+                return Err(PackError::ManifestMismatch);
+            }
+        }
+        Ok(Self { mmap, header })
+    }
+
+    pub fn header(&self) -> &PackHeader {
+        &self.header
+    }
+
+    pub fn n_windows(&self) -> usize {
+        self.header.n_windows
+    }
+
+    /// Borrowed `(scale_bytes[n_ch*4], mantissa_bytes[n_ch*window_len*mant_size])` of the
+    /// map for `row`. No copy, no dequant.
+    pub fn window_raw(&self, row: usize) -> Result<(&[u8], &[u8]), PackError> {
+        if row >= self.header.n_windows {
+            return Err(PackError::ShapeMismatch(format!(
+                "row {row} >= n_windows {}",
+                self.header.n_windows
+            )));
+        }
+        let start = self.header.record_offset(row);
+        let scale_bytes = self.header.n_channels * 4;
+        let scales = &self.mmap[start..start + scale_bytes];
+        let mant = &self.mmap[start + scale_bytes..start + self.header.record_stride];
+        Ok((scales, mant))
+    }
+
+    /// Dequantize `row` to `[n_ch, window_len]` f32 (Rust-side convenience; the training
+    /// hot path dequantizes on the GPU from the raw borrowed bytes instead).
+    pub fn dequantize_window(&self, row: usize) -> Result<Vec<f32>, PackError> {
+        let (scale_bytes, mant) = self.window_raw(row)?;
+        let scales: Vec<f32> = scale_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        Ok(dequantize_window(
+            &scales,
+            mant,
+            self.header.n_channels,
+            self.header.window_len,
+            self.header.dtype,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +509,113 @@ mod tests {
         assert_eq!(PackDtype::from_u8(4), None);
         assert_eq!(PackDtype::parse("int16"), Some(PackDtype::Int16));
         assert_eq!(PackDtype::parse("nope"), None);
+    }
+
+    fn sha_hex(b: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b);
+        format!("{:x}", h.finalize())
+    }
+
+    fn multi_window_signal(n_ch: usize, t: usize, n_win: usize) -> Vec<Vec<f32>> {
+        (0..n_win)
+            .map(|w| {
+                (0..n_ch)
+                    .flat_map(|c| {
+                        (0..t).map(move |i| {
+                            ((i + w * 7) as f32 * 0.03 + c as f32).sin() * (c + 1) as f32
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn writer_reader_roundtrip() {
+        let (n_ch, t, n_win) = (5usize, 300usize, 4usize);
+        let windows = multi_window_signal(n_ch, t, n_win);
+        let hash = [0x5au8; 32];
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        for dtype in [PackDtype::Int8, PackDtype::Int16, PackDtype::F32] {
+            {
+                let mut w = PackWriter::create(tmp.path(), dtype, n_ch, t, n_win, hash).unwrap();
+                for win in &windows {
+                    w.write_window(win).unwrap();
+                }
+                w.finish().unwrap();
+            }
+            let r = PackReader::open(tmp.path(), Some(hash)).unwrap();
+            assert_eq!(r.n_windows(), n_win);
+            assert_eq!(r.header().dtype, dtype);
+            for (row, win) in windows.iter().enumerate() {
+                let deq = r.dequantize_window(row).unwrap();
+                let (scales, _) = quantize_window(win, n_ch, t, dtype);
+                for c in 0..n_ch {
+                    let bound = if dtype == PackDtype::F32 { 0.0 } else { scales[c] * 0.5 + 1e-6 };
+                    for i in 0..t {
+                        assert!(
+                            (win[c * t + i] - deq[c * t + i]).abs() <= bound,
+                            "{dtype:?} row {row} ch {c} sample {i} out of BFP bound"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn index_hash_mismatch_refused() {
+        let (n_ch, t, n_win) = (3usize, 100usize, 2usize);
+        let windows = multi_window_signal(n_ch, t, n_win);
+        let hash = [0x11u8; 32];
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut w = PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, n_win, hash).unwrap();
+            for win in &windows {
+                w.write_window(win).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        // Matching hash opens; a wrong hash is refused FAIL-CLOSED; None = no check.
+        assert!(PackReader::open(tmp.path(), Some(hash)).is_ok());
+        assert!(matches!(
+            PackReader::open(tmp.path(), Some([0x22u8; 32])),
+            Err(PackError::ManifestMismatch)
+        ));
+        assert!(PackReader::open(tmp.path(), None).is_ok());
+        // A short build must refuse to finish (never ship a truncated pack).
+        let mut w2 =
+            PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, 3, hash).unwrap();
+        w2.write_window(&windows[0]).unwrap();
+        assert!(w2.finish().is_err(), "short pack must not finish");
+    }
+
+    #[test]
+    fn pack_layout_golden() {
+        // A tiny deterministic int16 pack; frozen sha over the whole file pins the LQTP1
+        // wire. Regenerate ONLY with a deliberate version bump.
+        let (n_ch, t, n_win) = (2usize, 3usize, 2usize);
+        let windows: Vec<Vec<f32>> = vec![
+            vec![1.0, -2.0, 3.0, 0.5, 0.0, -0.5],
+            vec![0.0, 0.0, 0.0, 10.0, -20.0, 30.0], // ch0 silent
+        ];
+        let hash = [0u8; 32];
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut w = PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, n_win, hash).unwrap();
+            for win in &windows {
+                w.write_window(win).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        assert_eq!(bytes.len(), LQTP_HEADER_LEN + n_win * (n_ch * 4 + n_ch * t * 2));
+        assert_eq!(
+            sha_hex(&bytes),
+            "cb35ecf71056e2440236dcdd46358492a467dac3a9d1adb621de519fb87394b5",
+            "LQTP1 layout drifted (regen deliberately with a version bump)"
+        );
     }
 }

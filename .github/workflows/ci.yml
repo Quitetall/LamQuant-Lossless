@@ -86,6 +86,10 @@ jobs:
       # vectors error with the specified kind, .lml bytes sha-pinned.
       - name: Conformance vectors (archive)
         run: cargo test -p lamquant-lml --features archive --test conformance_vectors
+      # ADR 0075: the LQTP1 training-pack wire (BFP codec + fixed-stride header) — a NEW
+      # frozen golden (pack_layout_golden); never regen without a deliberate version bump.
+      - name: LQTP1 tensor-pack format gate
+        run: cargo test -p lamquant-lml --lib tensor_pack::tests
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
