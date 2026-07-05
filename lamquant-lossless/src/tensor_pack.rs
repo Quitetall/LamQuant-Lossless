@@ -277,11 +277,12 @@ impl PackHeader {
 /// Sequential writer for an LQTP1 pack — writes the header, then `n_windows` BFP records in
 /// manifest order. `finish` refuses to close a short pack.
 pub struct PackWriter {
-    file: BufWriter<File>,
+    file: Option<BufWriter<File>>,
     header: PackHeader,
     written: usize,
     partial_path: std::path::PathBuf,
     final_path: std::path::PathBuf,
+    done: bool,
 }
 
 impl PackWriter {
@@ -302,13 +303,21 @@ impl PackWriter {
             manifest_sha256,
         };
         // Write to a sibling `.partial` and rename into place only on finish(), so a
-        // dropped or aborted build never leaves a corrupt pack at the final path.
+        // dropped or aborted build never leaves a corrupt pack at the final path. The
+        // Drop impl removes the `.partial` if finish() never succeeded.
         let mut partial = path.as_os_str().to_owned();
         partial.push(".partial");
         let partial_path = std::path::PathBuf::from(partial);
         let mut file = BufWriter::new(File::create(&partial_path)?);
         file.write_all(&header.to_bytes()?)?;
-        Ok(Self { file, header, written: 0, partial_path, final_path: path.to_path_buf() })
+        Ok(Self {
+            file: Some(file),
+            header,
+            written: 0,
+            partial_path,
+            final_path: path.to_path_buf(),
+            done: false,
+        })
     }
 
     /// Quantize + append one `[n_ch, window_len]` (row-major) window at the next row.
@@ -328,32 +337,49 @@ impl PackWriter {
         }
         let (scales, mant) =
             quantize_window(x, self.header.n_channels, self.header.window_len, self.header.dtype);
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| PackError::ShapeMismatch("writer already finished".into()))?;
         for s in &scales {
-            self.file.write_all(&s.to_le_bytes())?;
+            file.write_all(&s.to_le_bytes())?;
         }
-        self.file.write_all(&mant)?;
+        file.write_all(&mant)?;
         self.written += 1;
         Ok(())
     }
 
     /// Flush, fsync, and atomically rename the `.partial` into place. Refuses a short pack
-    /// (a truncated build must fail, not ship silently — the `.partial` is left for
-    /// inspection and the final path is never created).
-    pub fn finish(self) -> Result<(), PackError> {
-        let PackWriter { file, header, written, partial_path, final_path } = self;
-        if written != header.n_windows {
+    /// (a truncated build must fail, not ship silently); on any early return the `.partial`
+    /// is removed by Drop, and the final path is never created.
+    pub fn finish(mut self) -> Result<(), PackError> {
+        if self.written != self.header.n_windows {
             return Err(PackError::ShapeMismatch(format!(
-                "wrote {written} of the declared {} windows",
-                header.n_windows
+                "wrote {} of the declared {} windows",
+                self.written, self.header.n_windows
             )));
         }
-        let mut file = file;
+        let mut file = self
+            .file
+            .take()
+            .ok_or_else(|| PackError::ShapeMismatch("writer already finished".into()))?;
         file.flush()?;
         let f = file.into_inner().map_err(|e| PackError::Io(e.into_error()))?;
         f.sync_all()?;
         drop(f);
-        std::fs::rename(&partial_path, &final_path)?;
+        std::fs::rename(&self.partial_path, &self.final_path)?;
+        self.done = true;
         Ok(())
+    }
+}
+
+impl Drop for PackWriter {
+    fn drop(&mut self) {
+        // Aborted / short / errored build — remove the `.partial` so it doesn't linger.
+        // On success finish() already renamed it away and set `done`, so this no-ops.
+        if !self.done {
+            let _ = std::fs::remove_file(&self.partial_path);
+        }
     }
 }
 
@@ -617,5 +643,30 @@ mod tests {
             "cb35ecf71056e2440236dcdd46358492a467dac3a9d1adb621de519fb87394b5",
             "LQTP1 layout drifted (regen deliberately with a version bump)"
         );
+    }
+
+    #[test]
+    fn aborted_build_removes_partial() {
+        let (n_ch, t) = (2usize, 50usize);
+        let hash = [0u8; 32];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aborted.lqtp");
+        let partial = dir.path().join("aborted.lqtp.partial");
+        // Drop without finish (an aborted build) → Drop must remove the .partial and
+        // never create the final path.
+        {
+            let mut w = PackWriter::create(&path, PackDtype::Int16, n_ch, t, 3, hash).unwrap();
+            w.write_window(&vec![1.0f32; n_ch * t]).unwrap();
+        }
+        assert!(!partial.exists(), ".partial must be removed on drop-without-finish");
+        assert!(!path.exists(), "final pack must never appear on abort");
+        // A successful build renames the partial away — no leftover either.
+        {
+            let mut w = PackWriter::create(&path, PackDtype::Int16, n_ch, t, 1, hash).unwrap();
+            w.write_window(&vec![2.0f32; n_ch * t]).unwrap();
+            w.finish().unwrap();
+        }
+        assert!(path.exists(), "finish must create the final pack");
+        assert!(!partial.exists(), "finish renames partial → final, no leftover");
     }
 }
