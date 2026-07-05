@@ -76,6 +76,10 @@ jobs:
       # the payload — the byte-neutrality the whole ingest config rests on.
       - name: ADR-0074 Track I provenance-neutrality gate (archive)
         run: cargo test -p lamquant-lml --features archive --test modality_provenance_snapshot
+      # #23: byte-stability goldens for the lossy modes (BoundedMae / TargetBps) —
+      # the property gates prove the bound; this pins the exact wire bytes.
+      - name: Lossy-mode wire golden (archive)
+        run: cargo test -p lamquant-lml --features archive --test lossy_wire_golden
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
