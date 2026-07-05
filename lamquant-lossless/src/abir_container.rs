@@ -990,6 +990,88 @@ pub fn read_bytes_into_f32_calibrated(
     }
 }
 
+/// Selected-channel calibrated f32 decode (ADR 0075 A2). Decodes only the channels in
+/// `channel_mask` into `out` (`[n_sel * total]`, in selected order) — skipping the full
+/// `[n_ch, total]` f32 array [`read_bytes_into_f32_calibrated`] materialises AND the
+/// downstream channel-select copy. `calib` is `[n_sel * 4]` in selected order;
+/// `channel_mask[sel]` is the SOURCE channel index. Reuses the FROZEN dispatched
+/// per-window reader [`read_window_from_bytes`] (correct for BCS1 + legacy), so no wire
+/// walk is reimplemented; the transient is one decoded window (`[n_ch, ws]` i64), freed
+/// each iteration. The channel selection is purely in the write step, so a selected row
+/// is bit-identical to the corresponding row of the full decode.
+pub fn read_bytes_into_f32_calibrated_selected(
+    data: &[u8],
+    out: &mut [f32],
+    calib: &[f32],
+    channel_mask: &[u16],
+) -> LmlResult<ContainerHeader> {
+    let header = parse_header(data)?;
+    let n_ch = header.n_ch;
+    let total = header.total_samples;
+    let n_sel = channel_mask.len();
+    if out.len() != n_sel * total {
+        return Err(LmlError::InvalidHeader(format!(
+            "selected output buffer size mismatch: expected {} got {}",
+            n_sel * total,
+            out.len()
+        )));
+    }
+    if calib.len() != n_sel * 4 {
+        return Err(LmlError::InvalidHeader(format!(
+            "selected calib length {} != n_sel*4 ({})",
+            calib.len(),
+            n_sel * 4
+        )));
+    }
+    for &src_ch in channel_mask {
+        if src_ch as usize >= n_ch {
+            return Err(LmlError::InvalidHeader(format!(
+                "channel_mask index {src_ch} out of range (n_ch={n_ch})"
+            )));
+        }
+    }
+    // Per-selected-channel scale + offset — same formula as the full path.
+    let mut scale = vec![0.0f32; n_sel];
+    let mut offset = vec![0.0f32; n_sel];
+    for s in 0..n_sel {
+        let dig_min = calib[s * 4];
+        let dig_max = calib[s * 4 + 1];
+        let phys_min = calib[s * 4 + 2];
+        let phys_max = calib[s * 4 + 3];
+        let dig_range = dig_max - dig_min;
+        if dig_range == 0.0 {
+            scale[s] = 0.0;
+            offset[s] = 0.0;
+        } else {
+            scale[s] = (phys_max - phys_min) / dig_range;
+            offset[s] = phys_min - dig_min * scale[s];
+        }
+    }
+    let window_size = header.window_size;
+    for w in 0..header.n_windows {
+        let (window, _wh) = read_window_from_bytes(data, w)?;
+        if window.len() != n_ch {
+            return Err(LmlError::InvalidHeader(format!(
+                "window {w}: decoded channel count {} != header n_ch {}",
+                window.len(),
+                n_ch
+            )));
+        }
+        let start = w * window_size;
+        for sel in 0..n_sel {
+            let src = &window[channel_mask[sel] as usize];
+            let copy_len = src.len().min(total.saturating_sub(start));
+            let dst_off = sel * total + start;
+            let s = scale[sel];
+            let o = offset[sel];
+            for i in 0..copy_len {
+                out[dst_off + i] = src[i] as f32 * s + o;
+            }
+        }
+    }
+    Ok(header)
+}
+
 /// Random-access single-window read — the facade DISPATCHER (#34). Same 4-byte routing:
 /// `BCS1` → [`bcs1_read_window_from_bytes`], else the FROZEN legacy body. Backs
 /// `lamquant-py`'s `container_read_window_np`.
@@ -1013,6 +1095,60 @@ mod bcs1_read_tests {
             (0..600i64).map(|t| ((t * 37) % 4001) - 2000).collect(),
             (0..600i64).map(|t| ((t * 53) % 3001) - 1500).collect(),
         ]
+    }
+
+    /// A2 (ADR 0075) — a selected-channel decode is bit-identical to the corresponding
+    /// rows of the full decode (reordering + subset + distinct per-channel calib), and
+    /// out-of-range mask indices error.
+    #[test]
+    fn selected_channel_matches_full() {
+        let n_ch = 5usize;
+        let t = 600usize;
+        let sig: Vec<Vec<i64>> = (0..n_ch)
+            .map(|c| (0..t).map(|i| ((i as i64 * 37 + c as i64 * 101) % 4001) - 2000).collect())
+            .collect();
+        let abir = Abir::from_channels_i64(sig, 250.0);
+        let buf = write_abir_to_vec(&abir, 250.0, 128, 0, "{}", LpcMode::default(), None, None)
+            .expect("write_abir_to_vec");
+
+        // Distinct per-channel calib exercises the calib indexing.
+        let mut calib_full = vec![0.0f32; n_ch * 4];
+        for c in 0..n_ch {
+            calib_full[c * 4] = 0.0; // dig_min
+            calib_full[c * 4 + 1] = 100.0; // dig_max
+            calib_full[c * 4 + 2] = c as f32; // phys_min
+            calib_full[c * 4 + 3] = c as f32 + 50.0; // phys_max
+        }
+        let total = parse_header(&buf).unwrap().total_samples;
+        let mut full = vec![0.0f32; n_ch * total];
+        read_bytes_into_f32_calibrated(&buf, &mut full, &calib_full).unwrap();
+
+        // Reordering + subset {3, 1, 4}.
+        let mask: Vec<u16> = vec![3, 1, 4];
+        let mut calib_sel = vec![0.0f32; mask.len() * 4];
+        for (s, &src) in mask.iter().enumerate() {
+            let src = src as usize;
+            calib_sel[s * 4..s * 4 + 4].copy_from_slice(&calib_full[src * 4..src * 4 + 4]);
+        }
+        let mut sel = vec![0.0f32; mask.len() * total];
+        read_bytes_into_f32_calibrated_selected(&buf, &mut sel, &calib_sel, &mask).unwrap();
+
+        for (s, &src) in mask.iter().enumerate() {
+            let src = src as usize;
+            for i in 0..total {
+                assert_eq!(
+                    sel[s * total + i],
+                    full[src * total + i],
+                    "selected row {s} (src ch {src}) sample {i} must match the full decode"
+                );
+            }
+        }
+        // Out-of-range mask index errors (n_ch=5, index 9 invalid).
+        let mut bad = vec![0.0f32; total];
+        assert!(
+            read_bytes_into_f32_calibrated_selected(&buf, &mut bad, &[0.0; 4], &[9u16]).is_err(),
+            "out-of-range channel_mask must error"
+        );
     }
 
     #[test]

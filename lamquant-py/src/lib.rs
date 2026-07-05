@@ -237,6 +237,48 @@ fn container_read_phys_f32<'py>(
     Ok((arr, header.metadata, header.n_windows))
 }
 
+/// Selected-channel calibrated f32 decode (ADR 0075 A2). Decodes only `channel_mask`'s
+/// channels into a fresh `[n_sel, total]` f32 array (in selected order), skipping the
+/// full `[n_ch, total]` array `container_read_phys_f32` builds AND the downstream
+/// channel-select copy. `calib_f32` is `[n_sel*4]` in selected order; `channel_mask[sel]`
+/// is the source channel index. Returns `(array[n_sel, total], metadata, n_windows)`.
+#[pyfunction]
+fn container_read_phys_selected<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    calib_f32: PyReadonlyArray1<'py, f32>,
+    channel_mask: Vec<u16>,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, String, usize)> {
+    let dims = lml::container::parse_header(data)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let total = dims.total_samples;
+    let n_sel = channel_mask.len();
+
+    let calib_slice = calib_f32.as_slice().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("calib not contiguous: {e:?}"))
+    })?;
+    if calib_slice.len() != n_sel * 4 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "calib length {} != n_sel*4 ({})",
+            calib_slice.len(),
+            n_sel * 4
+        )));
+    }
+
+    let arr = PyArray2::<f32>::zeros(py, [n_sel, total], false);
+    // Safe: freshly allocated, no aliasing, GIL held — the &mut [f32] aliases the
+    // PyArray2 heap buffer, so no py.allow_threads while it is live.
+    let header = unsafe {
+        let out = arr.as_slice_mut().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
+        })?;
+        lml::container::read_bytes_into_f32_calibrated_selected(data, out, calib_slice, &channel_mask)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+    };
+
+    Ok((arr, header.metadata, header.n_windows))
+}
+
 /// Random-access read of one window from an in-memory LML container.
 ///
 /// Returns `(window[n_ch, window_size_actual] int64, metadata_json,
@@ -688,6 +730,7 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(normalize_eeg_f32, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_window_np, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_phys_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(container_read_phys_selected, m)?)?;
     m.add_function(wrap_pyfunction!(container_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(lma_read_entry, m)?)?;
     m.add_function(wrap_pyfunction!(lma_entry_headers, m)?)?;
