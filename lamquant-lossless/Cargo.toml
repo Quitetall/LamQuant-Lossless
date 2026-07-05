@@ -245,6 +245,10 @@ experimental_bit_pack = ["host", "lamquant-lml-mcu/experimental_bit_pack"]
 experimental_basestation = ["host"]
 
 [dependencies]
+# ADR 0069 S7b: the FFT resample branch of the 250 Hz normalizer
+# (`src/normalize.rs::resample_fft`, a scipy.signal.resample port). Host-only
+# facade crate, so std FFT is fine; core-no_std (lamquant-lml-mcu) is unaffected.
+realfft = "3"
 # Shared primitives extracted during decomposition (Phase 2). lamquant-core
 # now re-exports `crc32` (and incrementally more) from this crate so both
 # lossless and (future) neural codecs share the implementation.

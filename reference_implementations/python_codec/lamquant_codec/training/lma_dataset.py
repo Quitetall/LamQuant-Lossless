@@ -406,14 +406,15 @@ def decode_lma_signal(lma_path: str, stem: str,
         padded[: min(data.shape[0], n_target)] = data[: min(data.shape[0], n_target)]
         data = padded
 
-    # ADR 0069 S7b cutover: optionally run the normalization DSP (resample→250 →
+    # ADR 0069 S7b cutover (DEFAULT-ON): run the normalization DSP (resample→250 →
     # 0.5 Hz zero-phase HP → Q31 → f32) in Rust (`src/normalize.rs`) instead of
-    # scipy, so LML + LMQ share one definition. Bit-exact to the Python path
-    # below (parity-gated: normalize_parity.rs + test_normalize.py). Opt-in via
-    # LAMQUANT_RUST_NORMALIZE=1; the default stays Python until the Rust path is
-    # validated on the full corpus. The scipy FFT resample branch is not ported,
-    # so those (rare) rates raise NotImplementedError and fall through to scipy.
-    if os.environ.get("LAMQUANT_RUST_NORMALIZE", "") in ("1", "true", "yes"):
+    # scipy BY DEFAULT, so LML + LMQ share one definition. The FFT resample branch
+    # is now ported (`resample_fft`, scipy.signal.resample parity within the ADC
+    # noise floor), so Rust handles EVERY rate — the last blocker to defaulting on
+    # is gone. Parity-gated (normalize_parity.rs incl. the FFT branch +
+    # test_normalize.py); within the noise floor of the scipy path. Opt OUT with
+    # LAMQUANT_RUST_NORMALIZE=0 (and rebuild the extension: `maturin develop`).
+    if os.environ.get("LAMQUANT_RUST_NORMALIZE", "1") in ("1", "true", "yes"):
         try:
             # Returns the [21, T'] float32 array (or None on an all-flat signal,
             # matching the max_abs guard below).
@@ -421,10 +422,11 @@ def decode_lma_signal(lma_path: str, stem: str,
                 np.ascontiguousarray(data, dtype=np.float32), original_sr
             )
         except NotImplementedError:
-            # FFT-branch rate (not ported to Rust) → fall through to scipy below.
+            # Safety net: the FFT branch is now ported, so this is unreachable — but
+            # if a future rate ever raises it, fall through to scipy rather than crash.
             LOG.debug(
-                "LAMQUANT_RUST_NORMALIZE: %.1f Hz needs the FFT resample branch; "
-                "using the scipy path for %s",
+                "LAMQUANT_RUST_NORMALIZE: %.1f Hz raised NotImplementedError; "
+                "falling back to the scipy path for %s",
                 original_sr,
                 stem,
             )

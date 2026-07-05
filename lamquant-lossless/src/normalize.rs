@@ -288,9 +288,67 @@ pub fn resample_poly(x: &[f64], up: usize, down: usize) -> Vec<f64> {
     y[n_pre_remove..n_pre_remove + n_out].to_vec()
 }
 
+/// Port of `scipy.signal.resample(x, num)` for REAL input — the FFT branch of the
+/// 250 Hz resample, taken when the gcd-reduced up/down exceeds 256 (rare, prime-ish
+/// rates > 256 Hz). Fourier-domain: `rfft` → resize the spectrum (Nyquist-aware) →
+/// `irfft`, scaled by `num/Nx`. Within-noise-floor parity with scipy (FFT
+/// transcendentals), exactly like the polyphase branch.
+fn resample_fft(x: &[f64], num: usize) -> Vec<f64> {
+    let nx = x.len();
+    if nx == 0 || num == 0 {
+        return vec![0.0; num];
+    }
+    if num == nx {
+        return x.to_vec();
+    }
+    let mut planner = realfft::RealFftPlanner::<f64>::new();
+    let fwd = planner.plan_fft_forward(nx);
+    let mut input = x.to_vec();
+    let mut spec = fwd.make_output_vec(); // len nx/2+1
+    fwd.process(&mut input, &mut spec).expect("rfft");
+
+    let out_bins = num / 2 + 1;
+    let mut y = vec![realfft::num_complex::Complex::new(0.0_f64, 0.0); out_bins];
+    let n = num.min(nx);
+    let copy = (n / 2 + 1).min(spec.len()).min(out_bins);
+    y[..copy].copy_from_slice(&spec[..copy]);
+    // scipy scales the `n = min(num, nx)` Nyquist bin (index n/2 in the OUTPUT
+    // spectrum) when n is even: downsampling ×2 (folds in the discarded high-freq
+    // energy), upsampling ×0.5 (splits energy into the new bin pair).
+    if n % 2 == 0 {
+        let idx = n / 2;
+        if idx < out_bins {
+            if num < nx {
+                y[idx] = y[idx] * 2.0;
+            } else if num > nx {
+                y[idx] = y[idx] * 0.5;
+            }
+        }
+    }
+    // numpy irfft treats the DC and (even-length) output-Nyquist bins as purely
+    // real — mirror that so realfft's c2r matches numpy exactly.
+    y[0].im = 0.0;
+    if num % 2 == 0 {
+        y[out_bins - 1].im = 0.0;
+    }
+    let inv = planner.plan_fft_inverse(num);
+    let mut out = inv.make_output_vec(); // len num
+    inv.process(&mut y, &mut out).expect("irfft");
+    // numpy irfft is 1/num-normalized; realfft's inverse is unnormalized (×num);
+    // scipy multiplies by num/Nx → the net scale is 1/Nx.
+    let inv_nx = 1.0 / nx as f64;
+    for v in out.iter_mut() {
+        *v *= inv_nx;
+    }
+    out
+}
+
 /// Resample one channel to 250 Hz — `lma_dataset.py:408-421`. Identity when
-/// `|orig_sr − 250| ≤ 0.5`; else gcd-reduce (up=250, down=int(orig_sr)) and take
-/// the polyphase branch when both ≤ 256, otherwise error (FFT branch not ported).
+/// `|orig_sr − 250| ≤ 0.5`; else gcd-reduce (up=250, down=int(orig_sr)): the
+/// polyphase branch ([`resample_poly`]) when both ≤ 256, else the FFT branch
+/// ([`resample_fft`], `num = int(Nx·250/orig)`). Never errors now — every rate is
+/// handled. (`Result` kept for API stability + `NormalizeError::FftResampleUnsupported`
+/// retained but unreachable.)
 pub fn resample_to_250(x: &[f64], orig_sr: f64) -> Result<Vec<f64>, NormalizeError> {
     if (orig_sr - TARGET_SR).abs() <= 0.5 {
         return Ok(x.to_vec());
@@ -300,7 +358,9 @@ pub fn resample_to_250(x: &[f64], orig_sr: f64) -> Result<Vec<f64>, NormalizeErr
     let g = gcd(up, down);
     let (u, d) = (up / g, down / g);
     if u > 256 || d > 256 {
-        return Err(NormalizeError::FftResampleUnsupported { orig_sr });
+        // scipy FFT branch: num = int(Nx · 250 / orig_sr) (int() truncates).
+        let num = (x.len() as f64 * TARGET_SR / orig_sr) as usize;
+        return Ok(resample_fft(x, num));
     }
     Ok(resample_poly(x, u, d))
 }

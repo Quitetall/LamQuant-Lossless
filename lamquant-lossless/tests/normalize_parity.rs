@@ -125,3 +125,40 @@ fn parity_common_poly_rates() {
         assert_parity(out.into_iter().flatten().collect(), name, 4);
     }
 }
+
+/// ADR 0069 S7b — the FFT resample branch (`scipy.signal.resample`), taken when the
+/// gcd-reduced up/down exceeds 256. Here 333 Hz → 250 (down=333, prime-ish > 256).
+/// Parity vs a scipy 1.18 golden, within noise floor: realfft (rustfft) and scipy
+/// (pocketfft) differ by FFT-transcendental rounding (~1e-9), far below the ADC
+/// noise floor. This is the branch that lets Rust normalize handle EVERY rate, so
+/// it can be the production default.
+#[test]
+fn fft_resample_333hz_matches_scipy_within_noise_floor() {
+    use lamquant_core::normalize::resample_to_250;
+    // MUST match the scipy golden generator: x[i] = sin(0.03 i) + 0.3 sin(0.17 i)
+    // + 0.1 ((i·37 mod 11) − 5), i = 0..1000.
+    let n = 1000usize;
+    let x: Vec<f64> = (0..n)
+        .map(|i| {
+            let fi = i as f64;
+            (0.03 * fi).sin() + 0.3 * (0.17 * fi).sin() + 0.1 * (((i as i64 * 37) % 11 - 5) as f64)
+        })
+        .collect();
+    let y = resample_to_250(&x, 333.0).expect("FFT branch must resolve (no longer errors)");
+    assert_eq!(y.len(), 750, "num = int(1000 · 250 / 333)");
+
+    // scipy.signal.resample golden (first 8, last 4, and total energy).
+    const FIRST8: [f64; 8] = [
+        -0.707940769, 0.360265401, -0.022266587, 0.35070882, 0.533184042, 0.358612047, 0.922335941,
+        0.531804831,
+    ];
+    const LAST4: [f64; 4] = [-0.746287344, -1.353769254, -0.706335912, -0.847381202];
+    for (k, &g) in FIRST8.iter().enumerate() {
+        assert!((y[k] - g).abs() < 1e-4, "y[{k}] = {} vs scipy {g}", y[k]);
+    }
+    for (k, &g) in LAST4.iter().enumerate() {
+        assert!((y[750 - 4 + k] - g).abs() < 1e-4, "y[last-{}] = {} vs scipy {g}", 4 - k, y[750 - 4 + k]);
+    }
+    let sumsq: f64 = y.iter().map(|v| v * v).sum();
+    assert!((sumsq - 482.993909).abs() / 482.993909 < 1e-5, "energy {sumsq} vs scipy 482.99");
+}
