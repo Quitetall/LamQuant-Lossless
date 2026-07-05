@@ -333,8 +333,6 @@ def decode_lma_signal(lma_path: str, stem: str,
     (V4 Pro 2026-05-16 footgun).
     """
     _lazy_imports()
-    from scipy.signal import sosfiltfilt
-    from math import gcd
 
     lc = _LAZY["lamquant_core"]
     # ADR 0075 A3 requires the mmap+selected decode entry points. On a STALE extension a
@@ -417,63 +415,18 @@ def decode_lma_signal(lma_path: str, stem: str,
         padded[: min(data.shape[0], n_target)] = data[: min(data.shape[0], n_target)]
         data = padded
 
-    # ADR 0069 S7b cutover (DEFAULT-ON): run the normalization DSP (resample→250 →
-    # 0.5 Hz zero-phase HP → Q31 → f32) in Rust (`src/normalize.rs`) instead of
-    # scipy BY DEFAULT, so LML + LMQ share one definition. The FFT resample branch
-    # is now ported (`resample_fft`, scipy.signal.resample parity within the ADC
-    # noise floor), so Rust handles EVERY rate — the last blocker to defaulting on
-    # is gone. Parity-gated (normalize_parity.rs incl. the FFT branch +
-    # test_normalize.py); within the noise floor of the scipy path. Opt OUT with
-    # LAMQUANT_RUST_NORMALIZE=0 (and rebuild the extension: `maturin develop`).
-    if os.environ.get("LAMQUANT_RUST_NORMALIZE", "1") in ("1", "true", "yes"):
-        try:
-            # Returns the [21, T'] float32 array (or None on an all-flat signal,
-            # matching the max_abs guard below).
-            return _LAZY["lamquant_core"].normalize_eeg_f32(
-                np.ascontiguousarray(data, dtype=np.float32), original_sr
-            )
-        except NotImplementedError:
-            # Safety net: the FFT branch is now ported, so this is unreachable — but
-            # if a future rate ever raises it, fall through to scipy rather than crash.
-            LOG.debug(
-                "LAMQUANT_RUST_NORMALIZE: %.1f Hz raised NotImplementedError; "
-                "falling back to the scipy path for %s",
-                original_sr,
-                stem,
-            )
-
-    if abs(original_sr - TARGET_SR) > 0.5:
-        # ADR 0069 S7b: resample in float64, not float32. Previously `data` was
-        # float32 here (channel-select preserves the f32 calibration), so
-        # `resample_poly`/`resample` ran in float32 and the `.astype(float64)`
-        # only upcast AFTER the precision loss. Casting up FRONT makes the Rust
-        # f64 port (src/normalize.rs) bit-exact to this path and removes a
-        # ~2e-7-relative artifact (below the ADC noise floor, but free to fix).
-        data = data.astype(np.float64)
-        up = int(TARGET_SR)
-        down = int(original_sr)
-        g = gcd(up, down)
-        up, down = up // g, down // g
-        if up > 256 or down > 256:
-            from scipy.signal import resample
-            new_len = int(data.shape[1] * TARGET_SR / original_sr)
-            resampled = np.zeros((data.shape[0], new_len), dtype=np.float64)
-            for ch in range(data.shape[0]):
-                resampled[ch] = resample(data[ch], new_len)
-            data = resampled
-        else:
-            data = _LAZY["resample_poly"](data, up, down, axis=1)
-
-    data = sosfiltfilt(_highpass_sos(), data, axis=1)
-
-    max_abs = float(np.max(np.abs(data)))
-    if max_abs < 1e-12:
-        return None
-
-    gain = Q31_HEADROOM / max_abs
-    signal_q31 = (data * gain * 2147483647.0).astype(np.int32)
-    signal_f32 = (signal_q31.astype(np.float32) / 2147483647.0) * 1000.0
-    return signal_f32
+    # ADR 0075 — SINGLE SOURCE of the normalization DSP: Rust (`src/normalize.rs`):
+    # resample→250 → 0.5 Hz zero-phase HP → Q31 → f32. Rust handles EVERY rate (the FFT
+    # branch, #37) and is parity-gated bit-exact to the former scipy path on the common
+    # corpus rates (within the ADC noise floor on exotic rates). The scipy RUNTIME path is
+    # gone — scipy survives only as the OFFLINE golden generator (tools/dump_normalize_
+    # golden.py) that regenerates the normalize_parity golden, so there is no second live
+    # implementation that could silently drift. (A missing/stale extension fails loud via
+    # the guard at the top of this function rather than falling back to a second DSP.)
+    # Returns the [21, T'] f32 array, or None on an all-flat signal.
+    return _LAZY["lamquant_core"].normalize_eeg_f32(
+        np.ascontiguousarray(data, dtype=np.float32), original_sr
+    )
 
 
 # ----------------------------------------------------------------------
