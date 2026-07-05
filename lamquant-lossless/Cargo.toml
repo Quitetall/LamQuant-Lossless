@@ -245,6 +245,11 @@ experimental_bit_pack = ["host", "lamquant-lml-mcu/experimental_bit_pack"]
 experimental_basestation = ["host"]
 
 [dependencies]
+# Training data-path optimization (ADR 0075): memory-map the compressed `.lma`
+# archive so the training decode + the pack builder read entries as borrowed
+# slices (no ~1.4 GB per-entry copy) and the OS demand-pages only touched windows.
+# Host-only facade crate; core-no_std (lamquant-lml-mcu) is unaffected.
+memmap2 = "0.9"
 # ADR 0069 S7b: the FFT resample branch of the 250 Hz normalizer
 # (`src/normalize.rs::resample_fft`, a scipy.signal.resample port). Host-only
 # facade crate, so std FFT is fine; core-no_std (lamquant-lml-mcu) is unaffected.

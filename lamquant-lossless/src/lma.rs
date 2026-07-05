@@ -3417,6 +3417,108 @@ pub fn classify_error(e: &(dyn std::error::Error + Send + Sync)) -> LmaErrorKind
     }
 }
 
+/// A memory-mapped `.lma` archive for low-RSS, lazy-I/O reads (ADR 0075). Maps the
+/// file once and hands back **borrowed** slices of an entry's raw payload bytes — no
+/// per-entry `Vec<u8>` copy (contrast [`read_entry`], which pulls the whole entry into
+/// memory). The OS demand-pages only the touched windows, so decoding a handful of
+/// windows out of a multi-hour recording never materialises the ~1.4 GB compressed
+/// entry. Used by the training decode path + the pack builder.
+///
+/// This maps the **compressed archive** — orthogonal to any decoded-fullband memmap.
+pub struct MmapArchive {
+    mmap: memmap2::Mmap,
+    entries: Vec<ArchiveEntry>,
+    payload_start: u64,
+    payload_end: u64,
+}
+
+impl MmapArchive {
+    /// Map `archive_path` read-only and parse its index from the mapped bytes (no
+    /// extra I/O). The archive is treated as immutable for the handle's lifetime (the
+    /// training + build paths never mutate archives); a concurrent truncation could
+    /// SIGBUS on access — the same immutability assumption the rest of the reader makes.
+    pub fn open(archive_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let file = std::fs::File::open(archive_path)?;
+        let file_size = file.metadata()?.len();
+        // SAFETY: read-only mapping of a file we treat as immutable for this handle.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let idx = {
+            let mut cur = std::io::Cursor::new(&mmap[..]);
+            read_lma_index(&mut cur, file_size)?
+        };
+        Ok(Self {
+            mmap,
+            entries: idx.entries,
+            payload_start: idx.payload_base,
+            payload_end: idx.payload_end,
+        })
+    }
+
+    /// The parsed manifest entries (enumeration / window counts).
+    pub fn entries(&self) -> &[ArchiveEntry] {
+        &self.entries
+    }
+
+    /// A borrowed slice of an entry's raw payload bytes — **no copy**. Valid for
+    /// `Method::Lml` (raw LML, fed straight to `lml::decompress` — identical to what
+    /// [`read_entry`] returns for Lml) and `Method::Store`. `Method::Zstd` must be
+    /// decompressed (which allocates), so it cannot be borrowed — use [`read_entry`].
+    /// Bytes are returned UNVERIFIED (zero-copy precludes hashing); the Lml decode path
+    /// SHA-checks after `lml::decompress`, exactly as with `read_entry`.
+    pub fn entry_bytes(&self, entry_name: &str) -> Result<&[u8], Box<dyn std::error::Error + Send + Sync>> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.path == entry_name)
+            .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("Entry '{entry_name}' not found in mmap'd archive").into()
+            })?;
+        let payload_section_size = self.payload_end.checked_sub(self.payload_start).ok_or_else(
+            || -> Box<dyn std::error::Error + Send + Sync> {
+                "archive payload_start > payload_end (underflow)".into()
+            },
+        )?;
+        if entry.offset.saturating_add(entry.compressed_size) > payload_section_size {
+            return Err(format!(
+                "Entry '{}' exceeds archive bounds (offset={}, size={}, max={})",
+                entry.path, entry.offset, entry.compressed_size, payload_section_size
+            )
+            .into());
+        }
+        if !matches!(entry.method, Method::Lml | Method::Store) {
+            return Err(format!(
+                "Entry '{}' is {:?}; only Lml/Store can be borrowed from the map (use read_entry for Zstd)",
+                entry.path, entry.method
+            )
+            .into());
+        }
+        // u64 → usize via try_from (not `as`): a >4 GB offset must not silently
+        // truncate on a 32-bit host — archives can be hundreds of GB.
+        let start = usize::try_from(self.payload_start + entry.offset).map_err(
+            |_| -> Box<dyn std::error::Error + Send + Sync> {
+                "entry offset exceeds usize on this platform".into()
+            },
+        )?;
+        let size = usize::try_from(entry.compressed_size).map_err(
+            |_| -> Box<dyn std::error::Error + Send + Sync> {
+                "entry size exceeds usize on this platform".into()
+            },
+        )?;
+        let end = start.checked_add(size).ok_or_else(
+            || -> Box<dyn std::error::Error + Send + Sync> { "entry byte range overflow".into() },
+        )?;
+        if end > self.mmap.len() {
+            return Err(format!(
+                "Entry '{}' byte range [{start}, {end}) exceeds mapped length {}",
+                entry.path,
+                self.mmap.len()
+            )
+            .into());
+        }
+        Ok(&self.mmap[start..end])
+    }
+}
+
 /// Errors:
 ///   - Archive too small / bad magic / unsupported version.
 ///   - Manifest length above cap (likely corrupt or malicious).
@@ -4918,5 +5020,27 @@ mod tests {
         assert_eq!(std::fs::read(dst.path().join("x/one.bin")).unwrap(), a);
         assert_eq!(std::fs::read(dst.path().join("two.bin")).unwrap(), b);
         assert_eq!(std::fs::read(dst.path().join("deep/three.bin")).unwrap(), d_content);
+    }
+
+    /// A1 (ADR 0075) — the mmap'd borrow must be byte-identical to the copy
+    /// `read_entry` pulls into a `Vec`; Zstd entries must refuse to be borrowed.
+    #[test]
+    fn mmap_bytes_equal_fs_read() {
+        let src = tempfile::tempdir().unwrap();
+        let content: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(131) % 251) as u8).collect();
+        std::fs::write(src.path().join("rec.lml"), &content).unwrap(); // .lml → Method::Store (borrowable)
+        std::fs::write(src.path().join("data.txt"), &content).unwrap(); // .txt → Method::Zstd (not borrowable)
+        let archive = tempfile::NamedTempFile::new().unwrap();
+        pack_archive(src.path(), archive.path(), 9, false, None).unwrap();
+
+        let m = MmapArchive::open(archive.path()).unwrap();
+        // Store entry: the mmap borrow equals the read_entry copy AND the original bytes.
+        let via_read = read_entry(archive.path(), "rec.lml").unwrap();
+        let via_mmap = m.entry_bytes("rec.lml").unwrap();
+        assert_eq!(via_mmap, via_read.as_slice(), "mmap slice must equal read_entry copy");
+        assert_eq!(via_mmap, content.as_slice(), "and equal the original stored bytes");
+        // Zstd cannot be borrowed (must be decompressed); missing entries error.
+        assert!(m.entry_bytes("data.txt").is_err(), "Zstd entry must not be borrowable");
+        assert!(m.entry_bytes("nope.lml").is_err(), "missing entry must error");
     }
 }
