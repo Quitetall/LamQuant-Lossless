@@ -199,7 +199,7 @@ fn main() {
             let name = p.rsplit('/').next().unwrap_or(p).to_string();
             measure(&name, &sig);
             let amp = drift_index(&sig, 1024);
-            let cdrift = mv_rls::coeff_drift(&sig, M, 2048, RIDGE); // A.5-iii: the RIGHT index
+            let cdrift = mv_rls::coeff_drift(&sig, M, 2048, RIDGE); // A.5-iii hypothesis (falsified)
             let full = sig[0].len();
             let s = truncate(&sig, full);
             let dl_a = codelen_bits(&mv_rls::residuals_params(&s, 0.997, 4096, M, 0))
