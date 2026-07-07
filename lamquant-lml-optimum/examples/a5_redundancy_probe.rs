@@ -192,28 +192,30 @@ fn main() {
         measure("SYNTH switching AR(4) @ T/2", &synth(1 << 16, true));
     } else {
         // sorted by drift at the end for the A3 correlation view
+        // (name, amp-drift, coeff-drift, bits/sample win)
         let mut summ: Vec<(String, f64, f64, f64)> = Vec::new();
         for p in &bins {
             let sig = read_bin(p);
             let name = p.rsplit('/').next().unwrap_or(p).to_string();
             measure(&name, &sig);
-            let drift = drift_index(&sig, 1024);
+            let amp = drift_index(&sig, 1024);
+            let cdrift = mv_rls::coeff_drift(&sig, M, 2048, RIDGE); // A.5-iii: the RIGHT index
             let full = sig[0].len();
             let s = truncate(&sig, full);
             let dl_a = codelen_bits(&mv_rls::residuals_params(&s, 0.997, 4096, M, 0))
                 - codelen_bits(&mv_rls::residuals_hindsight(&s, M, RIDGE));
-            summ.push((name, drift, dl_a, (sig.len() * full) as f64));
+            summ.push((name, amp, cdrift, dl_a / (sig.len() * full) as f64));
         }
-        summ.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        println!("\n== A.5-iii — tracking win vs non-stationarity (drift-sorted) ==");
+        // sort by COEFFICIENT drift — the hypothesis is bits/sample tracks THIS, not amp-drift
+        summ.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        println!("\n== A.5-iii — tracking win vs non-stationarity (coeff-drift-sorted) ==");
         println!(
-            "{:>26}  {:>6}  {:>10}  {:>12}",
-            "recording", "drift", "bits/samp", "dL_adapt@T"
+            "{:>26}  {:>9}  {:>10}  {:>12}",
+            "recording", "amp-drift", "coeff-drift", "bits/samp"
         );
-        for (n, dr, dl, ns) in &summ {
-            // normalize by n_ch·T so differing channel counts + record lengths don't confound
-            println!("{n:>26}  {dr:>6.2}  {:>10.3}  {dl:>12.0}", dl / ns);
+        for (n, amp, cd, bps) in &summ {
+            println!("{n:>26}  {amp:>9.2}  {cd:>10.3}  {bps:>12.3}");
         }
-        println!("   [Corollary A3: bits/sample saved by adaptivity should rise with drift; absolute dL_adapt confounds T·d.]");
+        println!("   [A.5-iii: does bits/samp (the tracking win, normalized) rise monotonically with COEFF-drift? amp-drift was falsified.]");
     }
 }

@@ -432,6 +432,73 @@ pub fn residuals_growing_ls(signal: &[Vec<i64>], m: usize, block: usize, ridge: 
     out
 }
 
+/// RESEARCH (A.5-iii): predictor-COEFFICIENT drift — the non-stationarity measure that should
+/// actually predict the tracking win (amplitude-energy drift did NOT). Per channel, fit a batch
+/// ridge-LS predictor on each `window`-sample block (own history seeded causally from the block
+/// start), then average the RELATIVE L2 coefficient change `‖w_k − w_{k-1}‖ / ‖w_k‖` across
+/// blocks + channels. High ⇒ the best fixed predictor drifts ⇒ adaptivity pays. NOT a wire path.
+#[cfg(feature = "encode")]
+pub fn coeff_drift(signal: &[Vec<i64>], m: usize, window: usize, ridge: f64) -> f64 {
+    assert!(window > 0, "coeff_drift needs window > 0");
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    if t < 2 * window {
+        return 0.0;
+    }
+    let mut acc = 0.0f64;
+    let mut cnt = 0usize;
+    for c in 0..n_ch {
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        let nb = t / window;
+        let mut prev: Option<Vec<f64>> = None;
+        for k in 0..nb {
+            let lo = k * window;
+            let hi = lo + window;
+            let mut a = alloc::vec![alloc::vec![0.0f64; order]; order];
+            let mut b = alloc::vec![0.0f64; order];
+            let mut own = alloc::vec![0.0f64; K];
+            for j in 0..K {
+                let idx = lo as isize - 1 - j as isize;
+                own[j] = if idx >= 0 { signal[c][idx as usize] as f64 } else { 0.0 };
+            }
+            for n in lo..hi {
+                let reg = regressor(&own, signal, &refs, n);
+                let x = signal[c][n] as f64;
+                for i in 0..order {
+                    b[i] += reg[i] * x;
+                    for jj in 0..order {
+                        a[i][jj] += reg[i] * reg[jj];
+                    }
+                }
+                for q in (1..K).rev() {
+                    own[q] = own[q - 1];
+                }
+                own[0] = x;
+            }
+            for i in 0..order {
+                a[i][i] += ridge;
+            }
+            let w = crate::crosschan::solve_spd_cholesky(&a, &b)
+                .unwrap_or_else(|| alloc::vec![0.0f64; order]);
+            if let Some(pw) = &prev {
+                let mut dn = 0.0f64;
+                let mut wn = 0.0f64;
+                for i in 0..order {
+                    let d = w[i] - pw[i];
+                    dn += d * d;
+                    wn += w[i] * w[i];
+                }
+                acc += dn.sqrt() / (wn.sqrt() + 1e-9);
+                cnt += 1;
+            }
+            prev = Some(w);
+        }
+    }
+    if cnt > 0 { acc / cnt as f64 } else { 0.0 }
+}
+
 /// RESEARCH (TUH tuning): the exact encoded BYTE LENGTH under ARBITRARY
 /// `(λ, reset, m, seg)` params — the search primitive for finding new configs to
 /// ADD to `CONFIGS` (keep-best ⇒ never-worse). Mirrors `encode_one`'s body byte
