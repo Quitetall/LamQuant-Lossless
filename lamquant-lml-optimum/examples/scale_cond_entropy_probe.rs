@@ -1,7 +1,7 @@
 //! Phase A — learned lossless entropy probe: can an ONLINE **scale-conditioned**
 //! adaptive coder capture the −2 to −5% "shape | local-scale" headroom (STEP-0
 //! `learned_conditional` ceiling) WITHOUT the cross-corpus generalization risk that
-//! killed the frozen learned table (ADR 0058)?
+//! killed the frozen learned table (ADR 0076)?
 //!
 //! Idea: condition an online adaptive order-0 model on the LOCAL SCALE of the residual
 //! (causal EMA of |x|, log2-bucketed). Scale is a universal signal property, so the

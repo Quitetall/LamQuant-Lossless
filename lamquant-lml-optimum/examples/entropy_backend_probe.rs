@@ -109,7 +109,7 @@ fn arith_block_bytes(res: &[i64]) -> usize {
 }
 
 /// Ceiling of a LEARNED conditional entropy model (codec-technique-mine §B.2 /
-/// ADR 0058) — the one neural-track idea that is lossless-compatible (a better
+/// ADR 0076) — the one neural-track idea that is lossless-compatible (a better
 /// probability model shrinks arithmetic coding; reconstruction stays exact). The
 /// model conditions the residual SHAPE on the local SCALE (a baked-in/"learned"
 /// per-context distribution, ZERO transmission cost — unlike per-block histograms),
@@ -181,7 +181,7 @@ fn main() {
     row("block-Golomb (PROD)", block_golomb);
     row("arith order-0 /block", arith_block); // static, transmits per-block model
     row("adaptive order-0", adaptive); // online, no transmitted model
-    row("learned cond (scale)", learned); // §B.2/ADR0058 ceiling — shape | local scale
+    row("learned cond (scale)", learned); // §B.2/ADR0076 ceiling — shape | local scale
     row("H0 floor global", h0_floor);
     row("H0 floor /block", h0_block);
     println!("# adaptive order-0 = exact size of an online range coder (no transmitted model).");
