@@ -801,7 +801,9 @@ fn floor_div(a: i64, b: i64) -> i64 {
     }
 }
 
-fn bias_cancel(data: &mut [i64], ctx_len: usize) {
+/// Causal running-mean subtraction (Sriraam), exactly invertible by [`bias_restore`]. `pub` so
+/// the Optimum tier's `CODER_MV_RLS_BC` can reuse this one source (integer, `no_std`, reversible).
+pub fn bias_cancel(data: &mut [i64], ctx_len: usize) {
     let mask = if ctx_len.is_power_of_two() {
         ctx_len - 1
     } else {
@@ -823,9 +825,10 @@ fn bias_cancel(data: &mut [i64], ctx_len: usize) {
     }
 }
 
-/// Bias restoration with running accumulator. O(T). Exact inverse of cancel.
+/// Bias restoration with running accumulator. O(T). Exact inverse of [`bias_cancel`]. `pub` for
+/// the Optimum tier's `CODER_MV_RLS_BC` decode.
 #[inline]
-fn bias_restore(data: &mut [i64], ctx_len: usize) {
+pub fn bias_restore(data: &mut [i64], ctx_len: usize) {
     let mask = if ctx_len.is_power_of_two() {
         ctx_len - 1
     } else {

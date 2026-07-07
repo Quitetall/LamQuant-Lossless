@@ -53,6 +53,9 @@ const CODER_MV_RLS: u8 = 2;
 /// RLS at causal signal-derived regime boundaries in addition to the fixed period.
 /// A SEPARATE mode so the plain `CODER_RLS` wire stays byte-identical. Keep-best.
 const CODER_RLS_SEG: u8 = 3;
+/// MV-RLS + per-channel `bias_cancel` keep-best on the residual (E-A3). A SEPARATE coder so
+/// `CODER_MV_RLS` stays byte-identical; the coder keep-best below keeps the container never-worse.
+const CODER_MV_RLS_BC: u8 = 4;
 /// LSB bit-plane split layer. When the signal's low bit-plane(s) are heavily biased
 /// (e.g. linked-ear-montage LSB ≈ 0.3 bits — prediction would scramble that structure
 /// into a full-entropy residual LSB), strip `s` low bits, code the upper signal via the
@@ -132,6 +135,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         CODER_RLS => crate::rls::decode(&body[pos..])?,
         CODER_RLS_SEG => crate::rls::decode_seg(&body[pos..])?,
         CODER_MV_RLS => crate::mv_rls::decode(&body[pos..])?,
+        CODER_MV_RLS_BC => crate::mv_rls::decode_bc(&body[pos..])?,
         other => {
             return Err(LmlError::InvalidHeader(alloc::format!(
                 "lmo_lossless unknown coder_mode 0x{other:02X}"
@@ -519,6 +523,15 @@ pub fn encode_with_geometry(
     let mut body = body_cc;
     if let Ok(mv) = crate::mv_rls::encode(signal) {
         let cand = assemble(&raw_metas, CODER_MV_RLS, &mv);
+        if cand.len() < body.len() {
+            body = cand;
+        }
+    }
+    // Candidate C′: MV-RLS + per-channel `bias_cancel` keep-best on the residual (E-A3 —
+    // recovers a removable DC/baseline mv_rls's intercept-free predictor leaves; measured
+    // −0.6% mean on the referential lose-set, never-worse via this keep-best).
+    if let Ok(mvbc) = crate::mv_rls::encode_bc(signal) {
+        let cand = assemble(&raw_metas, CODER_MV_RLS_BC, &mvbc);
         if cand.len() < body.len() {
             body = cand;
         }

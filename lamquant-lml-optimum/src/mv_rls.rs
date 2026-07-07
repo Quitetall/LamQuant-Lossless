@@ -642,6 +642,143 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     Ok(out)
 }
 
+/// Bias-cancel contexts for `CODER_MV_RLS_BC`. A per-channel byte holds 0 (off) or 1..=4
+/// (index+1 into this table). Shared by encode + decode (not encode-gated).
+const BC_CTXS: [usize; 4] = [8, 16, 32, 64];
+
+/// `CODER_MV_RLS_BC` encode under one config: the SAME predictor + header as [`encode_one`]
+/// (residual via [`residuals_params`], bit-identical), but each channel's residual is coded
+/// keep-best over {plain, `bias_cancel`@ctx}, prefixed by a `[bc u8]` (0 = off, else BC_CTXS
+/// index+1). A SEPARATE coder ⇒ `CODER_MV_RLS` stays byte-identical; the container's coder
+/// keep-best keeps the whole thing never-worse. `encode_one` is untouched.
+#[cfg(feature = "encode")]
+fn encode_one_bc(signal: &[Vec<i64>], cfg: usize, seg: usize) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    let t = signal[0].len();
+    let (lambda, reset, m) = CONFIGS[cfg];
+    let packed = cfg + seg * CONFIGS.len();
+    let residuals = residuals_params(signal, lambda, reset, m, seg);
+    let mut out = Vec::new();
+    out.extend_from_slice(&(n_ch as u16).to_le_bytes());
+    out.extend_from_slice(&(t as u32).to_le_bytes());
+    out.push(K as u8);
+    out.push(m as u8);
+    out.push(packed as u8);
+    for c in 0..n_ch {
+        if signal[c].len() != t {
+            return Err(LmlError::InvalidHeader("mv_rls_bc ragged".into()));
+        }
+        let res = &residuals[c];
+        let mut best = crate::entropy::encode(res)?;
+        let mut bc = 0u8;
+        for (i, &ctx) in BC_CTXS.iter().enumerate() {
+            let mut rc = res.clone();
+            lamquant_lml_mcu::lpc::bias_cancel(&mut rc, ctx);
+            if let Ok(g) = crate::entropy::encode(&rc) {
+                if g.len() < best.len() {
+                    best = g;
+                    bc = (i + 1) as u8;
+                }
+            }
+        }
+        out.push(bc);
+        out.extend_from_slice(&(best.len() as u32).to_le_bytes());
+        out.extend_from_slice(&best);
+    }
+    Ok(out)
+}
+
+/// `CODER_MV_RLS_BC` encode: keep-best over the config `SEARCH_SET` (mirrors [`encode`]).
+#[cfg(feature = "encode")]
+pub fn encode_bc(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    if n_ch == 0 || n_ch > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader("mv_rls_bc n_ch".into()));
+    }
+    let cands: Vec<Vec<u8>> = SEARCH_SET
+        .par_iter()
+        .filter_map(|&(cfg, seg)| encode_one_bc(signal, cfg, seg).ok())
+        .collect();
+    let mut best: Option<Vec<u8>> = None;
+    for b in cands {
+        if best.as_ref().map_or(true, |bb| b.len() < bb.len()) {
+            best = Some(b);
+        }
+    }
+    best.ok_or(LmlError::InvalidHeader("mv_rls_bc: no config encoded".into()))
+}
+
+/// `CODER_MV_RLS_BC` decode. Reads the per-channel `[bc u8]`, `bias_restore`s the residual, then
+/// runs the identical RLS synthesis as [`decode`]. `no_std`-capable.
+pub fn decode_bc(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
+    if body.len() < 9 {
+        return Err(LmlError::Truncated { expected: 9, actual: body.len(), context: "mv_rls_bc header" });
+    }
+    let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
+    let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
+    let k = body[6] as usize;
+    let m = body[7] as usize;
+    let packed = body[8] as usize;
+    let cfg = packed % CONFIGS.len();
+    let seg = packed / CONFIGS.len();
+    if k == 0 || seg >= SEG_VARIANTS {
+        return Err(LmlError::InvalidHeader("mv_rls_bc bad params".into()));
+    }
+    let (lambda, reset, _m_cfg) = CONFIGS[cfg];
+    let mut pos = 9usize;
+    let mut out: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        if pos + 5 > body.len() {
+            return Err(LmlError::Truncated { expected: pos + 5, actual: body.len(), context: "mv_rls_bc ch hdr" });
+        }
+        let bc = body[pos];
+        pos += 1;
+        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        pos += 4;
+        if pos + glen > body.len() {
+            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "mv_rls_bc ch data" });
+        }
+        let mut res = crate::entropy::decode(&body[pos..pos + glen])?;
+        pos += glen;
+        if res.len() != t {
+            return Err(LmlError::InvalidHeader("mv_rls_bc ch t".into()));
+        }
+        if bc != 0 {
+            let idx = (bc - 1) as usize;
+            if idx >= BC_CTXS.len() {
+                return Err(LmlError::InvalidHeader("mv_rls_bc bad ctx".into()));
+            }
+            lamquant_lml_mcu::lpc::bias_restore(&mut res, BC_CTXS[idx]);
+        }
+        // identical RLS synthesis to `decode`
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = k + xref;
+        let mut rls = Rls::new(order, lambda);
+        let mut own = alloc::vec![0.0f64; k];
+        let mut det = crate::segmentation::ChangePoint::new();
+        let mut cp_next = false;
+        let mut ch = Vec::with_capacity(t);
+        for n in 0..t {
+            if n != 0 && (n % reset == 0 || cp_next) {
+                rls = Rls::new(order, lambda);
+            }
+            let reg = regressor(&own, &out, &refs, n);
+            let pred = rls.predict(&reg);
+            let x = res[n] + round_i64(pred);
+            ch.push(x);
+            rls.adapt(&reg, x as f64, pred);
+            cp_next = seg != 0 && det.observe(x);
+            for q in (1..k).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = x as f64;
+        }
+        out.push(ch);
+    }
+    Ok(out)
+}
+
 #[cfg(all(test, feature = "encode"))]
 mod tests {
     use super::*;
@@ -667,6 +804,26 @@ mod tests {
             let sig = make_sig(n_ch, t);
             let body = encode(&sig).unwrap();
             assert_eq!(decode(&body).unwrap(), sig, "mv_rls bit-exact ({n_ch}x{t})");
+        }
+    }
+
+    #[test]
+    fn bc_roundtrip_bit_exact() {
+        // CODER_MV_RLS_BC (bias_cancel keep-best) must round-trip bit-exact for every ctx choice.
+        for (n_ch, t) in [(1usize, 400usize), (4, 2000), (21, 1500), (8, 17000)] {
+            let sig = make_sig(n_ch, t);
+            let body = encode_bc(&sig).unwrap();
+            assert_eq!(decode_bc(&body).unwrap(), sig, "mv_rls_bc bit-exact ({n_ch}x{t})");
+        }
+    }
+
+    #[test]
+    fn bc_never_worse_than_plain() {
+        // Keep-best over {plain, bias_cancel@ctx} ⇒ encode_bc ≤ encode per channel; the config
+        // search can only help, so the total is ≤ plain mv_rls (the container then keep-bests too).
+        for (n_ch, t) in [(4usize, 4000usize), (21, 3000)] {
+            let sig = make_sig(n_ch, t);
+            assert!(encode_bc(&sig).unwrap().len() <= encode(&sig).unwrap().len() + n_ch);
         }
     }
 }
