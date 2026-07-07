@@ -72,9 +72,16 @@ struct Rls {
 
 impl Rls {
     fn new(n: usize, lambda: f64) -> Self {
+        Self::new_p0(n, lambda, 1.0)
+    }
+
+    /// `p0` = the initial `P` diagonal = `1/ridge` (a weak prior ⇒ large `p0`). Setting it to
+    /// match the batch hindsight's ridge makes `λ=1` RLS the EXACT VAW online-ridge forecaster
+    /// with the tight `(d/2)log T` regret (research A.5); `new` keeps the shipped `p0=1`.
+    fn new_p0(n: usize, lambda: f64, p0: f64) -> Self {
         let mut p = alloc::vec![alloc::vec![0.0f64; n]; n];
         for i in 0..n {
-            p[i][i] = 1.0;
+            p[i][i] = p0;
         }
         Self { n, w: alloc::vec![0.0; n], p, lambda }
     }
@@ -230,6 +237,195 @@ pub fn residuals(signal: &[Vec<i64>], cfg: usize, seg: usize) -> Vec<Vec<i64>> {
                 own[q] = own[q - 1];
             }
             own[0] = signal[c][n] as f64;
+        }
+        out.push(res);
+    }
+    out
+}
+
+/// RESEARCH (A.5 regret harness): the MV-RLS residual under ARBITRARY `(λ, reset, m,
+/// seg)` — like [`encode_len_params`] but RETURNS the residual, so the harness can code
+/// it with a fixed coder and measure predictor redundancy at λ=1 (static — the pure
+/// VAW/RLS setting Theorem A1 bounds) and λ<1 (adaptive/tracking, A2/A3). NOT a wire path.
+#[cfg(feature = "encode")]
+pub fn residuals_params(
+    signal: &[Vec<i64>],
+    lambda: f64,
+    reset: usize,
+    m: usize,
+    seg: usize,
+) -> Vec<Vec<i64>> {
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    let mut out = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        let mut rls = Rls::new(order, lambda);
+        let mut own = alloc::vec![0.0f64; K];
+        let mut det = crate::segmentation::ChangePoint::new();
+        let mut cp_next = false;
+        let mut res = Vec::with_capacity(t);
+        for n in 0..t {
+            if n != 0 && ((reset != 0 && n % reset == 0) || cp_next) {
+                rls = Rls::new(order, lambda);
+            }
+            let reg = regressor(&own, signal, &refs, n);
+            let pred = rls.predict(&reg);
+            res.push(signal[c][n] - round_i64(pred));
+            rls.adapt(&reg, signal[c][n] as f64, pred);
+            cp_next = seg != 0 && det.observe(signal[c][n]);
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = signal[c][n] as f64;
+        }
+        out.push(res);
+    }
+    out
+}
+
+/// RESEARCH (A.5 regret harness): the BEST FIXED `d`-tap linear predictor in HINDSIGHT
+/// — the regret-bound comparator `min_w Σ (x − w·φ)²`. Per channel, a batch
+/// least-squares fit (ridge `ridge`) over the WHOLE recording (the same `[own K] + [M
+/// cross-channel]` features MV-RLS uses), then the residual under that single fixed `w`.
+/// An ORACLE: the fit is non-causal and its `w` side-info is NOT counted — the `(d/2)log T`
+/// the online predictor pays is exactly this parameter cost the oracle skips. NOT a wire path.
+#[cfg(feature = "encode")]
+pub fn residuals_hindsight(signal: &[Vec<i64>], m: usize, ridge: f64) -> Vec<Vec<i64>> {
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    let mut out = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        // Pass 1: accumulate the normal equations A = Σ φφᵀ (+ ridge), b = Σ φ·x.
+        let mut a = alloc::vec![alloc::vec![0.0f64; order]; order];
+        let mut b = alloc::vec![0.0f64; order];
+        let mut own = alloc::vec![0.0f64; K];
+        for n in 0..t {
+            let reg = regressor(&own, signal, &refs, n);
+            let x = signal[c][n] as f64;
+            for i in 0..order {
+                b[i] += reg[i] * x;
+                for j in 0..order {
+                    a[i][j] += reg[i] * reg[j];
+                }
+            }
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = x;
+        }
+        for i in 0..order {
+            a[i][i] += ridge;
+        }
+        let w = crate::crosschan::solve_spd_cholesky(&a, &b)
+            .unwrap_or_else(|| alloc::vec![0.0f64; order]);
+        // Pass 2: residual under the single fixed w.
+        let mut own = alloc::vec![0.0f64; K];
+        let mut res = Vec::with_capacity(t);
+        for n in 0..t {
+            let reg = regressor(&own, signal, &refs, n);
+            let mut pred = 0.0f64;
+            for k in 0..order {
+                pred += w[k] * reg[k];
+            }
+            res.push(signal[c][n] - round_i64(pred));
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = signal[c][n] as f64;
+        }
+        out.push(res);
+    }
+    out
+}
+
+/// RESEARCH (A.5 regret harness): the EXACT VAW / online-ridge forecaster = `λ=1` RLS with
+/// `P₀=(1/ridge)·I` matched to `residuals_hindsight`'s ridge. This is the algorithm whose
+/// online-vs-batch regret Theorem A1 bounds by `(d/2)log T` — the honest A1 measurement.
+/// (`residuals_growing_ls` is a block-refit heuristic that is NOT VAW-tight.) NOT a wire path.
+#[cfg(feature = "encode")]
+pub fn residuals_vaw(signal: &[Vec<i64>], m: usize, ridge: f64) -> Vec<Vec<i64>> {
+    assert!(ridge > 0.0, "residuals_vaw needs ridge > 0 (P₀ = 1/ridge; ridge=0 ⇒ +inf ⇒ NaN)");
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    let mut out = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        let mut rls = Rls::new_p0(order, 1.0, 1.0 / ridge);
+        let mut own = alloc::vec![0.0f64; K];
+        let mut res = Vec::with_capacity(t);
+        for n in 0..t {
+            let reg = regressor(&own, signal, &refs, n);
+            let pred = rls.predict(&reg);
+            res.push(signal[c][n] - round_i64(pred));
+            rls.adapt(&reg, signal[c][n] as f64, pred);
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = signal[c][n] as f64;
+        }
+        out.push(res);
+    }
+    out
+}
+
+/// RESEARCH (A.5 regret harness): the numerically-STABLE online least-squares forecaster
+/// — the honest A1 comparator (the `λ=1` RLS recursion degrades over long `T`; this does
+/// not). At each `block` boundary it re-solves the ridge-LS from the accumulated `[0..n)`
+/// normal equations (fresh Cholesky, no accumulated recursion error, ridge matched to the
+/// hindsight) and predicts the next block with that causal fit. Its excess codelength over
+/// `residuals_hindsight` (same ridge) is the online-vs-batch redundancy Theorem A1 bounds by
+/// `(d/2)log T`. NOT a wire path.
+#[cfg(feature = "encode")]
+pub fn residuals_growing_ls(signal: &[Vec<i64>], m: usize, block: usize, ridge: f64) -> Vec<Vec<i64>> {
+    assert!(block > 0, "residuals_growing_ls needs block > 0 (n % block)");
+    let n_ch = signal.len();
+    let t = if n_ch > 0 { signal[0].len() } else { 0 };
+    let mut out = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        let mut a = alloc::vec![alloc::vec![0.0f64; order]; order]; // Σ φφᵀ over [0..n)
+        let mut b = alloc::vec![0.0f64; order]; // Σ φ·x over [0..n)
+        let mut w = alloc::vec![0.0f64; order]; // current causal fit (0 until first solve)
+        let mut own = alloc::vec![0.0f64; K];
+        let mut res = Vec::with_capacity(t);
+        for n in 0..t {
+            if n != 0 && n % block == 0 {
+                let mut a2 = a.clone();
+                for i in 0..order {
+                    a2[i][i] += ridge;
+                }
+                if let Some(sol) = crate::crosschan::solve_spd_cholesky(&a2, &b) {
+                    w = sol;
+                }
+            }
+            let reg = regressor(&own, signal, &refs, n);
+            let mut pred = 0.0f64;
+            for k in 0..order {
+                pred += w[k] * reg[k];
+            }
+            res.push(signal[c][n] - round_i64(pred));
+            // accumulate n INTO [0..n+1) only AFTER predicting it (keeps the fit causal)
+            let x = signal[c][n] as f64;
+            for i in 0..order {
+                b[i] += reg[i] * x;
+                for j in 0..order {
+                    a[i][j] += reg[i] * reg[j];
+                }
+            }
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = x;
         }
         out.push(res);
     }

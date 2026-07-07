@@ -189,7 +189,7 @@ pub fn fit_predictor_ridged(signal: &[Vec<i64>], ridge_frac: f64) -> CrossChanPr
 /// Solve `A x = b` for symmetric positive-definite `A` (Cholesky). `None` if not
 /// positive-definite.
 #[cfg(feature = "encode")]
-fn solve_spd_cholesky(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+pub(crate) fn solve_spd_cholesky(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = a.len();
     let mut l = alloc::vec![alloc::vec![0.0f64; n]; n];
     for i in 0..n {
