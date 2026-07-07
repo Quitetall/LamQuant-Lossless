@@ -78,36 +78,38 @@ fn codelen_ch(r: &[i64]) -> usize {
 
 fn main() {
     let bins: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect();
-    // sweep the bias context (power-of-two ⇒ fast mask path). A longer context tracks the slow
-    // baseline the E-A2 intercept found; the ship form is a per-channel keep-best over these.
-    let ctxs = [8usize, 16, BIAS_CTX, 64, 128];
-    println!("E-A3 bias_cancel keep-best Δ% on the shipped mv_rls residual (cfg 1) — context sweep");
-    print!("{:>14}", "recording");
-    for &c in &ctxs {
-        print!("  {:>9}", format!("ctx{c}"));
-    }
-    println!("  {:>9}", "best");
+    // The SHIP form: per channel, keep the smallest of {no-bc, bc@ctx for ctx in CTXS}. Each
+    // channel picks its own best context ⇒ 1 flag + a 2-bit ctx index/channel. Never-worse.
+    const CTXS: [usize; 4] = [8, 16, 32, 64];
+    println!("E-A3 ship-form: per-channel keep-best over bc-contexts {CTXS:?} on the mv_rls residual (cfg 1)");
+    println!("{:>18}  {:>8}  {}", "recording", "shipΔ%", "ctx dist (none/8/16/32/64)");
     for p in &bins {
         let sig = read_bin(p);
         let r = mv_rls::residuals(&sig, 1, 0); // shipped dominant config
-        let base: usize = (0..sig.len()).map(|c| codelen_ch(&r[c])).sum();
-        let name = p.rsplit('/').next().unwrap_or(p);
-        print!("{name:>14}");
-        let mut best = 0.0f64;
-        for &ctx in &ctxs {
-            let kb: usize = (0..sig.len())
-                .map(|c| {
-                    let l0 = codelen_ch(&r[c]);
-                    let mut rc = r[c].clone();
-                    bias_cancel(&mut rc, ctx);
-                    l0.min(codelen_ch(&rc))
-                })
-                .sum();
-            let d = 100.0 * (kb as f64 - base as f64) / base as f64;
-            best = best.min(d);
-            print!("  {d:>+9.3}");
+        let (mut base, mut ship) = (0usize, 0usize);
+        let mut dist = [0usize; 5]; // none, 8, 16, 32, 64
+        for c in 0..sig.len() {
+            let l0 = codelen_ch(&r[c]);
+            let (mut bl, mut bc) = (l0, 0usize);
+            for (ci, &ctx) in CTXS.iter().enumerate() {
+                let mut rc = r[c].clone();
+                bias_cancel(&mut rc, ctx);
+                let l = codelen_ch(&rc);
+                if l < bl {
+                    bl = l;
+                    bc = ci + 1;
+                }
+            }
+            base += l0;
+            ship += bl;
+            dist[bc] += 1;
         }
-        println!("  {best:>+9.3}");
+        let d = 100.0 * (ship as f64 - base as f64) / base as f64;
+        let name = p.rsplit('/').next().unwrap_or(p);
+        println!(
+            "{name:>18}  {d:>+8.3}  {}/{}/{}/{}/{}",
+            dist[0], dist[1], dist[2], dist[3], dist[4]
+        );
     }
-    println!("   per-channel keep-best (never-worse). Ship form: a CODER_MV_RLS_BC flag/channel (+ a 2-bit ctx index).");
+    println!("   never-worse (per-channel keep-best over contexts). Aggregate per corpus for the ship average.");
 }
