@@ -224,6 +224,12 @@ SOURCE FORMATS:
             conflicts_with = "max_error"
         )]
         target_bps: Option<f64>,
+        /// Run the **Optimum tier** (max-ratio, host-only lossless keep-best; ADR 0052) instead
+        /// of the MCU floor: windows the recording, LMO keep-best encodes each, and writes a
+        /// self-describing `.lmo` (round-trip verified with `--verify`). Requires building `lml`
+        /// with `--features archive`.
+        #[arg(long, conflicts_with_all = ["max_error", "target_bps", "lossless_mode", "noise_bits"])]
+        optimum: bool,
         /// Explicit lossless deployment mode. Omitted = MCU-safe integer mode.
         /// `basestation` requires `--features experimental_basestation`.
         #[arg(long = "lossless-mode", value_name = "MODE", value_parser = ["mcu", "basestation"])]
@@ -1518,6 +1524,7 @@ fn main() {
                 noise_bits,
                 max_error,
                 target_bps,
+                optimum,
                 lossless_mode,
                 window_size,
                 threads,
@@ -1569,6 +1576,13 @@ fn main() {
                                             delta,
                                             window_size,
                                             parse_lpc_mode(&lpc_mode),
+                                            verify,
+                                        )
+                                    } else if optimum {
+                                        encode_optimum_dispatch(
+                                            &input,
+                                            output.as_deref(),
+                                            window_size,
                                             verify,
                                         )
                                     // `--lml-siblings` is the TUI's "LML + copy siblings"
@@ -8899,6 +8913,98 @@ fn cmd_encode_bounded_mae(
         );
     }
     Ok(())
+}
+
+/// `--optimum`: run the max-ratio **Optimum tier** (ADR 0052) on a single EDF/BDF. Windows the
+/// recording into ≤`window_size` chunks (bounds the entropy coder's u16 sample count), runs the
+/// LMO keep-best lossless encode per chunk, frames them into a self-describing `.lmo`, and (with
+/// `--verify`) round-trips every chunk to prove bit-exactness. Prints achieved BPS + CR.
+#[cfg(feature = "archive")]
+fn cmd_encode_optimum(input: &Path, output: Option<&Path>, window_size: usize, verify: bool) -> R {
+    use lamquant_core::optimum::{decode_any, Codec, LmoCodec, Mode};
+    if input.is_dir() {
+        return Err("--optimum expects a single EDF/BDF file, not a directory".into());
+    }
+    let edf = edf::read_edf(input)?;
+    let sig = &edf.signal;
+    let n_ch = sig.len();
+    let t = if n_ch > 0 { sig[0].len() } else { 0 };
+    // LMO is a channel×time matrix; reject asymmetric EDFs (mixed sample rates) instead of
+    // panicking on the `ch[start..end]` slice below (channel 0's `t` would over-index a shorter one).
+    if sig.iter().any(|ch| ch.len() != t) {
+        return Err("--optimum requires all channels the same length (mixed sample rates unsupported)".into());
+    }
+    let w = window_size.max(1);
+    let out_path = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| input.with_extension("lmo"));
+    // Frame: b"LMOF" | ver u8=1 | n_ch u32 | total_samples u32 | window u32 | n_chunks u32
+    //        then per chunk: [body_len u32][LMO body]. Decode = per-chunk decode_any, concat time.
+    let n_chunks = if t == 0 { 0 } else { t.div_ceil(w) };
+    let u32f = |v: usize, what: &str| -> Result<[u8; 4], String> {
+        u32::try_from(v)
+            .map(|x| x.to_le_bytes())
+            .map_err(|_| format!("LMOF: {what} ({v}) exceeds u32"))
+    };
+    let mut file = Vec::new();
+    file.extend_from_slice(b"LMOF");
+    file.push(1);
+    file.extend_from_slice(&u32f(n_ch, "n_ch")?);
+    file.extend_from_slice(&u32f(t, "total_samples")?);
+    file.extend_from_slice(&u32f(w, "window")?);
+    file.extend_from_slice(&u32f(n_chunks, "n_chunks")?);
+    let mut recon: Vec<Vec<i64>> = if verify {
+        vec![Vec::with_capacity(t); n_ch]
+    } else {
+        Vec::new()
+    };
+    let mut start = 0usize;
+    while start < t {
+        let end = (start + w).min(t);
+        let chunk: Vec<Vec<i64>> = sig.iter().map(|ch| ch[start..end].to_vec()).collect();
+        let body = LmoCodec
+            .encode(&chunk, Mode::Lossless)
+            .map_err(|e| format!("optimum encode: {e}"))?;
+        file.extend_from_slice(&u32f(body.len(), "chunk body")?);
+        file.extend_from_slice(&body);
+        if verify {
+            let dec = decode_any(&body).map_err(|e| format!("optimum decode: {e}"))?;
+            for c in 0..n_ch {
+                recon[c].extend_from_slice(&dec[c]);
+            }
+        }
+        start = end;
+    }
+    std::fs::write(&out_path, &file).map_err(|e| format!("write {}: {e}", out_path.display()))?;
+    if verify && recon != *sig {
+        return Err("optimum roundtrip MISMATCH — refusing to claim lossless".into());
+    }
+    let nm = (n_ch * t).max(1);
+    let bps = file.len() as f64 * 8.0 / nm as f64;
+    let cr = nm as f64 * 2.0 / file.len().max(1) as f64;
+    println!(
+        "optimum: {} ({}ch x {}, {} windows) -> {} bytes, {:.4} BPS, {:.2}:1{}",
+        out_path.display(),
+        n_ch,
+        t,
+        n_chunks,
+        file.len(),
+        bps,
+        cr,
+        if verify { " (roundtrip OK)" } else { "" }
+    );
+    Ok(())
+}
+
+/// `--optimum` dispatch: two feature variants so the flag errors helpfully when `lml` is built
+/// without the `archive` feature (which links the Optimum encoder, ADR 0052).
+#[cfg(feature = "archive")]
+fn encode_optimum_dispatch(input: &Path, output: Option<&Path>, window_size: usize, verify: bool) -> R {
+    cmd_encode_optimum(input, output, window_size, verify)
+}
+#[cfg(not(feature = "archive"))]
+fn encode_optimum_dispatch(_: &Path, _: Option<&Path>, _: usize, _: bool) -> R {
+    Err("--optimum requires building `lml` with `--features archive` (the Optimum tier, ADR 0052)".into())
 }
 
 /// ADR 0051 track 2 P2: encode a single EDF/BDF to a target-BPS rate-controlled
