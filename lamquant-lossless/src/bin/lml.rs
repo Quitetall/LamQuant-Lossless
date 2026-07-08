@@ -224,11 +224,12 @@ SOURCE FORMATS:
             conflicts_with = "max_error"
         )]
         target_bps: Option<f64>,
-        /// Run the **Optimum tier** (max-ratio, host-only lossless keep-best; ADR 0052) instead
-        /// of the MCU floor: windows the recording, LMO keep-best encodes each, and writes a
-        /// self-describing `.lmo` (round-trip verified with `--verify`). Requires building `lml`
-        /// with `--features archive`.
-        #[arg(long, conflicts_with_all = ["max_error", "target_bps", "lossless_mode", "noise_bits"])]
+        /// Run the **Optimum tier** (max-ratio, host-only; ADR 0052) instead of the MCU floor:
+        /// windows the recording, LMO keep-best encodes each, writes a self-describing `.lmo`
+        /// (checked with `--verify`). Lossless by default; add `--max-error δ` for the
+        /// guaranteed-δ mv_rls **near-lossless** (the regime that beats H.BWC). Requires
+        /// building `lml` with `--features archive`.
+        #[arg(long, conflicts_with_all = ["target_bps", "lossless_mode", "noise_bits"])]
         optimum: bool,
         /// Explicit lossless deployment mode. Omitted = MCU-safe integer mode.
         /// `basestation` requires `--features experimental_basestation`.
@@ -1560,7 +1561,17 @@ fn main() {
                                     // the batch/bundle machinery (the lossy `.lml` has no `.lma`
                                     // sibling-envelope semantics). For the H.BWC working-point
                                     // bench + clinical near-lossless use.
-                                    if let Some(tb) = target_bps {
+                                    if optimum {
+                                        // Optimum tier: Lossless, or the guaranteed-δ mv_rls
+                                        // near-lossless win when `--max-error δ` is also given.
+                                        encode_optimum_dispatch(
+                                            &input,
+                                            output.as_deref(),
+                                            window_size,
+                                            max_error,
+                                            verify,
+                                        )
+                                    } else if let Some(tb) = target_bps {
                                         cmd_encode_target_bps(
                                             &input,
                                             output.as_deref(),
@@ -1576,13 +1587,6 @@ fn main() {
                                             delta,
                                             window_size,
                                             parse_lpc_mode(&lpc_mode),
-                                            verify,
-                                        )
-                                    } else if optimum {
-                                        encode_optimum_dispatch(
-                                            &input,
-                                            output.as_deref(),
-                                            window_size,
                                             verify,
                                         )
                                     // `--lml-siblings` is the TUI's "LML + copy siblings"
@@ -8916,12 +8920,23 @@ fn cmd_encode_bounded_mae(
 }
 
 /// `--optimum`: run the max-ratio **Optimum tier** (ADR 0052) on a single EDF/BDF. Windows the
-/// recording into ≤`window_size` chunks (bounds the entropy coder's u16 sample count), runs the
-/// LMO keep-best lossless encode per chunk, frames them into a self-describing `.lmo`, and (with
-/// `--verify`) round-trips every chunk to prove bit-exactness. Prints achieved BPS + CR.
+/// recording into ≤`window_size` chunks (bounds the entropy coder's u16 sample count) and runs the
+/// LMO keep-best encode per chunk — **lossless** by default, or the guaranteed-δ mv_rls
+/// **near-lossless** win when `delta` is `Some` (`--optimum --max-error δ`). Frames the chunks into
+/// a self-describing `.lmo`; with `--verify` checks the guarantee (bit-exact, or `|x−x̂| ≤ δ`).
 #[cfg(feature = "archive")]
-fn cmd_encode_optimum(input: &Path, output: Option<&Path>, window_size: usize, verify: bool) -> R {
+fn cmd_encode_optimum(
+    input: &Path,
+    output: Option<&Path>,
+    window_size: usize,
+    delta: Option<u64>,
+    verify: bool,
+) -> R {
     use lamquant_core::optimum::{decode_any, Codec, LmoCodec, Mode};
+    let mode = match delta {
+        Some(d) => Mode::BoundedMae(d),
+        None => Mode::Lossless,
+    };
     if input.is_dir() {
         return Err("--optimum expects a single EDF/BDF file, not a directory".into());
     }
@@ -8963,7 +8978,7 @@ fn cmd_encode_optimum(input: &Path, output: Option<&Path>, window_size: usize, v
         let end = (start + w).min(t);
         let chunk: Vec<Vec<i64>> = sig.iter().map(|ch| ch[start..end].to_vec()).collect();
         let body = LmoCodec
-            .encode(&chunk, Mode::Lossless)
+            .encode(&chunk, mode)
             .map_err(|e| format!("optimum encode: {e}"))?;
         file.extend_from_slice(&u32f(body.len(), "chunk body")?);
         file.extend_from_slice(&body);
@@ -8976,14 +8991,34 @@ fn cmd_encode_optimum(input: &Path, output: Option<&Path>, window_size: usize, v
         start = end;
     }
     std::fs::write(&out_path, &file).map_err(|e| format!("write {}: {e}", out_path.display()))?;
-    if verify && recon != *sig {
-        return Err("optimum roundtrip MISMATCH — refusing to claim lossless".into());
+    if verify {
+        match delta {
+            None if recon != *sig => {
+                return Err("optimum roundtrip MISMATCH — refusing to claim lossless".into());
+            }
+            Some(d) => {
+                let me = sig
+                    .iter()
+                    .zip(recon.iter())
+                    .flat_map(|(o, r)| o.iter().zip(r.iter()).map(|(a, b)| (a - b).abs()))
+                    .max()
+                    .unwrap_or(0);
+                if me > d as i64 {
+                    return Err(format!("optimum bounded-MAE VIOLATED: measured {me} > δ {d}").into());
+                }
+            }
+            None => {}
+        }
     }
     let nm = (n_ch * t).max(1);
     let bps = file.len() as f64 * 8.0 / nm as f64;
     let cr = nm as f64 * 2.0 / file.len().max(1) as f64;
+    let modestr = match delta {
+        Some(d) => format!("near-lossless δ={d}"),
+        None => "lossless".to_string(),
+    };
     println!(
-        "optimum: {} ({}ch x {}, {} windows) -> {} bytes, {:.4} BPS, {:.2}:1{}",
+        "optimum {modestr}: {} ({}ch x {}, {} windows) -> {} bytes, {:.4} BPS, {:.2}:1{}",
         out_path.display(),
         n_ch,
         t,
@@ -8991,7 +9026,7 @@ fn cmd_encode_optimum(input: &Path, output: Option<&Path>, window_size: usize, v
         file.len(),
         bps,
         cr,
-        if verify { " (roundtrip OK)" } else { "" }
+        if verify { " (verified)" } else { "" }
     );
     Ok(())
 }
@@ -8999,11 +9034,11 @@ fn cmd_encode_optimum(input: &Path, output: Option<&Path>, window_size: usize, v
 /// `--optimum` dispatch: two feature variants so the flag errors helpfully when `lml` is built
 /// without the `archive` feature (which links the Optimum encoder, ADR 0052).
 #[cfg(feature = "archive")]
-fn encode_optimum_dispatch(input: &Path, output: Option<&Path>, window_size: usize, verify: bool) -> R {
-    cmd_encode_optimum(input, output, window_size, verify)
+fn encode_optimum_dispatch(input: &Path, output: Option<&Path>, window_size: usize, delta: Option<u64>, verify: bool) -> R {
+    cmd_encode_optimum(input, output, window_size, delta, verify)
 }
 #[cfg(not(feature = "archive"))]
-fn encode_optimum_dispatch(_: &Path, _: Option<&Path>, _: usize, _: bool) -> R {
+fn encode_optimum_dispatch(_: &Path, _: Option<&Path>, _: usize, _: Option<u64>, _: bool) -> R {
     Err("--optimum requires building `lml` with `--features archive` (the Optimum tier, ADR 0052)".into())
 }
 
