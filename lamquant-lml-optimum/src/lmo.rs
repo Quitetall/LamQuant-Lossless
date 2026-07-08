@@ -46,6 +46,9 @@ const TRANSFORM_LMO_97: u8 = 1;
 /// `transform_id` = the Optimum LOSSLESS body (cross-channel spatial prediction
 /// + the lossless `lml` codec; ADR 0054 Lever C). Bit-exact, integer-only decode.
 const TRANSFORM_OPTIMUM_LOSSLESS: u8 = 2;
+/// Closed-loop mv_rls guaranteed-δ near-lossless body (`BoundedMae`) — the one regime that
+/// STRUCTURALLY beats H.BWC (it has no per-sample error bound). Keep-best vs the floor.
+const TRANSFORM_MVRLS_BOUNDED: u8 = 3;
 
 /// The Optimum (LMO) codec. Implements the shared [`Codec`] seam.
 #[derive(Debug, Default, Clone, Copy)]
@@ -155,6 +158,15 @@ pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
                 _ => (TRANSFORM_LML_53, floor),
             }
         }
+        Mode::BoundedMae(delta) => {
+            // Floor bounded-MAE vs the closed-loop mv_rls near-lossless (hard |x−x̂| ≤ δ — the
+            // regime H.BWC structurally can't match). Keep the smaller ⇒ never-worse.
+            let floor = lamquant_lml_mcu::codec::LmlCodec.encode(signal, Mode::BoundedMae(delta))?;
+            match crate::mv_rls::encode_bounded_mae(signal, delta as i64) {
+                Ok(mv) if mv.len() < floor.len() => (TRANSFORM_MVRLS_BOUNDED, mv),
+                _ => (TRANSFORM_LML_53, floor),
+            }
+        }
         other => (
             TRANSFORM_LML_53,
             lamquant_lml_mcu::codec::LmlCodec.encode(signal, other)?,
@@ -192,6 +204,7 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
         TRANSFORM_LML_53 => lml::decompress(inner).map_err(to_backend),
         TRANSFORM_LMO_97 => crate::lmo_pcrd97::decode_97(inner).map_err(to_backend),
         TRANSFORM_OPTIMUM_LOSSLESS => crate::lmo_lossless::decode(inner).map_err(to_backend),
+        TRANSFORM_MVRLS_BOUNDED => crate::mv_rls::decode_bounded_mae(inner).map_err(to_backend),
         other => Err(CodecError::Backend(alloc::format!(
             "unknown LMO transform_id 0x{other:02X}"
         ))),

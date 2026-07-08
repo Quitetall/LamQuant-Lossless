@@ -779,6 +779,138 @@ pub fn decode_bc(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     Ok(out)
 }
 
+// ── mv_rls guaranteed-δ near-lossless (closed-loop DPCM) ──────────────────────────────
+// The one regime that STRUCTURALLY beats H.BWC: H.BWC has no per-sample error bound (its TCQ
+// optimizes RMS ⇒ outliers force it near-lossless to bound max|err|). Ours bounds every sample
+// by construction: quantize the prediction residual to the (2δ+1)-grid and reconstruct on that
+// grid. CLOSED-LOOP — the RLS predicts from RECONSTRUCTED samples (own + cross-channel), so
+// encoder and decoder stay in lock-step and the error never accumulates. Fixed config (the one
+// the near_lossless_mvrls_probe measured as the win): λ=0.999, reset=8192, m=32.
+const NL_LAMBDA: f64 = 0.999;
+const NL_RESET: usize = 8192;
+const NL_M: usize = 32;
+
+/// Encode `signal` near-lossless with a HARD per-sample bound `|x − x̂| ≤ delta`. Closed-loop
+/// mv_rls DPCM: residual `r = x − round(pred)`, `q = round(r/(2δ+1))`, `x̂ = round(pred) + (2δ+1)·q`
+/// (⇒ `|x − x̂| ≤ δ`); the RLS adapts on `x̂`. Codes `q` losslessly. Wire: `[n_ch u16][t u32]
+/// [k u8][m u8][delta u32]` then per channel `[glen u32][entropy(q)]`.
+#[cfg(feature = "encode")]
+pub fn encode_bounded_mae(signal: &[Vec<i64>], delta: i64) -> LmlResult<Vec<u8>> {
+    let n_ch = signal.len();
+    if n_ch == 0 || n_ch > u16::MAX as usize {
+        return Err(LmlError::InvalidHeader("mv_rls_nl n_ch".into()));
+    }
+    if delta < 0 {
+        return Err(LmlError::InvalidHeader("mv_rls_nl delta < 0".into()));
+    }
+    if delta > u32::MAX as i64 {
+        return Err(LmlError::InvalidHeader("mv_rls_nl delta exceeds u32".into()));
+    }
+    let t = signal[0].len();
+    let grid = 2 * delta + 1;
+    let mut out = Vec::new();
+    out.extend_from_slice(&(n_ch as u16).to_le_bytes());
+    out.extend_from_slice(&(t as u32).to_le_bytes());
+    out.push(K as u8);
+    out.push(NL_M as u8);
+    out.extend_from_slice(&(delta as u32).to_le_bytes());
+    let mut xhat: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        if signal[c].len() != t {
+            return Err(LmlError::InvalidHeader("mv_rls_nl ragged".into()));
+        }
+        let xref = c.min(NL_M);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = K + xref;
+        let mut rls = Rls::new(order, NL_LAMBDA);
+        let mut own = alloc::vec![0.0f64; K];
+        let mut q_res = Vec::with_capacity(t);
+        let mut rec = Vec::with_capacity(t);
+        for n in 0..t {
+            if n != 0 && n % NL_RESET == 0 {
+                rls = Rls::new(order, NL_LAMBDA);
+            }
+            let reg = regressor(&own, &xhat, &refs, n);
+            let pred = rls.predict(&reg);
+            let pr = round_i64(pred);
+            let r = signal[c][n] - pr;
+            // integer round-half-away-from-zero (grid=2δ+1 is odd ⇒ ⌊grid/2⌋=δ): makes the
+            // guarantee |r − grid·q| ≤ δ EXACT for every i64 r, with no f64-precision dependency.
+            let q = if r >= 0 { (r + delta) / grid } else { -((-r + delta) / grid) };
+            let xh = pr + grid * q;
+            q_res.push(q);
+            rec.push(xh);
+            rls.adapt(&reg, xh as f64, pred);
+            for k in (1..K).rev() {
+                own[k] = own[k - 1];
+            }
+            own[0] = xh as f64;
+        }
+        let g = crate::entropy::encode(&q_res)?;
+        out.extend_from_slice(&(g.len() as u32).to_le_bytes());
+        out.extend_from_slice(&g);
+        xhat.push(rec);
+    }
+    Ok(out)
+}
+
+/// Decode a [`encode_bounded_mae`] stream. Replays the identical closed loop: `x̂ = round(pred)
+/// + (2δ+1)·q`, RLS adapts on `x̂`. `no_std`-capable. Header is 12 bytes.
+pub fn decode_bounded_mae(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
+    if body.len() < 12 {
+        return Err(LmlError::Truncated { expected: 12, actual: body.len(), context: "mv_rls_nl header" });
+    }
+    let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
+    let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
+    let k = body[6] as usize;
+    let m = body[7] as usize;
+    let delta = u32::from_le_bytes([body[8], body[9], body[10], body[11]]) as i64;
+    if k == 0 {
+        return Err(LmlError::InvalidHeader("mv_rls_nl bad k".into()));
+    }
+    let grid = 2 * delta + 1;
+    let mut pos = 12usize;
+    let mut xhat: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
+    for c in 0..n_ch {
+        if pos + 4 > body.len() {
+            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "mv_rls_nl ch len" });
+        }
+        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        pos += 4;
+        if pos + glen > body.len() {
+            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "mv_rls_nl ch data" });
+        }
+        let q_res = crate::entropy::decode(&body[pos..pos + glen])?;
+        pos += glen;
+        if q_res.len() != t {
+            return Err(LmlError::InvalidHeader("mv_rls_nl ch t".into()));
+        }
+        let xref = c.min(m);
+        let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect();
+        let order = k + xref;
+        let mut rls = Rls::new(order, NL_LAMBDA);
+        let mut own = alloc::vec![0.0f64; k];
+        let mut rec = Vec::with_capacity(t);
+        for n in 0..t {
+            if n != 0 && n % NL_RESET == 0 {
+                rls = Rls::new(order, NL_LAMBDA);
+            }
+            let reg = regressor(&own, &xhat, &refs, n);
+            let pred = rls.predict(&reg);
+            let pr = round_i64(pred);
+            let xh = pr + grid * q_res[n];
+            rec.push(xh);
+            rls.adapt(&reg, xh as f64, pred);
+            for q in (1..k).rev() {
+                own[q] = own[q - 1];
+            }
+            own[0] = xh as f64;
+        }
+        xhat.push(rec);
+    }
+    Ok(xhat)
+}
+
 #[cfg(all(test, feature = "encode"))]
 mod tests {
     use super::*;
@@ -824,6 +956,31 @@ mod tests {
         for (n_ch, t) in [(4usize, 4000usize), (21, 3000)] {
             let sig = make_sig(n_ch, t);
             assert!(encode_bc(&sig).unwrap().len() <= encode(&sig).unwrap().len() + n_ch);
+        }
+    }
+
+    #[test]
+    fn nl_bounded_mae_guarantee_and_roundtrip() {
+        // The HARD per-sample bound |x − x̂| ≤ δ must hold through the wire, and δ=0 must be
+        // bit-exact. This is the structural guarantee H.BWC cannot make.
+        for &delta in &[0i64, 1, 4, 16] {
+            for (n_ch, t) in [(1usize, 400usize), (8, 5000), (21, 3000)] {
+                let sig = make_sig(n_ch, t);
+                let body = encode_bounded_mae(&sig, delta).unwrap();
+                let dec = decode_bounded_mae(&body).unwrap();
+                assert_eq!(dec.len(), n_ch);
+                let mut maxerr = 0i64;
+                for c in 0..n_ch {
+                    assert_eq!(dec[c].len(), t);
+                    for n in 0..t {
+                        maxerr = maxerr.max((sig[c][n] - dec[c][n]).abs());
+                    }
+                }
+                assert!(maxerr <= delta, "δ={delta} {n_ch}x{t}: maxErr {maxerr} > δ");
+                if delta == 0 {
+                    assert_eq!(dec, sig, "δ=0 must be bit-exact");
+                }
+            }
         }
     }
 }
