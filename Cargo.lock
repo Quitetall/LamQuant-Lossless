@@ -3221,6 +3221,7 @@ dependencies = [
 [[package]]
 name = "lamquant-config"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=f8e9745a0dc13d4af5656a61e2b25233b146100e#f8e9745a0dc13d4af5656a61e2b25233b146100e"
 dependencies = [
  "clap",
  "dirs",
@@ -3232,6 +3233,7 @@ dependencies = [
 [[package]]
 name = "lamquant-history"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=f8e9745a0dc13d4af5656a61e2b25233b146100e#f8e9745a0dc13d4af5656a61e2b25233b146100e"
 dependencies = [
  "serde",
  "serde_json",
@@ -3355,6 +3357,7 @@ dependencies = [
 [[package]]
 name = "lamquant-ops"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=f8e9745a0dc13d4af5656a61e2b25233b146100e#f8e9745a0dc13d4af5656a61e2b25233b146100e"
 dependencies = [
  "serde",
  "serde_json",
@@ -3375,6 +3378,7 @@ dependencies = [
 [[package]]
 name = "lamquant-tui"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=f8e9745a0dc13d4af5656a61e2b25233b146100e#f8e9745a0dc13d4af5656a61e2b25233b146100e"
 dependencies = [
  "crossterm 0.28.1",
  "lamquant-config",

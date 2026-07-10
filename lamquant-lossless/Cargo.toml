@@ -29,7 +29,7 @@ crate-type = ["rlib"]
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
-lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops" }
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "f8e9745a0dc13d4af5656a61e2b25233b146100e" }
 # ADR 0069 L6.3 bench: `benches/codec.rs`'s `write_abir` arm builds an
 # `Abir` directly (the zero-copy currency `abir_container::write_abir`
 # reads from) to measure the killed per-window materialize vs the legacy
@@ -276,15 +276,15 @@ lamquant-lml-legacy = { version = "0.1.0", path = "../crates/lamquant-lml-legacy
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
-# Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
-# Host feature only; firmware never spawns subprocesses. Also used by the
-# binary for JSON event emission during encode (not just TUI).
-lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops", optional = true }
+# Shared platform contracts are immutable cross-owner inputs pinned to a
+# reviewed LamQuant revision. Host feature only; firmware never spawns
+# subprocesses. `lamquant-ops` also emits JSON events during encode.
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "f8e9745a0dc13d4af5656a61e2b25233b146100e", optional = true }
 # Shared TUI framework — all panels, Panel trait, AppState, Router, theme,
 # layout, config, etc. Replaces the 37-file local tui/ module.
-lamquant-tui = { version = "0.1.0", path = "../../crates/lamquant-tui", optional = true }
+lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "f8e9745a0dc13d4af5656a61e2b25233b146100e", optional = true }
 # Shared config crate — comment-preserving TOML with section-per-binary model.
-lamquant-config = { version = "0.1.0", path = "../../crates/lamquant-config", optional = true }
+lamquant-config = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "f8e9745a0dc13d4af5656a61e2b25233b146100e", optional = true }
 
 # Host-only deps (gated by `host` feature).
 clap = { version = "4", features = ["derive"], optional = true }
