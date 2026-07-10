@@ -1,0 +1,30 @@
+[package]
+# lamquant-neg — the Neural Evidence Graph (ADR 0114). The typed
+# measurement/inference/generation substrate that makes the platform's
+# invariants (measured != inferred != generated; generative is never evidence;
+# every conclusion is replayable) COMPILE errors instead of conventions.
+#
+# Foundational, like abir: consumers depend DOWN on it
+# (lamquant-common <- abir <- lamquant-neg <- {LML, LMQ, training, eval, BLUT}).
+# N0 seeds the schema: the epistemic-class typestate + node/edge types +
+# content-addressed serde. The typed ABIR-atom `Measured` producer, the PyO3
+# handle, and the LMQ/LQS producers land in later slices (N2/N3).
+#
+# Host/std for N0 (the graph is consumed by the host training/eval/orchestrator
+# path); the no_std-on-MCU provenance case is deferred until a producer needs it.
+name = "lamquant-neg"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Neural Evidence Graph (ADR 0114): the typed measured/derived/estimated/generated provenance substrate. Epistemic class is a type, not a string; illegal casts are compile errors."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+
+[lib]
+name = "lamquant_neg"
+crate-type = ["rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+sha2 = { version = "0.10" }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lamquant-common",
     "crates/abir",
+    "crates/lamquant-neg",
     "crates/lamquant-lml-legacy",
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
@@ -24,6 +25,7 @@ members = [
 default-members = [
     "crates/lamquant-common",
     "crates/abir",
+    "crates/lamquant-neg",
     "crates/lamquant-lml-legacy",
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
