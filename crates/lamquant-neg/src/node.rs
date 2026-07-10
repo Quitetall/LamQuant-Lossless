@@ -20,6 +20,19 @@ use sha2::{Digest, Sha256};
 
 use crate::class::{name_for_tag, EpistemicClass, Measured};
 
+/// Lowercase-hex a SHA-256 digest of `bytes`. Shared by node and graph content
+/// addressing so the encoding is defined once.
+pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        // Infallible: writing to a String never errors.
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
 /// A content address: the lowercase-hex SHA-256 of a node's canonical bytes.
 /// Newtype (not a bare `String`) so a node id can't be confused with an
 /// arbitrary label or a payload hash at a call site.
@@ -88,11 +101,17 @@ impl Provenance {
 /// / [`crate::class::Generated`] and for the future risk-limiting codec (its
 /// `uncertainty-propagation` edges read this). Minimal in N0: a named metric and
 /// its scalar value (e.g. `{"prd", 18.4}`, `{"lqs-grade-margin", 0.06}`).
+///
+/// `value` MUST be finite. A NaN would make `PartialEq` (and thus node equality)
+/// behave surprisingly (`NaN != NaN`) and would leak into the content address via
+/// its bit pattern; a non-finite uncertainty is meaningless anyway. This is
+/// enforced fail-closed by [`crate::NegGraph::verify`]
+/// ([`crate::VerifyError::NonFiniteUncertainty`]), not just documented.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Uncertainty {
     /// What the number measures (a PRD, an entropy in bits, a posterior width, …).
     pub metric: String,
-    /// The value.
+    /// The value. Must be finite (see the type note).
     pub value: f64,
 }
 
@@ -189,12 +208,7 @@ impl NodeRecord {
         uncertainty: &Option<Uncertainty>,
     ) -> NodeId {
         let bytes = Self::canonical_bytes(class_tag, payload, provenance, uncertainty);
-        let digest = Sha256::digest(&bytes);
-        let mut hex = String::with_capacity(64);
-        for b in digest {
-            hex.push_str(&format!("{b:02x}"));
-        }
-        NodeId(hex)
+        NodeId(hex_sha256(&bytes))
     }
 
     /// Recompute this record's id from its own fields — the tamper check. Returns
@@ -324,6 +338,10 @@ impl Node<crate::class::Estimated> {
             vec![self.record.id.clone()],
         )
         .with_note("PROMOTED estimated->measured (ADR 0114 audited boundary)");
+        // Uncertainty is intentionally NOT carried onto the promoted node: a
+        // promotion asserts "treat this as measured", and the original estimate
+        // — with its uncertainty intact — remains reachable as the provenance
+        // parent, so the signal is preserved one hop back, not lost.
         Node::<Measured>::new(self.record.payload.clone(), prov, None)
     }
 }

@@ -17,6 +17,13 @@ use crate::node::{ClassMismatch, Node, NodeId, NodeRecord};
 
 /// A Neural Evidence Graph: nodes (class-erased [`NodeRecord`]s) and the typed
 /// [`Edge`]s between them.
+///
+/// **Scale (N0):** lookups (`get`/`view`/`add_node` idempotency/
+/// `materialize_provenance_edges`) are O(n) linear scans — deliberately simple
+/// for the schema slice, where graphs are small (one window's worth of nodes). A
+/// producer that puts real volume through this (N3+) should add a
+/// `HashMap<NodeId, usize>` index; the public API is shaped so that swap is
+/// internal and non-breaking.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NegGraph {
     /// The nodes, by insertion; ids are unique (a re-added identical node is a
@@ -60,6 +67,15 @@ pub enum VerifyError {
         /// The unrecognized tag.
         tag: u8,
     },
+    /// A node carries a non-finite [`crate::Uncertainty`] value (NaN/±inf) —
+    /// meaningless, and it would poison equality + the content address. Rejected
+    /// fail-closed rather than silently hashed.
+    NonFiniteUncertainty {
+        /// The offending node.
+        node: NodeId,
+        /// The uncertainty metric name.
+        metric: String,
+    },
 }
 
 impl core::fmt::Display for VerifyError {
@@ -78,6 +94,9 @@ impl core::fmt::Display for VerifyError {
             }
             VerifyError::UnknownClass { node, tag } => {
                 write!(f, "node {node} has unknown epistemic-class tag {tag}")
+            }
+            VerifyError::NonFiniteUncertainty { node, metric } => {
+                write!(f, "node {node} has non-finite uncertainty '{metric}'")
             }
         }
     }
@@ -168,6 +187,14 @@ impl NegGraph {
                     tag: node.class_tag,
                 });
             }
+            if let Some(u) = &node.uncertainty {
+                if !u.value.is_finite() {
+                    errors.push(VerifyError::NonFiniteUncertainty {
+                        node: node.id.clone(),
+                        metric: u.metric.clone(),
+                    });
+                }
+            }
         }
 
         // Provenance parents must exist.
@@ -234,16 +261,10 @@ impl NegGraph {
     /// graphs with the same nodes+edges (any insertion order) hash identically —
     /// the round-trip-stability property the ADR 0114 gate checks.
     pub fn content_address(&self) -> String {
-        use sha2::{Digest, Sha256};
         let json = self
             .to_json()
             .expect("canonicalized NegGraph always serializes");
-        let digest = Sha256::digest(json.as_bytes());
-        let mut hex = String::with_capacity(64);
-        for b in digest {
-            hex.push_str(&format!("{b:02x}"));
-        }
-        hex
+        crate::node::hex_sha256(json.as_bytes())
     }
 }
 
@@ -360,6 +381,23 @@ mod tests {
         assert!(errs
             .iter()
             .any(|e| matches!(e, VerifyError::DanglingEdge { .. })));
+    }
+
+    #[test]
+    fn verify_rejects_non_finite_uncertainty() {
+        let mut g = NegGraph::new();
+        g.add_node(Node::<Estimated>::new(
+            NodePayload::default(),
+            Provenance::root("lmq"),
+            Some(Uncertainty {
+                metric: "prd".into(),
+                value: f64::NAN,
+            }),
+        ));
+        let errs = g.verify().unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, VerifyError::NonFiniteUncertainty { .. })));
     }
 
     #[test]

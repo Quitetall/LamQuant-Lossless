@@ -14,7 +14,12 @@ use crate::node::NodeId;
 
 /// The relation an [`Edge`] encodes. Closed set (ADR 0114): a new relation is a
 /// deliberate, reviewed addition here, not an ad-hoc string a caller invents.
+///
+/// `rename_all = "kebab-case"` makes the serde wire form match [`EdgeClass::name`]
+/// exactly, so a foreign (e.g. Python) consumer reading the JSON graph keys on
+/// the SAME string the Rust `name()` returns — one wire vocabulary, not two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum EdgeClass {
     /// `to` is a deterministic, replayable transform of `from`.
     DeterministicTransform,
@@ -91,6 +96,25 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), all.len(), "edge-class names must be unique");
+    }
+
+    #[test]
+    fn serde_wire_form_equals_name() {
+        // The one-wire-vocabulary invariant: serde emits exactly what name()
+        // returns, so a foreign consumer keys on a single string per relation.
+        for c in [
+            EdgeClass::DeterministicTransform,
+            EdgeClass::ProbabilisticInference,
+            EdgeClass::TemporalDependence,
+            EdgeClass::SpatialCorrespondence,
+            EdgeClass::CausalIntervention,
+            EdgeClass::CalibrationDependency,
+            EdgeClass::ProvenanceDependency,
+            EdgeClass::UncertaintyPropagation,
+        ] {
+            let j = serde_json::to_string(&c).unwrap();
+            assert_eq!(j, format!("\"{}\"", c.name()));
+        }
     }
 
     #[test]
