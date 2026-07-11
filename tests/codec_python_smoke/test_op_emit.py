@@ -23,6 +23,7 @@ from lamquant_codec._paths import REPO_ROOT
 
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "op-events-sample.jsonl"
+PYTHON_SOURCE = REPO_ROOT / "reference_implementations" / "python_codec"
 
 
 @pytest.mark.parametrize(
@@ -86,6 +87,7 @@ def test_parse_lines_reports_and_skips_malformed_input(capsys) -> None:
 
 @pytest.mark.parametrize("explicit_fixture", (False, True))
 def test_check_command_validates_owner_fixture(explicit_fixture: bool) -> None:
+    # Cover both owner-default dispatch and the explicit path used by composition.
     command = [sys.executable, "-m", "lamquant_codec.cli.op_emit", "--check"]
     if explicit_fixture:
         command.extend(("--fixture", str(FIXTURE)))
@@ -95,6 +97,10 @@ def test_check_command_validates_owner_fixture(explicit_fixture: bool) -> None:
         capture_output=True,
         text=True,
         timeout=10,
+        env={
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(PYTHON_SOURCE),
+        },
     )
 
     assert result.returncode == 0, result.stderr
