@@ -4,10 +4,18 @@ schema_version = 1
 id = "a02-root-rehomed"
 paths = [
   "tests/test_owned_suite.py",
+  "tests/codec/test_fused_pipeline.py",
   "tests/codec/test_l1_conformance.py",
   "tests/codec/test_l2_integrity_gaps.py",
   "tests/codec/test_l4_fuzz.py",
+  "tests/codec/test_l5_subband_int_vec.py",
+  "tests/codec/test_l5_vectorize_parity.py",
   "tests/codec/test_l7_paranoid.py",
   "tests/codec_python_smoke/test_channel_resolver_private.py",
   "tests/codec_python_smoke/test_decode_export_micro.py",
 ]
+
+[[allowed_skip]]
+path = "tests/codec/test_fused_pipeline.py"
+reason_contains = "numba not available"
+max_count = 1
