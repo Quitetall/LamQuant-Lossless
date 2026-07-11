@@ -171,6 +171,7 @@ class TestCRCParity:
             _, _, _, _, _, lpc_len, sub_len, expected = struct.unpack(
                 '<4sHHBBIII', packet[:22])
             payload = packet[22:22 + lpc_len + sub_len]
+            # Modern LML1 protects mutable header fields and encoded payload.
             actual = zlib.crc32(packet[4:18] + payload) & 0xFFFFFFFF
             assert actual == expected
 
@@ -412,6 +413,7 @@ class TestKnownValueDrift:
         py_bytes = strip_ascii_prefix(py_encode(sig.astype(np.float64), noise_bits=0))
         rs_bytes = strip_ascii_prefix(bytes(rust_encode(to_rust_signal(sig), 0)))
 
+        # Per-implementation byte stability keeps generated fixtures reproducible.
         assert py_bytes == strip_ascii_prefix(
             py_encode(sig.astype(np.float64), noise_bits=0))
         assert rs_bytes == strip_ascii_prefix(
@@ -625,6 +627,7 @@ class TestLegacyIsolation:
         _, _, _, _, _, lpc_len, sub_len, _ = struct.unpack(
             '<4sHHBBIII', body[:22])
         payload = body[22:22 + lpc_len + sub_len]
+        # Legacy packets use payload-only CRC scope; rewrite the modern CRC.
         body[18:22] = struct.pack('<I', zlib.crc32(payload) & 0xFFFFFFFF)
         decoded = _decompress_legacy_bytes_ref(bytes(body))
         np.testing.assert_array_equal(decoded.astype(np.int64), sig)
