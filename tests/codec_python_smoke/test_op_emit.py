@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import sys
 
@@ -20,9 +19,10 @@ from lamquant_codec.cli.op_emit import (
     parse_line,
     parse_lines,
 )
+from lamquant_codec._paths import REPO_ROOT
 
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/op-events-sample.jsonl"
+FIXTURE = REPO_ROOT / "tests" / "fixtures" / "op-events-sample.jsonl"
 
 
 @pytest.mark.parametrize(
@@ -84,16 +84,13 @@ def test_parse_lines_reports_and_skips_malformed_input(capsys) -> None:
     assert "dropping malformed event line" in capsys.readouterr().err
 
 
-def test_check_command_validates_owner_fixture() -> None:
+@pytest.mark.parametrize("explicit_fixture", (False, True))
+def test_check_command_validates_owner_fixture(explicit_fixture: bool) -> None:
+    command = [sys.executable, "-m", "lamquant_codec.cli.op_emit", "--check"]
+    if explicit_fixture:
+        command.extend(("--fixture", str(FIXTURE)))
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "lamquant_codec.cli.op_emit",
-            "--check",
-            "--fixture",
-            str(FIXTURE),
-        ],
+        command,
         check=False,
         capture_output=True,
         text=True,
