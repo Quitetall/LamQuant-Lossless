@@ -8,5 +8,6 @@ paths = [
   "tests/codec/test_l2_integrity_gaps.py",
   "tests/codec/test_l4_fuzz.py",
   "tests/codec/test_l7_paranoid.py",
+  "tests/codec_python_smoke/test_channel_resolver_private.py",
   "tests/codec_python_smoke/test_decode_export_micro.py",
 ]
