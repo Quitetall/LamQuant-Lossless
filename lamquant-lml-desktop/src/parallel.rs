@@ -48,6 +48,9 @@ fn assemble_at_levels_parallel(
 /// Adaptive transform-skip keep-best (parallel mirror of `lml::encode_maybe_skip`): encode at
 /// `full_levels`, and when the flag is on and the transform is in use, ALSO at `n_levels = 0`, keeping
 /// the smaller. Deterministic length compare ⇒ byte-identical to the serial MCU path either way.
+///
+/// MUST MIRROR: `lamquant_lml_mcu::lml::encode_maybe_skip` is the serial twin. A new candidate depth or
+/// selection rule added there MUST be added here in lockstep, or `byte_equal_backends` diverges.
 fn keep_best_levels_parallel(
     channels: &[&[i64]],
     n_ch: usize,

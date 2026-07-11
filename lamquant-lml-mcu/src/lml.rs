@@ -787,6 +787,10 @@ pub fn transform_skip_enabled() -> bool {
 /// Deterministic byte-length keep-best: both tiers (serial MCU + Desktop parallel) that route through
 /// this pick identically, so the byte-equal invariant is preserved. The chosen packet is produced by
 /// the SAME [`encode_channels_core`] firmware uses, so each candidate is itself byte-exact.
+///
+/// MUST MIRROR: `keep_best_levels_parallel` in `lamquant-lml-desktop/src/parallel.rs` implements the
+/// identical keep-best. Any new candidate depth or selection rule added here MUST be added there in
+/// lockstep, or `byte_equal_backends` diverges (serial vs parallel pick differently).
 fn encode_maybe_skip(
     channels: &[&[i64]],
     n_ch: usize,
