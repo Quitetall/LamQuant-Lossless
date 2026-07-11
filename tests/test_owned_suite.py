@@ -18,6 +18,11 @@ def test_repository_manifest_loads() -> None:
     assert "tests/test_owned_suite.py" in manifest.paths
 
 
+def test_retired_ai_models_aggregation_smoke_stays_absent() -> None:
+    retired = MANIFEST.parent / "codec_python_smoke/test_ai_models_smoke.py"
+    assert not retired.exists()
+
+
 @pytest.mark.parametrize("version", [True, "1", 2])
 def test_schema_version_is_exact_integer(tmp_path: Path, version: object) -> None:
     rendered = str(version).lower() if isinstance(version, bool) else repr(version)
