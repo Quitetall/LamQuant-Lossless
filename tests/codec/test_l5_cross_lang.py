@@ -93,16 +93,19 @@ class TestHeaderLayout:
     same logical input.
     """
 
-    def test_python_and_rust_header_equal(self):
+    def test_python_and_rust_header_schema_equal(self):
         sig = synth_signal(4, 256, seed=11)
         py_bytes = strip_ascii_prefix(py_encode(sig.astype(np.float64), noise_bits=0))
         rs_bytes = strip_ascii_prefix(bytes(rust_encode(to_rust_signal(sig), 0)))
-        # First 22 bytes are the LML1 header. They must match exactly.
-        assert py_bytes[:22] == rs_bytes[:22], (
-            f"Header byte-layout drift!\n"
-            f"  Python: {py_bytes[:22].hex(' ')}\n"
-            f"  Rust:   {rs_bytes[:22].hex(' ')}"
-        )
+        py_header = struct.unpack('<4sHHBBIII', py_bytes[:22])
+        rs_header = struct.unpack('<4sHHBBIII', rs_bytes[:22])
+
+        # Compression choices may produce different payload lengths and CRCs.
+        # The shared schema fields and each packet's declared extent must agree.
+        assert py_header[:5] == rs_header[:5]
+        for packet, header in ((py_bytes, py_header), (rs_bytes, rs_header)):
+            lpc_len, sub_len = header[5:7]
+            assert len(packet) == 22 + lpc_len + sub_len
 
     def test_magic_at_offset_0(self):
         sig = synth_signal(2, 64, seed=12)
@@ -157,22 +160,19 @@ class TestHeaderLayout:
 class TestCRCParity:
     """Both languages must compute the same CRC-32 over the same payload."""
 
-    def test_python_zlib_matches_rust_crc(self):
+    def test_modern_crc_scope_matches_both_encoders(self):
         sig = synth_signal(2, 64, seed=42)
-        py_full = strip_ascii_prefix(py_encode(sig.astype(np.float64), noise_bits=0))
-        # Header tells us the payload extent.
-        _, _, _, _, _, lpc_len, sub_len, crc_in_header = struct.unpack(
-            '<4sHHBBIII', py_full[:22])
-        payload = py_full[22:22 + lpc_len + sub_len]
-        recomputed = zlib.crc32(payload) & 0xFFFFFFFF
-        assert recomputed == crc_in_header
+        packets = (
+            strip_ascii_prefix(py_encode(sig.astype(np.float64), noise_bits=0)),
+            strip_ascii_prefix(bytes(rust_encode(to_rust_signal(sig), 0))),
+        )
 
-        # Same payload through Rust encoder must produce the same CRC.
-        rs_full = strip_ascii_prefix(bytes(rust_encode(to_rust_signal(sig), 0)))
-        _, _, _, _, _, _, _, rs_crc = struct.unpack('<4sHHBBIII', rs_full[:22])
-        rs_payload = rs_full[22:22 + lpc_len + sub_len]
-        # Cross-check: Python's zlib.crc32 over Rust's payload matches Rust's CRC.
-        assert (zlib.crc32(rs_payload) & 0xFFFFFFFF) == rs_crc
+        for packet in packets:
+            _, _, _, _, _, lpc_len, sub_len, expected = struct.unpack(
+                '<4sHHBBIII', packet[:22])
+            payload = packet[22:22 + lpc_len + sub_len]
+            actual = zlib.crc32(packet[4:18] + payload) & 0xFFFFFFFF
+            assert actual == expected
 
 
 # ============================================================
@@ -406,17 +406,19 @@ class TestKnownValueDrift:
     parse the same fields in the same way. Any change to header layout
     or endianness fails here loudly."""
 
-    def test_handcrafted_zero_packet_is_well_formed(self):
-        """A zeros-only signal compresses deterministically — pin some bytes."""
+    def test_zero_packets_are_deterministic_and_interoperable(self):
+        """Each encoder is deterministic and both zero packets interoperate."""
         sig = np.zeros((2, 16), dtype=np.int64)
         py_bytes = strip_ascii_prefix(py_encode(sig.astype(np.float64), noise_bits=0))
         rs_bytes = strip_ascii_prefix(bytes(rust_encode(to_rust_signal(sig), 0)))
 
-        # Headers equal, payloads equal.
-        assert py_bytes == rs_bytes, (
-            "Python and Rust diverge on identical zero input — "
-            "this means LPC/Golomb/CRC code paths differ."
-        )
+        assert py_bytes == strip_ascii_prefix(
+            py_encode(sig.astype(np.float64), noise_bits=0))
+        assert rs_bytes == strip_ascii_prefix(
+            bytes(rust_encode(to_rust_signal(sig), 0)))
+        np.testing.assert_array_equal(
+            np.array(rust_decode(py_bytes), dtype=np.int64), sig)
+        np.testing.assert_array_equal(py_decode(rs_bytes).astype(np.int64), sig)
 
     def test_n_ch_byte_order_explicit(self):
         """n_ch=0x0102 (258) must be serialized as bytes 02 01 (little-endian)."""
@@ -620,5 +622,9 @@ class TestLegacyIsolation:
         body = bytearray(strip_ascii_prefix(
             py_encode(sig.astype(np.float64), noise_bits=0)))
         body[0:4] = b'LMQ5'
+        _, _, _, _, _, lpc_len, sub_len, _ = struct.unpack(
+            '<4sHHBBIII', body[:22])
+        payload = body[22:22 + lpc_len + sub_len]
+        body[18:22] = struct.pack('<I', zlib.crc32(payload) & 0xFFFFFFFF)
         decoded = _decompress_legacy_bytes_ref(bytes(body))
         np.testing.assert_array_equal(decoded.astype(np.int64), sig)

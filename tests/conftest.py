@@ -60,6 +60,9 @@ for _rel in (
     "ai_models/validation",
     "ai_models",           # for `from snn import ...` etc.
     "firmware",
+    # Package root for the sibling `c_firmware` package used by
+    # `lamquant_codec.export` in source-tree test runs.
+    "reference_implementations",
     # Standalone Python codec reference impl: parent dir of the
     # `lamquant_codec` package so `import lamquant_codec` resolves in
     # the Lossless carve without an editable install.
