@@ -13,20 +13,10 @@ Test categories:
   6. Determinism — same input always produces same output
   7. Cross-platform — verify against reference implementation
 """
-import pytest  # decomp(lossless-carve): skip when ai_models absent
-pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
-
-import os
-import sys
 import struct
 import hashlib
 import pytest
 import numpy as np
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, _REPO)
-sys.path.insert(0, os.path.join(_REPO, 'reference_implementations', 'python_codec', 'lamquant_codec'))
-sys.path.insert(0, os.path.join(_REPO, 'ai_models', 'student'))
 
 from lamquant_codec.lossless import _compress_bytes, _decompress_bytes
 

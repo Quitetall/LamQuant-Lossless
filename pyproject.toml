@@ -89,8 +89,8 @@ all = [
 # reference_implementations/) discoverable. The `include`/`exclude`
 # filters still apply; the only change is where setuptools looks.
 [tool.setuptools.packages.find]
-where = [".", "reference_implementations/python_codec"]
-include = ["lamquant_codec*", "tools*"]
+where = [".", "reference_implementations/python_codec", "reference_implementations"]
+include = ["c_firmware*", "lamquant_codec*", "tools*"]
 exclude = ["tests*", "gui*", "docs*", "build*", "ai_models*", "firmware*", "installer*"]
 
 [tool.pytest.ini_options]

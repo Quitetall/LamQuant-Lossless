@@ -22,8 +22,6 @@ import zlib
 from pathlib import Path
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(os.path.join(ROOT_DIR, 'ai_models', 'student'))
-from train_ternary import TernaryMobileNetV5
 
 
 def export_to_header(model, output_path, encoder_only=False):

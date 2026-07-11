@@ -5,14 +5,10 @@ Usage:
     lamquant-export --checkpoint model.ckpt --output firmware/firmware_export/
 """
 import argparse
-import sys
 import os
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-sys.path.insert(0, os.path.join(ROOT_DIR, 'firmware'))
-from export_firmware import (
+from c_firmware.export_firmware import (
     export_to_header, compute_firmware_crc,
     export_fsq_lattice, export_toeplitz_seeds,
 )

@@ -1,0 +1,12 @@
+schema_version = 1
+
+[[suite]]
+id = "a02-root-rehomed"
+paths = [
+  "tests/test_owned_suite.py",
+  "tests/codec/test_l1_conformance.py",
+  "tests/codec/test_l2_integrity_gaps.py",
+  "tests/codec/test_l4_fuzz.py",
+  "tests/codec/test_l7_paranoid.py",
+  "tests/codec_python_smoke/test_decode_export_micro.py",
+]

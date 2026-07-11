@@ -8,11 +8,6 @@ Guardrails 6-8 from the LML hardening plan:
 These tests run longer than unit tests. Use `pytest -m fuzz` to run them
 separately, or `pytest --timeout=300` for CI.
 """
-import pytest  # decomp(lossless-carve): skip when ai_models absent
-pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
-
-import os
-import sys
 import struct
 import hashlib
 import pytest
@@ -21,11 +16,6 @@ import numpy as np
 from hypothesis import given, settings, assume, HealthCheck
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, _REPO)
-sys.path.insert(0, os.path.join(_REPO, 'reference_implementations', 'python_codec', 'lamquant_codec'))
-sys.path.insert(0, os.path.join(_REPO, 'ai_models', 'student'))
 
 from lamquant_codec.lossless import _compress_bytes, _decompress_bytes
 

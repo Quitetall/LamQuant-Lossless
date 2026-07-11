@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "lamquant-core"
+version = "0.9.3"
+description = "Python bindings for the LamQuant LML lossless EEG codec"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = ["numpy>=1.24"]
+
+[tool.maturin]
+manifest-path = "Cargo.toml"

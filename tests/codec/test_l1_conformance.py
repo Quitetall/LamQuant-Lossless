@@ -9,21 +9,12 @@ Modeled on FLAC, PNG, and ZIP conformance testing:
 
 Run: pytest tests/test_lml_conformance.py -v
 """
-import pytest  # decomp(lossless-carve): skip when ai_models absent
-pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
-
 import hashlib
-import os
 import struct
-import sys
 import zlib
 
 import numpy as np
 import pytest
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, _REPO)
-sys.path.insert(0, os.path.join(_REPO, 'ai_models', 'student'))
 
 from lamquant_codec.lossless import _compress_bytes, _decompress_bytes
 

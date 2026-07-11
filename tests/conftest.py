@@ -28,15 +28,11 @@ _HAS_NEURAL = (Path(__file__).parent.parent / "ai_models").is_dir()
 collect_ignore_glob = []
 if not _HAS_NEURAL:
     collect_ignore_glob.extend([
-        "codec/test_l1_conformance.py",
         "codec/test_l2_preprocessing.py",
-        "codec/test_l2_integrity_gaps.py",
-        "codec/test_l4_fuzz.py",
         "codec/test_l5_subband_int_vec.py",
         "codec/test_l5_vectorize_parity.py",
         "codec/test_l7_adversarial_saturation.py",
         "codec/test_l7_adversarial_zeros.py",
-        "codec/test_l7_paranoid.py",
         "codec/test_fused_pipeline.py",
         "decoder/*.py",
         "firmware/test_checkpoint.py",

@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, "decomp/**", "feat/**", "fix/**"]
+    branches: [main, "adr-0092/**", "decomp/**", "feat/**", "fix/**"]
   pull_request:
     branches: [main]
 
@@ -109,11 +109,15 @@ jobs:
       - name: Install Python deps
         run: |
           pip install --upgrade pip
-          pip install pytest numpy pyedflib mne
+          pip install hypothesis pytest numpy pyedflib mne torch
       - name: Build Python codec wheel
         run: |
           pip install maturin
-          cd reference_implementations/python_codec && pip install -e .
+          pip install -e .
+          maturin build --release --manifest-path lamquant-py/Cargo.toml --out /tmp/lamquant-wheels
+          pip install /tmp/lamquant-wheels/lamquant_core-*.whl
+      - name: Run A02 owner lane
+        run: python3 tests/run_owned_tests.py
       - name: Run fast tier diagnostics
         run: python3 tests/run_diagnostics.py fast
 

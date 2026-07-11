@@ -6,6 +6,7 @@ Both are tiny entry-point modules. Tests pin the public-API surface
 from __future__ import annotations
 
 import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -102,13 +103,21 @@ class TestExportMain:
         # bytes.
         mock_model = MagicMock()
         mock_model.eval = MagicMock(return_value=mock_model)
+        encoder = ModuleType("lamquant_neural.models.encoder")
+        encoder.TernaryMobileNetV5_Subband = MagicMock()
+        encoder.TernaryMobileNetV5_Subband.from_checkpoint.return_value = mock_model
+        models = ModuleType("lamquant_neural.models")
+        models.encoder = encoder
+        neural = ModuleType("lamquant_neural")
+        neural.models = models
+        monkeypatch.setitem(sys.modules, "lamquant_neural", neural)
+        monkeypatch.setitem(sys.modules, "lamquant_neural.models", models)
+        monkeypatch.setitem(sys.modules, "lamquant_neural.models.encoder", encoder)
 
         with patch.object(exp, "export_to_header") as eth, \
              patch.object(exp, "compute_firmware_crc") as cfc, \
              patch.object(exp, "export_fsq_lattice") as efl, \
-             patch.object(exp, "export_toeplitz_seeds") as ets, \
-             patch("lamquant_neural.models.encoder.TernaryMobileNetV5_Subband.from_checkpoint",
-                    return_value=mock_model):
+             patch.object(exp, "export_toeplitz_seeds") as ets:
             monkeypatch.setattr(sys, "argv", [
                 "lamquant-export",
                 "--checkpoint", str(tmp_path / "fake.ckpt"),

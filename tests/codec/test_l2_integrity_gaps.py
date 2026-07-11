@@ -9,11 +9,7 @@ AUDIT (2026-04-28): Created to close gaps found by provenance-checker agent:
 These tests complement the existing L1 conformance and L4 fuzz suites by
 targeting specific integrity-checking logic that was only exercised implicitly.
 """
-import pytest  # decomp(lossless-carve): skip when ai_models absent
-pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
-
 import os
-import sys
 import struct
 import zlib
 import hashlib
@@ -21,10 +17,6 @@ import tempfile
 
 import numpy as np
 import pytest
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-sys.path.insert(0, _REPO)
-sys.path.insert(0, os.path.join(_REPO, 'reference_implementations', 'python_codec', 'lamquant_codec'))
 
 from lamquant_codec.lossless import _compress_bytes, _decompress_bytes
 
@@ -137,42 +129,6 @@ class TestCRCMultiBit:
 class TestCrossLayerCRC:
     """The file container (LQL1) CRC and the inner LML1 packet CRC are
     independent layers. Both must be checked during decode."""
-
-    @pytest.mark.skip(
-        reason="Divergent Python LosslessWriter removed (2026-05-28): "
-        "fileformat is now a READ-ONLY reference reader, so this test "
-        "can no longer construct a container to corrupt. A reader-only "
-        "reference must not be round-tripped against its own deleted "
-        "writer. The canonical container CRC is exercised against the "
-        "Rust emitter (lamquant_core, LML1); the inner LML1 per-window "
-        "CRC is still covered by test_inner_lml1_crc_independent_of_container."
-    )
-    def test_container_crc_checked_on_read(self, tmp_path):
-        """Corrupt a byte inside the container payload — reader must reject.
-
-        SKIPPED: built on the removed divergent Python writer (see skip
-        marker). Body retained to document the removed round-trip.
-        """
-        sys.path.insert(0, os.path.join(_REPO, 'ai_models', 'student'))
-        from lamquant_codec.fileformat import LosslessWriter, LMQReader
-
-        rng = np.random.default_rng(42)
-        seg = rng.standard_normal((21, 2500)).astype(np.float32) * 100
-
-        path = str(tmp_path / "test.lml")
-        with LosslessWriter(path, channels=21, rate=250) as w:
-            w.write_window(seg, timestamp_us=0)
-
-        # Corrupt one byte in the window payload (after file header)
-        with open(path, 'r+b') as f:
-            f.seek(64 + 10)  # 64B file header + 10B into window
-            original = f.read(1)
-            f.seek(-1, 1)
-            f.write(bytes([(original[0] ^ 0xFF)]))
-
-        with LMQReader(path) as r:
-            with pytest.raises(ValueError, match="CRC"):
-                next(iter(r))
 
     def test_inner_lml1_crc_independent_of_container(self):
         """The LML1 per-window CRC covers lpc_meta+payload, NOT the
