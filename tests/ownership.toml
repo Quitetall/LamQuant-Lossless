@@ -5,6 +5,7 @@ id = "a02-root-rehomed"
 paths = [
   "tests/test_owned_suite.py",
   "tests/codec/test_fused_pipeline.py",
+  "tests/codec/test_format_source_contract.py",
   "tests/codec/test_l1_conformance.py",
   "tests/codec/test_l1_wire_constants.py",
   "tests/codec/test_l2_integrity_gaps.py",
