@@ -23,6 +23,50 @@ use lamquant_lml_mcu::lml::{
 };
 use lamquant_lml_mcu::lpc::LpcMode;
 
+/// Assemble one LML packet at a fixed `n_levels` via rayon-parallel per-channel encode. Byte-identical
+/// to the MCU serial `encode_channels_core` at the same `n_levels` (same primitives, order-preserving
+/// `par_iter`). The keep-best over `{full, skip}` layered on top ([`keep_best_levels_parallel`]) mirrors
+/// the MCU tier's `encode_maybe_skip`, so both tiers pick the same packet with the transform-skip flag
+/// ON or OFF.
+fn assemble_at_levels_parallel(
+    channels: &[&[i64]],
+    n_ch: usize,
+    t: usize,
+    n_levels: u8,
+    noise_bits: u8,
+    flags: (bool, bool, bool),
+    mode: LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let per_channel = channels
+        .par_iter()
+        .map(|&ch| encode_one_channel(ch, n_levels, mode, flags.0, flags.1, flags.2))
+        .collect::<LmlResult<Vec<_>>>()?;
+    let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
+    Ok(lml::assemble_lml_packet(n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload))
+}
+
+/// Adaptive transform-skip keep-best (parallel mirror of `lml::encode_maybe_skip`): encode at
+/// `full_levels`, and when the flag is on and the transform is in use, ALSO at `n_levels = 0`, keeping
+/// the smaller. Deterministic length compare ⇒ byte-identical to the serial MCU path either way.
+fn keep_best_levels_parallel(
+    channels: &[&[i64]],
+    n_ch: usize,
+    t: usize,
+    full_levels: u8,
+    noise_bits: u8,
+    flags: (bool, bool, bool),
+    mode: LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let full = assemble_at_levels_parallel(channels, n_ch, t, full_levels, noise_bits, flags, mode)?;
+    if lml::transform_skip_enabled() && full_levels > 0 {
+        let skip = assemble_at_levels_parallel(channels, n_ch, t, 0, noise_bits, flags, mode)?;
+        if skip.len() < full.len() {
+            return Ok(skip);
+        }
+    }
+    Ok(full)
+}
+
 /// Parallel LML encode (rayon per-channel). Byte-identical output to
 /// [`lamquant_lml_mcu::lml::compress_with_mode`].
 pub fn compress_with_mode_parallel(
@@ -33,29 +77,16 @@ pub fn compress_with_mode_parallel(
     let prep = prepare_encode(signal, noise_bits)?;
     // Parallel per-channel encode. `into_par_iter().map(...).collect()` preserves
     // input order, so the concatenated bytes match the serial path exactly.
-    let per_channel = (0..prep.n_ch)
-        .into_par_iter()
-        .map(|ch| {
-            encode_one_channel(
-                &prep.signal[ch],
-                prep.n_levels,
-                mode,
-                prep.flags.0,
-                prep.flags.1,
-                prep.flags.2,
-            )
-        })
-        .collect::<LmlResult<Vec<_>>>()?;
-    let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
-    Ok(lml::assemble_lml_packet(
+    let views: Vec<&[i64]> = prep.signal.iter().map(|v| v.as_slice()).collect();
+    keep_best_levels_parallel(
+        &views,
         prep.n_ch,
         prep.t,
         prep.n_levels,
         noise_bits,
-        wins,
-        &lpc_meta,
-        &payload,
-    ))
+        prep.flags,
+        mode,
+    )
 }
 
 /// Parallel zero-copy LML encode: `windows` are already-sliced `&[i64]`
@@ -108,49 +139,32 @@ pub fn compress_with_mode_parallel_views(
     let n_ch = windows.len();
     let t = windows.first().map(|w| w.len()).unwrap_or(0);
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
-    let per_channel = if noise_bits == 0 {
-        windows
-            .par_iter()
-            .map(|&ch| {
-                encode_one_channel(
-                    ch,
-                    shape.n_levels,
-                    mode,
-                    shape.flags.0,
-                    shape.flags.1,
-                    shape.flags.2,
-                )
-            })
-            .collect::<LmlResult<Vec<_>>>()?
+    if noise_bits == 0 {
+        keep_best_levels_parallel(
+            windows,
+            shape.n_ch,
+            shape.t,
+            shape.n_levels,
+            noise_bits,
+            shape.flags,
+            mode,
+        )
     } else {
         let shifted: Vec<Vec<i64>> = windows
             .iter()
             .map(|w| w.iter().map(|&v| v >> noise_bits).collect())
             .collect();
-        shifted
-            .par_iter()
-            .map(|ch| {
-                encode_one_channel(
-                    ch,
-                    shape.n_levels,
-                    mode,
-                    shape.flags.0,
-                    shape.flags.1,
-                    shape.flags.2,
-                )
-            })
-            .collect::<LmlResult<Vec<_>>>()?
-    };
-    let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
-    Ok(lml::assemble_lml_packet(
-        shape.n_ch,
-        shape.t,
-        shape.n_levels,
-        noise_bits,
-        wins,
-        &lpc_meta,
-        &payload,
-    ))
+        let shifted_views: Vec<&[i64]> = shifted.iter().map(|v| v.as_slice()).collect();
+        keep_best_levels_parallel(
+            &shifted_views,
+            shape.n_ch,
+            shape.t,
+            shape.n_levels,
+            noise_bits,
+            shape.flags,
+            mode,
+        )
+    }
 }
 
 /// Parallel LML decode: serial parse (cursor-bound) + rayon per-channel synth.

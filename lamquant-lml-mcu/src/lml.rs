@@ -757,6 +757,55 @@ fn encode_channels_core(
     ))
 }
 
+/// ADR 0023 Track B7 — adaptive transform-skip. Read at compress entry to decide whether the
+/// encoder ALSO tries the `n_levels = 0` (LPC-on-raw, no 5/3 wavelet) packet and keeps whichever is
+/// smaller. The 5/3 lifting is signal-dependent (measured `mcu_transform_skip_probe`): it helps
+/// non-stationary windows and *hurts* stationary ones (eegmmidb: 5/3 loses on 100% of windows,
+/// −3.8% at ~5s packets; siena: transform always wins, skip correctly never chosen — never-worse).
+/// The LML1 header already carries a per-packet `n_levels` and `n_levels=0` already decodes, so this
+/// is a pure encoder-side, wire-compatible, never-worse win. Default OFF ⇒ output byte-identical to
+/// today (byte-equal-backends + goldens unaffected) unless `LAMQUANT_TRY_TRANSFORM_SKIP=1`.
+///
+/// `#[doc(hidden)] pub` (ADR 0058 carve-full seam): the Desktop parallel tier reads the SAME flag via
+/// this one function so both tiers make the identical keep-best decision — the byte-equal invariant
+/// holds with the flag ON as well as OFF (task #32 discipline: experimental flags stay backend-symmetric).
+#[doc(hidden)]
+#[cfg(feature = "std")]
+pub fn transform_skip_enabled() -> bool {
+    std::env::var("LAMQUANT_TRY_TRANSFORM_SKIP")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+#[doc(hidden)]
+#[cfg(not(feature = "std"))]
+pub fn transform_skip_enabled() -> bool {
+    false
+}
+
+/// Encode `channels` at `full_levels`, and — when transform-skip is enabled and the transform is
+/// actually in use (`full_levels > 0`) — ALSO at `n_levels = 0`, returning the smaller packet.
+/// Deterministic byte-length keep-best: both tiers (serial MCU + Desktop parallel) that route through
+/// this pick identically, so the byte-equal invariant is preserved. The chosen packet is produced by
+/// the SAME [`encode_channels_core`] firmware uses, so each candidate is itself byte-exact.
+fn encode_maybe_skip(
+    channels: &[&[i64]],
+    n_ch: usize,
+    t: usize,
+    full_levels: u8,
+    noise_bits: u8,
+    flags: (bool, bool, bool),
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let full = encode_channels_core(channels, n_ch, t, full_levels, noise_bits, flags, mode)?;
+    if transform_skip_enabled() && full_levels > 0 {
+        let skip = encode_channels_core(channels, n_ch, t, 0, noise_bits, flags, mode)?;
+        if skip.len() < full.len() {
+            return Ok(skip);
+        }
+    }
+    Ok(full)
+}
+
 /// Compress [n_ch][T] signal → LML1 packet bytes with explicit LPC mode.
 ///
 /// `mode` controls the speed / CR trade-off the encoder makes per
@@ -776,7 +825,7 @@ pub fn compress_with_mode(
 ) -> LmlResult<Vec<u8>> {
     let prep = prepare_encode(signal, noise_bits)?;
     let views: Vec<&[i64]> = prep.signal.iter().map(|v| v.as_slice()).collect();
-    encode_channels_core(
+    encode_maybe_skip(
         &views,
         prep.n_ch,
         prep.t,
@@ -818,7 +867,7 @@ pub fn compress_with_mode_views(
     let t = windows.first().map(|w| w.len()).unwrap_or(0);
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
     if noise_bits == 0 {
-        encode_channels_core(
+        encode_maybe_skip(
             windows,
             shape.n_ch,
             shape.t,
@@ -833,7 +882,7 @@ pub fn compress_with_mode_views(
             .map(|w| w.iter().map(|&v| v >> noise_bits).collect())
             .collect();
         let shifted_views: Vec<&[i64]> = shifted.iter().map(|v| v.as_slice()).collect();
-        encode_channels_core(
+        encode_maybe_skip(
             &shifted_views,
             shape.n_ch,
             shape.t,
@@ -2128,6 +2177,52 @@ mod tests {
     fn roundtrip_short() {
         let s = vec![vec![100i64, -200, 300, -400]];
         assert_eq!(s, decompress(&compress(&s, 0).unwrap()).unwrap());
+    }
+
+    /// ADR 0023 Track B7: a transform-skip (`n_levels = 0`) lossless packet — the candidate
+    /// `encode_maybe_skip` keeps when it's smaller — must round-trip byte-exactly. Produced directly
+    /// via `encode_channels_core(.., 0, ..)` (no env var ⇒ no parallel-test race), decoded via the
+    /// public `decompress`. Guards the wire-compatibility claim: `n_levels=0` already decodes.
+    #[test]
+    fn roundtrip_transform_skip_nlevels0() {
+        let signal: Vec<Vec<i64>> = (0..8)
+            .map(|ch| (0..2500).map(|i| ((i * (ch + 3) * 31) % 8000 - 4000) as i64).collect())
+            .collect();
+        let (n_ch, t) = (signal.len(), signal[0].len());
+        let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
+        let flags = (false, false, false);
+        let skip_pkt =
+            encode_channels_core(&views, n_ch, t, 0, 0, flags, lpc::LpcMode::default()).unwrap();
+        // Header n_levels field must read 0 (the decoder branches on it), and the packet must decode.
+        assert_eq!(decompress(&skip_pkt).unwrap(), signal);
+        // Sanity: the full-transform packet also round-trips (the other keep-best candidate).
+        let full_levels = compute_n_levels(t);
+        let full_pkt =
+            encode_channels_core(&views, n_ch, t, full_levels, 0, flags, lpc::LpcMode::default())
+                .unwrap();
+        assert_eq!(decompress(&full_pkt).unwrap(), signal);
+    }
+
+    /// Default build (flag OFF) must be byte-identical to the pre-B7 encoder — `encode_maybe_skip`
+    /// returns exactly the full-transform packet, so no golden/byte-equal gate can shift unless the
+    /// operator opts in via `LAMQUANT_TRY_TRANSFORM_SKIP=1`.
+    #[test]
+    fn transform_skip_default_off_is_byte_identical() {
+        let signal: Vec<Vec<i64>> = (0..6)
+            .map(|ch| (0..2000).map(|i| ((i * (ch + 1) * 53) % 9000 - 4500) as i64).collect())
+            .collect();
+        let (n_ch, t) = (signal.len(), signal[0].len());
+        let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
+        let flags = (false, false, false);
+        let full_levels = compute_n_levels(t);
+        let baseline =
+            encode_channels_core(&views, n_ch, t, full_levels, 0, flags, lpc::LpcMode::default())
+                .unwrap();
+        // With the flag unset in the test environment, encode_maybe_skip == encode_channels_core(full).
+        let via_wrapper =
+            encode_maybe_skip(&views, n_ch, t, full_levels, 0, flags, lpc::LpcMode::default())
+                .unwrap();
+        assert_eq!(baseline, via_wrapper);
     }
 
     #[test]
