@@ -31,6 +31,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
@@ -229,7 +230,7 @@ def parse_lines(stream: Iterable[str]) -> Iterable[OpEvent]:
 
 # ── CLI / self-test (--check) ─────────────────────────────────────────────
 
-def _check_round_trip() -> int:
+def _check_round_trip(fixture: Path | None = None) -> int:
     """Self-test entry point used by ``crates/lamquant-ops/tests/schema_parity.rs``.
 
     Reads the canonical fixture, asserts every line round-trips through
@@ -237,8 +238,10 @@ def _check_round_trip() -> int:
     Rust-side diff can confirm the wire format is byte-stable across
     languages. Returns 0 on success, 1 on any drift.
     """
-    from lamquant_codec._paths import REPO_ROOT as here
-    fixture = here / "crates" / "lamquant-ops" / "tests" / "fixtures" / "op-events-sample.jsonl"
+    if fixture is None:
+        from lamquant_codec._paths import REPO_ROOT
+
+        fixture = REPO_ROOT / "tests/fixtures/op-events-sample.jsonl"
     if not fixture.exists():
         print(f"fixture not found: {fixture}", file=sys.stderr)
         return 1
@@ -276,13 +279,20 @@ def _check_round_trip() -> int:
     return 0
 
 
-def _main() -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m lamquant_codec.cli.op_emit")
     parser.add_argument("--check", action="store_true",
                         help="Round-trip the canonical fixture and exit.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--fixture",
+        type=Path,
+        help="JSONL contract fixture to validate (defaults to the owner fixture).",
+    )
+    args = parser.parse_args(argv)
     if args.check:
-        return _check_round_trip()
+        return _check_round_trip(args.fixture)
+    if args.fixture is not None:
+        parser.error("--fixture requires --check")
     parser.print_help()
     return 0
 
