@@ -13,9 +13,15 @@ paths = [
   "tests/codec/test_l7_paranoid.py",
   "tests/codec_python_smoke/test_channel_resolver_private.py",
   "tests/codec_python_smoke/test_decode_export_micro.py",
+  "tests/edf_reader/test_edf_reader.py",
 ]
 
 [[allowed_skip]]
 path = "tests/codec/test_fused_pipeline.py"
 reason_contains = "numba not available"
 max_count = 1
+
+[[allowed_skip]]
+path = "tests/edf_reader/test_edf_reader.py"
+reason_contains = "owner integration fixture unavailable"
+max_count = 3

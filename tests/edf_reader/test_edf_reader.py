@@ -3,9 +3,6 @@
 Tests read_edf_digital, _parse_tal, _unpack_int24 for the complete
 EDF family: EDF, EDF+C, EDF+D, BDF.
 """
-import pytest  # decomp(lossless-carve): skip when ai_models absent
-pytest.importorskip("subband_preprocess", reason="Neural-coupled test; requires LamQuant-Neural sibling clone")
-
 import os
 import struct
 import tempfile
@@ -18,12 +15,19 @@ from lamquant_codec.edf_to_lml import (
 )
 
 
-# ── Paths to real EDF files (skip if not present) ──
-_DATA_ROOT = os.environ.get("LAMQUANT_DATA_ROOT", "/mnt/4tb/data")
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-_TUEG_EDF = os.path.join(_DATA_ROOT, "tueg_v2.0.1/edf/000/aaaaaaaa/s001_2015/01_tcp_ar/aaaaaaaa_s001_t000.edf")
-_CHBMIT_EDF = os.path.join(_REPO_ROOT, "ai_models/dataset_sim/datasets/chbmit/chb01/chb01_03.edf")
+# Paths to optional real EDF files. Owner integration never probes implicit
+# sibling checkouts or machine-specific roots.
+_DATA_ROOT = os.environ.get("LAMQUANT_DATA_ROOT")
+_TUEG_EDF = (
+    os.path.join(
+        _DATA_ROOT,
+        "tueg_v2.0.1/edf/000/aaaaaaaa/s001_2015/01_tcp_ar/"
+        "aaaaaaaa_s001_t000.edf",
+    )
+    if _DATA_ROOT
+    else ""
+)
+_CHBMIT_EDF = os.environ.get("LAMQUANT_CHBMIT_EDF", "")
 
 
 class TestTALParser:
@@ -86,7 +90,10 @@ class TestInt24Unpack:
 class TestEDFReader:
     """read_edf_digital on real files."""
 
-    @pytest.mark.skipif(not os.path.exists(_TUEG_EDF), reason="TUEG not available")
+    @pytest.mark.skipif(
+        not os.path.exists(_TUEG_EDF),
+        reason="owner integration fixture unavailable: TUEG EDF",
+    )
     def test_tueg(self):
         sig, meta = read_edf_digital(_TUEG_EDF)
         assert sig.shape[0] > 0
@@ -96,7 +103,10 @@ class TestEDFReader:
         assert meta["continuous"] is True
         assert len(meta["channels"]) == sig.shape[0]
 
-    @pytest.mark.skipif(not os.path.exists(_CHBMIT_EDF), reason="CHB-MIT not available")
+    @pytest.mark.skipif(
+        not os.path.exists(_CHBMIT_EDF),
+        reason="owner integration fixture unavailable: CHB-MIT EDF",
+    )
     def test_chbmit(self):
         sig, meta = read_edf_digital(_CHBMIT_EDF)
         assert sig.shape[0] > 0
@@ -126,7 +136,10 @@ class TestEDFReader:
 class TestEDFToLMLRoundtrip:
     """Full EDF → LML → verify roundtrip."""
 
-    @pytest.mark.skipif(not os.path.exists(_TUEG_EDF), reason="TUEG not available")
+    @pytest.mark.skipif(
+        not os.path.exists(_TUEG_EDF),
+        reason="owner integration fixture unavailable: TUEG EDF",
+    )
     def test_convert_verify(self, tmp_path):
         from lamquant_codec.edf_to_lml import convert_edf_to_lml
         p = str(tmp_path / "out.lml")
