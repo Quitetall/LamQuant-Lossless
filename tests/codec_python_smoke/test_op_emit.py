@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -98,6 +99,7 @@ def test_check_command_validates_owner_fixture(explicit_fixture: bool) -> None:
         text=True,
         timeout=10,
         env={
+            **os.environ,
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPATH": str(PYTHON_SOURCE),
         },
