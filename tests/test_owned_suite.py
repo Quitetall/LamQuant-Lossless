@@ -19,6 +19,7 @@ def test_repository_manifest_loads() -> None:
 
 
 def test_retired_ai_models_aggregation_smoke_stays_absent() -> None:
+    """Lossless must not regain Neural/BLUT implementation-surface tests."""
     retired = MANIFEST.parent / "codec_python_smoke/test_ai_models_smoke.py"
     assert not retired.exists()
 
