@@ -16,9 +16,9 @@ def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
-def _assigned_names(tree: ast.AST) -> set[str]:
+def _assigned_names(tree: ast.Module) -> set[str]:
     names = set()
-    for node in ast.walk(tree):
+    for node in tree.body:
         targets = node.targets if isinstance(node, ast.Assign) else ()
         if isinstance(node, ast.AnnAssign):
             targets = (node.target,)
@@ -64,13 +64,19 @@ def test_active_write_paths_do_not_restore_lmq5_magic() -> None:
     for relative in ("compress.py", "decompress.py", "ops/fused_lml.py"):
         tree = _tree(CODEC / relative)
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+                value = node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = (node.target,)
+                value = node.value
+            else:
                 continue
             target_names = {
-                target.id for target in node.targets if isinstance(target, ast.Name)
+                target.id for target in targets if isinstance(target, ast.Name)
             }
             if target_names & {"MAGIC", "MAGIC_LMQ"}:
-                assert ast.literal_eval(node.value) != b"LMQ5"
+                assert ast.literal_eval(value) != b"LMQ5"
 
 
 def test_fused_codec_reads_bias_context_constant() -> None:
@@ -85,12 +91,16 @@ def test_fused_codec_reads_bias_context_constant() -> None:
     hardcoded = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "int64"
-        and len(node.args) == 1
-        and isinstance(node.args[0], ast.Constant)
-        and node.args[0].value == 32
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(
+            isinstance(target, ast.Name) and target.id == "ctx_len"
+            for target in (node.targets if isinstance(node, ast.Assign) else (node.target,))
+        )
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "int64"
+        and len(node.value.args) == 1
+        and isinstance(node.value.args[0], ast.Constant)
     ]
 
     assert "BIAS_CTX_LEN" in imported
