@@ -14,9 +14,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from firmware.export.crc import crc32_of, crc32_of_file
-from firmware.export.fsq import FsqCalibration, calibrate
-from firmware.export.quantize import (
+from c_firmware.export.crc import crc32_of, crc32_of_file
+from c_firmware.export.fsq import FsqCalibration, calibrate
+from c_firmware.export.quantize import (
     cayley_rotation_q15,
     clamp_int8_weight,
     lsq_ternarize,

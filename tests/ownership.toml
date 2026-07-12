@@ -18,6 +18,8 @@ paths = [
   "tests/codec_python_smoke/test_decode_export_micro.py",
   "tests/codec_python_smoke/test_op_emit.py",
   "tests/edf_reader/test_edf_reader.py",
+  "tests/firmware/test_checkpoint.py",
+  "tests/firmware/test_export_helpers.py",
 ]
 
 [[allowed_skip]]

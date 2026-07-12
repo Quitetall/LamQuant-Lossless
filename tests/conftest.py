@@ -31,16 +31,10 @@ if not _HAS_NEURAL:
         "codec/test_l7_adversarial_saturation.py",
         "codec/test_l7_adversarial_zeros.py",
         "decoder/*.py",
-        "firmware/test_checkpoint.py",
-        "firmware/test_l5_cross_impl.py",
-        "firmware/test_l5_parity.py",
-        "firmware/test_l3_weight_packing.py",
-        # Firmware-export tests import the neural `firmware` package
-        # (export_firmware/export_helpers/export_schema/rust_emitter/
-        # snn_emitter), which depends on neural checkpoints + emitter
-        # modules that live in LamQuant-Neural, not this Lossless carve.
+        # These remaining legacy exporters still import the removed neural
+        # `firmware` package; owner-local checkpoint and pure-helper tests use
+        # the canonical `c_firmware.export` package and stay collected.
         "firmware/test_export_firmware.py",
-        "firmware/test_export_helpers.py",
         "firmware/test_export_schema.py",
         "firmware/test_rust_emitter.py",
         "firmware/test_snn_emitter.py",
