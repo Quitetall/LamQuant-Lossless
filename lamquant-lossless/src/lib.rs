@@ -8,7 +8,7 @@
 //!
 //! Build modes:
 //!   default ("host")  — full library: codec + container + EDF + LMA + CLI/TUI deps
-//!   "std"             — codec only, host platform (file I/O, std types)
+//!   "std"             — codec + host Read/Write adapters; no archive/container
 //!   no features       — `no_std` + `alloc`. Codec only. For RP2350 firmware.
 //!   "python"          — PyO3 bindings (implies "host")
 //!   "ffi"             — C FFI bindings (implies "host")

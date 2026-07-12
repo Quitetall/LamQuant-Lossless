@@ -109,7 +109,7 @@ default = ["host"]
 
 # ── Level 0: no_std DSP core (firmware / embedded) ──────────────────────────
 # The codec core now lives in `lamquant-lml-mcu`; `std` turns on its host-side
-# numeric helpers. Host Read/Write policy enters with the Desktop archive tier.
+# numeric helpers and the Desktop-owned host Read/Write adapters.
 # Firmware depends on `lamquant-lml-mcu` directly, so it never gains host I/O.
 std = [
     "lamquant-lml-mcu/std",
@@ -123,8 +123,7 @@ std = [
 # Use this for OS plugins and 3rd-party readers (e.g. lml-os/lmafs).
 archive = [
     "std",
-    # Link the Desktop selector and turn on the codec owner's Rayon execution
-    # profile. `fast` implies `std`.
+    # Activate the codec owner's Rayon execution profile. `fast` implies `std`.
     "lamquant-lml-desktop/fast",
     # ADR 0069 L6.2: the ABIR container writer (`abir_container::write_abir`)
     # is sourced from `abir::Abir` instead of `Vec<Vec<i64>>`.
