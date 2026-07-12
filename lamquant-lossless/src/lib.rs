@@ -113,6 +113,8 @@ pub mod normalize;
 pub mod bcs1_stream;
 #[cfg(feature = "archive")]
 pub mod codec_stages;
+#[cfg(feature = "archive")]
+pub mod container_reader;
 // ADR 0069 L8 (cutover): `lamquant_core::container` now aliases the clean
 // `abir_container` facade, NOT the legacy crate directly. The write half
 // (`write_into`/`write_file*`) dispatches through `write_abir`

@@ -89,13 +89,17 @@
 //! `parse_header` magic guard → `PyValueError` → `except: return None`).
 
 use crate::deployment::LosslessMode;
+use crate::container_reader::{ContainerFormat, ContainerReader};
 use crate::error::{LmlError, LmlResult};
 use crate::lml;
 use crate::lpc::LpcMode;
 use abir::{
-    Abir, Bcs1Header, CodecDescriptor, Column, Modality, BCS1_HEADER_LEN, BCS1_MAGIC,
-    BCS1_VERSION_MAJOR,
+    Abir, Bcs1Header, CodecDescriptor, Column, Modality, BCS1_HEADER_LEN,
 };
+#[cfg(test)]
+use abir::BCS1_MAGIC;
+#[cfg(test)]
+use lamquant_lml_legacy::container::parse_header as legacy_parse_header;
 use std::path::Path;
 
 // Re-exported at `abir_container::{OffsetEntry, OffsetTable}` (this `pub use`
@@ -129,11 +133,6 @@ pub use lamquant_lml_legacy::container::{ContainerHeader, ContainerStats};
 // byte-for-byte frozen while the `BCS1` branch routes to the `bcs1_*` bodies.
 // `read_file` still needs no alias — its dispatcher re-reads the file and
 // calls this module's `read_bytes`, where the routing already happens.
-use lamquant_lml_legacy::container::{
-    parse_header as legacy_parse_header, read_bytes as legacy_read_bytes,
-    read_bytes_into_f32_calibrated as legacy_read_bytes_into_f32_calibrated,
-    read_window_from_bytes as legacy_read_window_from_bytes,
-};
 
 // Cloned verbatim from `lamquant-lml-legacy::container` (VERSION_MAJOR/MINOR,
 // FLAG_HAS_FOOTER) — these are wire-format constants, not implementation
@@ -524,34 +523,6 @@ pub fn write_abir<M: Modality, W: std::io::Write + ?Sized>(
 // read_file/read_bytes become a magic DISPATCHER") peek the leading 4 bytes
 // and route to whichever reader understands them.
 
-/// Fail-closed decode gate on a parsed BCS1 header (task #36): this build
-/// decodes only `version_major` ≤ 1, `decode_capability` 0 (the integer floor),
-/// and `codec_descriptor` `Lml53`. GOLDEN-NEUTRAL — v1 / cap0 / Lml53 headers
-/// (all the L9 writer emits) pass unchanged; a future/incompatible header
-/// fails closed (`UnsupportedVersion` / `InvalidHeader`) instead of being
-/// mis-decoded. NB `Bcs1Header::parse` stays permissive (any version/cap parses
-/// into the struct) so inspection tools can still read a future header; the gate
-/// lives here on the DECODE path.
-fn bcs1_gate_decodable(header: &Bcs1Header) -> LmlResult<()> {
-    if header.version_major > BCS1_VERSION_MAJOR {
-        return Err(LmlError::UnsupportedVersion(header.version_major));
-    }
-    if header.decode_capability > 0 {
-        return Err(LmlError::InvalidHeader(format!(
-            "BCS1 decode_capability {} exceeds this reader's max (0 = integer floor)",
-            header.decode_capability
-        )));
-    }
-    if header.codec_descriptor != CodecDescriptor::Lml53.to_u8() {
-        return Err(LmlError::InvalidHeader(format!(
-            "BCS1 codec_descriptor {} not wired to a decoder in this build \
-             (only CODEC_LML_53=0 decodes today; LMO/LMQ descriptors are deferred)",
-            header.codec_descriptor
-        )));
-    }
-    Ok(())
-}
-
 /// Decode a `BCS1` container from in-memory bytes into `(signal,
 /// metadata_json)` — the BCS1 counterpart of
 /// `lamquant_lml_legacy::container::read_bytes`. Parses the 40-byte typed
@@ -566,106 +537,27 @@ fn bcs1_gate_decodable(header: &Bcs1Header) -> LmlResult<()> {
 /// descriptor is a clean `LmlError::InvalidHeader`, never a silent
 /// mis-decode or a panic.
 pub fn bcs1_read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
-    let header = Bcs1Header::parse(data)
-        .map_err(|e| LmlError::InvalidHeader(format!("BCS1 header: {e}")))?;
-
-    let n_ch = header.n_channels as usize;
-    if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(format!("channel count: {}", n_ch)));
+    let mut reader = ContainerReader::from_source(std::io::Cursor::new(data))?;
+    if reader.format() != ContainerFormat::Bcs1 {
+        return Err(LmlError::InvalidHeader(
+            "bcs1_read_bytes requires a BCS1 container".into(),
+        ));
     }
-    let total_samples = header.total_samples as usize;
-    if total_samples == 0 {
-        return Err(LmlError::InvalidHeader("zero samples".into()));
-    }
-    let n_windows = header.n_windows as usize;
-    if n_windows == 0 {
-        return Err(LmlError::InvalidHeader("zero windows".into()));
-    }
-    let window_size = header.window_size as usize;
-    // Bound the signal allocation against the data-implied size (mirrors the
-    // legacy `read_bytes` guard) — total_samples can never legitimately
-    // exceed n_windows * window_size, so reject before allocating.
-    let max_samples = (n_windows as u64)
-        .checked_mul(window_size as u64)
-        .ok_or_else(|| LmlError::InvalidHeader("n_windows * window_size overflows u64".into()))?;
-    if total_samples as u64 > max_samples {
-        return Err(LmlError::InvalidHeader(format!(
-            "total_samples {total_samples} exceeds n_windows*window_size {max_samples}"
-        )));
-    }
-
-    let meta_len = header.metadata_length as usize;
-    let mut pos = BCS1_HEADER_LEN;
-    if pos + meta_len > data.len() {
-        return Err(LmlError::Truncated {
-            expected: pos + meta_len,
-            actual: data.len(),
-            context: "metadata",
-        });
-    }
-    let metadata = std::str::from_utf8(&data[pos..pos + meta_len])
-        .map_err(|e| LmlError::InvalidHeader(format!("metadata is not valid UTF-8: {e}")))?
-        .to_string();
-    pos += meta_len;
-
-    // Skip the window-length index (n_windows × u32 LE offsets) — this
-    // decoder walks payloads sequentially, same as the legacy reader.
-    // Random access via the index / LMLFOOT1 footer for the BCS1 path is a
-    // tracked fast-follow (L9 is the wire + the sequential decode proof;
-    // `stream::LmlReader`-style seek access is out of this minimal scope).
-    pos += n_windows * 4;
-
-    bcs1_gate_decodable(&header)?;
-
-    // Decompress windows — identical loop to
-    // `lamquant_lml_legacy::container::read_bytes`'s tail (the per-window
-    // `LML1` packet format is byte-unchanged by L9).
-    let mut signal = vec![vec![0i64; total_samples]; n_ch];
-    for w in 0..n_windows {
-        if pos + 4 > data.len() {
-            return Err(LmlError::Truncated {
-                expected: pos + 4,
-                actual: data.len(),
-                context: "window length",
-            });
-        }
-        let payload_len =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        pos += 4;
-        if pos + payload_len > data.len() {
-            return Err(LmlError::Truncated {
-                expected: pos + payload_len,
-                actual: data.len(),
-                context: "window payload",
-            });
-        }
-        let window = lml::decompress(&data[pos..pos + payload_len])?;
-        pos += payload_len;
-
-        if window.len() != n_ch {
-            return Err(LmlError::InvalidHeader(format!(
-                "window {w}: decoded channel count {} != header n_ch {}",
-                window.len(),
-                n_ch
-            )));
-        }
-
-        let start = w * window_size;
-        for ch in 0..n_ch {
-            let end = (start + window[ch].len()).min(total_samples);
-            let copy_len = end - start;
-            signal[ch][start..start + copy_len].copy_from_slice(&window[ch][..copy_len]);
-        }
-    }
-
-    Ok((signal, metadata))
+    let metadata = reader.header().metadata.clone();
+    Ok((reader.decode_all()?, metadata))
 }
 
 /// Decode a `BCS1` container file — thin wrapper over [`bcs1_read_bytes`],
 /// mirroring the legacy `read_file`/`read_bytes` split.
 pub fn bcs1_read_file(path: &Path) -> LmlResult<(Vec<Vec<i64>>, String)> {
-    let data = std::fs::read(path).map_err(LmlError::Io)?;
-    bcs1_read_bytes(&data)
+    let mut reader = ContainerReader::open(path)?;
+    if reader.format() != ContainerFormat::Bcs1 {
+        return Err(LmlError::InvalidHeader(
+            "bcs1_read_file requires a BCS1 container".into(),
+        ));
+    }
+    let metadata = reader.header().metadata.clone();
+    Ok((reader.decode_all()?, metadata))
 }
 
 /// Read a container from in-memory bytes — the facade DISPATCHER (ADR 0069
@@ -676,11 +568,9 @@ pub fn bcs1_read_file(path: &Path) -> LmlResult<(Vec<Vec<i64>>, String)> {
 /// truncation/magic error handling for that case — this function does not
 /// duplicate it.
 pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
-    if data.len() >= 4 && &data[0..4] == BCS1_MAGIC {
-        bcs1_read_bytes(data)
-    } else {
-        legacy_read_bytes(data)
-    }
+    let mut reader = ContainerReader::from_source(std::io::Cursor::new(data))?;
+    let metadata = reader.header().metadata.clone();
+    Ok((reader.decode_all()?, metadata))
 }
 
 /// Read a container from a file — the facade DISPATCHER (ADR 0069 L9).
@@ -688,8 +578,9 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
 /// same 4-byte peek so a `BCS1` file never round-trips through the legacy
 /// reader's own (separate) file-read.
 pub fn read_file(path: &Path) -> LmlResult<(Vec<Vec<i64>>, String)> {
-    let data = std::fs::read(path).map_err(LmlError::Io)?;
-    read_bytes(&data)
+    let mut reader = ContainerReader::open(path)?;
+    let metadata = reader.header().metadata.clone();
+    Ok((reader.decode_all()?, metadata))
 }
 
 /// Read a container from any [`std::io::Read`] source — the facade
@@ -725,75 +616,13 @@ pub fn read_from<R: std::io::Read>(src: &mut R) -> LmlResult<(Vec<Vec<i64>>, Str
 /// is not decodable in this build, so callers get `InvalidHeader`, never a silent
 /// mis-decode.
 pub fn bcs1_parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
-    let header = Bcs1Header::parse(data)
-        .map_err(|e| LmlError::InvalidHeader(format!("BCS1 header: {e}")))?;
-
-    let n_ch = header.n_channels as usize;
-    if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(format!("channel count: {}", n_ch)));
+    let reader = ContainerReader::from_source(std::io::Cursor::new(data))?;
+    if reader.format() != ContainerFormat::Bcs1 {
+        return Err(LmlError::InvalidHeader(
+            "bcs1_parse_header requires a BCS1 container".into(),
+        ));
     }
-    let total_samples = header.total_samples as usize;
-    if total_samples == 0 {
-        return Err(LmlError::InvalidHeader("zero samples".into()));
-    }
-    let n_windows = header.n_windows as usize;
-    if n_windows == 0 {
-        return Err(LmlError::InvalidHeader("zero windows".into()));
-    }
-    let window_size = header.window_size as usize;
-    // Cross-field consistency (MiMo #34 review): total_samples can never
-    // legitimately exceed n_windows * window_size. Guard it here — the
-    // calibrated-f32 and window read paths parse through this fn, so without
-    // it they'd lack the protection the whole-decode `bcs1_read_bytes` already
-    // has (a crafted header would allocate an oversized output and silently
-    // zero-fill the tail into garbage training data).
-    let max_samples = (n_windows as u64)
-        .checked_mul(window_size as u64)
-        .ok_or_else(|| LmlError::InvalidHeader("n_windows * window_size overflows u64".into()))?;
-    if total_samples as u64 > max_samples {
-        return Err(LmlError::InvalidHeader(format!(
-            "total_samples {total_samples} exceeds n_windows*window_size {max_samples}"
-        )));
-    }
-
-    bcs1_gate_decodable(&header)?;
-
-    let meta_len = header.metadata_length as usize;
-    let hdr_end = BCS1_HEADER_LEN;
-    // checked_* on the offset arithmetic (MiMo #34 review): `metadata_length`
-    // is an attacker-controllable u32. On the 64-bit host these can't actually
-    // wrap usize, but this matches the discipline in
-    // `bcs1_read_window_from_bytes` and keeps the truncation guard sound if
-    // abir_container ever moves to a 32-bit (no_std) target.
-    let meta_end = hdr_end
-        .checked_add(meta_len)
-        .ok_or_else(|| LmlError::InvalidHeader("metadata offset overflow".into()))?;
-    if meta_end > data.len() {
-        return Err(LmlError::Truncated {
-            expected: meta_end,
-            actual: data.len(),
-            context: "metadata",
-        });
-    }
-    let metadata = std::str::from_utf8(&data[hdr_end..meta_end])
-        .map_err(|e| LmlError::InvalidHeader(format!("metadata is not valid UTF-8: {e}")))?
-        .to_string();
-
-    // Window-length index (n_windows × u32) sits immediately after the metadata; the
-    // first payload's length prefix begins right after it. Identical relative layout to
-    // the legacy reader — only the fixed header length (40 vs 32/20/18) differs.
-    let payload_start = meta_end
-        .checked_add(n_windows * 4)
-        .ok_or_else(|| LmlError::InvalidHeader("payload_start overflow".into()))?;
-
-    Ok(ContainerHeader {
-        n_ch,
-        n_windows,
-        total_samples,
-        window_size,
-        metadata,
-        payload_start,
-    })
+    reader.container_header()
 }
 
 /// Calibrated full-signal f32 decode of a `BCS1` container — the BCS1 counterpart of the
@@ -806,89 +635,14 @@ pub fn bcs1_read_bytes_into_f32_calibrated(
     out: &mut [f32],
     calib: &[f32],
 ) -> LmlResult<ContainerHeader> {
-    let header = bcs1_parse_header(data)?;
-    let n_ch = header.n_ch;
-    let total = header.total_samples;
-    if out.len() != n_ch * total {
-        return Err(LmlError::InvalidHeader(format!(
-            "output buffer size mismatch: expected {} got {}",
-            n_ch * total,
-            out.len()
-        )));
+    let mut reader = ContainerReader::from_source(std::io::Cursor::new(data))?;
+    if reader.format() != ContainerFormat::Bcs1 {
+        return Err(LmlError::InvalidHeader(
+            "bcs1 calibrated decode requires a BCS1 container".into(),
+        ));
     }
-    if calib.len() != n_ch * 4 {
-        return Err(LmlError::InvalidHeader(format!(
-            "calib length {} != n_ch*4 ({})",
-            calib.len(),
-            n_ch * 4
-        )));
-    }
-
-    // Per-channel scale + offset so we do one mul + one add per sample (identical to the
-    // legacy body — the degenerate `dig_range == 0` row emits zero).
-    let mut scale = vec![0.0f32; n_ch];
-    let mut offset = vec![0.0f32; n_ch];
-    for ch in 0..n_ch {
-        let dig_min = calib[ch * 4];
-        let dig_max = calib[ch * 4 + 1];
-        let phys_min = calib[ch * 4 + 2];
-        let phys_max = calib[ch * 4 + 3];
-        let dig_range = dig_max - dig_min;
-        if dig_range == 0.0 {
-            scale[ch] = 0.0;
-            offset[ch] = 0.0;
-        } else {
-            scale[ch] = (phys_max - phys_min) / dig_range;
-            offset[ch] = phys_min - dig_min * scale[ch];
-        }
-    }
-
-    let window_size = header.window_size;
-    let mut pos = header.payload_start;
-    for w in 0..header.n_windows {
-        if pos + 4 > data.len() {
-            return Err(LmlError::Truncated {
-                expected: pos + 4,
-                actual: data.len(),
-                context: "window length",
-            });
-        }
-        let payload_len =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        pos += 4;
-        if pos + payload_len > data.len() {
-            return Err(LmlError::Truncated {
-                expected: pos + payload_len,
-                actual: data.len(),
-                context: "window payload",
-            });
-        }
-        let window = lml::decompress(&data[pos..pos + payload_len])?;
-        pos += payload_len;
-
-        // Refuse to silently zero-fill a header/window channel-count disagreement (would
-        // produce garbage training data without a warning) — matches the legacy body.
-        if window.len() != n_ch {
-            return Err(LmlError::InvalidHeader(format!(
-                "window {w}: decoded channel count {} != header n_ch {}",
-                window.len(),
-                n_ch
-            )));
-        }
-
-        let start = w * window_size;
-        for ch in 0..n_ch {
-            let src = &window[ch];
-            let copy_len = (src.len()).min(total.saturating_sub(start));
-            let dst_off = ch * total + start;
-            let s = scale[ch];
-            let o = offset[ch];
-            for i in 0..copy_len {
-                out[dst_off + i] = src[i] as f32 * s + o;
-            }
-        }
-    }
-
+    let header = reader.container_header()?;
+    reader.decode_all_f32_calibrated(out, calib)?;
     Ok(header)
 }
 
@@ -900,65 +654,14 @@ pub fn bcs1_read_window_from_bytes(
     data: &[u8],
     window_idx: usize,
 ) -> LmlResult<(Vec<Vec<i64>>, ContainerHeader)> {
-    let header = bcs1_parse_header(data)?;
-    if window_idx >= header.n_windows {
-        return Err(LmlError::InvalidHeader(format!(
-            "window_idx {} out of range (n_windows {})",
-            window_idx, header.n_windows
-        )));
+    let mut reader = ContainerReader::from_source(std::io::Cursor::new(data))?;
+    if reader.format() != ContainerFormat::Bcs1 {
+        return Err(LmlError::InvalidHeader(
+            "bcs1 window read requires a BCS1 container".into(),
+        ));
     }
-    let index_base = header
-        .payload_start
-        .checked_sub(header.n_windows * 4)
-        .ok_or_else(|| LmlError::InvalidHeader("payload_start underflow".into()))?;
-    let entry_pos = index_base + window_idx * 4;
-    if entry_pos + 4 > data.len() {
-        return Err(LmlError::Truncated {
-            expected: entry_pos + 4,
-            actual: data.len(),
-            context: "window index entry",
-        });
-    }
-    let rel_off = u32::from_le_bytes([
-        data[entry_pos],
-        data[entry_pos + 1],
-        data[entry_pos + 2],
-        data[entry_pos + 3],
-    ]) as usize;
-    let block_pos = header
-        .payload_start
-        .checked_add(rel_off)
-        .ok_or_else(|| LmlError::InvalidHeader("window block position overflow".into()))?;
-    if block_pos + 4 > data.len() {
-        return Err(LmlError::Truncated {
-            expected: block_pos + 4,
-            actual: data.len(),
-            context: "window length",
-        });
-    }
-    let payload_len = u32::from_le_bytes([
-        data[block_pos],
-        data[block_pos + 1],
-        data[block_pos + 2],
-        data[block_pos + 3],
-    ]) as usize;
-    let payload_start = block_pos + 4;
-    if payload_start + payload_len > data.len() {
-        return Err(LmlError::Truncated {
-            expected: payload_start + payload_len,
-            actual: data.len(),
-            context: "window payload",
-        });
-    }
-    let window = lml::decompress(&data[payload_start..payload_start + payload_len])?;
-    if window.len() != header.n_ch {
-        return Err(LmlError::InvalidHeader(format!(
-            "window {window_idx}: decoded channel count {} != header n_ch {}",
-            window.len(),
-            header.n_ch
-        )));
-    }
-    Ok((window, header))
+    let header = reader.container_header()?;
+    Ok((reader.read_window(window_idx)?, header))
 }
 
 /// Parse a container header from in-memory bytes — the facade DISPATCHER (#34). Peeks
@@ -967,11 +670,7 @@ pub fn bcs1_read_window_from_bytes(
 /// magic/truncation errors. Every caller of `container::parse_header` (the dataloader's
 /// `container_metadata`, `cmd_recover`, `cmd_info`) transparently gains BCS1 support.
 pub fn parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
-    if data.len() >= 4 && &data[0..4] == BCS1_MAGIC {
-        bcs1_parse_header(data)
-    } else {
-        legacy_parse_header(data)
-    }
+    ContainerReader::from_source(std::io::Cursor::new(data))?.container_header()
 }
 
 /// Calibrated full-signal f32 decode — the facade DISPATCHER (#34). Same 4-byte routing
@@ -983,11 +682,10 @@ pub fn read_bytes_into_f32_calibrated(
     out: &mut [f32],
     calib: &[f32],
 ) -> LmlResult<ContainerHeader> {
-    if data.len() >= 4 && &data[0..4] == BCS1_MAGIC {
-        bcs1_read_bytes_into_f32_calibrated(data, out, calib)
-    } else {
-        legacy_read_bytes_into_f32_calibrated(data, out, calib)
-    }
+    let mut reader = ContainerReader::from_source(std::io::Cursor::new(data))?;
+    let header = reader.container_header()?;
+    reader.decode_all_f32_calibrated(out, calib)?;
+    Ok(header)
 }
 
 /// Random-access single-window read — the facade DISPATCHER (#34). Same 4-byte routing:
@@ -997,11 +695,9 @@ pub fn read_window_from_bytes(
     data: &[u8],
     window_idx: usize,
 ) -> LmlResult<(Vec<Vec<i64>>, ContainerHeader)> {
-    if data.len() >= 4 && &data[0..4] == BCS1_MAGIC {
-        bcs1_read_window_from_bytes(data, window_idx)
-    } else {
-        legacy_read_window_from_bytes(data, window_idx)
-    }
+    let mut reader = ContainerReader::from_source(std::io::Cursor::new(data))?;
+    let header = reader.container_header()?;
+    Ok((reader.read_window(window_idx)?, header))
 }
 
 #[cfg(test)]
