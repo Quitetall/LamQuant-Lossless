@@ -38,9 +38,17 @@ extern crate alloc;
 // paths stay byte-for-byte stable for firmware, lamquant-lsl, the Python
 // extension, and every test — none of those call sites change.
 pub use lamquant_lml_mcu::{
-    bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting, lml, lmqc, lpc,
-    quant, rans, zrle,
+    bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting, lmqc, lpc, quant,
+    rans, zrle,
 };
+
+/// Stable LML codec facade: buffer-oriented codec from the MCU floor plus host
+/// `Read`/`Write` adapters when the Desktop assembly is enabled.
+pub mod lml {
+    #[cfg(feature = "archive")]
+    pub use lamquant_lml_desktop::io::{compress_into, decompress_from};
+    pub use lamquant_lml_mcu::lml::*;
+}
 // ADR 0023 Track B5+ / ADR 0051 P3.5: arithmetic + empirical-categorical range
 // coders are opt-in via `experimental_arithmetic` (re-exported from core).
 #[cfg(feature = "experimental_arithmetic")]
@@ -187,4 +195,3 @@ pub mod ffi;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
-

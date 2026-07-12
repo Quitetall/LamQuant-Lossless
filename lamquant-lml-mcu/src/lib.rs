@@ -55,3 +55,8 @@ pub mod lpc;
 pub mod quant;
 pub mod rans;
 pub mod zrle;
+
+/// Host-only parallel execution profile. Packet orchestration remains in this
+/// codec owner; firmware builds exclude the module and its Rayon dependency.
+#[cfg(feature = "parallel")]
+pub mod parallel;

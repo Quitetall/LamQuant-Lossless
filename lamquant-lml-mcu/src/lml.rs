@@ -440,23 +440,19 @@ pub fn compress(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<Vec<u8>> {
     compress_with_mode(signal, noise_bits, lpc::LpcMode::default())
 }
 
-// ─── Shared encode primitives (ADR 0058 carve-full) ───────────────────────
-// The MCU tier owns the per-channel codec + LML packet assembly. The Desktop
-// tier (`lamquant-lml-desktop`) builds a *parallel* orchestrator over these
-// SAME primitives, so its output is byte-identical to the serial path below by
-// construction — the only difference is `map` vs `into_par_iter().map`. These
-// are #[doc(hidden)]: a workspace-internal seam, not a stable public API.
+// ─── Internal execution primitives ────────────────────────────────────────
+// Serial and host-parallel profiles share these primitives inside the codec
+// owner; packet orchestration never crosses a crate boundary.
 
 /// Validated, noise-stripped encode inputs. `signal` borrows the caller's slice
 /// when `noise_bits == 0` (no clone on the hot path) via `Cow`.
-#[doc(hidden)]
-pub struct EncodePrep<'a> {
-    pub n_ch: usize,
-    pub t: usize,
-    pub n_levels: u8,
+pub(crate) struct EncodePrep<'a> {
+    pub(crate) n_ch: usize,
+    pub(crate) t: usize,
+    pub(crate) n_levels: u8,
     /// (try_arithmetic, try_bit_pack, try_extended_lpc)
-    pub flags: (bool, bool, bool),
-    pub signal: alloc::borrow::Cow<'a, [Vec<i64>]>,
+    pub(crate) flags: (bool, bool, bool),
+    pub(crate) signal: alloc::borrow::Cow<'a, [Vec<i64>]>,
 }
 
 /// Validated encode-shape output shared by every entry point:
@@ -464,26 +460,24 @@ pub struct EncodePrep<'a> {
 /// the experimental encoder flags `(try_arithmetic, try_bit_pack,
 /// try_extended_lpc)`. Carries no signal data — [`prepare_encode`] (owns the
 /// `noise_bits` shift) and [`crate::lml::compress_with_mode_views`] /
-/// the Desktop parallel-views orchestrator (borrow-only, no shift when
+/// the host parallel-views profile (borrow-only, no shift when
 /// `noise_bits == 0`) both build on top of this so every caller agrees on
 /// header fields and candidate selection (ADR 0069 L6.3).
-#[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
-pub struct EncodeShape {
-    pub n_ch: usize,
-    pub t: usize,
-    pub n_levels: u8,
+pub(crate) struct EncodeShape {
+    pub(crate) n_ch: usize,
+    pub(crate) t: usize,
+    pub(crate) n_levels: u8,
     /// (try_arithmetic, try_bit_pack, try_extended_lpc)
-    pub flags: (bool, bool, bool),
+    pub(crate) flags: (bool, bool, bool),
 }
 
 /// Validate `n_ch`/`t`/`noise_bits` ranges and resolve level depth + the
 /// experimental encoder flags. Pulled out of [`prepare_encode`] so the
-/// zero-copy views entry points (`compress_with_mode_views` and the Desktop
-/// parallel-views orchestrator) can run the identical checks without forcing
+/// zero-copy views entry points (`compress_with_mode_views` and the host
+/// parallel-views profile) can run the identical checks without forcing
 /// a `Vec<Vec<i64>>` materialization first (ADR 0069 L6.3).
-#[doc(hidden)]
-pub fn validate_and_levels(n_ch: usize, t: usize, noise_bits: u8) -> LmlResult<EncodeShape> {
+pub(crate) fn validate_and_levels(n_ch: usize, t: usize, noise_bits: u8) -> LmlResult<EncodeShape> {
     if n_ch == 0 || n_ch > 1024 {
         return Err(LmlError::InvalidHeader(format!(
             "n_ch={} out of range 1..=1024",
@@ -543,10 +537,9 @@ pub fn validate_and_levels(n_ch: usize, t: usize, noise_bits: u8) -> LmlResult<E
 }
 
 /// Validate dimensions, strip `noise_bits`, resolve level depth + the
-/// experimental encoder flags. Shared by the serial (MCU) and parallel (Desktop)
-/// orchestrators so both agree on header fields and candidate selection.
-#[doc(hidden)]
-pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePrep<'_>> {
+/// experimental encoder flags. Shared by serial and host-parallel profiles so
+/// both agree on header fields and candidate selection.
+pub(crate) fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePrep<'_>> {
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
@@ -572,8 +565,7 @@ pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePr
 /// Concatenate per-channel `lpc_meta`, assemble the `payload`, and return the
 /// `any_bit_pack_wins_global` flag selecting tagged framing. Encapsulates the
 /// experimental-feature branching so the orchestrators stay shape-agnostic.
-#[doc(hidden)]
-pub fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u8>, bool) {
+pub(crate) fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u8>, bool) {
     let lpc_meta_total: usize = per_channel.iter().map(|c| c.meta.len()).sum();
     let mut lpc_meta = Vec::with_capacity(lpc_meta_total);
     for c in per_channel {
@@ -601,8 +593,7 @@ pub fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u
 /// Build the framed LML1 packet (ASCII prefix + magic + 14-byte header + CRC-32
 /// + lpc_meta + payload) from finalized channel bytes. Byte-identical regardless
 /// of which orchestrator (serial/parallel) produced the inputs.
-#[doc(hidden)]
-pub fn assemble_lml_packet(
+pub(crate) fn assemble_lml_packet(
     n_ch: usize,
     t: usize,
     n_levels: u8,
@@ -1435,13 +1426,10 @@ struct SubbandResult {
 /// allocations) so rayon's `collect` on `Vec<ChannelEncodeOutput>`
 /// moves only ~48 bytes of header per channel — matching the pre-B1
 /// throughput on multi-channel desktop-parallel encode.
-// #[doc(hidden)] pub (ADR 0058 carve-full): an opaque per-channel encode result.
-// The Desktop tier names this type (`Vec<ChannelEncodeOutput>`) but never reads
-// its fields — it goes straight back into `finalize_channels`. Fields stay
-// private so the wire-assembly logic remains owned by this crate.
+// Opaque per-channel output shared only by execution profiles in this crate.
+// Fields stay private so wire assembly has one owner.
 #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-#[doc(hidden)]
-pub struct ChannelEncodeOutput {
+pub(crate) struct ChannelEncodeOutput {
     meta: Vec<u8>,
     subbands: Vec<SubbandResult>,
     n_subbands: usize,
@@ -1449,8 +1437,7 @@ pub struct ChannelEncodeOutput {
 }
 
 #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
-#[doc(hidden)]
-pub struct ChannelEncodeOutput {
+pub(crate) struct ChannelEncodeOutput {
     meta: Vec<u8>,
     payload: Vec<u8>,
 }
@@ -1497,8 +1484,7 @@ fn assemble_payload(per_channel: &[ChannelEncodeOutput], use_tagged: bool) -> Ve
     payload
 }
 
-#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
-pub fn encode_one_channel(
+pub(crate) fn encode_one_channel(
     signal_ch: &[i64],
     n_levels: u8,
     mode: lpc::LpcMode,
@@ -1688,55 +1674,10 @@ pub fn encode_one_channel(
 /// Returns identical bytes to `compress_with_mode`; the only
 /// difference is wall-clock time on multi-channel inputs (typical
 /// clinical EEG = 8-24 channels = 4-12× speedup on a 16-core host).
-/// Compress a signal into any [`std::io::Write`] sink.
-///
-/// Phase 0.4 wrapper around [`compress_with_mode`]: today this buffers
-/// the full LML1 packet in `Vec<u8>` and `write_all`s it. Phase 0.5
-/// will rewrite `compress_with_mode` itself to stream into the sink so
-/// peak allocation drops to one window. The signature is the future
-/// shape — callers can adopt it now without another rewrite later.
-///
-/// Bible R33 — the `LmlSink` trait's `before_window` hook (in
-/// `crate::io`) is the future attachment point for backpressure once
-/// per-window streaming lands; for now sinks just receive the full
-/// packet.
-///
-/// Returns the number of bytes written.
-#[cfg(feature = "std")]
-pub fn compress_into<W: std::io::Write>(
-    signal: &[Vec<i64>],
-    noise_bits: u8,
-    mode: lpc::LpcMode,
-    sink: &mut W,
-) -> LmlResult<usize> {
-    let bytes = compress_with_mode(signal, noise_bits, mode)?;
-    sink.write_all(&bytes).map_err(LmlError::Io)?;
-    Ok(bytes.len())
-}
-
-/// Decompress an LML1 packet from any [`std::io::Read`] source.
-///
-/// Phase 0.4 wrapper around [`decompress`]: today this `read_to_end`s
-/// the source into `Vec<u8>` and decompresses. Partial-read sources
-/// (one-byte-at-a-time pipes, `ByteAtATime` test adapter) work
-/// correctly because `read_to_end` loops internally. Phase 0.5 will
-/// teach the decoder to consume bytes incrementally so streaming
-/// sources don't need to fit in memory.
-///
-/// Callers who already have `&[u8]` should keep using [`decompress`]
-/// — this wrapper exists for the `LmlSource` / stdin / S3 path.
-#[cfg(feature = "std")]
-pub fn decompress_from<R: std::io::Read>(src: &mut R) -> LmlResult<Vec<Vec<i64>>> {
-    let mut buf = Vec::new();
-    src.read_to_end(&mut buf).map_err(LmlError::Io)?;
-    decompress(&buf)
-}
-
 /// Decompress LML1 packet → [n_ch][T].
 /// Decode plan produced by [`parse_lml_channels`] — either an already-decoded
 /// signal (track-2 path) or per-channel subbands awaiting synth + lifting.
-#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
-pub enum DecodePlan {
+pub(crate) enum DecodePlan {
     /// Track-2 near-lossless / lossy packet: already a full signal.
     Done(Vec<Vec<i64>>),
     /// Standard LML1: per-channel `Vec<(coeffs, residual)>` per subband, plus
@@ -1750,11 +1691,10 @@ pub enum DecodePlan {
 
 /// Parse an LML1 stream up to (but not including) per-channel synthesis: header,
 /// validation, CRC verify, track-2 dispatch, and the sequential per-(channel,
-/// subband) coeff/residual decode. Shared by the serial (MCU) and parallel
-/// (Desktop) decode orchestrators; the only thing they add is HOW the per-channel
+/// subband) coeff/residual decode. Shared by serial and host-parallel decode
+/// profiles; the only thing they add is HOW the per-channel
 /// [`synthesize_channel_signal`] runs (serial vs rayon) + the post-synth shift.
-#[doc(hidden)]
-pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
+pub(crate) fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
     let offset = find_magic_offset(data)?;
     let data = &data[offset..];
 
@@ -2031,8 +1971,7 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
 /// n_levels=0 edge case). Extracted so the parallel decoder can
 /// dispatch this work across rayon workers while the byte-equal
 /// invariant is preserved by construction.
-#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
-pub fn synthesize_channel_signal(
+pub(crate) fn synthesize_channel_signal(
     per_subband: Vec<(Vec<i32>, Vec<i64>)>,
     n_levels: u8,
 ) -> LmlResult<Vec<i64>> {
@@ -2133,69 +2072,6 @@ mod tests {
         let r = decompress(&compress(&s, 4).unwrap()).unwrap();
         let expected: Vec<i64> = s[0].iter().map(|&v| (v >> 4) << 4).collect();
         assert_eq!(expected, r[0]);
-    }
-
-    #[test]
-    fn compress_into_writes_to_vec_sink() {
-        let signal = vec![vec![1i64, 2, 3, 4, 5]];
-        let direct = compress(&signal, 0).unwrap();
-        let mut sink: Vec<u8> = Vec::new();
-        let written = compress_into(&signal, 0, lpc::LpcMode::default(), &mut sink).unwrap();
-        assert_eq!(written, direct.len(), "byte count must match direct call");
-        assert_eq!(sink, direct, "sink output must be byte-identical");
-    }
-
-    #[test]
-    fn decompress_from_reads_from_cursor() {
-        let signal: Vec<Vec<i64>> = (0..4)
-            .map(|ch| (0..256).map(|i| ((i * (ch + 1)) % 1000) as i64).collect())
-            .collect();
-        let bytes = compress(&signal, 0).unwrap();
-        let mut cursor = std::io::Cursor::new(&bytes);
-        let recovered = decompress_from(&mut cursor).unwrap();
-        assert_eq!(signal, recovered);
-    }
-
-    #[test]
-    fn decompress_from_handles_partial_reads() {
-        // A one-byte-per-read adapter forces caller loops; the generic
-        // decompress_from must still recover the full signal. (Inlined here
-        // when lml moved to -core; the facade's `io::tests::ByteAtATime` is
-        // no longer reachable from this crate.)
-        struct ByteAtATime<'a> {
-            src: &'a [u8],
-        }
-        impl<'a> std::io::Read for ByteAtATime<'a> {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                if self.src.is_empty() || buf.is_empty() {
-                    return Ok(0);
-                }
-                buf[0] = self.src[0];
-                self.src = &self.src[1..];
-                Ok(1)
-            }
-        }
-        let signal = vec![vec![42i64; 128]];
-        let bytes = compress(&signal, 0).unwrap();
-        let mut src = ByteAtATime { src: &bytes };
-        let recovered = decompress_from(&mut src).unwrap();
-        assert_eq!(signal, recovered);
-    }
-
-    #[test]
-    fn compress_into_then_decompress_from_roundtrip() {
-        let signal: Vec<Vec<i64>> = (0..3)
-            .map(|ch| {
-                (0..512)
-                    .map(|i| ((i * 7 + ch * 11) % 5000) as i64)
-                    .collect()
-            })
-            .collect();
-        let mut sink: Vec<u8> = Vec::new();
-        compress_into(&signal, 0, lpc::LpcMode::default(), &mut sink).unwrap();
-        let mut cursor = std::io::Cursor::new(&sink);
-        let recovered = decompress_from(&mut cursor).unwrap();
-        assert_eq!(signal, recovered);
     }
 
     #[test]

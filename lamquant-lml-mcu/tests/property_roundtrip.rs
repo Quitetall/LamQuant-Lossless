@@ -10,8 +10,6 @@
 
 #![cfg(feature = "std")]
 
-use std::io::Cursor;
-
 use lamquant_lml_mcu::lml;
 use proptest::prelude::*;
 
@@ -36,8 +34,7 @@ fn signal_strategy() -> impl Strategy<Value = Vec<Vec<i64>>> {
 /// Roundtrip helper — compress then immediately decompress, assert eq.
 fn assert_roundtrip(signal: &[Vec<i64>]) {
     let bytes = lml::compress(signal, 0).expect("compress");
-    let mut cursor = Cursor::new(&bytes);
-    let recovered = lml::decompress_from(&mut cursor).expect("decompress");
+    let recovered = lml::decompress(&bytes).expect("decompress");
     assert_eq!(recovered.len(), signal.len(), "channel count mismatch");
     for (i, (orig, rec)) in signal.iter().zip(recovered.iter()).enumerate() {
         assert_eq!(orig, rec, "channel {} mismatch (len orig={} rec={})",

@@ -4,12 +4,6 @@
 # BYTE-IDENTICAL LML output. It is the MCU codec assembled with the host perf
 # path turned on, NOT a reimplementation (ADR 0052).
 #
-# Carve note: at ADR 0058 the rayon code physically still lives in
-# `lamquant-lml-mcu` behind its `archive` feature (firmware excludes it via
-# `--no-default-features`). This crate turns that path on and presents it as the
-# Desktop tier. Physically relocating the parallel code out of `-mcu` into this
-# crate is a tracked follow-up (it would split the `byte_equal_backends`
-# Firmware-vs-Desktop gate across two crates, so it is staged separately).
 name = "lamquant-lml-desktop"
 version = "0.9.3"
 edition = "2021"
@@ -29,7 +23,7 @@ default = ["fast"]
 # The Desktop fast path: rayon-parallel encode/decode orchestrators (ADR 0058
 # carve-full — this crate now OWNS the parallel code; it pulls rayon directly,
 # not via the MCU tier). Implies `std` (rayon is std-only).
-fast = ["std", "dep:rayon"]
+fast = ["std", "lamquant-lml-mcu/parallel"]
 
 # Host std (f64 helpers / std::io via the MCU tier).
 std = ["lamquant-lml-mcu/std"]
@@ -39,11 +33,9 @@ experimental_arithmetic = ["fast", "lamquant-lml-mcu/experimental_arithmetic"]
 experimental_bit_pack = ["fast", "lamquant-lml-mcu/experimental_bit_pack"]
 
 [dependencies]
-# The Desktop tier builds ON the MCU tier (the shared codec + primitives); it
-# adds the host parallel execution profile, not a second codec.
+# The Desktop tier selects the MCU codec owner's host execution profile; packet
+# preparation, channel plans, and wire assembly never cross this crate seam.
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
-# Owned by this tier (ADR 0058 carve-full): rayon per-channel parallelism.
-rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 # byte_equal_backends.rs (moved here in the ADR 0058 carve-full) hashes encoded

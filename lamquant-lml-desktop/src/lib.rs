@@ -3,28 +3,17 @@
 //!
 //! Desktop is *identical to the MCU tier, just fast* (ADR 0052): same LML wire
 //! format, **byte-identical output**, with rayon per-channel parallelism (and
-//! future SIMD) on top. After the ADR 0058 carve-full, this crate *physically
-//! owns* the parallel orchestration ([`parallel`]) and the [`backend`] selector
-//! that chooses between the MCU scalar path and the Desktop parallel path —
-//! both built over the MCU tier's exposed codec primitives, so the output is
-//! byte-identical to the serial path by construction.
-//!
-//! The MCU tier (`lamquant-lml-mcu`) is re-exported wholesale, so a Desktop
-//! consumer reaches the whole codec (`lml`, `codec`, `lpc`, …) plus the fast
-//! path through this one crate.
+//! future SIMD) on top. The codec owner retains packet orchestration and private
+//! channel plans; this crate owns only host backend selection and compatibility
+//! entry points for the host execution profile.
 
 extern crate alloc;
-
-/// The MCU tier, re-exported under a tier-named alias.
-pub use lamquant_lml_mcu as mcu;
-
-// The full MCU codec surface (`lml`, the `codec` seam, `lpc`, `lifting`,
-// `golomb`, …) re-exported so Desktop consumers reach everything here.
-pub use lamquant_lml_mcu::*;
 
 // ─── The Desktop fast path (rayon). Requires `fast` (the default). ─────────
 #[cfg(feature = "fast")]
 pub mod backend;
+#[cfg(feature = "std")]
+pub mod io;
 #[cfg(feature = "fast")]
 pub mod parallel;
 
@@ -47,10 +36,11 @@ mod tests {
     /// round-trips through the re-exported entry points.
     #[test]
     fn desktop_parallel_round_trips() {
-        let sig: alloc::vec::Vec<alloc::vec::Vec<i64>> =
-            (0..4).map(|c| (0..256).map(|i| ((i * 3 + c) % 50) as i64 - 25).collect()).collect();
+        let sig: alloc::vec::Vec<alloc::vec::Vec<i64>> = (0..4)
+            .map(|c| (0..256).map(|i| ((i * 3 + c) % 50) as i64 - 25).collect())
+            .collect();
         let bytes =
-            super::compress_with_mode_parallel(&sig, 0, super::lpc::LpcMode::default())
+            super::compress_with_mode_parallel(&sig, 0, lamquant_lml_mcu::lpc::LpcMode::default())
                 .expect("parallel encode");
         let back = super::decompress_parallel(&bytes).expect("parallel decode");
         assert_eq!(back, sig);

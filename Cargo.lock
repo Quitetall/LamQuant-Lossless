@@ -3308,7 +3308,6 @@ name = "lamquant-lml-desktop"
 version = "0.9.3"
 dependencies = [
  "lamquant-lml-mcu",
- "rayon",
  "sha2 0.10.9",
 ]
 
@@ -3343,6 +3342,7 @@ dependencies = [
  "libm",
  "probability",
  "proptest",
+ "rayon",
  "sha2 0.10.9",
 ]
 

@@ -37,8 +37,8 @@ use lamquant_lml_desktop::backend::{
     compress_with_backend, decompress_with_backend, ComputeBackend,
 };
 use lamquant_lml_desktop::compress_with_mode_parallel_views;
-use lamquant_lml_desktop::lml::{compress_with_mode, compress_with_mode_views};
-use lamquant_lml_desktop::lpc::LpcMode;
+use lamquant_lml_mcu::lml::{compress_with_mode, compress_with_mode_views};
+use lamquant_lml_mcu::lpc::LpcMode;
 use sha2::{Digest, Sha256};
 
 /// xorshift64 — deterministic across machines + architectures.

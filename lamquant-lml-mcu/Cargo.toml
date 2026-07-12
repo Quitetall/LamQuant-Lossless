@@ -25,14 +25,15 @@ crate-type = ["rlib"]
 # exercises the whole suite; the firmware / no_std floor is validated explicitly
 # with `--no-default-features --target riscv32imac-unknown-none-elf` (CI gate).
 #
-# ADR 0058 carve-full: the rayon parallel path (the old `archive` feature) moved
-# wholesale to the Desktop tier `lamquant-lml-desktop`, so this crate carries no
-# rayon and no `archive` feature anymore — it is the pure scalar codec.
 default = ["std"]
 
 # Host codec capabilities: f64 RD search (target-BPS), env-var opt-ins like
 # LAMQUANT_TRY_EXTENDED_LPC, Anytime LPC, blockfloat bench, std::io sinks.
 std = []
+
+# Host-only execution adapter. The codec owner keeps packet orchestration and
+# internal channel plans private while Desktop selects this implementation.
+parallel = ["std", "dep:rayon"]
 
 # ADR 0023 Track B5+ / ADR 0051 P3.5: constriction-backed arithmetic +
 # empirical-categorical range coders (arith_cat). Runtime opt-in via
@@ -53,8 +54,7 @@ abir = { version = "0.1.0", path = "../crates/abir", default-features = false }
 # (`f64::ln()` is std-only and would break the firmware path).
 libm = "0.2"
 
-# (rayon removed — ADR 0058 carve-full moved the parallel path to the Desktop
-# tier `lamquant-lml-desktop`, which owns the rayon dependency now.)
+rayon = { version = "1", optional = true }
 
 # Research-grade entropy coders (rANS/range/arithmetic) backing
 # src/arithmetic.rs + src/arith_cat.rs when `experimental_arithmetic` is on.
