@@ -114,7 +114,13 @@ fn invalid_metadata_and_index_offsets_fail_closed() {
     let index = BCS1_HEADER_LEN + header.metadata_length as usize;
     invalid_index[index..index + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     let mut reader = ContainerReader::from_source(Cursor::new(invalid_index)).unwrap();
-    assert!(reader.read_window(0).is_err());
+    assert!(matches!(
+        reader.read_window(0),
+        Err(LmlError::Truncated {
+            context: "window length",
+            ..
+        })
+    ));
 
     let (_signal, mut invalid_payload) = bcs1_bytes();
     let header = Bcs1Header::parse(&invalid_payload).unwrap();
@@ -128,6 +134,19 @@ fn invalid_metadata_and_index_offsets_fail_closed() {
             ..
         }))
     ));
+}
+
+#[test]
+fn short_sources_return_truncated_without_panicking() {
+    for length in 0..4 {
+        assert!(matches!(
+            ContainerReader::from_source(Cursor::new(vec![0u8; length])),
+            Err(LmlError::Truncated {
+                context: "container header",
+                ..
+            })
+        ));
+    }
 }
 
 #[test]

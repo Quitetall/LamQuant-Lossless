@@ -372,6 +372,16 @@ impl<R: Read + Seek> ContainerReader<R> {
             .first_payload_pos
             .checked_add(relative)
             .ok_or_else(|| LmlError::InvalidHeader("window offset overflows u64".into()))?;
+        let length_end = position
+            .checked_add(4)
+            .ok_or_else(|| LmlError::InvalidHeader("window length offset overflows u64".into()))?;
+        if length_end > self.source_len {
+            return Err(LmlError::Truncated {
+                expected: usize::try_from(length_end).unwrap_or(usize::MAX),
+                actual: usize::try_from(self.source_len).unwrap_or(usize::MAX),
+                context: "window length",
+            });
+        }
         self.source
             .seek(SeekFrom::Start(position))
             .map_err(LmlError::Io)?;
