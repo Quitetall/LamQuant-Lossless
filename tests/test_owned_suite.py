@@ -24,6 +24,17 @@ def test_retired_ai_models_aggregation_smoke_stays_absent() -> None:
     assert not retired.exists()
 
 
+def test_cross_owner_composition_suites_stay_out_of_lossless() -> None:
+    """Neural and training composition belongs to the Cookbook owner lane."""
+    retired = (
+        "integration/test_joint_codec.py",
+        "integration/test_l3_e2e_codec.py",
+        "integration/test_snn_codec_integration.py",
+    )
+
+    assert all(not (MANIFEST.parent / path).exists() for path in retired)
+
+
 @pytest.mark.parametrize("version", [True, "1", 2])
 def test_schema_version_is_exact_integer(tmp_path: Path, version: object) -> None:
     rendered = str(version).lower() if isinstance(version, bool) else repr(version)
