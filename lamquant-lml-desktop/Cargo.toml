@@ -20,9 +20,8 @@ crate-type = ["rlib"]
 # Default = the fast path on (this crate's whole reason to exist).
 default = ["fast"]
 
-# The Desktop fast path: rayon-parallel encode/decode orchestrators (ADR 0058
-# carve-full — this crate now OWNS the parallel code; it pulls rayon directly,
-# not via the MCU tier). Implies `std` (rayon is std-only).
+# Select the codec owner's Rayon execution profile. Implies `std` because Rayon
+# is host-only; Desktop itself owns selection and host I/O, not packet internals.
 fast = ["std", "lamquant-lml-mcu/parallel"]
 
 # Host std (f64 helpers / std::io via the MCU tier).

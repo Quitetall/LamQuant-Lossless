@@ -45,7 +45,7 @@ pub use lamquant_lml_mcu::{
 /// Stable LML codec facade: buffer-oriented codec from the MCU floor plus host
 /// `Read`/`Write` adapters when the Desktop assembly is enabled.
 pub mod lml {
-    #[cfg(feature = "archive")]
+    #[cfg(feature = "std")]
     pub use lamquant_lml_desktop::io::{compress_into, decompress_from};
     pub use lamquant_lml_mcu::lml::*;
 }

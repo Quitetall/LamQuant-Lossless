@@ -50,8 +50,10 @@ pub fn compress_with_mode_parallel(
 /// Parallel zero-copy encode for pre-sliced channel windows.
 ///
 /// Live `LpcMode::Anytime` deadlines remain serial-only because independent
-/// workers would sample the wall clock at different instants. Clock-free modes
-/// are byte-identical to [`crate::lml::compress_with_mode_views`].
+/// workers sample the wall clock at different scheduling instants and can choose
+/// different LPC candidates. Container callers route deadline-bearing modes to
+/// the serial views path. Clock-free modes are byte-identical to
+/// [`crate::lml::compress_with_mode_views`].
 pub fn compress_with_mode_parallel_views(
     windows: &[&[i64]],
     noise_bits: u8,

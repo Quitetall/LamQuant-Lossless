@@ -111,7 +111,11 @@ default = ["host"]
 # The codec core now lives in `lamquant-lml-mcu`; `std` turns on its host-side
 # numeric helpers. Host Read/Write policy enters with the Desktop archive tier.
 # Firmware depends on `lamquant-lml-mcu` directly, so it never gains host I/O.
-std = ["lamquant-lml-mcu/std"]
+std = [
+    "lamquant-lml-mcu/std",
+    "dep:lamquant-lml-desktop",
+    "lamquant-lml-desktop/std",
+]
 
 # ── Level 1: archive — file I/O + LMA/EDF/container r/w ────────────────────
 # Enables: lma, container, edf, io, offset_table, range, stream, source,
@@ -121,7 +125,6 @@ archive = [
     "std",
     # Link the Desktop selector and turn on the codec owner's Rayon execution
     # profile. `fast` implies `std`.
-    "dep:lamquant-lml-desktop",
     "lamquant-lml-desktop/fast",
     # ADR 0069 L6.2: the ABIR container writer (`abir_container::write_abir`)
     # is sourced from `abir::Abir` instead of `Vec<Vec<i64>>`.
