@@ -1,14 +1,15 @@
 //! Stage-0 oracle: choose the shipped spatial or MV-RLS branch per channel.
 //!
 //! The production codec chooses one branch for an entire 32K-sample window.
-//! This probe constructs a conservative, independently decodable research
-//! packet: each spatial channel carries a complete single-channel LML/RLS
-//! packet, while each MV-RLS channel carries its config, bias-cancel tag,
-//! length, and entropy payload. All branch tags, reference metadata, lengths,
-//! the research-body header, and the real outer-container overhead are charged.
+//! This probe models the exact size of a conservative, independently decodable
+//! research framing: each spatial channel carries a complete single-channel
+//! LML/RLS packet, while each MV-RLS channel carries its config, bias-cancel
+//! tag, length, and entropy payload. All branch tags, reference metadata,
+//! lengths, the research-body header, and real outer-container overhead are
+//! charged. It does not serialize that proposed framing.
 //!
-//! Negative `HYB/CONT` is the maximum deterministic gain available from this
-//! seam without inventing a new predictor or entropy model.
+//! Negative `HYB/CONT` is a realizable size estimate for this branch-union seam,
+//! not a new production codec or a ceiling on unrelated predictors.
 
 use std::fs;
 
@@ -16,7 +17,7 @@ use lamquant_lml_mcu::{
     codec::{Codec, Mode},
     lml, lpc,
 };
-use lamquant_lml_optimum::{entropy, lmo_lossless, mv_rls, rls, LmoCodec};
+use lamquant_lml_optimum::{entropy, mv_rls, rls, LmoCodec, LMO_HEADER_LEN};
 use rayon::prelude::*;
 
 const W: usize = 32768;
@@ -145,9 +146,10 @@ fn best_energy_ref(
         .map(|x| x.0)
 }
 
-/// Exact production spatial search for one channel. Returns reference count and
-/// residual. Its packet cost uses a complete single-channel packet, so the
-/// research wire is executable without relying on private LML internals.
+/// Per-channel spatial search using production's reference/gain algorithm but
+/// scoring each candidate as a complete one-channel LML/RLS packet. Returns the
+/// selected reference count and residual; the proposed decoder would not need
+/// private LML internals.
 fn spatial_channel(i: usize, signal: &[Vec<i64>]) -> (usize, Vec<i64>) {
     let mut best_cost = packet_cost(&signal[i]);
     let mut best_refs = Vec::new();
@@ -230,8 +232,6 @@ fn main() {
             let end = (start + W).min(t);
             let win: Vec<Vec<i64>> = signal.iter().map(|c| c[start..end].to_vec()).collect();
             let complete = LmoCodec.encode(&win, Mode::Lossless).expect("container");
-            let body = lmo_lossless::encode(&win).expect("body");
-            let outer = complete.len() - body.len();
             cont_total += complete.len();
 
             let mv_res: Vec<Vec<Vec<i64>>> = (0..N_CFG)
@@ -260,7 +260,7 @@ fn main() {
                 }
             }
             // Research body: version, feature, n_ch, t. Channel framing above.
-            hybrid_total += outer + 8 + channels;
+            hybrid_total += LMO_HEADER_LEN + 8 + channels;
             start = end;
         }
 

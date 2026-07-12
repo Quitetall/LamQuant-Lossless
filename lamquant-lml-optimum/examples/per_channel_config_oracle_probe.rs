@@ -23,7 +23,7 @@ use std::fs;
 
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_mcu::lpc;
-use lamquant_lml_optimum::{entropy, lmo_lossless, mv_rls, LmoCodec};
+use lamquant_lml_optimum::{entropy, mv_rls, LmoCodec, LMO_HEADER_LEN};
 
 const W: usize = 32768;
 const N_CFG: usize = 6;
@@ -91,16 +91,10 @@ fn main() {
             let complete = LmoCodec
                 .encode(&win, Mode::Lossless)
                 .expect("container encode");
-            let body = lmo_lossless::encode(&win).expect("lossless body");
-            assert!(
-                complete.len() >= body.len(),
-                "outer container shorter than body"
-            );
-            let outer_overhead = complete.len() - body.len();
             cont_total += complete.len();
 
             let mvbc = mv_rls::encode_bc(&win).expect("mvrls bc");
-            mvbc_total += outer_overhead + 5 + nch + mvbc.len();
+            mvbc_total += LMO_HEADER_LEN + 5 + nch + mvbc.len();
 
             let residuals: Vec<Vec<Vec<i64>>> = (0..N_CFG)
                 .map(|cfg| mv_rls::residuals(&win, cfg, 0))
@@ -121,7 +115,7 @@ fn main() {
             }
             // Existing LMO body header: version+feature+n_ch + raw n_refs bytes + coder mode.
             // Proposed per-channel stream header: n_ch+t+k = 7 bytes.
-            pc_total += outer_overhead + (5 + nch) + 7 + per_channel;
+            pc_total += LMO_HEADER_LEN + (5 + nch) + 7 + per_channel;
             start = end;
         }
 
