@@ -1,3 +1,5 @@
+#![cfg(feature = "host")]
+
 use lamquant_core::lpc::LpcMode;
 use lamquant_core::tui::state::AppState;
 use lamquant_core::workflows::{self, VerificationOutcome, VerificationTarget};
