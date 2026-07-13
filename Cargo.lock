@@ -3274,6 +3274,7 @@ dependencies = [
  "lamquant-lml-legacy",
  "lamquant-lml-mcu",
  "lamquant-lml-optimum",
+ "lamquant-lml-optimum-v2",
  "lamquant-lmq",
  "lamquant-ops",
  "lamquant-tui",
@@ -3352,6 +3353,15 @@ version = "0.0.1"
 dependencies = [
  "lamquant-lml-mcu",
  "rayon",
+]
+
+[[package]]
+name = "lamquant-lml-optimum-v2"
+version = "0.1.0"
+dependencies = [
+ "abir",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

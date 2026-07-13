@@ -128,6 +128,7 @@ archive = [
     # is sourced from `abir::Abir` instead of `Vec<Vec<i64>>`.
     "dep:abir",
     "dep:lamquant-lml-legacy",
+    "dep:lamquant-lml-optimum-v2",
     # ADR 0069 L8 (cutover): the live path only needs the FROZEN v1 reader —
     # `container::{read_file,read_bytes,...}` + the shared `ContainerHeader`/
     # `ContainerStats`/`OffsetEntry`/`OffsetTable` types the `abir_container`
@@ -274,6 +275,9 @@ abir = { version = "0.1.0", path = "../crates/abir", default-features = false, o
 # pulls core's RD-search `archive` path that LMO encode needs). Re-exported as
 # `lamquant_core::optimum`.
 lamquant-lml-optimum = { version = "0.0.1", path = "../lamquant-lml-optimum", default-features = false, features = ["decode"] }
+# ADR 0116: host-only independent learned-lossless peer. Kept out of the
+# no-default-features firmware graph; `archive` enables its LMO1-v3/BGF1 API.
+lamquant-lml-optimum-v2 = { version = "0.1.0", path = "../lamquant-lml-optimum-v2", optional = true }
 # ADR 0074 Track N: the neural (lossy) codec shell — the NeuralEncodePass Lossy DAG
 # morphism in stage.rs delegates to it. Host-only (archive).
 lamquant-lmq = { version = "0.0.1", path = "../lamquant-lmq", default-features = false, optional = true }

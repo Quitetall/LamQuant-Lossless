@@ -38,9 +38,9 @@ pub use reversibility::{Lossy, Reversibility, Reversible};
 /// construction (pure `to_le_bytes`/`from_le_bytes`, no I/O).
 pub mod bcs1;
 pub use bcs1::{
-    Bcs1Header, Bcs1ParseError, CodecDescriptor, BCS1_FLAG_HAS_FOOTER, BCS1_HEADER_LEN,
-    BCS1_MAGIC, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53, CODEC_LMO_97,
-    CODEC_LMO_LOSSLESS, CODEC_LMQ_FSQ,
+    Bcs1Header, Bcs1ParseError, CodecDescriptor, BCS1_FLAG_HAS_FOOTER, BCS1_HEADER_LEN, BCS1_MAGIC,
+    BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53, CODEC_LMO_97, CODEC_LMO_LOSSLESS,
+    CODEC_LMQ_FSQ, CODEC_OPTIMUM_V2,
 };
 
 /// Which deterministic wire format a stream is, decided by its leading magic.
@@ -95,7 +95,9 @@ impl core::fmt::Display for CodecError {
             CodecError::Backend(s) => write!(f, "backend codec error: {s}"),
             CodecError::OptimumNotInstalled => write!(f, "LMO decoder not installed in this build"),
             CodecError::UnknownFormat => write!(f, "unknown stream format (no magic match)"),
-            CodecError::ModeUnsupported => write!(f, "requested codec mode not available in this build"),
+            CodecError::ModeUnsupported => {
+                write!(f, "requested codec mode not available in this build")
+            }
         }
     }
 }

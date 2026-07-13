@@ -112,16 +112,19 @@ How `modality_tag` was decided — recorded so an audit can explain why a record
 
 ### 4.3 codec_descriptor (offset 8) — the body selector
 
-Names the compressed body format. **Decode dispatches on this byte.** Values are numerically identical to the LMO `transform_id` so a container that speaks both vocabularies never needs a translation table:
+Names the compressed body format. **Decode dispatches on this byte.** Legacy values 0–2 retain their numerical LMO `transform_id` mapping; later values are independent BCS body identifiers:
 
 ```
 0          CODEC_LML_53      LML integer 5/3 lifting stream (lossless floor)
 1          CODEC_LMO_97      LMO-native 9/7 float PCRD body (lossy)
 2          CODEC_LMO_LOSSLESS Optimum lossless body (cross-channel + LML)
+3          CODEC_OPTIMUM_V2   Optimum v2 LMO1-v3/BGF1 learned-lossless body
 0x10..0xFF (reserved)        LMQ / neural descriptor family
 ```
 
-**Conformance:** a BCS1 v1 encoder MUST emit `codec_descriptor = 0` (`CODEC_LML_53`) — it is the only body a v1 decoder is required to decode. A decoder that does not implement a given descriptor's body MUST fail closed with a clear error (`InvalidHeader` / "descriptor not wired"), and MUST NOT attempt to decode the body as if it were `CODEC_LML_53`. Descriptors 1, 2, and the 0x10+ range are reserved for future bodies; a v1 header carrying them parses cleanly but its body is not decodable by a v1 reader.
+An implementation that supports descriptor 3 MUST dispatch it only to an `LMO1` version-3 `BGF1` decoder and MUST NOT interpret it as legacy LMO version-2 transform ID 3 (bounded MV-RLS). Baseline readers may refuse it fail-closed.
+
+**Conformance:** a baseline BCS1 v1 encoder MUST emit `codec_descriptor = 0` (`CODEC_LML_53`) — it is the only body every v1 decoder is required to decode. A decoder that does not implement a given descriptor's body MUST fail closed with a clear error (`InvalidHeader` / "descriptor not wired"), and MUST NOT attempt to decode the body as if it were `CODEC_LML_53`. Descriptors 1–3 and the 0x10+ range parse cleanly; readers without those body decoders refuse them.
 
 ### 4.4 tier (offset 10) — descriptive, non-gating
 

@@ -71,6 +71,10 @@ pub use lamquant_lml_desktop::{
 // LMO decoder always and the encoder under `archive` (which needs the MCU tier's
 // RD search), matching where the host codec capabilities already live.
 pub use lamquant_lml_optimum as optimum;
+/// Independent Optimum-v2 learned-lossless peer (`LMO1` v3 / `BGF1`). Host-only;
+/// the firmware/no-default-features graph remains unchanged.
+#[cfg(feature = "archive")]
+pub use lamquant_lml_optimum_v2 as optimum_v2;
 
 /// Universal magic-dispatch decode (the Desktop full dispatch): routes an LML
 /// stream to the integer floor and an LMO stream to the Optimum decoder. Unlike
@@ -78,6 +82,13 @@ pub use lamquant_lml_optimum as optimum;
 /// `OptimumNotInstalled` for LMO), this resolves both formats because the
 /// facade always links the LMO decoder.
 pub fn decode(bytes: &[u8]) -> Result<codec::Signal, codec::CodecError> {
+    #[cfg(feature = "archive")]
+    if bytes.get(..4) == Some(b"LMO1") && bytes.get(4) == Some(&3) {
+        return optimum_v2::OptimumV2Codec
+            .decode_window(bytes)
+            .map(|window| window.samples)
+            .map_err(|error| codec::CodecError::Backend(error.to_string()));
+    }
     optimum::decode_any(bytes)
 }
 
@@ -194,4 +205,3 @@ pub mod ffi;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
-

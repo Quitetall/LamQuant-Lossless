@@ -64,8 +64,7 @@ pub const BCS1_VERSION_MINOR: u8 = 0;
 pub const BCS1_FLAG_HAS_FOOTER: u8 = 0b0000_0001;
 
 /// `codec_descriptor` = the inner payload is an LML integer 5/3 stream (the
-/// lossless floor). Numerically identical to LMO's `transform_id` for the
-/// same body shape (`lamquant-lml-optimum/src/lmo.rs::TRANSFORM_LML_53`).
+/// lossless floor). Legacy values 0..=2 mirror the original LMO transform IDs.
 pub const CODEC_LML_53: u8 = 0;
 /// `codec_descriptor` = an LMO-native 9/7 float PCRD body (lossy). Mirrors
 /// LMO's `transform_id=1`. Not wired into the BCS1 read dispatch yet — a
@@ -74,6 +73,10 @@ pub const CODEC_LMO_97: u8 = 1;
 /// `codec_descriptor` = the Optimum LOSSLESS body (cross-channel + `lml`).
 /// Mirrors LMO's `transform_id=2`. Deferred — see [`CODEC_LMO_97`].
 pub const CODEC_LMO_LOSSLESS: u8 = 2;
+/// `codec_descriptor` = LamQuant Optimum v2 `LMO1` v3 / `BGF1` body.
+/// Descriptor 3 is version-qualified and does NOT alias legacy LMO v2
+/// `transform_id=3` (bounded MV-RLS); dispatch must inspect the LMO version.
+pub const CODEC_OPTIMUM_V2: u8 = 3;
 /// `codec_descriptor` = the LMQ neural body: FSQ tokens entropy-coded with rANS
 /// (ADR 0074 Track N). The first member of the `0x10..=0xFF` LMQ/neural family.
 /// PERMANENTLY LOSSY: a BCS1 file carrying this descriptor is refused fail-closed
@@ -85,9 +88,8 @@ pub const CODEC_LMQ_FSQ: u8 = 0x10;
 // parses fine (the header is well-formed) but `CodecDescriptor::from_u8` returns
 // `None`, and the reader refuses to DECODE it (still no silent mis-decode).
 
-/// Which body format `codec_descriptor` names. Values are numerically
-/// identical to LMO's `transform_id` (see module docs) so a future container
-/// that speaks both vocabularies never needs a translation table.
+/// Which body format `codec_descriptor` names. Values 0..=2 retain their legacy
+/// LMO mapping. New descriptors are independent BCS names, not transform IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecDescriptor {
     /// `=0`. The LML integer 5/3 lifting floor — the only descriptor the L9
@@ -99,6 +101,9 @@ pub enum CodecDescriptor {
     /// `=2`. Optimum lossless body (cross-channel + `lml`). Parseable, not
     /// yet decodable via the BCS1 dispatch (deferred).
     LmoLossless,
+    /// `=3`. Optimum v2 `LMO1` v3 / `BGF1`; host-only and not yet wired into
+    /// the BCS container reader.
+    OptimumV2,
     /// `=0x10`. The LMQ neural body (FSQ tokens → rANS, ADR 0074 Track N).
     /// Recognized so the reader can name + refuse it fail-closed; permanently
     /// lossy, never decoded by a lossless reader.
@@ -112,6 +117,7 @@ impl CodecDescriptor {
             Self::Lml53 => CODEC_LML_53,
             Self::Lmo97 => CODEC_LMO_97,
             Self::LmoLossless => CODEC_LMO_LOSSLESS,
+            Self::OptimumV2 => CODEC_OPTIMUM_V2,
             Self::LmqFsq => CODEC_LMQ_FSQ,
         }
     }
@@ -125,6 +131,7 @@ impl CodecDescriptor {
             CODEC_LML_53 => Some(Self::Lml53),
             CODEC_LMO_97 => Some(Self::Lmo97),
             CODEC_LMO_LOSSLESS => Some(Self::LmoLossless),
+            CODEC_OPTIMUM_V2 => Some(Self::OptimumV2),
             CODEC_LMQ_FSQ => Some(Self::LmqFsq),
             _ => None,
         }
@@ -334,8 +341,8 @@ mod tests {
     }
 
     #[test]
-    fn codec_descriptor_matches_lmo_transform_id_values() {
-        // Numerically identical to lamquant-lml-optimum/src/lmo.rs's
+    fn legacy_codec_descriptors_retain_lmo_transform_id_values() {
+        // Legacy descriptors remain identical to lamquant-lml-optimum/src/lmo.rs's
         // TRANSFORM_LML_53=0 / TRANSFORM_LMO_97=1 / TRANSFORM_OPTIMUM_LOSSLESS=2
         // (checked by inspection there, since abir must not depend
         // UP on lamquant-lml-optimum — see the crate dependency graph note
@@ -343,6 +350,7 @@ mod tests {
         assert_eq!(CodecDescriptor::Lml53.to_u8(), 0);
         assert_eq!(CodecDescriptor::Lmo97.to_u8(), 1);
         assert_eq!(CodecDescriptor::LmoLossless.to_u8(), 2);
+        assert_eq!(CodecDescriptor::OptimumV2.to_u8(), 3);
     }
 
     #[test]
@@ -351,6 +359,7 @@ mod tests {
             CodecDescriptor::Lml53,
             CodecDescriptor::Lmo97,
             CodecDescriptor::LmoLossless,
+            CodecDescriptor::OptimumV2,
         ] {
             assert_eq!(CodecDescriptor::from_u8(d.to_u8()), Some(d));
         }
@@ -358,9 +367,15 @@ mod tests {
 
     #[test]
     fn codec_descriptor_recognizes_lmq_fsq_and_rejects_the_rest() {
-        assert_eq!(CodecDescriptor::from_u8(3), None);
+        assert_eq!(
+            CodecDescriptor::from_u8(3),
+            Some(CodecDescriptor::OptimumV2)
+        );
         // 0x10 is now the recognized LMQ neural descriptor (ADR 0074 Track N).
-        assert_eq!(CodecDescriptor::from_u8(CODEC_LMQ_FSQ), Some(CodecDescriptor::LmqFsq));
+        assert_eq!(
+            CodecDescriptor::from_u8(CODEC_LMQ_FSQ),
+            Some(CodecDescriptor::LmqFsq)
+        );
         assert_eq!(CodecDescriptor::LmqFsq.to_u8(), 0x10);
         // 0x11..=0xFF stays reserved (unrecognized).
         assert_eq!(CodecDescriptor::from_u8(0x11), None);

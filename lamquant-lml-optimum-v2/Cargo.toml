@@ -1,0 +1,21 @@
+[package]
+name = "lamquant-lml-optimum-v2"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "LamQuant Optimum v2 learned-lossless EEG and biosignal codec"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+
+[lib]
+name = "lamquant_lml_optimum_v2"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "optimum-v2-codec"
+path = "src/bin/optimum_v2_codec.rs"
+
+[dependencies]
+abir = { version = "0.1.0", path = "../crates/abir" }
+serde_json = "1"
+sha2 = "0.10"
