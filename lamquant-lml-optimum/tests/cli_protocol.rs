@@ -283,3 +283,69 @@ fn decoder_rejects_non_lossless_mode_and_invalidates_stale_output() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn invalid_protocol_invalidates_stale_output_without_deleting_inputs() {
+    let root = std::env::temp_dir().join(format!("optimum_v1_protocol_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let raw = root.join("input.lqraw");
+    let metadata = root.join("metadata.json");
+    let stale = root.join("stale-output.lmo");
+    fs::write(&raw, fixture_bytes(250_000, 16)).unwrap();
+    write_metadata(&metadata, 250_000, 16);
+    fs::write(&stale, b"stale").unwrap();
+
+    let binary = env!("CARGO_BIN_EXE_optimum-v1-codec");
+    assert!(!Command::new(binary)
+        .env("LQ_CODEC_META_JSON", &metadata)
+        .args(["invalid", raw.to_str().unwrap(), stale.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    assert!(!stale.exists());
+
+    let describe_output = root.join("describe-output.json");
+    let unrelated_extra = root.join("unrelated-extra.txt");
+    fs::write(&describe_output, b"stale").unwrap();
+    fs::write(&unrelated_extra, b"must survive").unwrap();
+    assert!(!Command::new(binary)
+        .args([
+            "describe",
+            describe_output.to_str().unwrap(),
+            unrelated_extra.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(!describe_output.exists());
+    assert_eq!(fs::read(&unrelated_extra).unwrap(), b"must survive");
+
+    let extra_argument = root.join("extra.txt");
+    fs::write(&stale, b"stale").unwrap();
+    assert!(!Command::new(binary)
+        .env("LQ_CODEC_META_JSON", &metadata)
+        .args([
+            "encode",
+            raw.to_str().unwrap(),
+            stale.to_str().unwrap(),
+            extra_argument.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(!stale.exists());
+
+    for protected in [&raw, &metadata] {
+        let before = fs::read(protected).unwrap();
+        assert!(!Command::new(binary)
+            .env("LQ_CODEC_META_JSON", &metadata)
+            .args(["encode", raw.to_str().unwrap(), protected.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(fs::read(protected).unwrap(), before);
+    }
+
+    let _ = fs::remove_dir_all(root);
+}

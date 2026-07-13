@@ -253,53 +253,123 @@ fn invalidate_output(path: &Path) -> Result<(), String> {
     }
 }
 
-fn run(args: &[String]) -> Result<(), String> {
-    if args.len() == 3 && args[1] == "describe" {
-        let output = Path::new(&args[2]);
-        invalidate_output(output)?;
-        return describe(output);
+fn comparable_path(path: &Path) -> Result<PathBuf, String> {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return Ok(canonical);
     }
-    if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
-        return Err("usage: optimum-v1-codec encode|decode INPUT OUTPUT | describe OUTPUT".into());
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(canonical_parent) = fs::canonicalize(parent) {
+            return Ok(canonical_parent.join(name));
+        }
     }
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|error| format!("resolve {}: {error}", path.display()))
+    }
+}
 
-    let input = Path::new(&args[2]);
-    let output = Path::new(&args[3]);
-    invalidate_output(output)?;
-    let metadata = read_metadata()?;
-    match args[1].as_str() {
-        "encode" => {
-            let signal = read_lqraw(input)?;
-            validate_input_metadata(&signal, metadata)?;
-            let stream = LmoCodec
-                .encode(&signal.samples, Mode::Lossless)
-                .map_err(|error| error.to_string())?;
-            if stream.get(..LMO_V2_PREFIX.len()) != Some(LMO_V2_PREFIX) {
-                return Err("Optimum v1 encoder did not emit raw LMO1-v2".into());
-            }
-            fs::write(output, stream)
-                .map_err(|error| format!("write {}: {error}", output.display()))
-        }
-        "decode" => {
-            let size = fs::metadata(input)
-                .map_err(|error| format!("stat {}: {error}", input.display()))?
-                .len();
-            if size > MAX_LMO_BYTES {
-                return Err("LMO1-v2 input exceeds benchmark adapter maximum".into());
-            }
-            let stream =
-                fs::read(input).map_err(|error| format!("read {}: {error}", input.display()))?;
-            if stream.get(..LMO_V2_PREFIX.len()) != Some(LMO_V2_PREFIX) {
-                return Err("input is not a raw LMO1-v2 stream".into());
-            }
-            if stream.get(5) != Some(&0) || !matches!(stream.get(6).copied(), Some(0 | 2)) {
-                return Err("input is not an Optimum-v1 lossless stream".into());
-            }
-            let signal = decode_any(&stream).map_err(|error| error.to_string())?;
-            write_lqraw(output, &signal, metadata)
-        }
-        _ => unreachable!(),
+fn declared_output(args: &[String]) -> Option<&Path> {
+    match args.get(1).map(String::as_str) {
+        Some("describe") => args.get(2).map(Path::new),
+        Some("encode" | "decode") => args.get(3).map(Path::new),
+        _ if args.len() == 4 => Some(Path::new(&args[3])),
+        _ => None,
     }
+}
+
+fn reject_output_alias(args: &[String], output: &Path) -> Result<(), String> {
+    let output = comparable_path(output)?;
+    let mut protected = Vec::new();
+    let operation = args.get(1).map(String::as_str);
+    if matches!(operation, Some("encode" | "decode"))
+        || (args.len() == 4 && operation != Some("describe"))
+    {
+        protected.push(("codec input", PathBuf::from(&args[2])));
+        if let Some(metadata) = std::env::var_os("LQ_CODEC_META_JSON") {
+            protected.push(("codec metadata", PathBuf::from(metadata)));
+        }
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        protected.push(("codec executable", executable));
+    }
+    for (label, path) in protected {
+        if comparable_path(&path)? == output {
+            return Err(format!(
+                "declared output aliases protected {label}: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run(args: &[String]) -> Result<(), String> {
+    let output = declared_output(args);
+    if let Some(output) = output {
+        reject_output_alias(args, output)?;
+        invalidate_output(output)?;
+    }
+    let result = (|| {
+        if args.len() == 3 && args[1] == "describe" {
+            return describe(Path::new(&args[2]));
+        }
+        if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
+            return Err(
+                "usage: optimum-v1-codec encode|decode INPUT OUTPUT | describe OUTPUT".into(),
+            );
+        }
+
+        let input = Path::new(&args[2]);
+        let output = Path::new(&args[3]);
+        let metadata = read_metadata()?;
+        match args[1].as_str() {
+            "encode" => {
+                let signal = read_lqraw(input)?;
+                validate_input_metadata(&signal, metadata)?;
+                let stream = LmoCodec
+                    .encode(&signal.samples, Mode::Lossless)
+                    .map_err(|error| error.to_string())?;
+                if stream.get(..LMO_V2_PREFIX.len()) != Some(LMO_V2_PREFIX) {
+                    return Err("Optimum v1 encoder did not emit raw LMO1-v2".into());
+                }
+                fs::write(output, stream)
+                    .map_err(|error| format!("write {}: {error}", output.display()))
+            }
+            "decode" => {
+                let size = fs::metadata(input)
+                    .map_err(|error| format!("stat {}: {error}", input.display()))?
+                    .len();
+                if size > MAX_LMO_BYTES {
+                    return Err("LMO1-v2 input exceeds benchmark adapter maximum".into());
+                }
+                let stream = fs::read(input)
+                    .map_err(|error| format!("read {}: {error}", input.display()))?;
+                if stream.get(..LMO_V2_PREFIX.len()) != Some(LMO_V2_PREFIX) {
+                    return Err("input is not a raw LMO1-v2 stream".into());
+                }
+                if stream.get(5) != Some(&0) || !matches!(stream.get(6).copied(), Some(0 | 2)) {
+                    return Err("input is not an Optimum-v1 lossless stream".into());
+                }
+                let signal = decode_any(&stream).map_err(|error| error.to_string())?;
+                write_lqraw(output, &signal, metadata)
+            }
+            _ => unreachable!(),
+        }
+    })();
+    if result.is_err() {
+        if let Some(output) = output {
+            if let Err(cleanup) = invalidate_output(output) {
+                return Err(format!(
+                    "{}; output cleanup failed: {cleanup}",
+                    result.unwrap_err()
+                ));
+            }
+        }
+    }
+    result
 }
 
 fn main() {
