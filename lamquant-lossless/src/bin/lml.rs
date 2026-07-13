@@ -9,7 +9,7 @@
 
 use clap::{Parser, Subcommand};
 use lamquant_core::deployment::LosslessMode;
-use lamquant_core::{container, edf, lma, lml, tui};
+use lamquant_core::{container, edf, lma, lml, tui, workflows};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::io::{BufWriter, Write};
@@ -1902,7 +1902,12 @@ fn main() {
     let exit_code = match &result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            // Batch verification has already rendered every failure. Preserve
+            // its historical stdout-only failure path without suppressing
+            // direct workflow errors, which still reach stderr below.
+            if e.downcast_ref::<RenderedFailure>().is_none() {
+                eprintln!("Error: {}", e);
+            }
             1
         }
     };
@@ -1919,6 +1924,17 @@ fn main() {
 }
 
 type R = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Debug)]
+struct RenderedFailure(String);
+
+impl std::fmt::Display for RenderedFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RenderedFailure {}
 
 /// Recognised source-format extensions for `lml encode`. Phase 4
 /// registers BrainVision (.vhdr) alongside the EDF/BDF family;
@@ -5267,123 +5283,111 @@ fn summarise_json(v: &serde_json::Value) -> String {
 }
 
 fn cmd_info(input: &Path) -> R {
-    use std::io::Read as _;
-    let mut f = std::fs::File::open(input)?;
-    // Tier 3 audit (O5): keep file_size in u64. Pre-fix `as usize`
-    // silently truncated > 4 GiB files on 32-bit MCU/host targets;
-    // bounds checks derived from the truncated value were wrong.
-    // Use usize only where slice arithmetic forces it, after a
-    // bounds check.
-    let file_size: u64 = f.metadata()?.len();
-    let mut hdr = [0u8; 32];
-    f.read_exact(&mut hdr)?;
-
-    // v1.1 magic-byte auto-dispatch: `lml info foo.lma` now routes
-    // to the archive inspector instead of erroring "Not LML". The
-    // CLI ergonomics match `tar` / `7z` / `unzip` where one tool
-    // handles both container forms.
-    if &hdr[0..4] == b"LMA1" {
-        eprintln!(
-            "note: {} is an LMA archive, dispatching to archive inspector (`lml ls --tree`).",
-            input.display(),
-        );
-        return cmd_ls(input, /*tree=*/ true, /*long=*/ false);
+    match workflows::inspect_path(input)? {
+        workflows::InspectionReport::Archive(entries) => {
+            eprintln!(
+                "note: {} is an LMA archive, dispatching to archive inspector (`lml ls --tree`).",
+                input.display(),
+            );
+            render_archive_listing(input, &entries, true, false)
+        }
+        workflows::InspectionReport::Container(inspection) => {
+            render_container_inspection(input, &inspection);
+            Ok(())
+        }
     }
+}
 
-    // ADR 0069/0071 L9: `lml info` on a `BCS1` file (write_abir's default
-    // output today) — dispatch to the BCS1-aware reader BEFORE the legacy
-    // `hdr[0..3] != b"LML"` guard below would reject it. Reads the
-    // remaining bytes to complete the 40-byte typed header (32 already
-    // buffered above).
-    if &hdr[0..4] == abir::BCS1_MAGIC {
-        let mut rest = [0u8; abir::BCS1_HEADER_LEN - 32];
-        f.read_exact(&mut rest)?;
-        let mut full = [0u8; abir::BCS1_HEADER_LEN];
-        full[..32].copy_from_slice(&hdr);
-        full[32..].copy_from_slice(&rest);
-        return cmd_info_bcs1(input, &mut f, file_size, &full);
-    }
+fn render_container_inspection(
+    input: &Path,
+    inspection: &lamquant_core::container_reader::ContainerInspection,
+) {
+    use lamquant_core::container_reader::{
+        ContainerFormat, ContainerFormatDetails, FooterInspection,
+    };
 
-    if &hdr[0..3] != b"LML" {
-        return Err(format!(
-            "Not LML or LMA (magic: {:?}). Expected leading bytes `LML1` or `BCS1` or `LMA1`.",
-            &hdr[0..4]
-        )
-        .into());
-    }
-
-    let ver_major = hdr[4];
-    let ver_minor = hdr[5];
-    let n_ch = u16::from_le_bytes([hdr[6], hdr[7]]);
-    let n_win = u16::from_le_bytes([hdr[8], hdr[9]]);
-    let total = u32::from_le_bytes([hdr[10], hdr[11], hdr[12], hdr[13]]);
-    let ws = u16::from_le_bytes([hdr[14], hdr[15]]);
-    let sr_mhz = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
-    let bit_depth = hdr[20];
-    let flags = hdr[21];
-    let meta_len = u32::from_le_bytes([hdr[22], hdr[23], hdr[24], hdr[25]]);
-    let raw = n_ch as f64 * total as f64 * 2.0;
-    let sr_hz = sr_mhz as f64 / 1000.0;
-    let duration_s = if sr_hz > 0.0 {
-        total as f64 / sr_hz
+    let sample_rate_hz = inspection.sample_rate_mhz as f64 / 1000.0;
+    let duration_s = if sample_rate_hz > 0.0 {
+        inspection.total_samples as f64 / sample_rate_hz
     } else {
         0.0
     };
-    let has_footer = (flags & 0b0000_0001) != 0;
+    let raw_bytes = inspection.n_channels as f64 * inspection.total_samples as f64 * 2.0;
 
     println!("File:       {}", input.display());
-    println!(
-        "Format:     LML{} v{}.{}",
-        hdr[3] as char, ver_major, ver_minor
-    );
-    println!("Channels:   {}", n_ch);
-    println!("Windows:    {}", n_win);
+    match inspection.format {
+        ContainerFormat::LegacyLml1 => println!(
+            "Format:     LML1 v{}.{}",
+            inspection.version_major, inspection.version_minor
+        ),
+        ContainerFormat::Bcs1 => println!(
+            "Format:     BCS1 v{}.{}",
+            inspection.version_major, inspection.version_minor
+        ),
+    }
+    println!("Channels:   {}", inspection.n_channels);
+    println!("Windows:    {}", inspection.n_windows);
     println!(
         "Samples:    {} ({:.1}s @ {:.0} Hz)",
-        total, duration_s, sr_hz
+        inspection.total_samples, duration_s, sample_rate_hz
     );
     println!("Duration:   {}", human_duration(duration_s));
-    println!("Window:     {} samples", ws);
-    println!("Bit depth:  {}", bit_depth);
-    println!(
-        "Flags:      0x{:02X}{}",
-        flags,
-        if has_footer {
-            " (HAS_FOOTER)"
-        } else {
-            " (no footer; legacy file)"
-        }
-    );
-    println!("Size:       {}", human_bytes(file_size));
-    if raw > 0.0 {
+    println!("Window:     {} samples", inspection.window_size);
+    println!("Bit depth:  {}", inspection.bit_depth);
+    if let ContainerFormatDetails::Bcs1 {
+        modality_tag,
+        modality_source,
+        codec_descriptor,
+        mode,
+        tier,
+        decode_capability,
+    } = inspection.details
+    {
         println!(
-            "CR:         {:.2}:1  ({} raw → {})",
-            raw / file_size as f64,
-            human_bytes(raw as u64),
-            human_bytes(file_size)
+            "Modality:   tag={} source={}",
+            modality_tag, modality_source
+        );
+        println!(
+            "Codec:      descriptor={} mode={} tier={} decode_capability={}",
+            codec_descriptor, mode, tier, decode_capability
         );
     }
-    // Tier 3 audit (O5): u64-domain bounds check. Pre-fix
-    // `32 + meta_len as usize <= file_size` did the addition in
-    // 32-bit usize on MCU targets and could wrap. Now: check in
-    // u64 first; only cast to usize if the read fits.
-    if meta_len > 0 && 32u64.saturating_add(meta_len as u64) <= file_size {
-        let read_len = (meta_len as usize).min(4096);
-        let mut meta_buf = vec![0u8; read_len];
-        f.read_exact(&mut meta_buf)?;
-        let meta = String::from_utf8_lossy(&meta_buf);
-        print_metadata_summary(&meta);
+    let footer_suffix = match inspection.format {
+        ContainerFormat::LegacyLml1 if inspection.flags & 1 == 0 => " (no footer; legacy file)",
+        _ if inspection.flags & 1 == 0 => " (no footer)",
+        _ => " (HAS_FOOTER)",
+    };
+    println!("Flags:      0x{:02X}{}", inspection.flags, footer_suffix);
+    println!("Size:       {}", human_bytes(inspection.source_len));
+    if raw_bytes > 0.0 {
+        println!(
+            "CR:         {:.2}:1  ({} raw → {})",
+            raw_bytes / inspection.source_len as f64,
+            human_bytes(raw_bytes as u64),
+            human_bytes(inspection.source_len)
+        );
     }
-
-    // Probe footer at EOF when present. Surface the seek-table size
-    // (the only field that meaningfully informs the user — full table
-    // parse is for `lml stats` etc.). Footer absence is already
-    // signalled by the Flags line above; flag set but EOF magic
-    // mismatched = corrupted random-access trailer, surface as warn.
-    if has_footer {
-        print_footer_probe(&mut f, file_size, n_win as u32)?;
+    if !inspection.metadata.is_empty() {
+        print_metadata_summary(&inspection.metadata);
     }
-    Ok(())
+    match inspection.footer {
+        FooterInspection::NotDeclared => {}
+        FooterInspection::MissingMagic => println!(
+            "Seek table: FLAG_HAS_FOOTER set but LMLFOOT1 magic missing at EOF \
+             — corrupted random-access trailer"
+        ),
+        FooterInspection::Valid {
+            entries,
+            exceeds_header_windows: true,
+        } => println!(
+            "Seek table: {} entries (CORRUPT: exceeds header n_windows = {})",
+            entries, inspection.n_windows
+        ),
+        FooterInspection::Valid {
+            entries,
+            exceeds_header_windows: false,
+        } => println!("Seek table: {} entries (LMLFOOT1 magic OK)", entries),
+    }
 }
 
 /// Human-readable metadata JSON dump — shared tail of `lml info` for both
@@ -5433,283 +5437,137 @@ fn print_metadata_summary(meta: &str) {
     }
 }
 
-/// Probe the `LMLFOOT1` seek-table footer at EOF and print a one-line
-/// summary — shared tail of `lml info` for both header formats. The
-/// footer's own position/shape (fixed 32 bytes at EOF, preceded by the
-/// offset table) does NOT depend on which header the file carries, so this
-/// is a straight share, not a clone-with-changes. `n_win_header` is the
-/// header's own `n_windows` field, used only to bound-check the footer's
-/// claimed count against corruption (Tier 3 audit O5 — a poisoned footer
-/// used to print "Seek table: 4294967295 entries" unchecked).
-fn print_footer_probe(
-    f: &mut std::fs::File,
-    file_size: u64,
-    n_win_header: u32,
-) -> std::io::Result<()> {
-    use std::io::{Read as _, Seek as _};
-    if file_size < 32 {
-        return Ok(());
-    }
-    f.seek(std::io::SeekFrom::End(-32))?;
-    let mut footer = [0u8; 32];
-    f.read_exact(&mut footer)?;
-    if &footer[0..8] == b"LMLFOOT1" {
-        let n_seek_windows = u32::from_le_bytes([footer[12], footer[13], footer[14], footer[15]]);
-        if n_seek_windows > n_win_header {
-            println!(
-                "Seek table: {} entries (CORRUPT: exceeds header n_windows = {})",
-                n_seek_windows, n_win_header
-            );
-        } else {
-            println!("Seek table: {} entries (LMLFOOT1 magic OK)", n_seek_windows);
-        }
-    } else {
-        println!(
-            "Seek table: FLAG_HAS_FOOTER set but LMLFOOT1 magic missing at EOF \
-             — corrupted random-access trailer"
-        );
-    }
-    Ok(())
-}
-
-/// `lml info` for a `BCS1` file (ADR 0069/0071 L9) — the BCS1 counterpart
-/// of the legacy tail of [`cmd_info`] above, sourced from
-/// [`abir::Bcs1Header`]'s parsed fields instead of hand-rolled
-/// 32-byte offsets. `hdr_bytes` is the already-buffered 40-byte header
-/// (`cmd_info` reads it before dispatching here); `f` is positioned right
-/// after it, ready for the metadata read below.
-fn cmd_info_bcs1(
-    input: &Path,
-    f: &mut std::fs::File,
-    file_size: u64,
-    hdr_bytes: &[u8; abir::BCS1_HEADER_LEN],
-) -> R {
-    use std::io::Read as _;
-    let header =
-        abir::Bcs1Header::parse(hdr_bytes).map_err(|e| format!("invalid BCS1 header: {e}"))?;
-
-    let raw = header.n_channels as f64 * header.total_samples as f64 * 2.0;
-    let sr_hz = header.sample_rate_mhz as f64 / 1000.0;
-    let duration_s = if sr_hz > 0.0 {
-        header.total_samples as f64 / sr_hz
-    } else {
-        0.0
-    };
-    let has_footer = (header.flags & 0b0000_0001) != 0;
-
-    println!("File:       {}", input.display());
-    println!(
-        "Format:     BCS1 v{}.{}",
-        header.version_major, header.version_minor
-    );
-    println!("Channels:   {}", header.n_channels);
-    println!("Windows:    {}", header.n_windows);
-    println!(
-        "Samples:    {} ({:.1}s @ {:.0} Hz)",
-        header.total_samples, duration_s, sr_hz
-    );
-    println!("Duration:   {}", human_duration(duration_s));
-    println!("Window:     {} samples", header.window_size);
-    println!("Bit depth:  {}", header.bit_depth);
-    println!(
-        "Modality:   tag={} source={}",
-        header.modality_tag, header.modality_source
-    );
-    println!(
-        "Codec:      descriptor={} mode={} tier={} decode_capability={}",
-        header.codec_descriptor, header.mode, header.tier, header.decode_capability
-    );
-    println!(
-        "Flags:      0x{:02X}{}",
-        header.flags,
-        if has_footer {
-            " (HAS_FOOTER)"
-        } else {
-            " (no footer)"
-        }
-    );
-    println!("Size:       {}", human_bytes(file_size));
-    if raw > 0.0 {
-        println!(
-            "CR:         {:.2}:1  ({} raw → {})",
-            raw / file_size as f64,
-            human_bytes(raw as u64),
-            human_bytes(file_size)
-        );
-    }
-
-    let meta_len = header.metadata_length;
-    if meta_len > 0 && (abir::BCS1_HEADER_LEN as u64).saturating_add(meta_len as u64) <= file_size {
-        let read_len = (meta_len as usize).min(4096);
-        let mut meta_buf = vec![0u8; read_len];
-        f.read_exact(&mut meta_buf)?;
-        let meta = String::from_utf8_lossy(&meta_buf);
-        print_metadata_summary(&meta);
-    }
-
-    if has_footer {
-        print_footer_probe(f, file_size, header.n_windows as u32)?;
-    }
-    Ok(())
-}
-
 fn cmd_verify(input: &Path, recursive: bool, explain: bool) -> R {
-    // Hard-fail on a missing input — clinical-grade contract: silent
-    // "0/0 verified" on a typo'd path is unacceptable.
-    if !input.exists() {
-        return Err(format!("input path does not exist: {}", input.display()).into());
+    let report = workflows::verify_path(input, recursive)?;
+    if report.uses_legacy_single_archive_rendering() {
+        eprintln!(
+            "note: {} is an LMA archive, dispatching to archive verifier (`lml verify-archive`).",
+            input.display(),
+        );
+    }
+    if explain && !report.has_archives() {
+        eprintln!(
+            "  WARNING: --explain currently only applies to LMA archive verification, \
+             not LML files (verify batch); ignoring for this run."
+        );
     }
 
-    // Tier 3 audit (O14 follow-up): if user passed `--explain` but
-    // the dispatch never reaches the archive verifier (i.e. input
-    // is a pure-LML file or LML directory), emit a stderr WARNING
-    // so the operator knows the flag is being ignored. The
-    // per-window CRC report for LML files is a follow-up feature;
-    // until then, the visible diagnostic prevents silent
-    // confusion.
-    let warn_explain_unused = |scope: &str| {
-        if explain {
-            eprintln!(
-                "  WARNING: --explain currently only applies to LMA archive verification, \
-                 not LML files ({}); ignoring for this run.",
-                scope
-            );
-        }
-    };
-
-    // v1.1 magic-byte auto-dispatch: if the user passed a single
-    // `.lma` archive (or any single file whose leading bytes are
-    // `LMA1`), route to the archive verifier instead of trying to
-    // walk it as an LML directory. v1.2 X adds `--explain`
-    // forwarding so `lml verify foo.lma --explain` renders the
-    // auditable per-step readout.
-    //
-    // Tier 3 audit (O14): surface File::open errors instead of
-    // silently falling through to the LML walker. Pre-fix the
-    // `.is_ok()` short-circuit meant a permission-denied on an
-    // LMA produced a confusing "not LML" error downstream.
-    if input.is_file() {
-        use std::io::Read as _;
-        match std::fs::File::open(input) {
-            Ok(mut f) => {
-                let mut magic = [0u8; 4];
-                if f.read_exact(&mut magic).is_ok() && &magic == b"LMA1" {
-                    eprintln!(
-                        "note: {} is an LMA archive, dispatching to archive verifier (`lml verify-archive`).",
-                        input.display(),
-                    );
-                    return cmd_verify_archive_explain(input, explain);
-                }
-            }
-            Err(e) => {
-                return Err(format!(
-                    "cmd_verify: cannot open {} for magic-byte check: {}",
-                    input.display(),
-                    e
-                )
-                .into());
-            }
-        }
-    }
-
-    let files = if input.is_file() {
-        vec![input.to_path_buf()]
+    if EMIT_JSON.load(std::sync::atomic::Ordering::Relaxed) {
+        emit_verification_events(&report);
+    } else if report.uses_legacy_single_archive_rendering() {
+        render_archive_item(
+            report
+                .archive_item()
+                .ok_or("archive dispatch produced no archive result")?,
+            explain,
+        );
     } else {
-        let mut f = Vec::new();
-        let walker = if recursive {
-            walkdir::WalkDir::new(input)
-        } else {
-            walkdir::WalkDir::new(input).max_depth(1)
-        };
-        for entry in walker.into_iter().filter_map(|e| e.ok()) {
-            // v1.1: include `.lma` in directory walks so `lml verify
-            // recursive_dir/` picks up archives alongside `.lml` files.
-            //
-            // Tier 3 audit (O14): compare against OsStr instead of
-            // str so paths with non-UTF-8 components aren't silently
-            // dropped from the verify set (pre-fix `.and_then(|e|
-            // e.to_str())` returned None and the entry was skipped
-            // with no warning; total count under-reported).
-            let ext = entry.path().extension();
-            let is_lml = ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lml")));
-            let is_lma = ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lma")));
-            if is_lml || is_lma {
-                f.push(entry.path().to_path_buf());
-            }
-        }
-        f.sort();
-        f
-    };
-
-    let total = files.len();
-    if total == 0 {
-        return Err(format!(
-            "no .lml files found at {} — verify would silently report \
-             0/0 success otherwise",
-            input.display()
-        )
-        .into());
+        render_verification_report(&report, explain);
     }
-    let mut passed = 0;
-    let mut failed = 0;
 
-    // Tier 3 audit (O14): if explain was requested but every file
-    // in the batch is LML (not LMA), surface the warning once
-    // instead of per-file. Mixed batches don't trigger this; the
-    // per-LML-entry path silently skips explain.
-    let any_lma = files.iter().any(|f| {
-        f.extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lma")))
-    });
-    if !any_lma {
-        warn_explain_unused("verify batch");
+    if report.is_success() {
+        Ok(())
+    } else if report.uses_legacy_single_archive_rendering() {
+        // LMA1 single-file dispatch historically returned its failure to main
+        // for stderr rendering; LMA2 and directory batches rendered per-item
+        // failures to stdout before terminating. Keep both serialized forms.
+        Err(verification_failure_message(&report).into())
+    } else {
+        Err(RenderedFailure(verification_failure_message(&report)).into())
     }
-    for f in &files {
-        let t0 = Instant::now();
-        // v1.1: per-file magic-byte dispatch so a mixed `.lml` +
-        // `.lma` corpus walks transparently.
-        let is_lma = f
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e == "lma");
-        if is_lma {
-            match cmd_verify_archive_explain(f, explain) {
-                Ok(()) => {
-                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                    if total <= 10 {
-                        println!("  OK  lma ({:.1}ms) {}", ms, f.display());
-                    }
-                    passed += 1;
-                }
-                Err(e) => {
-                    println!("  FAIL {} — {}", f.display(), e);
-                    failed += 1;
-                }
-            }
-            continue;
-        }
-        match container::read_file(f) {
-            Ok((sig, _)) => {
-                let n_ch = sig.len();
-                let t = if n_ch > 0 { sig[0].len() } else { 0 };
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+}
+
+fn emit_verification_events(report: &workflows::VerificationReport) {
+    for event in report.op_events() {
+        println!("{}", event.to_json_line());
+    }
+}
+
+fn render_verification_report(report: &workflows::VerificationReport, explain: bool) {
+    let total = report.items.len();
+    for item in &report.items {
+        match &item.outcome {
+            workflows::VerificationOutcome::Lml { channels, samples } => {
                 if total <= 10 {
-                    println!("  OK  {}ch × {} ({:.1}ms) {}", n_ch, t, ms, f.display());
+                    println!(
+                        "  OK  {}ch × {} ({:.1}ms) {}",
+                        channels,
+                        samples,
+                        item.elapsed_ms,
+                        item.path.display()
+                    );
                 }
-                passed += 1;
             }
-            Err(e) => {
-                println!("  FAIL {} — {}", f.display(), e);
-                failed += 1;
+            workflows::VerificationOutcome::Lma(result) => {
+                render_archive_verification(result, item.elapsed_ms, explain);
+                if item.passed() && total <= 10 {
+                    println!(
+                        "  OK  lma ({:.1}ms) {}",
+                        item.elapsed_ms,
+                        item.path.display()
+                    );
+                } else if !item.passed() {
+                    println!(
+                        "  FAIL {} — {}",
+                        item.path.display(),
+                        archive_failure_message(result)
+                    );
+                }
+            }
+            workflows::VerificationOutcome::Failed { error, .. } => {
+                println!("  FAIL {} — {}", item.path.display(), error);
             }
         }
     }
+    println!(
+        "{}/{} verified, {} failed",
+        report.passed(),
+        total,
+        report.failed()
+    );
+}
 
-    println!("{}/{} verified, {} failed", passed, total, failed);
-    if failed > 0 {
-        std::process::exit(1);
+fn render_archive_item(item: &workflows::VerificationItem, explain: bool) {
+    match &item.outcome {
+        workflows::VerificationOutcome::Lma(result) => {
+            render_archive_verification(result, item.elapsed_ms, explain)
+        }
+        workflows::VerificationOutcome::Failed { error, .. } => {
+            println!("  FAIL {} — {}", item.path.display(), error)
+        }
+        workflows::VerificationOutcome::Lml { .. } => {
+            println!(
+                "  FAIL {} — expected an archive result",
+                item.path.display()
+            )
+        }
     }
-    Ok(())
+}
+
+fn verification_failure_message(report: &workflows::VerificationReport) -> String {
+    if let Some(item) = report.items.iter().find(|item| !item.passed()) {
+        if let workflows::VerificationOutcome::Lma(result) = &item.outcome {
+            return archive_failure_message(result);
+        }
+    }
+    format!("{} files failed verification", report.failed())
+}
+
+fn archive_failure_message(result: &lma::ArchiveVerification) -> String {
+    if !result.archive_hash_matches {
+        "Archive SHA-256 mismatch — file is corrupted".into()
+    } else {
+        format!("{} files failed verification", result.failed_entries())
+    }
+}
+
+fn render_archive_verification(result: &lma::ArchiveVerification, elapsed_ms: f64, explain: bool) {
+    let elapsed = std::time::Duration::from_secs_f64(elapsed_ms / 1000.0);
+    if explain {
+        render_archive_verification_explained(result, elapsed);
+    } else {
+        render_archive_verification_compact(result, elapsed);
+    }
 }
 
 // ── Paranoid roundtrip verification — clinical-grade bit-exact check ──
@@ -7864,7 +7722,15 @@ fn cmd_list_archive(input: &Path) -> R {
 /// single-entry extraction.
 fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
     let entries = lma::list_archive(input)?;
+    render_archive_listing(input, &entries, tree, long)
+}
 
+fn render_archive_listing(
+    input: &Path,
+    entries: &[lma::ArchiveEntry],
+    tree: bool,
+    long: bool,
+) -> R {
     if long {
         // Machine-readable, versioned wire format for OS plugin
         // shell-outs (Ark CliPlugin, Nautilus extension, etc.).
@@ -7887,7 +7753,7 @@ fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
         // re-validate per entry below and refuse to emit a malformed
         // line rather than silently truncate downstream.
         println!("#lml-ls schema=1");
-        for entry in &entries {
+        for entry in entries {
             let method_str = match entry.method {
                 lma::Method::Lml => "lml",
                 lma::Method::Zstd => "zstd",
@@ -7920,7 +7786,7 @@ fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
 
     if !tree {
         // Flat one-line-per-entry listing. Like `tar tf`.
-        for entry in &entries {
+        for entry in entries {
             println!("{}", entry.path);
         }
         return Ok(());
@@ -8213,19 +8079,21 @@ fn cmd_volume_assemble(input: &Path, output: Option<&Path>, force: bool) -> R {
 /// v1.2 X — dispatches to the explainer when `--explain` is set;
 /// otherwise calls the compact existing verifier.
 fn cmd_verify_archive_explain(input: &Path, explain: bool) -> R {
-    let started = Instant::now();
-    let result = lma::verify_archive(input)?;
-    if explain {
-        render_archive_verification_explained(&result, started.elapsed());
+    let report = workflows::verify_archive(input)?;
+    if EMIT_JSON.load(std::sync::atomic::Ordering::Relaxed) {
+        emit_verification_events(&report);
     } else {
-        render_archive_verification_compact(&result, started.elapsed());
+        render_archive_item(
+            report
+                .archive_item()
+                .ok_or("archive verification produced no archive result")?,
+            explain,
+        );
     }
-    if !result.archive_hash_matches {
-        Err("Archive SHA-256 mismatch — file is corrupted".into())
-    } else if result.failed_entries() > 0 {
-        Err(format!("{} files failed verification", result.failed_entries()).into())
-    } else {
+    if report.is_success() {
         Ok(())
+    } else {
+        Err(verification_failure_message(&report).into())
     }
 }
 

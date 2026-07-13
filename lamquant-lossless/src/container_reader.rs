@@ -22,15 +22,62 @@ pub enum ContainerFormat {
     Bcs1,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerFormatDetails {
+    Legacy,
+    Bcs1 {
+        modality_tag: u8,
+        modality_source: u8,
+        codec_descriptor: u8,
+        mode: u8,
+        tier: u8,
+        decode_capability: u8,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FooterInspection {
+    NotDeclared,
+    MissingMagic,
+    Valid {
+        entries: usize,
+        exceeds_header_windows: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerInspection {
+    pub format: ContainerFormat,
+    pub details: ContainerFormatDetails,
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub n_channels: usize,
+    pub n_windows: usize,
+    pub total_samples: usize,
+    pub window_size: usize,
+    pub sample_rate_mhz: u32,
+    pub bit_depth: u8,
+    pub flags: u8,
+    pub metadata: String,
+    pub source_len: u64,
+    pub footer: FooterInspection,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ContainerPlan {
     format: ContainerFormat,
+    details: ContainerFormatDetails,
+    version_major: u8,
+    version_minor: u8,
     header_len: usize,
     metadata_len: usize,
     n_channels: usize,
     n_windows: usize,
     total_samples: usize,
     window_size: usize,
+    sample_rate_mhz: u32,
+    bit_depth: u8,
+    flags: u8,
 }
 
 impl ContainerPlan {
@@ -97,12 +144,25 @@ fn bcs1_plan(header: &[u8]) -> LmlResult<ContainerPlan> {
     validate_bcs1(&parsed)?;
     ContainerPlan {
         format: ContainerFormat::Bcs1,
+        details: ContainerFormatDetails::Bcs1 {
+            modality_tag: parsed.modality_tag,
+            modality_source: parsed.modality_source,
+            codec_descriptor: parsed.codec_descriptor,
+            mode: parsed.mode,
+            tier: parsed.tier,
+            decode_capability: parsed.decode_capability,
+        },
+        version_major: parsed.version_major,
+        version_minor: parsed.version_minor,
         header_len: BCS1_HEADER_LEN,
         metadata_len: parsed.metadata_length as usize,
         n_channels: parsed.n_channels as usize,
         n_windows: parsed.n_windows as usize,
         total_samples: parsed.total_samples as usize,
         window_size: parsed.window_size as usize,
+        sample_rate_mhz: parsed.sample_rate_mhz,
+        bit_depth: parsed.bit_depth,
+        flags: parsed.flags,
     }
     .validate()
 }
@@ -167,15 +227,32 @@ fn legacy_plan(header: &[u8]) -> LmlResult<ContainerPlan> {
                 u32::from_le_bytes([header[14], header[15], header[16], header[17]]) as usize,
             )
         };
+    let (version_major, version_minor, sample_rate_mhz, bit_depth, flags) = if header_len == 32 {
+        (
+            header[4],
+            header[5],
+            u32::from_le_bytes([header[16], header[17], header[18], header[19]]),
+            header[20],
+            header[21],
+        )
+    } else {
+        (1, 0, 0, 0, 0)
+    };
 
     ContainerPlan {
         format: ContainerFormat::LegacyLml1,
+        details: ContainerFormatDetails::Legacy,
+        version_major,
+        version_minor,
         header_len,
         metadata_len,
         n_channels,
         n_windows,
         total_samples,
         window_size,
+        sample_rate_mhz,
+        bit_depth,
+        flags,
     }
     .validate()
 }
@@ -238,6 +315,13 @@ pub struct ContainerReader<R: Read + Seek> {
     offset_table: Option<OffsetTable>,
     first_payload_pos: u64,
     source_len: u64,
+    details: ContainerFormatDetails,
+    version_major: u8,
+    version_minor: u8,
+    sample_rate_mhz: u32,
+    bit_depth: u8,
+    flags: u8,
+    footer: FooterInspection,
 }
 
 impl ContainerReader<BufReader<File>> {
@@ -269,6 +353,16 @@ impl<R: Read + Seek> ContainerReader<R> {
             .seek(SeekFrom::Start(first_payload_pos))
             .map_err(LmlError::Io)?;
         let offset_table = read_footer(&mut source)?;
+        let footer = if let Some(table) = offset_table.as_ref() {
+            FooterInspection::Valid {
+                entries: table.len(),
+                exceeds_header_windows: table.len() > plan.n_windows,
+            }
+        } else if plan.flags & 0b0000_0001 != 0 {
+            FooterInspection::MissingMagic
+        } else {
+            FooterInspection::NotDeclared
+        };
         source
             .seek(SeekFrom::Start(first_payload_pos))
             .map_err(LmlError::Io)?;
@@ -287,6 +381,13 @@ impl<R: Read + Seek> ContainerReader<R> {
             offset_table,
             first_payload_pos,
             source_len,
+            details: plan.details,
+            version_major: plan.version_major,
+            version_minor: plan.version_minor,
+            sample_rate_mhz: plan.sample_rate_mhz,
+            bit_depth: plan.bit_depth,
+            flags: plan.flags,
+            footer,
         })
     }
 
@@ -296,6 +397,25 @@ impl<R: Read + Seek> ContainerReader<R> {
 
     pub fn header(&self) -> &ContainerHeader {
         &self.header
+    }
+
+    pub fn inspection(&self) -> ContainerInspection {
+        ContainerInspection {
+            format: self.format,
+            details: self.details,
+            version_major: self.version_major,
+            version_minor: self.version_minor,
+            n_channels: self.header.n_channels,
+            n_windows: self.header.n_windows,
+            total_samples: self.header.total_samples,
+            window_size: self.header.window_size,
+            sample_rate_mhz: self.sample_rate_mhz,
+            bit_depth: self.bit_depth,
+            flags: self.flags,
+            metadata: self.header.metadata.clone(),
+            source_len: self.source_len,
+            footer: self.footer,
+        }
     }
 
     pub fn offset_table(&self) -> Option<&OffsetTable> {

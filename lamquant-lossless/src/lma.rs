@@ -497,6 +497,31 @@ pub struct LmaArchive<R: Read + Seek> {
     path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LmaFormat {
+    V1,
+    V2,
+}
+
+pub(crate) fn probe_format(
+    path: &Path,
+) -> Result<Option<LmaFormat>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut source = std::fs::File::open(path)?;
+    let mut magic = [0u8; 4];
+    if let Err(error) = source.read_exact(&mut magic) {
+        return if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            Ok(None)
+        } else {
+            Err(error.into())
+        };
+    }
+    match &magic {
+        value if value == LMA_MAGIC => Ok(Some(LmaFormat::V1)),
+        value if value == LMA_MAGIC_V2 => Ok(Some(LmaFormat::V2)),
+        _ => Ok(None),
+    }
+}
+
 impl LmaArchive<BufReader<std::fs::File>> {
     pub fn open(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let file = std::fs::File::open(path)?;

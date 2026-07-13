@@ -164,7 +164,7 @@ fn cli_verifier_contains_no_archive_layout_parser() {
     let start = cli.find("fn cmd_verify_archive_explain").unwrap();
     let end = cli[start..].find("fn cmd_encode_bounded_mae").unwrap() + start;
     let verifier = &cli[start..end];
-    assert!(verifier.contains("lma::verify_archive(input)"));
+    assert!(verifier.contains("workflows::verify_archive(input)"));
     assert!(!verifier.contains("manifest_len"));
     assert!(!verifier.contains("payload_start"));
     assert!(!verifier.contains("SeekFrom"));
