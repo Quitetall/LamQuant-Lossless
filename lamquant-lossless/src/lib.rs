@@ -109,7 +109,11 @@ pub mod abir_container;
 #[cfg(feature = "archive")]
 pub mod normalize;
 /// ADR 0075 — the LQTP1 training tensor pack (BFP window store). Host-only.
+#[cfg(feature = "std")]
 pub mod tensor_pack;
+/// ADR 0119 — immutable indexed multi-view LQTP2 training snapshots. Host-only.
+#[cfg(feature = "std")]
+pub mod tensor_pack_v2;
 // ADR 0069/0071 L9 (read-side completion): the BCS1-aware streaming reader
 // (`Bcs1StreamReader`) + the magic-dispatching `AnyLmlReader` facade that
 // `range::RangeReader` and `bin/lml.rs`'s streaming decode paths use instead
