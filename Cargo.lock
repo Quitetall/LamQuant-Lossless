@@ -3278,6 +3278,7 @@ dependencies = [
  "lamquant-lmq",
  "lamquant-ops",
  "lamquant-tui",
+ "libc",
  "loom",
  "memmap2",
  "ndarray 0.17.2",

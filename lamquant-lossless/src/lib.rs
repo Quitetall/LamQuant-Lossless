@@ -114,6 +114,10 @@ pub mod tensor_pack;
 /// ADR 0119 — immutable indexed multi-view LQTP2 training snapshots. Host-only.
 #[cfg(feature = "std")]
 pub mod tensor_pack_v2;
+/// Chunked, content-addressable LQTP3 training bundles. Host-only; LQTP1/2
+/// wire bytes and the firmware dependency graph remain unchanged.
+#[cfg(feature = "tensor-pack-v3")]
+pub mod tensor_pack_v3;
 // ADR 0069/0071 L9 (read-side completion): the BCS1-aware streaming reader
 // (`Bcs1StreamReader`) + the magic-dispatching `AnyLmlReader` facade that
 // `range::RangeReader` and `bin/lml.rs`'s streaming decode paths use instead

@@ -112,6 +112,7 @@ default = ["host"]
 # host-side encode helpers (f64 RD search, std::io sinks). Firmware depends on
 # `lamquant-lml-mcu` DIRECTLY (not this facade), so this is the host path.
 std = ["lamquant-lml-mcu/std"]
+tensor-pack-v3 = ["std", "dep:zstd", "dep:libc"]
 
 # ── Level 1: archive — file I/O + LMA/EDF/container r/w ────────────────────
 # Enables: lma, container, edf, io, offset_table, range, stream, source,
@@ -119,6 +120,7 @@ std = ["lamquant-lml-mcu/std"]
 # Use this for OS plugins and 3rd-party readers (e.g. lml-os/lmafs).
 archive = [
     "std",
+    "tensor-pack-v3",
     # Link the Desktop tier crate + turn on its rayon parallel path (ADR 0058
     # carve-full: the Desktop tier now OWNS the parallel encode/decode). `fast`
     # implies `std`.
@@ -251,6 +253,7 @@ experimental_basestation = ["host"]
 # slices (no ~1.4 GB per-entry copy) and the OS demand-pages only touched windows.
 # Host-only facade crate; core-no_std (lamquant-lml-mcu) is unaffected.
 memmap2 = "0.9"
+libc = { version = "0.2", optional = true }
 # ADR 0069 S7b: the FFT resample branch of the 250 Hz normalizer
 # (`src/normalize.rs::resample_fft`, a scipy.signal.resample port). Host-only
 # facade crate, so std FFT is fine; core-no_std (lamquant-lml-mcu) is unaffected.
