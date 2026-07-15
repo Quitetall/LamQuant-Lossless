@@ -277,6 +277,22 @@ fn expected_hashes_short_writes_and_invalid_specs_fail_closed() {
 }
 
 #[test]
+fn owned_file_reader_remains_bound_across_path_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.lqtp3");
+    let displaced = dir.path().join("displaced.lqtp3");
+    write_pack(&path, false);
+
+    let file = std::fs::File::open(&path).unwrap();
+    std::fs::rename(&path, &displaced).unwrap();
+    std::fs::write(&path, b"not an LQTP3 snapshot").unwrap();
+
+    let reader = PackV3Reader::from_file(file, Some([0xaa; 32]), Some([0xbb; 32])).unwrap();
+    assert_eq!(reader.read_raw_row("labels", 4).unwrap(), vec![4, 1, 2, 3]);
+    assert!(PackV3Reader::open(&path, None, None).is_err());
+}
+
+#[test]
 fn corruption_truncation_trailing_bytes_and_hostile_lengths_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.lqtp3");
@@ -477,6 +493,27 @@ fn verified_open_defers_payload_scan_but_first_access_fails_closed() {
         Err(PackV3Error::IntegrityMismatch("chunk payload"))
     ));
     assert!(PackV3Reader::open(&path, None, None).is_err());
+}
+
+#[test]
+fn verified_owned_file_reader_remains_bound_across_path_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipt.lqtp3");
+    let displaced = dir.path().join("displaced.lqtp3");
+    write_pack(&path, false);
+    let verified = PackV3Reader::open(&path, None, None).unwrap();
+    let bundle_sha: [u8; 32] = Sha256::digest(std::fs::read(&path).unwrap()).into();
+    let receipt = verified.verification_receipt(bundle_sha).encode();
+    drop(verified);
+
+    let file = std::fs::File::open(&path).unwrap();
+    std::fs::rename(&path, &displaced).unwrap();
+    std::fs::write(&path, b"not an LQTP3 snapshot").unwrap();
+
+    let reader =
+        PackV3Reader::from_verified_file(file, Some([0xaa; 32]), Some([0xbb; 32]), &receipt)
+            .unwrap();
+    assert_eq!(reader.read_raw_row("labels", 4).unwrap(), vec![4, 1, 2, 3]);
 }
 
 #[test]

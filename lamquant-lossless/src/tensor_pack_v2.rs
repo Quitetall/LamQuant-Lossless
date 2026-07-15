@@ -793,7 +793,26 @@ impl PackV2Reader {
         expected_manifest_sha256: Option<[u8; 32]>,
         expected_view_spec_sha256: Option<[u8; 32]>,
     ) -> Result<Self, PackV2Error> {
-        let file = File::open(path)?;
+        Self::from_file(
+            open_nofollow(path)?,
+            expected_manifest_sha256,
+            expected_view_spec_sha256,
+        )
+    }
+
+    /// Fully verify a snapshot through an already-open, owned descriptor.
+    ///
+    /// The caller transfers ownership of `file`. Path-based callers should use
+    /// [`Self::open`]; descriptor bridges can duplicate a borrowed descriptor
+    /// and pass the duplicate here without reopening a pathname.
+    pub fn from_file(
+        file: File,
+        expected_manifest_sha256: Option<[u8; 32]>,
+        expected_view_spec_sha256: Option<[u8; 32]>,
+    ) -> Result<Self, PackV2Error> {
+        if !file.metadata()?.is_file() {
+            return Err(PackV2Error::InvalidLayout("non-regular file"));
+        }
         // SAFETY: read-only mapping. Callers treat a published pack as immutable;
         // all writer publication is atomic rename.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
@@ -1007,6 +1026,17 @@ impl PackV2Reader {
             }
         }
     }
+}
+
+fn open_nofollow(path: &Path) -> Result<File, PackV2Error> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    Ok(options.open(path)?)
 }
 
 /// Fail-closed LQTP2 format error.

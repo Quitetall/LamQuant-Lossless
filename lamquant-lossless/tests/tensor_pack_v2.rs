@@ -126,6 +126,22 @@ fn expected_snapshot_hashes_are_fail_closed() {
 }
 
 #[test]
+fn owned_file_reader_remains_bound_across_path_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.lqtp2");
+    let displaced = dir.path().join("displaced.lqtp2");
+    write_pack(&path, false);
+
+    let file = std::fs::File::open(&path).unwrap();
+    std::fs::rename(&path, &displaced).unwrap();
+    std::fs::write(&path, b"not an LQTP2 snapshot").unwrap();
+
+    let reader = PackV2Reader::from_file(file, Some([0xaa; 32]), Some([0xbb; 32])).unwrap();
+    assert_eq!(reader.row_raw("labels", 1).unwrap(), &[1, 1, 2, 3]);
+    assert!(PackV2Reader::open(&path, None, None).is_err());
+}
+
+#[test]
 fn corruption_truncation_and_trailing_bytes_are_rejected_at_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.lqtp2");
@@ -306,4 +322,18 @@ fn lqtp2_wire_layout_is_pinned() {
         format!("{:x}", Sha256::digest(&bytes)),
         "7d8b5961521b1eaa807cf763b5de92f657ed2ec5244a523860a30cdbc9650f88"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn lqtp2_path_reader_rejects_terminal_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.lqtp2");
+    let link = dir.path().join("link.lqtp2");
+    write_pack(&real, false);
+    symlink(&real, &link).unwrap();
+
+    assert!(PackV2Reader::open(&link, Some([0xaa; 32]), Some([0xbb; 32])).is_err());
 }

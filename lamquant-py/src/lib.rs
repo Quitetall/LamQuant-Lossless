@@ -961,6 +961,37 @@ fn fixed_hash(bytes: &[u8], name: &str) -> PyResult<[u8; 32]> {
     Ok(hash)
 }
 
+#[cfg(unix)]
+fn duplicate_borrowed_file_descriptor(file_descriptor: i64) -> PyResult<std::fs::File> {
+    use std::os::fd::BorrowedFd;
+
+    let raw_fd = i32::try_from(file_descriptor).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("file_descriptor is outside the Unix fd range")
+    })?;
+    if raw_fd < 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "file_descriptor must be non-negative",
+        ));
+    }
+    // SAFETY: Python retains ownership and the GIL remains held while the
+    // descriptor is borrowed. try_clone_to_owned duplicates it with CLOEXEC,
+    // so every success and error path leaves the caller's descriptor alone.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+    let owned = borrowed.try_clone_to_owned().map_err(|error| {
+        pyo3::exceptions::PyOSError::new_err(format!(
+            "cannot duplicate borrowed file descriptor: {error}"
+        ))
+    })?;
+    Ok(std::fs::File::from(owned))
+}
+
+#[cfg(not(unix))]
+fn duplicate_borrowed_file_descriptor(_file_descriptor: i64) -> PyResult<std::fs::File> {
+    Err(pyo3::exceptions::PyNotImplementedError::new_err(
+        "descriptor-backed LQTP readers require Unix",
+    ))
+}
+
 fn parse_hex_hash(value: &str, name: &str) -> PyResult<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -1140,6 +1171,30 @@ impl PyPackV2Reader {
             .transpose()?;
         let inner = lml::tensor_pack_v2::PackV2Reader::open(
             std::path::Path::new(path),
+            manifest,
+            view_spec,
+        )
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// Open through a borrowed Unix file descriptor. The descriptor is
+    /// duplicated internally and remains owned by the Python caller.
+    #[staticmethod]
+    #[pyo3(signature = (file_descriptor, expected_manifest_sha256=None, expected_view_spec_sha256=None))]
+    fn from_file_descriptor(
+        file_descriptor: i64,
+        expected_manifest_sha256: Option<&[u8]>,
+        expected_view_spec_sha256: Option<&[u8]>,
+    ) -> PyResult<Self> {
+        let manifest = expected_manifest_sha256
+            .map(|value| fixed_hash(value, "expected_manifest_sha256"))
+            .transpose()?;
+        let view_spec = expected_view_spec_sha256
+            .map(|value| fixed_hash(value, "expected_view_spec_sha256"))
+            .transpose()?;
+        let inner = lml::tensor_pack_v2::PackV2Reader::from_file(
+            duplicate_borrowed_file_descriptor(file_descriptor)?,
             manifest,
             view_spec,
         )
@@ -1448,6 +1503,32 @@ impl PyPackV3Reader {
         Ok(Self { inner: Some(inner) })
     }
 
+    /// Open through a borrowed Unix file descriptor. The descriptor is
+    /// duplicated internally and remains owned by the Python caller.
+    #[staticmethod]
+    #[pyo3(signature = (file_descriptor, expected_manifest_sha256=None, expected_view_spec_sha256=None, chunk_cache_slots=0))]
+    fn from_file_descriptor(
+        file_descriptor: i64,
+        expected_manifest_sha256: Option<&[u8]>,
+        expected_view_spec_sha256: Option<&[u8]>,
+        chunk_cache_slots: usize,
+    ) -> PyResult<Self> {
+        let manifest = expected_manifest_sha256
+            .map(|value| fixed_hash(value, "expected_manifest_sha256"))
+            .transpose()?;
+        let view_spec = expected_view_spec_sha256
+            .map(|value| fixed_hash(value, "expected_view_spec_sha256"))
+            .transpose()?;
+        let inner = lml::tensor_pack_v3::PackV3Reader::from_file_with_cache_slots(
+            duplicate_borrowed_file_descriptor(file_descriptor)?,
+            manifest,
+            view_spec,
+            chunk_cache_slots,
+        )
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(Self { inner: Some(inner) })
+    }
+
     #[staticmethod]
     #[pyo3(signature = (path, expected_manifest_sha256, expected_view_spec_sha256, receipt_bytes, chunk_cache_slots=0))]
     fn open_verified(
@@ -1459,6 +1540,34 @@ impl PyPackV3Reader {
     ) -> PyResult<Self> {
         let inner = lml::tensor_pack_v3::PackV3Reader::open_verified_with_cache_slots(
             std::path::Path::new(path),
+            Some(fixed_hash(
+                expected_manifest_sha256,
+                "expected_manifest_sha256",
+            )?),
+            Some(fixed_hash(
+                expected_view_spec_sha256,
+                "expected_view_spec_sha256",
+            )?),
+            receipt_bytes,
+            chunk_cache_slots,
+        )
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(Self { inner: Some(inner) })
+    }
+
+    /// Open a verification receipt through a borrowed Unix descriptor. The
+    /// descriptor is duplicated internally and never consumed or closed.
+    #[staticmethod]
+    #[pyo3(signature = (file_descriptor, expected_manifest_sha256, expected_view_spec_sha256, receipt_bytes, chunk_cache_slots=0))]
+    fn open_verified_from_file_descriptor(
+        file_descriptor: i64,
+        expected_manifest_sha256: &[u8],
+        expected_view_spec_sha256: &[u8],
+        receipt_bytes: &[u8],
+        chunk_cache_slots: usize,
+    ) -> PyResult<Self> {
+        let inner = lml::tensor_pack_v3::PackV3Reader::from_verified_file_with_cache_slots(
+            duplicate_borrowed_file_descriptor(file_descriptor)?,
             Some(fixed_hash(
                 expected_manifest_sha256,
                 "expected_manifest_sha256",

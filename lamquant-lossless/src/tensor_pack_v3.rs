@@ -772,6 +772,8 @@ struct ViewSinkV3 {
 
 pub struct PackV3Writer {
     final_path: PathBuf,
+    publication_parent: File,
+    publication_parent_identity: FileIdentity,
     partial_path: PathBuf,
     partial_identity: Option<FileIdentity>,
     partial_file: Option<File>,
@@ -829,11 +831,11 @@ impl FileIdentity {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
-            Ok(Self {
-                volume: metadata.volume_serial_number(),
-                index: metadata.file_index(),
-            })
+            let _ = metadata;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "descriptor-safe LQTP3 file identity requires Linux",
+            ))
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -1011,6 +1013,15 @@ impl PackV3Writer {
                 specs.len()
             )));
         }
+        let parent_path = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        // Bind the destination directory (and, for relative paths, the current
+        // working directory) at writer creation. Publication never redirects
+        // to a later same-name directory or traverses a symlink component.
+        let publication_parent = open_publication_parent(parent_path)?;
+        let publication_parent_identity = FileIdentity::from_file(&publication_parent)?;
         if path.symlink_metadata().is_ok() {
             return Err(PackV3Error::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -1069,6 +1080,8 @@ impl PackV3Writer {
         }
         Ok(Self {
             final_path: path.to_path_buf(),
+            publication_parent,
+            publication_parent_identity,
             partial_path,
             partial_identity: None,
             partial_file: None,
@@ -1291,6 +1304,7 @@ impl PackV3Writer {
         .encode();
 
         let output_file = OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&self.partial_path)?;
@@ -1301,7 +1315,7 @@ impl PackV3Writer {
             .ok_or(PackV3Error::InvalidLayout("missing writer partial file"))?;
         let partial_identity = FileIdentity::from_file(partial_file)?;
         self.partial_identity = Some(partial_identity);
-        let mut output = BufWriter::new(partial_file.try_clone()?);
+        let mut output = HashingWriter::new(BufWriter::new(partial_file.try_clone()?));
         before_io(FinishIoStageV3::PartialWrite)?;
         output.write_all(&header)?;
         output.write_all(&directory)?;
@@ -1343,6 +1357,7 @@ impl PackV3Writer {
         }
         before_io(FinishIoStageV3::PartialFlush)?;
         output.flush()?;
+        let (output, expected_bundle_sha256) = output.into_parts();
         let (output, buffered) = output.into_parts();
         debug_assert!(matches!(buffered, Ok(bytes) if bytes.is_empty()));
         drop(output);
@@ -1351,6 +1366,23 @@ impl PackV3Writer {
             .as_ref()
             .ok_or(PackV3Error::InvalidLayout("missing writer partial file"))?
             .sync_all()?;
+        let final_name = self.final_path.file_name().ok_or_else(|| {
+            PackV3Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "LQTP3 destination has no file name",
+            ))
+        })?;
+        // Keep a descriptor-created audit link before exposing the prepublish
+        // seam. If the named staging path is unlinked or substituted and the
+        // later directory sync fails, the synced source inode remains named.
+        let _audit_name = create_staging_audit_link(
+            self.partial_file
+                .as_ref()
+                .ok_or(PackV3Error::InvalidLayout("missing writer partial file"))?,
+            &self.publication_parent,
+            final_name,
+        )?;
+        self.publication_parent.sync_all()?;
         before_io(FinishIoStageV3::PrePublish)?;
         match publish_noreplace(
             &self.partial_path,
@@ -1358,7 +1390,12 @@ impl PackV3Writer {
             self.partial_file
                 .as_ref()
                 .ok_or(PackV3Error::InvalidLayout("missing writer partial file"))?,
-            &self.final_path,
+            expected_bundle_sha256,
+            PublicationTarget {
+                parent: &self.publication_parent,
+                parent_identity: self.publication_parent_identity,
+                final_path: &self.final_path,
+            },
         ) {
             Ok(()) => {}
             Err(error @ PackV3Error::PublicationStateUnknown(_)) => {
@@ -1618,8 +1655,38 @@ impl PackV3Reader {
         expected_view_spec_sha256: Option<[u8; 32]>,
         chunk_cache_slots: usize,
     ) -> Result<Self, PackV3Error> {
+        Self::from_file_with_cache_slots(
+            open_nofollow(path)?,
+            expected_manifest_sha256,
+            expected_view_spec_sha256,
+            chunk_cache_slots,
+        )
+    }
+
+    /// Fully verify a snapshot through an already-open, owned descriptor.
+    pub fn from_file(
+        file: File,
+        expected_manifest_sha256: Option<[u8; 32]>,
+        expected_view_spec_sha256: Option<[u8; 32]>,
+    ) -> Result<Self, PackV3Error> {
+        Self::from_file_with_cache_slots(
+            file,
+            expected_manifest_sha256,
+            expected_view_spec_sha256,
+            0,
+        )
+    }
+
+    /// Fully verify a snapshot through an owned descriptor with a decoded
+    /// chunk-cache capacity.
+    pub fn from_file_with_cache_slots(
+        file: File,
+        expected_manifest_sha256: Option<[u8; 32]>,
+        expected_view_spec_sha256: Option<[u8; 32]>,
+        chunk_cache_slots: usize,
+    ) -> Result<Self, PackV3Error> {
         Self::open_inner(
-            path,
+            file,
             expected_manifest_sha256,
             expected_view_spec_sha256,
             None,
@@ -1649,9 +1716,44 @@ impl PackV3Reader {
         receipt_bytes: &[u8],
         chunk_cache_slots: usize,
     ) -> Result<Self, PackV3Error> {
+        Self::from_verified_file_with_cache_slots(
+            open_nofollow(path)?,
+            expected_manifest_sha256,
+            expected_view_spec_sha256,
+            receipt_bytes,
+            chunk_cache_slots,
+        )
+    }
+
+    /// Open an owned descriptor using a verification receipt and lazy payload
+    /// verification.
+    pub fn from_verified_file(
+        file: File,
+        expected_manifest_sha256: Option<[u8; 32]>,
+        expected_view_spec_sha256: Option<[u8; 32]>,
+        receipt_bytes: &[u8],
+    ) -> Result<Self, PackV3Error> {
+        Self::from_verified_file_with_cache_slots(
+            file,
+            expected_manifest_sha256,
+            expected_view_spec_sha256,
+            receipt_bytes,
+            0,
+        )
+    }
+
+    /// Open an owned descriptor using a verification receipt and decoded
+    /// chunk-cache capacity.
+    pub fn from_verified_file_with_cache_slots(
+        file: File,
+        expected_manifest_sha256: Option<[u8; 32]>,
+        expected_view_spec_sha256: Option<[u8; 32]>,
+        receipt_bytes: &[u8],
+        chunk_cache_slots: usize,
+    ) -> Result<Self, PackV3Error> {
         let receipt = VerificationReceiptV3::parse(receipt_bytes)?;
         Self::open_inner(
-            path,
+            file,
             expected_manifest_sha256,
             expected_view_spec_sha256,
             Some(receipt),
@@ -1660,13 +1762,12 @@ impl PackV3Reader {
     }
 
     fn open_inner(
-        path: &Path,
+        file: File,
         expected_manifest_sha256: Option<[u8; 32]>,
         expected_view_spec_sha256: Option<[u8; 32]>,
         receipt: Option<VerificationReceiptV3>,
         chunk_cache_slots: usize,
     ) -> Result<Self, PackV3Error> {
-        let file = open_nofollow(path)?;
         let file_metadata = file.metadata()?;
         if !file_metadata.is_file() {
             return Err(PackV3Error::InvalidLayout("non-regular file"));
@@ -2561,6 +2662,36 @@ fn require_zero_padding(
     Ok(())
 }
 
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn into_parts(self) -> (W, [u8; 32]) {
+        (self.inner, self.hasher.finalize().into())
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let count = self.inner.write(bytes)?;
+        self.hasher.update(&bytes[..count]);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 fn write_padding(writer: &mut impl Write, length: u64) -> Result<(), PackV3Error> {
     const ZEROES: [u8; 64] = [0; 64];
     let mut remaining = length;
@@ -2578,11 +2709,24 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     value.into()
 }
 
+#[derive(Clone, Copy)]
+struct PublicationTarget<'a> {
+    parent: &'a File,
+    parent_identity: FileIdentity,
+    final_path: &'a Path,
+}
+
+struct PublicationHooks<S, R> {
+    sync_parent: S,
+    retire_staging: R,
+}
+
 fn publish_noreplace(
     partial_path: &Path,
     partial_identity: FileIdentity,
     partial_file: &File,
-    final_path: &Path,
+    expected_bundle_sha256: [u8; 32],
+    target: PublicationTarget<'_>,
 ) -> Result<(), PackV3Error> {
     #[cfg(target_os = "linux")]
     {
@@ -2590,13 +2734,20 @@ fn publish_noreplace(
             partial_path,
             partial_identity,
             partial_file,
-            final_path,
+            expected_bundle_sha256,
+            target,
             File::sync_all,
         )
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (partial_path, partial_identity, partial_file, final_path);
+        let _ = (
+            partial_path,
+            partial_identity,
+            partial_file,
+            expected_bundle_sha256,
+            target,
+        );
         Err(PackV3Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "descriptor-safe no-replace LQTP3 publication is unavailable on this platform",
@@ -2609,24 +2760,72 @@ fn publish_noreplace_with_sync(
     partial_path: &Path,
     partial_identity: FileIdentity,
     partial_file: &File,
-    final_path: &Path,
+    expected_bundle_sha256: [u8; 32],
+    target: PublicationTarget<'_>,
     sync_parent: impl FnOnce(&File) -> std::io::Result<()>,
 ) -> Result<(), PackV3Error> {
-    let parent_path = final_path
+    publish_noreplace_with_hooks(
+        partial_path,
+        partial_identity,
+        partial_file,
+        expected_bundle_sha256,
+        target,
+        PublicationHooks {
+            sync_parent,
+            retire_staging: retire_owned_file,
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn publish_noreplace_with_hooks(
+    partial_path: &Path,
+    partial_identity: FileIdentity,
+    partial_file: &File,
+    expected_bundle_sha256: [u8; 32],
+    target: PublicationTarget<'_>,
+    hooks: PublicationHooks<
+        impl FnOnce(&File) -> std::io::Result<()>,
+        impl FnOnce(&Path, FileIdentity, &File, bool) -> std::io::Result<()>,
+    >,
+) -> Result<(), PackV3Error> {
+    let PublicationHooks {
+        sync_parent,
+        retire_staging,
+    } = hooks;
+    let parent_path = target
+        .final_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let final_name = final_path.file_name().ok_or_else(|| {
+    let final_name = target.final_path.file_name().ok_or_else(|| {
         PackV3Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "LQTP3 destination has no file name",
         ))
     })?;
-    // Open the parent once so link creation and durability apply to the same
-    // directory even if a pathname component is concurrently renamed.
-    let parent = File::open(parent_path)?;
-    link_file_descriptor_noreplace(partial_file, &parent, final_name)?;
-    if let Err(sync_error) = sync_parent(&parent) {
+    if !directory_path_matches_bound(parent_path, target.parent_identity)? {
+        return Err(PackV3Error::Io(std::io::Error::other(
+            "LQTP3 destination parent changed after writer creation",
+        )));
+    }
+    // Publish a distinct inode. Linking the named staging inode directly would
+    // leave the durable artifact with two links because safe staging cleanup
+    // deliberately retains a zero-byte quarantine name. An anonymous file in
+    // the already-bound destination directory keeps both no-replace and
+    // descriptor authority without making the final artifact unevictable by
+    // single-link CAS policy.
+    let published_file = create_anonymous_file(target.parent)?;
+    copy_exact_file_descriptor(partial_file, &published_file, expected_bundle_sha256)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let source_mode = partial_file.metadata()?.mode() & 0o7777;
+        published_file.set_permissions(std::fs::Permissions::from_mode(source_mode))?;
+    }
+    published_file.sync_all()?;
+    link_file_descriptor_noreplace(&published_file, target.parent, final_name)?;
+    if let Err(sync_error) = sync_parent(target.parent) {
         // There is no portable atomic "unlink this path only if it still names
         // this inode" operation. A metadata check followed by remove_file has a
         // substitution TOCTOU, so never path-delete after publication. The
@@ -2636,10 +2835,274 @@ fn publish_noreplace_with_sync(
             "final no-replace link was created but directory sync failed ({sync_error}); names retained for audit; do not retry"
         )));
     }
-    // The final link is durable. Removing the staging name is cleanup-only;
-    // a cleanup failure must not report the durable final artifact as failed.
-    let _ = retire_owned_file(partial_path, partial_identity, partial_file, false);
+    match directory_path_matches_bound(parent_path, target.parent_identity) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(PackV3Error::PublicationStateUnknown(
+                "final link is durable in the bound parent, but the destination parent path changed; names retained for audit; do not retry"
+                    .into(),
+            ));
+        }
+        Err(identity_error) => {
+            return Err(PackV3Error::PublicationStateUnknown(format!(
+                "final link is durable in the bound parent, but the destination parent path could not be revalidated ({identity_error}); names retained for audit; do not retry"
+            )));
+        }
+    }
+    // The final link is durable and owns an independent inode. Retire and
+    // truncate the exact staging descriptor, retaining only a zero-byte name;
+    // cleanup failure is a distinct committed do-not-retry state, not an
+    // ordinary publication failure.
+    if let Err(retire_error) = retire_staging(partial_path, partial_identity, partial_file, true) {
+        return Err(PackV3Error::PublicationStateUnknown(format!(
+            "final link is durable but staging retirement failed ({retire_error}); names retained for audit; do not retry"
+        )));
+    }
     Ok(())
+}
+
+fn open_publication_parent(path: &Path) -> std::io::Result<File> {
+    #[cfg(target_os = "linux")]
+    {
+        open_directory_nofollow(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "descriptor-safe no-replace LQTP3 publication requires Linux O_TMPFILE",
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn directory_path_matches_bound(
+    path: &Path,
+    expected_identity: FileIdentity,
+) -> std::io::Result<bool> {
+    let observed = open_directory_nofollow(path)?;
+    Ok(FileIdentity::from_file(&observed)? == expected_identity)
+}
+
+#[cfg(target_os = "linux")]
+fn create_staging_audit_link(
+    staging_file: &File,
+    publication_parent: &File,
+    final_name: &std::ffi::OsStr,
+) -> std::io::Result<std::ffi::OsString> {
+    for _ in 0..16 {
+        let mut audit_name = final_name.to_os_string();
+        audit_name.push(format!(
+            ".staging-audit.{}.{}",
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        match link_file_descriptor_noreplace(staging_file, publication_parent, &audit_name) {
+            Ok(()) => return Ok(audit_name),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique LQTP3 staging audit name",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_staging_audit_link(
+    staging_file: &File,
+    publication_parent: &File,
+    final_name: &std::ffi::OsStr,
+) -> std::io::Result<std::ffi::OsString> {
+    let _ = (staging_file, publication_parent, final_name);
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "descriptor-safe LQTP3 staging audit links require Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    let mut components = path.components().peekable();
+    let absolute = matches!(components.peek(), Some(Component::RootDir));
+    let anchor = if absolute {
+        b"/\0".as_slice()
+    } else {
+        b".\0".as_slice()
+    };
+    // SAFETY: `anchor` is NUL-terminated. A successful descriptor is owned by
+    // the File constructed immediately below.
+    let descriptor = unsafe {
+        libc::open(
+            anchor.as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `descriptor` is a fresh successful open result and ownership is
+    // transferred exactly once to File.
+    let mut directory = unsafe { File::from_raw_fd(descriptor) };
+
+    for component in components {
+        let name = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => name,
+            Component::ParentDir => std::ffi::OsStr::new(".."),
+            Component::Prefix(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "unsupported path prefix in Linux LQTP3 destination parent",
+                ));
+            }
+        };
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "LQTP3 destination parent contains a NUL byte",
+            )
+        })?;
+        // SAFETY: `name` and the current directory descriptor remain live for
+        // the call. O_NOFOLLOW rejects a symlink at every traversed component.
+        let next = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `next` is a fresh successful openat result and ownership is
+        // transferred exactly once, replacing and closing the prior component.
+        directory = unsafe { File::from_raw_fd(next) };
+    }
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn create_anonymous_file(destination_parent: &File) -> std::io::Result<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let current_directory = b".\0";
+    // SAFETY: `current_directory` is NUL-terminated, the directory descriptor
+    // is live, and a successful open returns a new owned descriptor. Omitting
+    // O_EXCL deliberately permits linking the O_TMPFILE inode after it is
+    // fully copied and synced.
+    let descriptor = unsafe {
+        libc::openat(
+            destination_parent.as_raw_fd(),
+            current_directory.as_ptr().cast(),
+            libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Linux O_TMPFILE is required for descriptor-safe single-link LQTP3 publication: {error}"
+            ),
+        ));
+    }
+    // SAFETY: `descriptor` is a fresh successful openat result and ownership
+    // is transferred exactly once to File.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(target_os = "linux")]
+fn copy_exact_file_descriptor(
+    source: &File,
+    destination: &File,
+    expected_sha256: [u8; 32],
+) -> std::io::Result<u64> {
+    copy_exact_file_descriptor_with_hook(source, destination, expected_sha256, |_| Ok(()))
+}
+
+#[cfg(target_os = "linux")]
+fn copy_exact_file_descriptor_with_hook(
+    source: &File,
+    destination: &File,
+    expected_sha256: [u8; 32],
+    mut after_chunk: impl FnMut(u64) -> std::io::Result<()>,
+) -> std::io::Result<u64> {
+    use std::os::unix::fs::FileExt;
+
+    const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+
+    let expected_length = source.metadata()?.len();
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    let mut copied_hasher = Sha256::new();
+    let mut offset = 0_u64;
+    while offset < expected_length {
+        let remaining = expected_length - offset;
+        let bounded_length = usize::try_from(remaining.min(COPY_BUFFER_BYTES as u64))
+            .map_err(|_| std::io::Error::other("LQTP3 publication copy length overflow"))?;
+        let count = source.read_at(&mut buffer[..bounded_length], offset)?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "LQTP3 staging descriptor truncated during publication at byte {offset} of {expected_length}"
+                ),
+            ));
+        }
+        copied_hasher.update(&buffer[..count]);
+        let mut written = 0_usize;
+        while written < count {
+            let write_offset = offset
+                .checked_add(written as u64)
+                .ok_or_else(|| std::io::Error::other("LQTP3 publication offset overflow"))?;
+            let progress = destination.write_at(&buffer[written..count], write_offset)?;
+            if progress == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to copy the complete LQTP3 staging descriptor",
+                ));
+            }
+            written = written
+                .checked_add(progress)
+                .ok_or_else(|| std::io::Error::other("LQTP3 publication write overflow"))?;
+        }
+        offset = offset
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("LQTP3 publication offset overflow"))?;
+        after_chunk(offset)?;
+    }
+
+    // Reject concurrent growth as well as truncation. The destination must be
+    // an exact descriptor-bound copy, never a prefix selected from a changing
+    // staging inode.
+    let mut trailing = [0_u8; 1];
+    if source.metadata()?.len() != expected_length
+        || source.read_at(&mut trailing, expected_length)? != 0
+    {
+        return Err(std::io::Error::other(
+            "LQTP3 staging descriptor changed length during publication",
+        ));
+    }
+    if destination.metadata()?.len() != expected_length {
+        return Err(std::io::Error::other(
+            "LQTP3 anonymous publication copy has the wrong length",
+        ));
+    }
+    let copied_sha256: [u8; 32] = copied_hasher.finalize().into();
+    if copied_sha256 != expected_sha256 {
+        return Err(std::io::Error::other(
+            "LQTP3 staging bytes changed after the writer computed the immutable bundle digest",
+        ));
+    }
+    Ok(expected_length)
 }
 
 #[cfg(target_os = "linux")]
@@ -2722,6 +3185,56 @@ mod publication_tests {
         (file, identity)
     }
 
+    fn descriptor_sha256(file: &File) -> [u8; 32] {
+        use std::os::unix::fs::FileExt;
+
+        let length = usize::try_from(file.metadata().unwrap().len()).unwrap();
+        let mut bytes = vec![0_u8; length];
+        let mut offset = 0_usize;
+        while offset < length {
+            let count = file.read_at(&mut bytes[offset..], offset as u64).unwrap();
+            assert_ne!(count, 0);
+            offset += count;
+        }
+        sha256(&bytes)
+    }
+
+    fn bound_parent(final_path: &Path) -> (File, FileIdentity) {
+        let parent_path = final_path.parent().unwrap();
+        let parent = open_directory_nofollow(parent_path).unwrap();
+        let identity = FileIdentity::from_file(&parent).unwrap();
+        (parent, identity)
+    }
+
+    fn fail_retirement(_: &Path, _: FileIdentity, _: &File, _: bool) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected retirement failure"))
+    }
+
+    fn publish_owned_with_sync(
+        partial_path: &Path,
+        partial_identity: FileIdentity,
+        partial_file: &File,
+        final_path: &Path,
+        sync_parent: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<(), PackV3Error> {
+        let (parent, parent_identity) = bound_parent(final_path);
+        let final_name = final_path.file_name().unwrap();
+        create_staging_audit_link(partial_file, &parent, final_name).unwrap();
+        parent.sync_all().unwrap();
+        publish_noreplace_with_sync(
+            partial_path,
+            partial_identity,
+            partial_file,
+            descriptor_sha256(partial_file),
+            PublicationTarget {
+                parent: &parent,
+                parent_identity,
+                final_path,
+            },
+            sync_parent,
+        )
+    }
+
     fn raw_spec(chunk_rows: usize) -> ViewSpecV3 {
         ViewSpecV3::new(
             "signal",
@@ -2766,12 +3279,14 @@ mod publication_tests {
 
     #[test]
     fn sync_failure_retains_both_names_and_reports_do_not_retry_state() {
+        use std::os::unix::fs::MetadataExt;
+
         let directory = tempfile::tempdir().unwrap();
         let partial = directory.path().join("pack.partial");
         let final_path = directory.path().join("pack.lqtp3");
         let (partial_file, partial_identity) = create_owned(&partial, b"owned");
 
-        let result = publish_noreplace_with_sync(
+        let result = publish_owned_with_sync(
             &partial,
             partial_identity,
             &partial_file,
@@ -2786,6 +3301,215 @@ mod publication_tests {
         assert!(final_path.exists());
         assert_eq!(std::fs::read(&partial).unwrap(), b"owned");
         assert_eq!(std::fs::read(&final_path).unwrap(), b"owned");
+        let partial_metadata = std::fs::metadata(&partial).unwrap();
+        let final_metadata = std::fs::metadata(&final_path).unwrap();
+        assert_ne!(partial_metadata.ino(), final_metadata.ino());
+        assert_eq!(partial_metadata.nlink(), 2);
+        assert_eq!(final_metadata.nlink(), 1);
+        let audit_entries: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".staging-audit.")
+            })
+            .collect();
+        assert_eq!(audit_entries.len(), 1);
+        assert_eq!(std::fs::read(audit_entries[0].path()).unwrap(), b"owned");
+    }
+
+    #[test]
+    fn successful_publication_copies_to_a_single_link_final_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("pack.partial");
+        let final_path = directory.path().join("pack.lqtp3");
+        let expected = b"owned-pack-bytes";
+        let (partial_file, partial_identity) = create_owned(&partial, expected);
+
+        publish_owned_with_sync(
+            &partial,
+            partial_identity,
+            &partial_file,
+            &final_path,
+            File::sync_all,
+        )
+        .unwrap();
+
+        let final_metadata = std::fs::metadata(&final_path).unwrap();
+        assert_eq!(std::fs::read(&final_path).unwrap(), expected);
+        assert_eq!(final_metadata.nlink(), 1);
+        assert_ne!(
+            FileIdentity::from_file(&partial_file).unwrap().inode,
+            final_metadata.ino()
+        );
+        assert_eq!(partial_file.metadata().unwrap().len(), 0);
+
+        let partial_name = partial.file_name().unwrap().to_string_lossy();
+        let tombstones: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(partial_name.as_ref()) && name.contains(".retired.")
+            })
+            .collect();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].metadata().unwrap().len(), 0);
+        for entry in std::fs::read_dir(directory.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path() != final_path {
+                assert_eq!(entry.metadata().unwrap().len(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn same_length_source_mutation_cannot_publish_a_torn_copy() {
+        use std::os::unix::fs::FileExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.partial");
+        let mut expected = vec![0x5a_u8; 2 * 1024 * 1024];
+        let final_index = expected.len() - 1;
+        expected[final_index] = 0x7b;
+        let (source, _) = create_owned(&source_path, &expected);
+        let parent = open_directory_nofollow(directory.path()).unwrap();
+        let destination = create_anonymous_file(&parent).unwrap();
+        let expected_sha256 = sha256(&expected);
+        let mutated = std::cell::Cell::new(false);
+
+        let result = copy_exact_file_descriptor_with_hook(
+            &source,
+            &destination,
+            expected_sha256,
+            |copied| {
+                if !mutated.get() && copied >= 1024 * 1024 {
+                    source.write_at(&[0x33], (expected.len() - 1) as u64)?;
+                    source.sync_all()?;
+                    mutated.set(true);
+                }
+                Ok(())
+            },
+        );
+
+        assert!(mutated.get());
+        assert!(result.is_err());
+        assert_eq!(source.metadata().unwrap().len(), expected.len() as u64);
+    }
+
+    #[test]
+    fn retirement_failure_is_an_observable_do_not_retry_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("pack.partial");
+        let final_path = directory.path().join("pack.lqtp3");
+        let expected = b"owned";
+        let (partial_file, partial_identity) = create_owned(&partial, expected);
+        let (parent, parent_identity) = bound_parent(&final_path);
+
+        let result = publish_noreplace_with_hooks(
+            &partial,
+            partial_identity,
+            &partial_file,
+            sha256(expected),
+            PublicationTarget {
+                parent: &parent,
+                parent_identity,
+                final_path: &final_path,
+            },
+            PublicationHooks {
+                sync_parent: File::sync_all,
+                retire_staging: fail_retirement,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(PackV3Error::PublicationStateUnknown(_))
+        ));
+        assert_eq!(std::fs::read(&final_path).unwrap(), expected);
+        assert_eq!(std::fs::read(&partial).unwrap(), expected);
+    }
+
+    #[test]
+    fn parent_change_after_final_sync_is_a_do_not_retry_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent_path = directory.path().join("parent");
+        let displaced_parent = directory.path().join("displaced-parent");
+        let replacement_parent = directory.path().join("replacement-parent");
+        std::fs::create_dir(&parent_path).unwrap();
+        std::fs::create_dir(&replacement_parent).unwrap();
+        let partial = parent_path.join("pack.partial");
+        let final_path = parent_path.join("pack.lqtp3");
+        let expected = b"owned";
+        let (partial_file, partial_identity) = create_owned(&partial, expected);
+
+        let result = publish_owned_with_sync(
+            &partial,
+            partial_identity,
+            &partial_file,
+            &final_path,
+            |bound_parent| {
+                bound_parent.sync_all()?;
+                std::fs::rename(&parent_path, &displaced_parent)?;
+                std::fs::rename(&replacement_parent, &parent_path)?;
+                Ok(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(PackV3Error::PublicationStateUnknown(_))
+        ));
+        assert_eq!(
+            std::fs::read(displaced_parent.join("pack.lqtp3")).unwrap(),
+            expected
+        );
+        assert!(!parent_path.join("pack.lqtp3").exists());
+    }
+
+    #[test]
+    fn unlink_substitution_and_sync_failure_retain_a_staging_audit_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("pack.partial");
+        let final_path = directory.path().join("pack.lqtp3");
+        let expected = b"owned";
+        let (partial_file, partial_identity) = create_owned(&partial, expected);
+        let (parent, parent_identity) = bound_parent(&final_path);
+        let audit_name =
+            create_staging_audit_link(&partial_file, &parent, final_path.file_name().unwrap())
+                .unwrap();
+        parent.sync_all().unwrap();
+        std::fs::remove_file(&partial).unwrap();
+        std::fs::write(&partial, b"substitution").unwrap();
+
+        let result = publish_noreplace_with_sync(
+            &partial,
+            partial_identity,
+            &partial_file,
+            sha256(expected),
+            PublicationTarget {
+                parent: &parent,
+                parent_identity,
+                final_path: &final_path,
+            },
+            |_| Err(std::io::Error::other("injected sync failure")),
+        );
+
+        assert!(matches!(
+            result,
+            Err(PackV3Error::PublicationStateUnknown(_))
+        ));
+        assert_eq!(std::fs::read(&partial).unwrap(), b"substitution");
+        assert_eq!(
+            std::fs::read(directory.path().join(audit_name)).unwrap(),
+            expected
+        );
+        assert_eq!(std::fs::read(&final_path).unwrap(), expected);
     }
 
     #[test]
@@ -2795,7 +3519,7 @@ mod publication_tests {
         let final_path = directory.path().join("pack.lqtp3");
         let (partial_file, partial_identity) = create_owned(&partial, b"owned");
 
-        let result = publish_noreplace_with_sync(
+        let result = publish_owned_with_sync(
             &partial,
             partial_identity,
             &partial_file,
@@ -2850,7 +3574,7 @@ mod publication_tests {
     }
 
     #[test]
-    fn descriptor_publication_fails_closed_after_unlink_substitution() {
+    fn descriptor_publication_ignores_unlink_substitution() {
         let directory = tempfile::tempdir().unwrap();
         let final_path = directory.path().join("pack.lqtp3");
         let mut writer = PackV3Writer::create(
@@ -2866,19 +3590,21 @@ mod publication_tests {
         let partial = writer.partial_path.clone();
         let observed_owned_file = std::cell::RefCell::new(None);
 
-        let result = writer.finish_with_io_hook(|stage| {
-            if stage == FinishIoStageV3::PrePublish {
-                let owned = OpenOptions::new().read(true).write(true).open(&partial)?;
-                std::fs::remove_file(&partial)?;
-                std::fs::write(&partial, b"partial-substitution")?;
-                observed_owned_file.replace(Some(owned));
-            }
-            Ok(())
-        });
+        writer
+            .finish_with_io_hook(|stage| {
+                if stage == FinishIoStageV3::PrePublish {
+                    let owned = OpenOptions::new().read(true).write(true).open(&partial)?;
+                    std::fs::remove_file(&partial)?;
+                    std::fs::write(&partial, b"partial-substitution")?;
+                    observed_owned_file.replace(Some(owned));
+                }
+                Ok(())
+            })
+            .unwrap();
 
-        assert!(matches!(result, Err(PackV3Error::Io(_))));
-        assert!(!final_path.exists());
         assert_eq!(std::fs::read(&partial).unwrap(), b"partial-substitution");
+        let reader = PackV3Reader::open(&final_path, None, None).unwrap();
+        assert_eq!(reader.dequantize_f32("signal", 0).unwrap(), vec![7.0]);
         assert_eq!(
             observed_owned_file
                 .into_inner()
@@ -2888,6 +3614,176 @@ mod publication_tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn publication_rejects_a_symlinked_parent_component() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let real_parent = directory.path().join("real");
+        let symlink_parent = directory.path().join("link");
+        std::fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &symlink_parent).unwrap();
+        let final_path = symlink_parent.join("pack.lqtp3");
+        let result = PackV3Writer::create(
+            &final_path,
+            1,
+            [0; 32],
+            [0; 32],
+            Vec::new(),
+            vec![single_raw_spec()],
+        );
+
+        assert!(matches!(result, Err(PackV3Error::Io(_))));
+        assert!(!real_parent.join("pack.lqtp3").exists());
+    }
+
+    #[test]
+    fn publication_rejects_a_parent_swapped_to_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("parent");
+        let displaced_parent = directory.path().join("displaced-parent");
+        let attacker_parent = directory.path().join("attacker-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::create_dir(&attacker_parent).unwrap();
+        let final_path = parent.join("pack.lqtp3");
+        let mut writer = PackV3Writer::create(
+            &final_path,
+            1,
+            [0; 32],
+            [0; 32],
+            Vec::new(),
+            vec![single_raw_spec()],
+        )
+        .unwrap();
+        writer.write_f32_row("signal", &[7.0]).unwrap();
+        let swapped = std::cell::Cell::new(false);
+
+        let result = writer.finish_with_io_hook(|stage| {
+            if stage == FinishIoStageV3::PrePublish {
+                std::fs::rename(&parent, &displaced_parent)?;
+                symlink(&attacker_parent, &parent)?;
+                swapped.set(true);
+            }
+            Ok(())
+        });
+
+        assert!(swapped.get());
+        assert!(matches!(result, Err(PackV3Error::Io(_))));
+        assert!(!attacker_parent.join("pack.lqtp3").exists());
+        assert!(!displaced_parent.join("pack.lqtp3").exists());
+    }
+
+    #[test]
+    fn publication_rejects_a_parent_swapped_to_another_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("parent");
+        let displaced_parent = directory.path().join("displaced-parent");
+        let replacement_parent = directory.path().join("replacement-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::create_dir(&replacement_parent).unwrap();
+        let final_path = parent.join("pack.lqtp3");
+        let mut writer = PackV3Writer::create(
+            &final_path,
+            1,
+            [0; 32],
+            [0; 32],
+            Vec::new(),
+            vec![single_raw_spec()],
+        )
+        .unwrap();
+        writer.write_f32_row("signal", &[7.0]).unwrap();
+        let swapped = std::cell::Cell::new(false);
+
+        let result = writer.finish_with_io_hook(|stage| {
+            if stage == FinishIoStageV3::PrePublish {
+                std::fs::rename(&parent, &displaced_parent)?;
+                std::fs::rename(&replacement_parent, &parent)?;
+                swapped.set(true);
+            }
+            Ok(())
+        });
+
+        assert!(swapped.get());
+        assert!(matches!(result, Err(PackV3Error::Io(_))));
+        assert!(!parent.join("pack.lqtp3").exists());
+        assert!(!displaced_parent.join("pack.lqtp3").exists());
+    }
+
+    #[test]
+    fn publication_walks_a_relative_parent_from_a_bound_cwd() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::Builder::new()
+            .prefix("lqtp3-relative-parent-")
+            .tempdir_in(".")
+            .unwrap();
+        let current_directory = std::env::current_dir().unwrap();
+        let relative_parent = directory.path().strip_prefix(current_directory).unwrap();
+        assert!(!relative_parent.is_absolute());
+        let final_path = relative_parent.join("pack.lqtp3");
+        let mut writer = PackV3Writer::create(
+            &final_path,
+            1,
+            [0; 32],
+            [0; 32],
+            Vec::new(),
+            vec![single_raw_spec()],
+        )
+        .unwrap();
+        writer.write_f32_row("signal", &[7.0]).unwrap();
+        writer.finish().unwrap();
+
+        assert_eq!(std::fs::metadata(&final_path).unwrap().nlink(), 1);
+        let reader = PackV3Reader::open(&final_path, None, None).unwrap();
+        assert_eq!(reader.dequantize_f32("signal", 0).unwrap(), vec![7.0]);
+    }
+
+    #[test]
+    fn publication_rejects_relative_cwd_change() {
+        const CHILD_ENV: &str = "LAMQUANT_LQTP3_CWD_SWAP_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("tensor_pack_v3::publication_tests::publication_rejects_relative_cwd_change")
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let original_cwd = std::env::current_dir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let first_cwd = directory.path().join("first");
+        let second_cwd = directory.path().join("second");
+        std::fs::create_dir(&first_cwd).unwrap();
+        std::fs::create_dir(&second_cwd).unwrap();
+        std::fs::create_dir(first_cwd.join("output")).unwrap();
+        std::fs::create_dir(second_cwd.join("output")).unwrap();
+        std::env::set_current_dir(&first_cwd).unwrap();
+        let final_path = Path::new("output").join("pack.lqtp3");
+        let mut writer = PackV3Writer::create(
+            &final_path,
+            1,
+            [0; 32],
+            [0; 32],
+            Vec::new(),
+            vec![single_raw_spec()],
+        )
+        .unwrap();
+        writer.write_f32_row("signal", &[7.0]).unwrap();
+        std::env::set_current_dir(&second_cwd).unwrap();
+
+        let result = writer.finish();
+        std::env::set_current_dir(&original_cwd).unwrap();
+
+        assert!(matches!(result, Err(PackV3Error::Io(_))));
+        assert!(!first_cwd.join("output/pack.lqtp3").exists());
+        assert!(!second_cwd.join("output/pack.lqtp3").exists());
     }
 
     #[test]
@@ -2966,10 +3862,13 @@ mod publication_tests {
         let partial = directory.path().join("pack.partial");
         let final_path = directory.path().join("pack.lqtp3");
         let (partial_file, partial_identity) = create_owned(&partial, b"owned-partial");
+        let (publication_parent, publication_parent_identity) = bound_parent(&final_path);
         std::fs::write(&final_path, b"audit-final").unwrap();
 
         let writer = PackV3Writer {
             final_path: final_path.clone(),
+            publication_parent,
+            publication_parent_identity,
             partial_path: partial.clone(),
             partial_identity: Some(partial_identity),
             partial_file: Some(partial_file),
@@ -2993,7 +3892,7 @@ mod publication_tests {
         let final_path = directory.path().join("pack.lqtp3");
         let (partial_file, partial_identity) = create_owned(&partial, b"owned");
 
-        publish_noreplace_with_sync(
+        publish_owned_with_sync(
             &partial,
             partial_identity,
             &partial_file,
