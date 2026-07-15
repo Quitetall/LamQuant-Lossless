@@ -19,6 +19,7 @@
 
 pub mod abir2;
 pub mod ascii;
+pub mod bcs;
 pub mod bids;
 pub mod bitstream;
 pub mod brainvision;
@@ -46,6 +47,7 @@ pub use abir2::{
     recording_from_signal_bundle, recording_from_signal_bundle_with_options,
     RecordingAdapterOptions,
 };
+pub use bcs::{decode_biosignal_recording, BiosignalRecording};
 pub use bids::BidsRecordingReader;
 pub use brainvision::BrainVisionReader;
 pub use bundle::{SidecarBlob, SignalBundle, SourceMetadata};
