@@ -379,10 +379,7 @@ struct H5FloatTimeSeries {
     timing: NwbTiming,
 }
 
-fn read_float_timeseries(
-    file: &File,
-    datasets: &[Dataset],
-) -> LmlResult<Vec<H5FloatTimeSeries>> {
+fn read_float_timeseries(file: &File, datasets: &[Dataset]) -> LmlResult<Vec<H5FloatTimeSeries>> {
     let mut signals = Vec::new();
     for dataset in datasets {
         let h5_path = dataset.name();
