@@ -121,12 +121,17 @@ pub struct Unit {
 }
 
 impl Unit {
+    /// Construct a unit from an arbitrary namespaced unit system.
+    pub fn new(system: impl AsRef<str>, value: impl AsRef<str>) -> Self {
+        Self {
+            system: Arc::from(system.as_ref()),
+            value: Arc::from(value.as_ref()),
+        }
+    }
+
     /// Construct UCUM unit.
     pub fn ucum(unit: impl AsRef<str>) -> Self {
-        Self {
-            system: Arc::from("ucum"),
-            value: Arc::from(unit.as_ref()),
-        }
+        Self::new("ucum", unit)
     }
 
     /// Access unit string.

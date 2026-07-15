@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 use crate::semantic::{
     Attachment, Clock, CoordinateFrame, CoordinatePoint, Event, Interval, LossReceipt, ModalityId,
     PropertyBag, ProvenanceActivity, QualifiedName, RecordingIdentity, ReferenceEdge,
-    ReferenceNode, Relationship, SignalStream, Table, Tensor, ValueType,
+    ReferenceNode, Relationship, SemanticDisposition, SignalStream, Table, Tensor, Value,
+    ValueType,
 };
 
 /// Errors for recording construction and validation.
@@ -103,6 +104,23 @@ pub enum RecordingError {
         /// Repeated qualified name.
         name: QualifiedName,
     },
+    /// A clock or uniformly sampled axis has a zero rate.
+    InvalidRate {
+        /// ID of the clock or channel owning the invalid rate.
+        owner_id: Arc<str>,
+    },
+    /// A loss receipt claims extension preservation without a matching field.
+    MissingExtensionTarget {
+        /// Loss receipt ID.
+        receipt_id: Arc<str>,
+        /// Required extension name.
+        target: QualifiedName,
+    },
+    /// Nested typed extension values exceed the bounded verification depth.
+    ValueNestingLimit {
+        /// Maximum supported nesting depth.
+        limit: u8,
+    },
     /// Tensor shape and buffer mismatch.
     TensorElementCountMismatch {
         /// Tensor ID.
@@ -192,6 +210,18 @@ impl core::fmt::Display for RecordingError {
                 name.namespace(),
                 name.local()
             ),
+            Self::InvalidRate { owner_id } => {
+                write!(f, "'{owner_id}' has a zero clock or sample rate")
+            }
+            Self::MissingExtensionTarget { receipt_id, target } => write!(
+                f,
+                "loss receipt '{receipt_id}' requires missing extension '{}:{}'",
+                target.namespace(),
+                target.local()
+            ),
+            Self::ValueNestingLimit { limit } => {
+                write!(f, "typed value nesting exceeds limit {limit}")
+            }
             Self::TensorElementCountMismatch {
                 tensor_id,
                 expected,
@@ -509,7 +539,10 @@ impl Recording {
         Ok(())
     }
 
-    fn unique_properties(properties: &PropertyBag) -> Result<(), RecordingError> {
+    fn validate_properties(properties: &PropertyBag, depth: u8) -> Result<(), RecordingError> {
+        if depth >= 64 {
+            return Err(RecordingError::ValueNestingLimit { limit: 64 });
+        }
         let mut seen: BTreeSet<(Arc<str>, Arc<str>)> = BTreeSet::new();
         for property in properties.properties() {
             let name = property.name();
@@ -517,6 +550,23 @@ impl Recording {
             if !seen.insert(key) {
                 return Err(RecordingError::DuplicatePropertyName { name: name.clone() });
             }
+            Self::validate_value(property.value(), depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn validate_value(value: &Value, depth: u8) -> Result<(), RecordingError> {
+        if depth >= 64 {
+            return Err(RecordingError::ValueNestingLimit { limit: 64 });
+        }
+        match value {
+            Value::List(values) => {
+                for value in values.iter() {
+                    Self::validate_value(value, depth + 1)?;
+                }
+            }
+            Value::Record(properties) => Self::validate_properties(properties, depth + 1)?,
+            _ => {}
         }
         Ok(())
     }
@@ -540,6 +590,11 @@ impl Recording {
                 });
             }
             Self::insert_node_id(clock.id(), &mut node_ids)?;
+            if clock.tick_rate().numerator() == 0 {
+                return Err(RecordingError::InvalidRate {
+                    owner_id: Arc::from(clock.id()),
+                });
+            }
         }
         for stream in self.signal_streams.iter() {
             Self::insert_node_id(stream.id(), &mut node_ids)?;
@@ -603,6 +658,15 @@ impl Recording {
                         clock_id: Arc::from(series.time_axis().clock_id()),
                     });
                 }
+                if series
+                    .time_axis()
+                    .sample_rate()
+                    .is_some_and(|rate| rate.numerator() == 0)
+                {
+                    return Err(RecordingError::InvalidRate {
+                        owner_id: Arc::from(series.channel().id()),
+                    });
+                }
                 if let Some(ticks) = series.time_axis().explicit_ticks() {
                     if ticks.len() != series.len() {
                         return Err(RecordingError::ExplicitTimestampCountMismatch {
@@ -627,7 +691,7 @@ impl Recording {
                     clock_id: Arc::from(event.clock_id()),
                 });
             }
-            Self::unique_properties(event.properties())?;
+            Self::validate_properties(event.properties(), 0)?;
         }
         for interval in self.intervals.iter() {
             if !clock_ids.contains(interval.clock_id()) {
@@ -668,6 +732,7 @@ impl Recording {
                     });
                 }
                 for value in column.values() {
+                    Self::validate_value(value, 0)?;
                     if let Some(actual) = value.value_type() {
                         if actual != column.value_type() {
                             return Err(RecordingError::TableColumnTypeMismatch {
@@ -756,7 +821,25 @@ impl Recording {
             }
         }
 
-        Self::unique_properties(&self.extensions)?;
+        for receipt in self.loss_receipts.iter() {
+            if receipt.disposition() == SemanticDisposition::PreservedAsExtension {
+                let target =
+                    receipt
+                        .extension()
+                        .ok_or_else(|| RecordingError::MissingExtensionTarget {
+                            receipt_id: Arc::from(receipt.id()),
+                            target: QualifiedName::new("abir", "unspecified"),
+                        })?;
+                if self.extensions.get(target).is_none() {
+                    return Err(RecordingError::MissingExtensionTarget {
+                        receipt_id: Arc::from(receipt.id()),
+                        target: target.clone(),
+                    });
+                }
+            }
+        }
+
+        Self::validate_properties(&self.extensions, 0)?;
         Ok(())
     }
 }

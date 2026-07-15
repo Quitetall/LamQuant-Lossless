@@ -355,3 +355,48 @@ fn primitive_vocabulary_preserves_native_numeric_and_nested_extension_values() {
     );
     assert_ne!(ClockKind::UnixUtc, ClockKind::Relative);
 }
+
+#[test]
+fn freeze_rejects_zero_rates_missing_extension_targets_and_excessive_nesting() {
+    let mut zero_clock = RecordingBuilder::new(RecordingIdentity::new("s", None, None));
+    zero_clock
+        .add_clock(Clock::new(
+            "clock:stopped",
+            ClockKind::Device,
+            Rational::new(0, 1).unwrap(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        zero_clock.freeze(),
+        Err(RecordingError::InvalidRate { .. })
+    ));
+
+    let mut missing_extension = base_builder();
+    missing_extension
+        .add_loss_receipt(LossReceipt::new(
+            "loss:missing-extension",
+            name("dicom", "private"),
+            SemanticDisposition::PreservedAsExtension,
+            Some(name("vendor.example", "absent")),
+            "claimed but absent",
+        ))
+        .unwrap();
+    assert!(matches!(
+        missing_extension.freeze(),
+        Err(RecordingError::MissingExtensionTarget { .. })
+    ));
+
+    let mut nested = Value::Null;
+    for _ in 0..65 {
+        nested = Value::list(Arc::from([nested]));
+    }
+    let mut excessive_nesting = base_builder();
+    excessive_nesting.set_extensions(PropertyBag::new(vec![Property::new(
+        name("test", "nested"),
+        nested,
+    )]));
+    assert!(matches!(
+        excessive_nesting.freeze(),
+        Err(RecordingError::ValueNestingLimit { .. })
+    ));
+}
