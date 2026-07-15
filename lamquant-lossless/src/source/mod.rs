@@ -19,6 +19,7 @@
 
 pub mod abir2;
 pub mod ascii;
+pub mod bids;
 pub mod bitstream;
 pub mod brainvision;
 pub mod bundle;
@@ -45,6 +46,7 @@ pub use abir2::{
     recording_from_signal_bundle, recording_from_signal_bundle_with_options,
     RecordingAdapterOptions,
 };
+pub use bids::BidsRecordingReader;
 pub use brainvision::BrainVisionReader;
 pub use bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 pub use cnt::CntReader;

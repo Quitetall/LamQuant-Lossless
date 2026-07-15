@@ -19,7 +19,7 @@ use crate::error::{LmlError, LmlResult};
 
 use super::bundle::{SidecarBlob, SignalBundle};
 
-const CLOCK_ID: &str = "clock:source";
+pub(crate) const CLOCK_ID: &str = "clock:source";
 const CALIBRATION_TABLE_ID: &str = "table:channel-calibration";
 const SIDECAR_TABLE_ID: &str = "table:source-sidecars";
 const SOURCE_NAMESPACE: &str = "lamquant.source";
@@ -49,6 +49,19 @@ pub fn recording_from_signal_bundle_with_options(
     bundle: SignalBundle,
     options: RecordingAdapterOptions,
 ) -> LmlResult<Recording> {
+    recording_builder_from_signal_bundle_with_options(bundle, options, Vec::new())?
+        .freeze()
+        .map_err(graph_error)
+}
+
+/// Build the common source graph while leaving the final immutable transition
+/// to a dataset adapter. BIDS/NWB use this seam to add dataset-level semantics
+/// without reimplementing signal, calibration, sidecar, and provenance rules.
+pub(crate) fn recording_builder_from_signal_bundle_with_options(
+    bundle: SignalBundle,
+    options: RecordingAdapterOptions,
+    mut additional_extensions: Vec<Property>,
+) -> LmlResult<RecordingBuilder> {
     bundle.validate()?;
     validate_adapter_input(&bundle, &options)?;
     let (sample_rate, rate_was_approximated) = rationalize_rate(bundle.sample_rate)?;
@@ -85,13 +98,9 @@ pub fn recording_from_signal_bundle_with_options(
 
     let unit = source_unit(&bundle.metadata.phys_dim);
     let mut extensions = source_properties(&bundle, &options);
+    extensions.append(&mut additional_extensions);
     let mut streams: BTreeMap<String, Vec<SignalSeries>> = BTreeMap::new();
-    for (index, (label, samples)) in bundle
-        .channels
-        .iter()
-        .zip(bundle.signal)
-        .enumerate()
-    {
+    for (index, (label, samples)) in bundle.channels.iter().zip(bundle.signal).enumerate() {
         let modality = if declared_modality.is_some() {
             overall_modality
         } else {
@@ -204,7 +213,7 @@ pub fn recording_from_signal_bundle_with_options(
             concat!("lamquant-lml/", env!("CARGO_PKG_VERSION")),
         ))
         .map_err(graph_error)?;
-    builder.freeze().map_err(graph_error)
+    Ok(builder)
 }
 
 fn channel_calibration_table(
