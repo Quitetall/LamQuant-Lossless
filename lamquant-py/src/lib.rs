@@ -3,7 +3,10 @@ use abir::{
     Modality, ModalitySource, Other, Resp, Seeg, Untyped, BCS1_MAGIC,
 };
 use std::sync::Arc;
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{
+    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArrayDyn,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict};
 
@@ -921,6 +924,278 @@ impl PyPackReader {
     }
 }
 
+fn fixed_hash(bytes: &[u8], name: &str) -> PyResult<[u8; 32]> {
+    if bytes.len() != 32 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} must be 32 bytes"
+        )));
+    }
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(bytes);
+    Ok(hash)
+}
+
+fn parse_hex_hash(value: &str, name: &str) -> PyResult<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} must be 64 hexadecimal characters"
+        )));
+    }
+    let mut hash = [0_u8; 32];
+    for (index, output) in hash.iter_mut().enumerate() {
+        *output = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "{name} must be 64 hexadecimal characters"
+            ))
+        })?;
+    }
+    Ok(hash)
+}
+
+fn pack_v2_dtype(value: &str) -> PyResult<lml::tensor_pack_v2::PackV2Dtype> {
+    use lml::tensor_pack_v2::PackV2Dtype as Dtype;
+    match value {
+        "i8" | "int8" => Ok(Dtype::I8),
+        "u8" | "uint8" => Ok(Dtype::U8),
+        "i16" | "int16" => Ok(Dtype::I16),
+        "u16" | "uint16" => Ok(Dtype::U16),
+        "i32" | "int32" => Ok(Dtype::I32),
+        "u32" | "uint32" => Ok(Dtype::U32),
+        "i64" | "int64" => Ok(Dtype::I64),
+        "u64" | "uint64" => Ok(Dtype::U64),
+        "f16" | "float16" => Ok(Dtype::F16),
+        "bf16" | "bfloat16" => Ok(Dtype::Bf16),
+        "f32" | "float32" => Ok(Dtype::F32),
+        "f64" | "float64" => Ok(Dtype::F64),
+        "bool" => Ok(Dtype::Bool),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown LQTP2 dtype '{value}'"
+        ))),
+    }
+}
+
+fn pack_v2_dtype_name(value: lml::tensor_pack_v2::PackV2Dtype) -> &'static str {
+    use lml::tensor_pack_v2::PackV2Dtype as Dtype;
+    match value {
+        Dtype::I8 => "int8",
+        Dtype::U8 => "uint8",
+        Dtype::I16 => "int16",
+        Dtype::U16 => "uint16",
+        Dtype::I32 => "int32",
+        Dtype::U32 => "uint32",
+        Dtype::I64 => "int64",
+        Dtype::U64 => "uint64",
+        Dtype::F16 => "float16",
+        Dtype::Bf16 => "bfloat16",
+        Dtype::F32 => "float32",
+        Dtype::F64 => "float64",
+        Dtype::Bool => "bool",
+    }
+}
+
+fn pack_v2_encoding(value: &str) -> PyResult<lml::tensor_pack_v2::PackV2Encoding> {
+    use lml::tensor_pack_v2::PackV2Encoding as Encoding;
+    match value {
+        "raw" => Ok(Encoding::Raw),
+        "bfp8" | "bfp-int8" => Ok(Encoding::BfpInt8),
+        "bfp16" | "bfp-int16" => Ok(Encoding::BfpInt16),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown LQTP2 encoding '{value}'"
+        ))),
+    }
+}
+
+fn pack_v2_encoding_name(value: lml::tensor_pack_v2::PackV2Encoding) -> &'static str {
+    use lml::tensor_pack_v2::PackV2Encoding as Encoding;
+    match value {
+        Encoding::Raw => "raw",
+        Encoding::BfpInt8 => "bfp8",
+        Encoding::BfpInt16 => "bfp16",
+    }
+}
+
+/// LQTP2 writer. View specs are tuples of
+/// `(name, dtype, encoding, row_shape, required, spec_sha256_hex)`.
+#[pyclass]
+struct PyPackV2Writer {
+    inner: Option<lml::tensor_pack_v2::PackV2Writer>,
+}
+
+#[pymethods]
+impl PyPackV2Writer {
+    #[new]
+    fn new(
+        path: &str,
+        row_count: usize,
+        manifest_sha256: &[u8],
+        view_spec_sha256: &[u8],
+        metadata: &[u8],
+        view_specs: Vec<(String, String, String, Vec<usize>, bool, String)>,
+    ) -> PyResult<Self> {
+        let specs = view_specs
+            .into_iter()
+            .map(|(name, dtype, encoding, shape, required, spec_hash)| {
+                lml::tensor_pack_v2::ViewSpec::new(
+                    name,
+                    pack_v2_dtype(&dtype)?,
+                    pack_v2_encoding(&encoding)?,
+                    &shape,
+                    required,
+                    parse_hex_hash(&spec_hash, "view spec hash")?,
+                )
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let writer = lml::tensor_pack_v2::PackV2Writer::create(
+            std::path::Path::new(path),
+            row_count,
+            fixed_hash(manifest_sha256, "manifest_sha256")?,
+            fixed_hash(view_spec_sha256, "view_spec_sha256")?,
+            metadata.to_vec(),
+            specs,
+        )
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(Self {
+            inner: Some(writer),
+        })
+    }
+
+    fn write_f32_row(&mut self, view_name: &str, values: PyReadonlyArrayDyn<f32>) -> PyResult<()> {
+        let values = values.as_slice().map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "LQTP2 row must be contiguous: {error:?}"
+            ))
+        })?;
+        self.inner
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("writer already finished"))?
+            .write_f32_row(view_name, values)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+    }
+
+    fn write_raw_row(&mut self, view_name: &str, values: &Bound<'_, PyAny>) -> PyResult<()> {
+        let values = extract_bytes(values)?;
+        self.inner
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("writer already finished"))?
+            .write_raw_row(view_name, &values)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+    }
+
+    fn finish(&mut self) -> PyResult<()> {
+        self.inner
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("writer already finished"))?
+            .finish()
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+    }
+}
+
+/// Strict LQTP2 reader. Construction validates all hashes before workers start.
+#[pyclass]
+struct PyPackV2Reader {
+    inner: lml::tensor_pack_v2::PackV2Reader,
+}
+
+#[pymethods]
+impl PyPackV2Reader {
+    #[new]
+    #[pyo3(signature = (path, expected_manifest_sha256=None, expected_view_spec_sha256=None))]
+    fn new(
+        path: &str,
+        expected_manifest_sha256: Option<&[u8]>,
+        expected_view_spec_sha256: Option<&[u8]>,
+    ) -> PyResult<Self> {
+        let manifest = expected_manifest_sha256
+            .map(|value| fixed_hash(value, "expected_manifest_sha256"))
+            .transpose()?;
+        let view_spec = expected_view_spec_sha256
+            .map(|value| fixed_hash(value, "expected_view_spec_sha256"))
+            .transpose()?;
+        let inner = lml::tensor_pack_v2::PackV2Reader::open(
+            std::path::Path::new(path),
+            manifest,
+            view_spec,
+        )
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn row_count(&self) -> u64 {
+        self.inner.row_count()
+    }
+
+    #[getter]
+    fn view_names(&self) -> Vec<String> {
+        self.inner
+            .view_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[getter]
+    fn manifest_sha256<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.manifest_sha256())
+    }
+
+    #[getter]
+    fn view_spec_sha256<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.view_spec_sha256())
+    }
+
+    #[getter]
+    fn metadata<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.metadata())
+    }
+
+    fn view_info<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyDict>> {
+        let view = self
+            .inner
+            .view(name)
+            .map_err(|error| pyo3::exceptions::PyKeyError::new_err(error.to_string()))?;
+        let result = PyDict::new(py);
+        result.set_item("name", view.name())?;
+        result.set_item("dtype", pack_v2_dtype_name(view.dtype()))?;
+        result.set_item("encoding", pack_v2_encoding_name(view.encoding()))?;
+        result.set_item("row_shape", view.row_shape())?;
+        result.set_item("required", view.required())?;
+        result.set_item("spec_sha256", PyBytes::new(py, view.spec_sha256()))?;
+        result.set_item("data_sha256", PyBytes::new(py, view.data_sha256()))?;
+        result.set_item("data_offset", view.data_offset())?;
+        result.set_item("data_length", view.data_length())?;
+        result.set_item("row_stride", view.row_stride())?;
+        Ok(result)
+    }
+
+    fn row_raw<'py>(
+        &self,
+        py: Python<'py>,
+        view_name: &str,
+        row: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let values = self
+            .inner
+            .row_raw(view_name, row)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(PyBytes::new(py, values))
+    }
+
+    fn dequantize_flat<'py>(
+        &self,
+        py: Python<'py>,
+        view_name: &str,
+        row: usize,
+    ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let values = self
+            .inner
+            .dequantize_f32(view_name, row)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(PyArray1::from_vec(py, values))
+    }
+}
+
 #[pymodule]
 fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(golomb_encode_dense, m)?)?;
@@ -935,6 +1210,8 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAbir>()?;
     m.add_class::<PyPackWriter>()?;
     m.add_class::<PyPackReader>()?;
+    m.add_class::<PyPackV2Writer>()?;
+    m.add_class::<PyPackV2Reader>()?;
     m.add_function(wrap_pyfunction!(container_read_abir, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_bytes_abir, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_eeg_f32, m)?)?;
