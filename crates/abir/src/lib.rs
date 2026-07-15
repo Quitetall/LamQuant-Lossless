@@ -31,6 +31,13 @@ pub use modality::{
 pub mod reversibility;
 pub use reversibility::{Lossy, Reversibility, Reversible};
 
+/// ABIR2 recording graph primitives.
+pub mod recording;
+pub use recording::{
+    ChannelDescriptor, ModalityId, Rational, Recording, RecordingBuilder, RecordingError,
+    RecordingIdentity, SampleBuffer, SampleDtype, SignalSeries, SignalStream, TimeAxis, Unit,
+};
+
 /// The BCS1 neutral wire header (ADR 0069/0071 L9) — the ONE deliberate byte
 /// change: a 40-byte typed header (born-typed modality + codec descriptor +
 /// mode + tier) wrapping the byte-unchanged JSON metadata → window index →
