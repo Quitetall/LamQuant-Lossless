@@ -13,7 +13,9 @@
 //!
 //! Float / non-integer datasets are intentionally **not** returned here: LML is
 //! integer-only (ADR 0051 line 83 lists float roundtrip as a separate, later
-//! item), so the ingest caller stores those byte-exact instead of through LML.
+//! item), so the legacy bundle caller stores those byte-exact instead of through
+//! LML. The ABIR2 adapter additionally projects timed f32/f64 TimeSeries through
+//! native float sample buffers while retaining exact reconstruction.
 
 use crate::error::{LmlError, LmlResult};
 use crate::source::{SidecarBlob, SignalBundle, SourceMetadata};
@@ -21,6 +23,10 @@ use hdf5_metno::types::{IntSize, TypeDescriptor};
 use hdf5_metno::{Dataset, File, Group};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+mod abir2;
+
+pub use abir2::{read_recording, write_recording};
 
 /// One integer time-series dataset extracted from an HDF5/NWB file, in the
 /// codec's channel-major `i64` form, plus the metadata needed to put it back
@@ -119,7 +125,7 @@ fn read_int_dataset(ds: &Dataset) -> LmlResult<Option<H5IntSignal>> {
     };
 
     let shape = ds.shape();
-    if shape.is_empty() || shape.len() > 2 || shape.iter().any(|&d| d == 0) {
+    if shape.is_empty() || shape.len() > 2 || shape.contains(&0) {
         return Ok(None);
     }
 
@@ -161,8 +167,12 @@ pub fn read_int_signals(path: &Path) -> LmlResult<Vec<H5IntSignal>> {
     let mut datasets = Vec::new();
     collect_datasets(&file, &mut datasets)?;
 
+    read_int_signals_from_datasets(&datasets)
+}
+
+fn read_int_signals_from_datasets(datasets: &[Dataset]) -> LmlResult<Vec<H5IntSignal>> {
     let mut out = Vec::new();
-    for ds in &datasets {
+    for ds in datasets {
         if let Some(sig) = read_int_dataset(ds)? {
             out.push(sig);
         }
@@ -222,7 +232,11 @@ fn write_flat_i64(ds: &Dataset, int_bytes: u8, signed: bool, flat: &[i64]) -> Lm
         (2, false) => w!(u16),
         (4, false) => w!(u32),
         (8, false) => w!(u64),
-        _ => return Err(LmlError::InvalidHeader(format!("unsupported int width {int_bytes}"))),
+        _ => {
+            return Err(LmlError::InvalidHeader(format!(
+                "unsupported int width {int_bytes}"
+            )))
+        }
     }
     Ok(())
 }
@@ -250,6 +264,60 @@ fn flatten_slot(chs: &[Vec<i64>], shape: &[usize], time_major: bool) -> Vec<i64>
     flat
 }
 
+fn build_zeroed_skeleton(
+    path: &Path,
+    signals: &[H5IntSignal],
+    float_datasets: &[(String, u8, usize)],
+) -> LmlResult<Vec<u8>> {
+    let skeleton = tempfile::Builder::new()
+        .prefix("lml_nwb_skel_")
+        .suffix(".h5")
+        .tempfile()
+        .map_err(LmlError::Io)?;
+    std::fs::copy(path, skeleton.path()).map_err(LmlError::Io)?;
+    {
+        let file = h5(File::open_rw(skeleton.path()), "open_rw skeleton")?;
+        for signal in signals {
+            let dataset = h5(file.dataset(&signal.h5_path), "skeleton dataset")?;
+            let element_count = signal
+                .orig_shape
+                .iter()
+                .try_fold(1_usize, |total, &dimension| total.checked_mul(dimension))
+                .ok_or_else(|| {
+                    LmlError::InvalidHeader(format!(
+                        "NWB dataset '{}' shape overflows usize",
+                        signal.h5_path
+                    ))
+                })?;
+            write_flat_i64(
+                &dataset,
+                signal.int_bytes,
+                signal.signed,
+                &vec![0_i64; element_count],
+            )?;
+        }
+        for (dataset_path, float_bytes, element_count) in float_datasets {
+            let dataset = h5(file.dataset(dataset_path), "float skeleton dataset")?;
+            match float_bytes {
+                4 => h5(
+                    dataset.write_raw(&vec![0.0_f32; *element_count]),
+                    "zero f32 dataset",
+                )?,
+                8 => h5(
+                    dataset.write_raw(&vec![0.0_f64; *element_count]),
+                    "zero f64 dataset",
+                )?,
+                _ => {
+                    return Err(LmlError::InvalidHeader(format!(
+                        "unsupported NWB float width {float_bytes}"
+                    )))
+                }
+            }
+        }
+    }
+    std::fs::read(skeleton.path()).map_err(LmlError::Io)
+}
+
 /// Read an HDF5/NWB file into a [`SignalBundle`]: integer datasets become
 /// `signal` (for LML), and a zeroed copy of the whole file plus a slot map go
 /// into the sidecar (see module note). The original is never mutated.
@@ -263,6 +331,7 @@ pub fn read_bundle(path: &Path) -> LmlResult<SignalBundle> {
             "no little-endian integer datasets found to compress".into(),
         ));
     }
+    let skel_bytes = build_zeroed_skeleton(path, &sigs, &[])?;
 
     let mut signal: Vec<Vec<i64>> = Vec::new();
     let mut slots: Vec<NwbSlot> = Vec::new();
@@ -280,24 +349,6 @@ pub fn read_bundle(path: &Path) -> LmlResult<SignalBundle> {
         });
         signal.extend(s.signal);
     }
-
-    // Build the zeroed skeleton: copy the file, overwrite each integer dataset
-    // with zeros, read the bytes back. The temp file is removed on drop.
-    let skel = tempfile::Builder::new()
-        .prefix("lml_nwb_skel_")
-        .suffix(".h5")
-        .tempfile()
-        .map_err(LmlError::Io)?;
-    std::fs::copy(path, skel.path()).map_err(LmlError::Io)?;
-    {
-        let f = h5(File::open_rw(skel.path()), "open_rw skeleton")?;
-        for slot in &slots {
-            let ds = h5(f.dataset(&slot.h5_path), "skeleton dataset")?;
-            let n: usize = slot.orig_shape.iter().product();
-            write_flat_i64(&ds, slot.int_bytes, slot.signed, &vec![0i64; n])?;
-        }
-    }
-    let skel_bytes = std::fs::read(skel.path()).map_err(LmlError::Io)?;
 
     let n = signal.len();
     let slots_json = serde_json::to_vec(&slots)
@@ -318,8 +369,16 @@ pub fn read_bundle(path: &Path) -> LmlResult<SignalBundle> {
             phys_dim: String::new(),
         },
         sidecar: vec![
-            SidecarBlob { key: SKEL_KEY.into(), bytes: skel_bytes, aux: None },
-            SidecarBlob { key: SLOTS_KEY.into(), bytes: slots_json, aux: None },
+            SidecarBlob {
+                key: SKEL_KEY.into(),
+                bytes: skel_bytes,
+                aux: None,
+            },
+            SidecarBlob {
+                key: SLOTS_KEY.into(),
+                bytes: slots_json,
+                aux: None,
+            },
         ],
     })
 }
