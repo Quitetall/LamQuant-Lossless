@@ -17,6 +17,7 @@
 //!   free function `crate::edf::read_edf` continues to exist for
 //!   non-migrated callers
 
+pub mod abir2;
 pub mod ascii;
 pub mod bitstream;
 pub mod brainvision;
@@ -40,6 +41,10 @@ pub mod eeglab;
 pub mod raw;
 pub mod reader;
 
+pub use abir2::{
+    recording_from_signal_bundle, recording_from_signal_bundle_with_options,
+    RecordingAdapterOptions,
+};
 pub use brainvision::BrainVisionReader;
 pub use bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 pub use cnt::CntReader;

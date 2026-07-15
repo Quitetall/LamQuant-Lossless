@@ -13,8 +13,9 @@
 //!   checks the returned `SignalBundle` invariants.
 
 use crate::error::LmlResult;
-use abir::Abir;
+use abir::{Abir, Recording};
 
+use super::abir2::recording_from_signal_bundle;
 use super::bundle::SignalBundle;
 
 /// Read a physiology recording into the codec-agnostic `SignalBundle`.
@@ -57,5 +58,12 @@ pub trait SignalSourceReader {
         let b = self.read_bundle()?;
         let labels: Vec<&str> = b.channels.iter().map(String::as_str).collect();
         Ok(Abir::from_channels_i64(b.signal, b.sample_rate).with_inferred_modality(&labels, None))
+    }
+
+    /// Lower through the single format-neutral reader seam into immutable
+    /// ABIR2. Dataset-specific adapters may override identity or modality by
+    /// calling `recording_from_signal_bundle_with_options` directly.
+    fn lower_to_recording(&mut self) -> LmlResult<Recording> {
+        recording_from_signal_bundle(self.read_bundle()?)
     }
 }
