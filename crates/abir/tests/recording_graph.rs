@@ -1,9 +1,19 @@
 use std::sync::Arc;
 
 use abir::{
-    ChannelDescriptor, ModalityId, Rational, RecordingBuilder, RecordingIdentity, SampleBuffer,
-    SampleDtype, SignalSeries, SignalStream, TimeAxis, Unit,
+    ChannelDescriptor, Clock, ClockKind, ModalityId, Rational, RecordingBuilder, RecordingIdentity,
+    SampleBuffer, SampleDtype, SignalSeries, SignalStream, TimeAxis, Unit,
 };
+
+fn add_device_clock(builder: &mut RecordingBuilder) {
+    builder
+        .add_clock(Clock::new(
+            "clocks/device",
+            ClockKind::Device,
+            Rational::new(1_000_000, 1).unwrap(),
+        ))
+        .unwrap();
+}
 
 #[test]
 fn frozen_recording_preserves_mixed_rates_ragged_lengths_and_native_widths() {
@@ -12,6 +22,7 @@ fn frozen_recording_preserves_mixed_rates_ragged_lengths_and_native_widths() {
         Some("session-01"),
         Some("run-01"),
     ));
+    add_device_clock(&mut builder);
 
     let eeg = SignalStream::new("signals/eeg", ModalityId::eeg()).with_series(SignalSeries::new(
         ChannelDescriptor::new("channels/fz", "Fz", ModalityId::eeg(), Unit::ucum("uV")),
@@ -66,6 +77,7 @@ fn freeze_rejects_duplicate_entity_ids_and_bad_explicit_time_axes() {
     };
 
     let mut builder = RecordingBuilder::new(RecordingIdentity::new("subject-01", None, None));
+    add_device_clock(&mut builder);
     builder
         .add_signal_stream(make_stream("signals/eeg", "channels/fz"))
         .unwrap();
@@ -73,4 +85,23 @@ fn freeze_rejects_duplicate_entity_ids_and_bad_explicit_time_axes() {
         .add_signal_stream(make_stream("signals/eeg", "channels/fz-duplicate"))
         .is_err());
     assert!(builder.freeze().is_err());
+}
+
+#[test]
+fn freeze_requires_declared_clocks_for_every_signal_axis() {
+    let mut builder = RecordingBuilder::new(RecordingIdentity::new("subject-01", None, None));
+    builder
+        .add_signal_stream(
+            SignalStream::new("signals/eeg", ModalityId::eeg()).with_series(SignalSeries::new(
+                ChannelDescriptor::new("channels/fz", "Fz", ModalityId::eeg(), Unit::ucum("uV")),
+                TimeAxis::uniform("clocks/missing", 0, Rational::new(250, 1).unwrap()),
+                SampleBuffer::from_i16(Arc::from([1_i16, 2, 3])),
+            )),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        builder.freeze(),
+        Err(abir::RecordingError::UnknownClockId { .. })
+    ));
 }

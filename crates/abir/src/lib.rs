@@ -31,12 +31,19 @@ pub use modality::{
 pub mod reversibility;
 pub use reversibility::{Lossy, Reversibility, Reversible};
 
-/// ABIR2 recording graph primitives.
-pub mod recording;
-pub use recording::{
-    ChannelDescriptor, ModalityId, Rational, Recording, RecordingBuilder, RecordingError,
-    RecordingIdentity, SampleBuffer, SampleDtype, SignalSeries, SignalStream, TimeAxis, Unit,
+/// ABIR2 semantic graph primitives.
+pub mod semantic;
+pub use semantic::{
+    Attachment, ChannelDescriptor, Clock, ClockKind, CoordinateFrame, CoordinatePoint, Event,
+    Interval, LossReceipt, ModalityId, Property, PropertyBag, ProvenanceActivity, QualifiedName,
+    Rational, RecordingIdentity, ReferenceEdge, ReferenceNode, ReferenceNodeKind, Relationship,
+    SampleBuffer, SampleDtype, SemanticDisposition, SignalSeries, SignalStream, Table, TableColumn,
+    Tensor, TensorBuffer, TensorDataType, TimeAxis, Unit, Value, ValueType,
 };
+
+/// ABIR2 recording graph builder and recorder.
+pub mod recording;
+pub use recording::{Recording, RecordingBuilder, RecordingError};
 
 /// The BCS1 neutral wire header (ADR 0069/0071 L9) — the ONE deliberate byte
 /// change: a 40-byte typed header (born-typed modality + codec descriptor +
