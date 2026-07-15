@@ -57,6 +57,13 @@ pub use bcs1::{
     CODEC_LMQ_FSQ, CODEC_OPTIMUM_V2,
 };
 
+/// BCS2 deterministic indexed ABIR2 graph wire format.
+pub mod bcs2;
+pub use bcs2::{
+    decode_bcs2, encode_bcs2, Bcs2Error, Bcs2Header, Bcs2View, BiosignalWireVersion, SectionKind,
+    BCS2_HEADER_LEN, BCS2_MAGIC, BCS2_VERSION_MAJOR, BCS2_VERSION_MINOR,
+};
+
 /// Which deterministic wire format a stream is, decided by its leading magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
