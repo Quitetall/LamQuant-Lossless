@@ -3627,6 +3627,51 @@ pub fn read_entry(
     Ok(data)
 }
 
+/// Read one BCS1 or BCS2 archive member into the canonical immutable ABIR2
+/// recording boundary.
+///
+/// [`Method`] remains the archive compression tier. The biosignal schema is
+/// detected independently from the bounded, decompressed entry bytes. Explicit
+/// `.bcs1`/`.bcs2` suffixes are checked against that magic and fail closed on a
+/// mismatch; other suffixes (including EDF paths encoded as BCS1 by the LML
+/// tier) do not override authoritative wire bytes.
+pub fn read_recording_entry(
+    archive_path: &Path,
+    entry_name: &str,
+) -> Result<crate::source::BiosignalRecording, Box<dyn std::error::Error + Send + Sync>> {
+    let bytes = read_entry(archive_path, entry_name)?;
+    let decoded = crate::source::decode_biosignal_recording(&bytes, Some(entry_name))?;
+    if let Some(extension) = Path::new(entry_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+    {
+        let declared = match extension.as_str() {
+            "bcs1" => Some(abir::BiosignalWireVersion::Bcs1),
+            "bcs2" => Some(abir::BiosignalWireVersion::Bcs2),
+            _ => None,
+        };
+        if let Some(declared) = declared {
+            if declared != decoded.wire_version() {
+                return Err(format!(
+                    "LMA entry {entry_name:?} declares {} by extension but contains {} magic",
+                    wire_version_name(declared),
+                    wire_version_name(decoded.wire_version())
+                )
+                .into());
+            }
+        }
+    }
+    Ok(decoded)
+}
+
+fn wire_version_name(version: abir::BiosignalWireVersion) -> &'static str {
+    match version {
+        abir::BiosignalWireVersion::Bcs1 => "BCS1",
+        abir::BiosignalWireVersion::Bcs2 => "BCS2",
+    }
+}
+
 /// Batch ranged-header read: parse the LMA index ONCE, then for each
 /// requested name read only the first `n_bytes` of its payload.
 ///

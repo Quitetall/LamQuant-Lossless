@@ -378,8 +378,10 @@ fn source_unit(value: &str) -> Unit {
 
 fn sidecar_media_type(sidecar: &SidecarBlob) -> &'static str {
     match sidecar.key.as_str() {
-        "edf_meta" | "nwb_slots" => "application/json",
-        "raw_header" | "trailing_data" | "non_eeg_chunk" => "application/octet-stream",
+        "edf_meta" | "nwb_slots" | "bcs1_metadata_json" => "application/json",
+        "raw_header" | "trailing_data" | "non_eeg_chunk" | "bcs1_header" => {
+            "application/octet-stream"
+        }
         "dicom_raw" => "application/dicom",
         "nwb_skeleton" => "application/x-hdf5",
         _ => "application/octet-stream",
