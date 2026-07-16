@@ -6,6 +6,9 @@
 
 use std::fmt;
 
+#[doc(hidden)]
+#[path = "universal.rs"]
+pub mod fixed_universal_conformance;
 pub mod model_pack;
 
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";
