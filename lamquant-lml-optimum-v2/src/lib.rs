@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+pub mod bgf1_model_pack;
 #[doc(hidden)]
 #[path = "universal.rs"]
 pub mod fixed_universal_conformance;
