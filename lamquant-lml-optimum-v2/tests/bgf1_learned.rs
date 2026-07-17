@@ -4,6 +4,8 @@ use lamquant_lml_optimum_v2::bgf1_learned::{
 use lamquant_lml_optimum_v2::model_pack::{ModelPack, Tensor, TensorDtype};
 use sha2::{Digest, Sha256};
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -378,6 +380,7 @@ fn spaced_bipolar_labels_match_python_with_token_weighted_parameters() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn learned_worker_protocol_forces_each_arm_and_round_trips_lqraw() {
     let root = std::env::temp_dir().join(format!("optimum_v2_bgf1_learned_{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
@@ -438,6 +441,12 @@ fn learned_worker_protocol_forces_each_arm_and_round_trips_lqraw() {
             .status()
             .unwrap()
             .success());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&packet).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "learned packet must remain private while the construction reservation is active",
+        );
         assert!(Command::new(binary)
             .args([
                 "learned-decode",
@@ -450,6 +459,22 @@ fn learned_worker_protocol_forces_each_arm_and_round_trips_lqraw() {
             .success());
         assert_eq!(fs::read(recon).unwrap(), raw);
     }
+    let occupied = root.join("occupied-output.lmo");
+    let sentinel = b"do not overwrite";
+    fs::write(&occupied, sentinel).unwrap();
+    assert!(!Command::new(binary)
+        .args([
+            "learned-encode",
+            "2",
+            model_path.to_str().unwrap(),
+            raw_path.to_str().unwrap(),
+            meta_path.to_str().unwrap(),
+            occupied.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(fs::read(occupied).unwrap(), sentinel);
     assert!(!Command::new(binary)
         .args([
             "learned-encode",
@@ -480,6 +505,7 @@ fn learned_worker_protocol_forces_each_arm_and_round_trips_lqraw() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn learned_encode_rejects_governed_raw_paths_in_every_operand_before_open() {
     let root = std::env::temp_dir().join(format!(
         "optimum_v2_bgf1_governed_raw_guard_{}",

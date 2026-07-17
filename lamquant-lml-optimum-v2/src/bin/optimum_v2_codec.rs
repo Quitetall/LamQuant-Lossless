@@ -1,9 +1,13 @@
-use std::fs::{self, File, OpenOptions};
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use lamquant_lml_optimum_v2::bgf1_learned::{
@@ -55,6 +59,22 @@ fn lexical_normalize(absolute: &Path) -> PathBuf {
 struct GovernedRawBoundary {
     lexical_root: PathBuf,
     canonical_root: Option<PathBuf>,
+}
+
+struct GovernedOutputPath {
+    #[cfg(target_os = "linux")]
+    expected_parent: PathBuf,
+    #[cfg(target_os = "linux")]
+    name: std::ffi::OsString,
+    #[cfg(target_os = "linux")]
+    parent: File,
+    path: PathBuf,
+}
+
+impl GovernedOutputPath {
+    fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl GovernedRawBoundary {
@@ -116,36 +136,51 @@ impl GovernedRawBoundary {
         Ok(canonical)
     }
 
-    fn output_path(&self, path: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    fn output_path(&self, path: &Path) -> Result<GovernedOutputPath, String> {
         let absolute = absolute_unresolved(path)?;
         self.reject_lexical(&lexical_normalize(&absolute), "OUTPUT")?;
-        let canonical = match fs::canonicalize(&absolute) {
-            Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let parent = absolute
-                    .parent()
-                    .ok_or_else(|| "learned-encode OUTPUT has no parent".to_owned())?;
-                let name = absolute
-                    .file_name()
-                    .ok_or_else(|| "learned-encode OUTPUT has no file name".to_owned())?;
-                fs::canonicalize(parent)
-                    .map_err(|error| {
-                        format!(
-                            "canonicalize learned-encode OUTPUT parent {} before open: {error}",
-                            parent.display()
-                        )
-                    })?
-                    .join(name)
-            }
-            Err(error) => {
-                return Err(format!(
-                    "canonicalize learned-encode OUTPUT {} before open: {error}",
-                    absolute.display()
-                ));
-            }
-        };
-        self.reject_canonical(&canonical, "OUTPUT")?;
-        Ok(canonical)
+        let parent_path = absolute
+            .parent()
+            .ok_or_else(|| "learned-encode OUTPUT has no parent".to_owned())?;
+        let name = absolute
+            .file_name()
+            .ok_or_else(|| "learned-encode OUTPUT has no file name".to_owned())?
+            .to_owned();
+        let parent = File::open(parent_path).map_err(|error| {
+            format!(
+                "open learned-encode OUTPUT parent {}: {error}",
+                parent_path.display()
+            )
+        })?;
+        let descriptor_parent = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()));
+        let expected_parent = fs::canonicalize(&descriptor_parent).map_err(|error| {
+            format!(
+                "resolve opened learned-encode OUTPUT parent {}: {error}",
+                parent_path.display()
+            )
+        })?;
+        self.reject_canonical(&expected_parent, "OUTPUT")?;
+        if fs::canonicalize(parent_path).map_err(|error| {
+            format!(
+                "revalidate learned-encode OUTPUT parent {}: {error}",
+                parent_path.display()
+            )
+        })? != expected_parent
+        {
+            return Err("learned-encode OUTPUT parent changed during validation".to_owned());
+        }
+        Ok(GovernedOutputPath {
+            path: expected_parent.join(&name),
+            expected_parent,
+            name,
+            parent,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn output_path(&self, _path: &Path) -> Result<GovernedOutputPath, String> {
+        Err("learned-encode OUTPUT requires Linux descriptor-bound creation".to_owned())
     }
 
     fn verify_opened(&self, file: &File, expected: &Path, operand: &str) -> Result<(), String> {
@@ -181,15 +216,61 @@ impl GovernedRawBoundary {
         Ok(file)
     }
 
-    fn open_output(&self, path: &Path) -> Result<File, String> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|error| format!("open learned-encode OUTPUT {}: {error}", path.display()))?;
-        self.verify_opened(&file, path, "OUTPUT")?;
+    #[cfg(target_os = "linux")]
+    fn open_output(&self, output: &GovernedOutputPath) -> Result<File, String> {
+        let descriptor_parent =
+            PathBuf::from(format!("/proc/self/fd/{}", output.parent.as_raw_fd()));
+        if fs::canonicalize(&descriptor_parent).map_err(|error| {
+            format!(
+                "resolve opened learned-encode OUTPUT parent {}: {error}",
+                output.expected_parent.display()
+            )
+        })? != output.expected_parent
+        {
+            return Err("learned-encode OUTPUT parent changed before creation".to_owned());
+        }
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        options.mode(0o600);
+        let file = options
+            .open(descriptor_parent.join(&output.name))
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    format!(
+                        "refuse existing learned-encode OUTPUT {}",
+                        output.path.display()
+                    )
+                } else {
+                    format!(
+                        "open learned-encode OUTPUT {}: {error}",
+                        output.path.display()
+                    )
+                }
+            })?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!(
+                    "set learned-encode OUTPUT mode {}: {error}",
+                    output.path.display()
+                )
+            })?;
+        self.verify_opened(&file, &output.path, "OUTPUT")?;
+        if file
+            .metadata()
+            .map_err(|error| format!("inspect learned-encode OUTPUT mode: {error}"))?
+            .permissions()
+            .mode()
+            & 0o777
+            != 0o600
+        {
+            return Err("learned-encode OUTPUT mode is not exactly 0600".to_owned());
+        }
         Ok(file)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn open_output(&self, _output: &GovernedOutputPath) -> Result<File, String> {
+        Err("learned-encode OUTPUT requires Linux descriptor-bound creation".to_owned())
     }
 }
 
@@ -462,10 +543,10 @@ fn run(args: &[String]) -> Result<(), String> {
         let mut output_file = boundary.open_output(&output)?;
         output_file
             .set_len(0)
-            .map_err(|error| format!("truncate {}: {error}", output.display()))?;
+            .map_err(|error| format!("truncate {}: {error}", output.path().display()))?;
         return output_file
             .write_all(&packet)
-            .map_err(|error| format!("write {}: {error}", output.display()));
+            .map_err(|error| format!("write {}: {error}", output.path().display()));
     }
     if args.len() == 5 && args[1] == "learned-decode" {
         let codec = read_learned_model(Path::new(&args[2]))?;
@@ -531,7 +612,7 @@ mod governed_raw_guard_tests {
     use std::fs;
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn rejects_lexical_descendants_and_canonical_directory_aliases() {
         use std::os::unix::fs::symlink;
 
@@ -564,7 +645,7 @@ mod governed_raw_guard_tests {
         fs::hard_link(&governed_input, &hardlink_output).unwrap();
         let hardlink_output = boundary.output_path(&hardlink_output).unwrap();
         let error = boundary.open_output(&hardlink_output).unwrap_err();
-        assert!(error.contains("hard-linked"));
+        assert!(error.contains("refuse existing"));
         assert_eq!(fs::read(&governed_input).unwrap(), b"synthetic");
 
         let scratch = base.join("scratch.lqraw");
@@ -574,7 +655,10 @@ mod governed_raw_guard_tests {
             fs::canonicalize(&scratch).unwrap()
         );
         assert_eq!(
-            boundary.output_path(&base.join("scratch.lmo")).unwrap(),
+            boundary
+                .output_path(&base.join("scratch.lmo"))
+                .unwrap()
+                .path(),
             fs::canonicalize(&base).unwrap().join("scratch.lmo")
         );
 
@@ -598,17 +682,17 @@ mod governed_raw_guard_tests {
         let substitute_output_parent = base.join("substitute-output-parent");
         fs::create_dir_all(&output_parent).unwrap();
         fs::create_dir_all(&substitute_output_parent).unwrap();
-        fs::write(substitute_output_parent.join("result.lmo"), b"preserve").unwrap();
         let approved_output = boundary
             .output_path(&output_parent.join("result.lmo"))
             .unwrap();
         fs::rename(&output_parent, base.join("output-parent-moved")).unwrap();
-        symlink(&substitute_output_parent, &output_parent).unwrap();
+        fs::rename(&substitute_output_parent, &output_parent).unwrap();
         let error = boundary.open_output(&approved_output).unwrap_err();
-        assert!(error.contains("changed between validation and open"));
+        assert!(error.contains("OUTPUT parent changed before creation"));
         assert_eq!(
-            fs::read(substitute_output_parent.join("result.lmo")).unwrap(),
-            b"preserve"
+            fs::read_dir(&output_parent).unwrap().count(),
+            0,
+            "a same-path replacement parent must remain untouched",
         );
         let _ = fs::remove_dir_all(base);
     }
