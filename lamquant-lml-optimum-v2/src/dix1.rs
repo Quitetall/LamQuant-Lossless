@@ -25,6 +25,12 @@ const SCORE_DECAY_SHIFT: u32 = 5;
 const MIX_WEIGHT_NUMERATOR: u64 = 1 << 20;
 const INCIDENCE_PRIOR_COST: u64 = 64 * SCORE_Q;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dix1IncidenceMode {
+    Enabled,
+    Disabled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChannelState {
     history: Vec<i64>,
@@ -35,6 +41,7 @@ struct ChannelState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dix1Session {
     incidence: DerivationIncidence,
+    incidence_mode: Dix1IncidenceMode,
     states: Vec<ChannelState>,
     sample_lags: [usize; TEMPORAL_LAG_MS.len()],
     sample_min: i64,
@@ -47,6 +54,21 @@ impl Dix1Session {
         identities: &[ChannelIdentity],
         bit_depth: u8,
         sample_rate_mhz: u32,
+    ) -> Result<Self, OptimumV2Error> {
+        Self::new_with_incidence_mode(
+            identities,
+            bit_depth,
+            sample_rate_mhz,
+            Dix1IncidenceMode::Enabled,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_incidence_mode(
+        identities: &[ChannelIdentity],
+        bit_depth: u8,
+        sample_rate_mhz: u32,
+        incidence_mode: Dix1IncidenceMode,
     ) -> Result<Self, OptimumV2Error> {
         if !(1..=32).contains(&bit_depth) {
             return Err(invalid("DIX1 bit depth must be in 1..=32"));
@@ -83,6 +105,7 @@ impl Dix1Session {
         }
         Ok(Self {
             incidence,
+            incidence_mode,
             states,
             sample_lags,
             sample_min: -magnitude,
@@ -93,6 +116,10 @@ impl Dix1Session {
 
     pub fn incidence(&self) -> &DerivationIncidence {
         &self.incidence
+    }
+
+    pub fn incidence_mode(&self) -> Dix1IncidenceMode {
+        self.incidence_mode
     }
 
     pub fn sample_lags(&self) -> [usize; TEMPORAL_LAG_MS.len()] {
@@ -133,7 +160,11 @@ impl Dix1Session {
     /// packet commitment and is intentionally absent from any wire grammar.
     pub fn state_digest(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"LAMQUANT-DIX1-STATE-PROTOTYPE-V1");
+        digest.update(b"LAMQUANT-DIX1-STATE-PROTOTYPE-V2");
+        digest.update([match self.incidence_mode {
+            Dix1IncidenceMode::Enabled => 1,
+            Dix1IncidenceMode::Disabled => 0,
+        }]);
         digest.update(self.rows.to_le_bytes());
         digest.update(self.sample_min.to_le_bytes());
         digest.update(self.sample_max.to_le_bytes());
@@ -234,16 +265,26 @@ impl Dix1Session {
         let temporal = self.clip_prediction(state.temporal.prediction(&temporal_features)?);
         let delta = state.history[0];
         let incidence_channel = &self.incidence.channels()[channel];
-        let raw_incidence = self.clip_prediction(signed_support_sum(
-            incidence_channel,
-            current,
-            "DIX1 raw incidence",
-        )?);
-        let innovation_adjustment = signed_support_sum(
-            incidence_channel,
-            current_innovations,
-            "DIX1 innovation incidence",
-        )?;
+        let use_incidence = self.incidence_mode == Dix1IncidenceMode::Enabled
+            && !incidence_channel.supports().is_empty();
+        let raw_incidence = if use_incidence {
+            self.clip_prediction(signed_support_sum(
+                incidence_channel,
+                current,
+                "DIX1 raw incidence",
+            )?)
+        } else {
+            0
+        };
+        let innovation_adjustment = if use_incidence {
+            signed_support_sum(
+                incidence_channel,
+                current_innovations,
+                "DIX1 innovation incidence",
+            )?
+        } else {
+            0
+        };
         let innovation_incidence = self.clip_prediction(checked_add(
             temporal,
             innovation_adjustment,
@@ -254,10 +295,10 @@ impl Dix1Session {
         predictions[TEMPORAL_EXPERT] = temporal;
         predictions[RAW_INCIDENCE_EXPERT] = raw_incidence;
         predictions[INNOVATION_INCIDENCE_EXPERT] = innovation_incidence;
-        let active = if incidence_channel.supports().is_empty() {
-            [true, true, false, false]
-        } else {
+        let active = if use_incidence {
             [true; EXPERT_COUNT]
+        } else {
+            [true, true, false, false]
         };
         let blended = blend_predictions(
             predictions,

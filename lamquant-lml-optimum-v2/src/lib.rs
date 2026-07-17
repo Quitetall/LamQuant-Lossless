@@ -8,10 +8,14 @@ use std::fmt;
 
 pub mod bgf1_learned;
 pub mod bgf1_model_pack;
+mod binary_rans;
 #[doc(hidden)]
 pub mod derivation_incidence;
 #[doc(hidden)]
 pub mod dix1;
+#[doc(hidden)]
+pub mod dix1_carrier;
+mod dix1_entropy;
 #[doc(hidden)]
 #[path = "universal.rs"]
 pub mod fixed_predictor;

@@ -3,7 +3,7 @@
 use lamquant_lml_optimum_v2::derivation_incidence::{
     ChannelIdentity, DerivationIncidence, Partition,
 };
-use lamquant_lml_optimum_v2::dix1::Dix1Session;
+use lamquant_lml_optimum_v2::dix1::{Dix1IncidenceMode, Dix1Session};
 
 fn identity(stable_id: u16, label: &str) -> ChannelIdentity {
     ChannelIdentity::new(stable_id, label)
@@ -187,31 +187,17 @@ fn dix1_roundtrips_permuted_montage_with_identical_state_and_residual_proxy_byte
     assert_eq!(encoder, repeat);
     assert_eq!(encoder.row_count(), rows.len() as u64);
 
-    let no_incidence_identities = vec![
-        identity(10, "F3-REF"),
-        identity(11, "C3-REF"),
-        identity(12, "P3-REF"),
-        identity(13, "ECG"),
-    ];
-    let no_incidence = DerivationIncidence::build(&no_incidence_identities)
-        .expect("no-incidence control topology");
-    let candidate_order: Vec<_> = encoder
+    let control =
+        Dix1Session::new_with_incidence_mode(&identities, 24, 500_000, Dix1IncidenceMode::Disabled)
+            .expect("same-topology control");
+    assert_eq!(control.incidence_mode(), Dix1IncidenceMode::Disabled);
+    assert!(control
         .incidence()
         .channels()
         .iter()
-        .map(|channel| channel.stable_id())
-        .collect();
-    let control_order: Vec<_> = no_incidence
-        .channels()
-        .iter()
-        .map(|channel| channel.stable_id())
-        .collect();
-    assert_eq!(candidate_order, control_order);
-    assert!(no_incidence
-        .channels()
-        .iter()
-        .all(|channel| channel.supports().is_empty()));
-    let no_incidence_bytes = dix1_varint_bytes(&no_incidence_identities, &rows);
+        .any(|channel| !channel.supports().is_empty()));
+    assert_eq!(control.incidence(), encoder.incidence());
+    let no_incidence_bytes = dix1_varint_bytes(&identities, &rows, Dix1IncidenceMode::Disabled);
     let delta_bytes = delta_varint_bytes(&identities, &rows);
     println!(
         "DIX1 residual-payload varint proxy: incidence={} no_incidence={} incidence_saving={:.6}% delta={} delta_saving={:.6}%",
@@ -224,7 +210,7 @@ fn dix1_roundtrips_permuted_montage_with_identical_state_and_residual_proxy_byte
     );
     assert!(
         encoded.len() * 100 <= no_incidence_bytes.len() * 95,
-        "DIX1 incidence arm must beat the same predictor with its topology broken by at least 5%: {} vs {}",
+        "DIX1 incidence arm must beat the same-topology predictor with incidence experts disabled by at least 5%: {} vs {}",
         encoded.len(),
         no_incidence_bytes.len()
     );
@@ -391,8 +377,13 @@ fn delta_varint_bytes(identities: &[ChannelIdentity], rows: &[Vec<i64>]) -> Vec<
     bytes
 }
 
-fn dix1_varint_bytes(identities: &[ChannelIdentity], rows: &[Vec<i64>]) -> Vec<u8> {
-    let mut session = Dix1Session::new(identities, 24, 500_000).expect("DIX1 proxy session");
+fn dix1_varint_bytes(
+    identities: &[ChannelIdentity],
+    rows: &[Vec<i64>],
+    incidence_mode: Dix1IncidenceMode,
+) -> Vec<u8> {
+    let mut session = Dix1Session::new_with_incidence_mode(identities, 24, 500_000, incidence_mode)
+        .expect("DIX1 proxy session");
     let mut bytes = Vec::new();
     for row in rows {
         let residuals = session.forward_row(row).expect("DIX1 proxy forward");
