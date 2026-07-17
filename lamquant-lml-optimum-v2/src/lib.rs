@@ -13,6 +13,7 @@ mod binary_rans;
 pub mod derivation_incidence;
 #[doc(hidden)]
 pub mod dix1;
+mod dix1_blocks;
 #[doc(hidden)]
 pub mod dix1_carrier;
 mod dix1_entropy;

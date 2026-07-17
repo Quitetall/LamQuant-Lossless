@@ -18,6 +18,40 @@ fn identities() -> Vec<ChannelIdentity> {
 }
 
 #[test]
+fn construction_v2_uses_canonical_128_row_compact_blocks() {
+    let codec = Dix1ConstructionCodec;
+    let identities = identities();
+    for samples in [1usize, 127, 128, 129, 512] {
+        let signal = incidence_signal(samples);
+        let packet = codec
+            .encode_forced(&signal, &identities, 500_000, 24, Dix1CarrierMode::Raw)
+            .unwrap();
+        let block_count = samples.div_ceil(128);
+        assert_eq!(packet[11], 2, "body version for {samples} rows");
+        assert_eq!(packet[14], 2, "forced-raw profile for {samples} rows");
+        assert_eq!(
+            usize::from(u16::from_le_bytes(packet[17..19].try_into().unwrap())),
+            block_count
+        );
+        let (_, _, directory_len, payload_len) = packet_sections(&packet);
+        assert_eq!(directory_len, block_count * 5);
+        assert_eq!(payload_len, identities.len() * samples * 4);
+
+        let directory_start = packet_directory_start(&packet);
+        for block in 0..block_count {
+            let entry = directory_start + block * 5;
+            let rows = (samples - block * 128).min(128);
+            assert_eq!(packet[entry], 0);
+            assert_eq!(
+                u32::from_le_bytes(packet[entry + 1..entry + 5].try_into().unwrap()) as usize,
+                identities.len() * rows * 4
+            );
+        }
+        assert_eq!(codec.decode_window(&packet).unwrap().samples, signal);
+    }
+}
+
+#[test]
 fn every_forced_mode_is_self_decoding_repeatable_and_fully_accounted() {
     let codec = Dix1ConstructionCodec;
     let identities = identities();
@@ -42,7 +76,7 @@ fn every_forced_mode_is_self_decoding_repeatable_and_fully_accounted() {
         assert_eq!(decoded.identities, identities);
         assert_eq!(decoded.sample_rate_mhz, 500_000);
         assert_eq!(decoded.bit_depth, 24);
-        assert_eq!(decoded.mode, mode);
+        assert_eq!(decoded.tile_modes, vec![mode; 4]);
         if matches!(
             mode,
             Dix1CarrierMode::IncidenceRans | Dix1CarrierMode::NoIncidenceRans
@@ -54,28 +88,28 @@ fn every_forced_mode_is_self_decoding_repeatable_and_fully_accounted() {
         let (identity_len, topology_len, directory_len, payload_len) = packet_sections(&first);
         assert_eq!(identity_len, 32);
         assert_eq!(topology_len, 8);
-        assert_eq!(directory_len, 24);
+        assert_eq!(directory_len, 20);
         assert_eq!(
             first.len(),
             87 + identity_len + topology_len + directory_len + payload_len
         );
-        assert_eq!(first.len() - payload_len, 151);
+        assert_eq!(first.len() - payload_len, 147);
         let (expected_len, expected_sha256) = match mode {
             Dix1CarrierMode::Raw => (
-                8_343,
-                "add9052bd22f1463cd3496ed8b6ca3d27cc1cda1868839a09e408d5158200de4",
+                8_339,
+                "61f20ae238b52b15d967ac9a4a6860bb8ae22e6ccb2cb35aa4054c0168d4f004",
             ),
             Dix1CarrierMode::Delta => (
-                6_201,
-                "a9bde46ccdd6006bf6a82f9fc881555e4e6086d1c7412ab9be432524a5e4c500",
+                6_198,
+                "e6ffb5e911c475b55955be95bc30d9f71c4313393f85a048e4120728c433047e",
             ),
             Dix1CarrierMode::IncidenceRans => (
-                4_874,
-                "deebd7d8b041e8158bc8de8bf279e0a6fbcac63789930a257690c1333745b09c",
+                5_043,
+                "25b611906a0d4d54160f4dabc2f94bb94546b70d4486904a7b79ada7c99d1a70",
             ),
             Dix1CarrierMode::NoIncidenceRans => (
-                5_083,
-                "998da6ee6a9a7f597be568fe7a7edd8a64e7e427e58a47645b4a3e00687eb8d3",
+                5_260,
+                "b56f75f2f78176a9cd42d811ac01d8a7f6427b8a9228b8df00930ff8b66feb31",
             ),
         };
         assert_eq!(first.len(), expected_len);
@@ -136,17 +170,35 @@ fn product_and_native_escape_select_the_smallest_complete_packet() {
     let native = codec
         .encode_native_window(&signal, &identities, 500_000, 24)
         .expect("native");
-    assert_eq!(
-        product.len(),
-        raw.len().min(delta.len()).min(incidence.len())
-    );
-    assert_eq!(native.len(), raw.len().min(delta.len()));
+    assert!(product.len() <= raw.len().min(delta.len()).min(incidence.len()));
+    assert!(native.len() <= raw.len().min(delta.len()));
     let decoded_product = codec.decode_window(&product).unwrap();
     let decoded_native = codec.decode_window(&native).unwrap();
     assert_eq!(decoded_product.samples, signal);
     assert_eq!(decoded_native.samples, signal);
-    assert_eq!(decoded_product.mode, Dix1CarrierMode::IncidenceRans);
-    assert_eq!(decoded_native.mode, Dix1CarrierMode::Delta);
+    let expected_product = expected_product_modes(&raw, &delta, &incidence);
+    let expected_native = expected_native_modes(&raw, &delta);
+    assert_eq!(expected_product, vec![Dix1CarrierMode::IncidenceRans; 4]);
+    assert_eq!(expected_native, vec![Dix1CarrierMode::Delta; 4]);
+    assert_eq!(decoded_product.tile_modes, expected_product);
+    assert_eq!(decoded_native.tile_modes, expected_native);
+    assert_eq!(product.len(), 5_043);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&product)),
+        "748144213a5a95c429a5ceddfacf7e4a40a180d97b3961b726de93e99ce31e8d"
+    );
+    assert_eq!(native.len(), 6_198);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&native)),
+        "017b7fc3d385257e6798464dd22d9e83f6beed8f5f4758d1474c61652e4ae150"
+    );
+    assert_eq!(
+        packet_sections(&product).3,
+        packet_block_entries(&product)
+            .iter()
+            .map(|(_, length)| length)
+            .sum()
+    );
 
     let random = independent_signal(512);
     let random_raw = codec
@@ -161,11 +213,93 @@ fn product_and_native_escape_select_the_smallest_complete_packet() {
     let random_product = codec
         .encode_window(&random, &identities, 500_000, 24)
         .unwrap();
-    assert_eq!(
-        random_native.len(),
-        random_raw.len().min(random_delta.len())
-    );
+    assert!(random_native.len() <= random_raw.len().min(random_delta.len()));
     assert!(random_product.len() <= random_native.len());
+    let random_decoded_native = codec.decode_window(&random_native).unwrap();
+    let random_decoded_product = codec.decode_window(&random_product).unwrap();
+    assert_eq!(
+        random_decoded_native.tile_modes,
+        expected_native_modes(&random_raw, &random_delta)
+    );
+    let random_incidence = codec
+        .encode_forced(
+            &random,
+            &identities,
+            500_000,
+            24,
+            Dix1CarrierMode::IncidenceRans,
+        )
+        .unwrap();
+    assert_eq!(
+        random_decoded_product.tile_modes,
+        expected_product_modes(&random_raw, &random_delta, &random_incidence)
+    );
+}
+
+#[test]
+fn raw_escape_advances_predictor_before_a_later_incidence_block() {
+    let codec = Dix1ConstructionCodec;
+    let identities = identities();
+    let signal = raw_escape_then_zero_signal();
+    let raw = codec
+        .encode_forced(&signal, &identities, 500_000, 32, Dix1CarrierMode::Raw)
+        .unwrap();
+    let delta = codec
+        .encode_forced(&signal, &identities, 500_000, 32, Dix1CarrierMode::Delta)
+        .unwrap();
+    let incidence = codec
+        .encode_forced(
+            &signal,
+            &identities,
+            500_000,
+            32,
+            Dix1CarrierMode::IncidenceRans,
+        )
+        .unwrap();
+    let product = codec
+        .encode_window(&signal, &identities, 500_000, 32)
+        .unwrap();
+    let expected = expected_product_modes(&raw, &delta, &incidence);
+    assert_eq!(expected[0], Dix1CarrierMode::Raw);
+    assert!(expected[1..].contains(&Dix1CarrierMode::IncidenceRans));
+    let decoded = codec.decode_window(&product).unwrap();
+    assert_eq!(decoded.tile_modes, expected);
+    assert_eq!(decoded.samples, signal);
+}
+
+#[test]
+fn product_ties_choose_raw_before_delta() {
+    let codec = Dix1ConstructionCodec;
+    let identities = vec![identity(0, "ECG")];
+    let signal = vec![vec![1 << 20]];
+    let raw = codec
+        .encode_forced(&signal, &identities, 500_000, 24, Dix1CarrierMode::Raw)
+        .unwrap();
+    let delta = codec
+        .encode_forced(&signal, &identities, 500_000, 24, Dix1CarrierMode::Delta)
+        .unwrap();
+    let incidence = codec
+        .encode_forced(
+            &signal,
+            &identities,
+            500_000,
+            24,
+            Dix1CarrierMode::IncidenceRans,
+        )
+        .unwrap();
+    let lengths = [
+        packet_sections(&raw).3,
+        packet_sections(&delta).3,
+        packet_sections(&incidence).3,
+    ];
+    assert_eq!(lengths, [4, 4, 9]);
+
+    let product = codec
+        .encode_window(&signal, &identities, 500_000, 24)
+        .unwrap();
+    let decoded = codec.decode_window(&product).unwrap();
+    assert_eq!(decoded.tile_modes, [Dix1CarrierMode::Raw]);
+    assert_eq!(decoded.samples, signal);
 }
 
 #[test]
@@ -199,12 +333,14 @@ fn incidence_disabled_is_an_exact_payload_control_without_derivation_supports() 
 
     assert_eq!(incidence.len(), no_incidence.len());
     assert_eq!(packet_payload(&incidence), packet_payload(&no_incidence));
+    let decoded_incidence = codec.decode_window(&incidence).unwrap();
+    let decoded_no_incidence = codec.decode_window(&no_incidence).unwrap();
     assert_eq!(
-        packet_event_count(&incidence),
-        packet_event_count(&no_incidence)
+        decoded_incidence.event_count,
+        decoded_no_incidence.event_count
     );
-    assert_eq!(codec.decode_window(&incidence).unwrap().samples, signal);
-    assert_eq!(codec.decode_window(&no_incidence).unwrap().samples, signal);
+    assert_eq!(decoded_incidence.samples, signal);
+    assert_eq!(decoded_no_incidence.samples, signal);
 }
 
 #[test]
@@ -235,6 +371,22 @@ fn packets_are_invariant_when_stable_identities_move_with_channels() {
             .unwrap();
         assert_eq!(canonical, permuted);
     }
+    assert_eq!(
+        codec
+            .encode_window(&signal, &identities, 500_000, 24)
+            .unwrap(),
+        codec
+            .encode_window(&permuted_signal, &permuted_identities, 500_000, 24)
+            .unwrap()
+    );
+    assert_eq!(
+        codec
+            .encode_native_window(&signal, &identities, 500_000, 24)
+            .unwrap(),
+        codec
+            .encode_native_window(&permuted_signal, &permuted_identities, 500_000, 24,)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -272,10 +424,59 @@ fn packet_corruption_topology_tampering_and_truncation_fail_closed() {
     assert!(error.to_string().contains("topology"));
 
     let directory_start = topology_start + topology_len;
-    let mut count_tamper = packet.clone();
-    count_tamper[directory_start + 20..directory_start + 24].copy_from_slice(&1u32.to_le_bytes());
-    refresh_packet_crc(&mut count_tamper);
-    assert!(codec.decode_window(&count_tamper).is_err());
+    let mut mode_tamper = packet.clone();
+    mode_tamper[directory_start] = 0;
+    refresh_packet_crc(&mut mode_tamper);
+    let error = codec
+        .decode_window(&mode_tamper)
+        .expect_err("forced-incidence profile rejects raw block");
+    assert!(error.to_string().contains("profile"));
+
+    let mut length_tamper = packet.clone();
+    let length = u32::from_le_bytes(
+        length_tamper[directory_start + 1..directory_start + 5]
+            .try_into()
+            .unwrap(),
+    );
+    length_tamper[directory_start + 1..directory_start + 5]
+        .copy_from_slice(&(length + 1).to_le_bytes());
+    refresh_packet_crc(&mut length_tamper);
+    let error = codec
+        .decode_window(&length_tamper)
+        .expect_err("compact directory length tamper");
+    assert!(error.to_string().contains("cover the payload"));
+
+    let mut redistributed = codec
+        .encode_forced(
+            &incidence_signal(256),
+            &identities,
+            500_000,
+            24,
+            Dix1CarrierMode::IncidenceRans,
+        )
+        .unwrap();
+    let directory_start = packet_directory_start(&redistributed);
+    let first_len = u32::from_le_bytes(
+        redistributed[directory_start + 1..directory_start + 5]
+            .try_into()
+            .unwrap(),
+    );
+    let second_len = u32::from_le_bytes(
+        redistributed[directory_start + 6..directory_start + 10]
+            .try_into()
+            .unwrap(),
+    );
+    redistributed[directory_start + 1..directory_start + 5]
+        .copy_from_slice(&(first_len + 1).to_le_bytes());
+    redistributed[directory_start + 6..directory_start + 10]
+        .copy_from_slice(&(second_len - 1).to_le_bytes());
+    refresh_packet_crc(&mut redistributed);
+    assert!(codec.decode_window(&redistributed).is_err());
+
+    let mut profile_tamper = packet.clone();
+    profile_tamper[14] = 6;
+    refresh_packet_crc(&mut profile_tamper);
+    assert!(codec.decode_window(&profile_tamper).is_err());
 
     let mut payload_tamper = packet.clone();
     let payload = packet_payload_range(&payload_tamper);
@@ -290,6 +491,22 @@ fn packet_corruption_topology_tampering_and_truncation_fail_closed() {
     trailed.push(0);
     refresh_packet_crc(&mut trailed);
     assert!(codec.decode_window(&trailed).is_err());
+}
+
+#[test]
+fn refreshed_crc_single_bit_mutations_never_panic_or_decode_noncanonically() {
+    let codec = Dix1ConstructionCodec;
+    let packet = codec
+        .encode_window(&incidence_signal(512), &identities(), 500_000, 24)
+        .unwrap();
+    for index in (0..packet.len()).step_by(17) {
+        let mut mutated = packet.clone();
+        mutated[index] ^= 1u8 << (index % 8);
+        refresh_packet_crc(&mut mutated);
+        if codec.decode_window(&mutated).is_ok() {
+            assert_eq!(mutated, packet, "accepted mutation at byte {index}");
+        }
+    }
 }
 
 #[test]
@@ -446,6 +663,23 @@ fn independent_signal(count: usize) -> Vec<Vec<i64>> {
     signal
 }
 
+fn raw_escape_then_zero_signal() -> Vec<Vec<i64>> {
+    let mut state = 0xd1c1_5eed_f00d_cafeu64;
+    let mut signal = (0..4).map(|_| Vec::with_capacity(512)).collect::<Vec<_>>();
+    for _ in 0..128 {
+        for channel in &mut signal {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            channel.push(i64::from((state >> 32) as u32 as i32));
+        }
+    }
+    for channel in &mut signal {
+        channel.resize(512, 0);
+    }
+    signal
+}
+
 fn bounded_noise(state: &mut u64, bound: i64) -> i64 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
@@ -476,18 +710,70 @@ fn packet_payload_range(packet: &[u8]) -> std::ops::Range<usize> {
     start..start + payload_len
 }
 
+fn packet_directory_start(packet: &[u8]) -> usize {
+    let (identity_len, topology_len, _, _) = packet_sections(packet);
+    87 + identity_len + topology_len
+}
+
 fn packet_payload(packet: &[u8]) -> &[u8] {
     &packet[packet_payload_range(packet)]
 }
 
-fn packet_event_count(packet: &[u8]) -> u32 {
-    let (identity_len, topology_len, _, _) = packet_sections(packet);
-    let directory_start = 87 + identity_len + topology_len;
-    u32::from_le_bytes(
-        packet[directory_start + 20..directory_start + 24]
-            .try_into()
-            .unwrap(),
-    )
+fn packet_block_entries(packet: &[u8]) -> Vec<(u8, usize)> {
+    let (_, _, directory_len, _) = packet_sections(packet);
+    assert_eq!(directory_len % 5, 0);
+    let directory_start = packet_directory_start(packet);
+    (0..directory_len / 5)
+        .map(|block| {
+            let entry = directory_start + block * 5;
+            (
+                packet[entry],
+                u32::from_le_bytes(packet[entry + 1..entry + 5].try_into().unwrap()) as usize,
+            )
+        })
+        .collect()
+}
+
+fn expected_product_modes(raw: &[u8], delta: &[u8], incidence: &[u8]) -> Vec<Dix1CarrierMode> {
+    packet_block_entries(raw)
+        .into_iter()
+        .zip(packet_block_entries(delta))
+        .zip(packet_block_entries(incidence))
+        .map(
+            |(((raw_mode, raw_len), (delta_mode, delta_len)), (incidence_mode, incidence_len))| {
+                [
+                    (raw_len, raw_mode, Dix1CarrierMode::Raw),
+                    (delta_len, delta_mode, Dix1CarrierMode::Delta),
+                    (
+                        incidence_len,
+                        incidence_mode,
+                        Dix1CarrierMode::IncidenceRans,
+                    ),
+                ]
+                .into_iter()
+                .min_by_key(|(length, mode, _)| (*length, *mode))
+                .unwrap()
+                .2
+            },
+        )
+        .collect()
+}
+
+fn expected_native_modes(raw: &[u8], delta: &[u8]) -> Vec<Dix1CarrierMode> {
+    packet_block_entries(raw)
+        .into_iter()
+        .zip(packet_block_entries(delta))
+        .map(|((raw_mode, raw_len), (delta_mode, delta_len))| {
+            [
+                (raw_len, raw_mode, Dix1CarrierMode::Raw),
+                (delta_len, delta_mode, Dix1CarrierMode::Delta),
+            ]
+            .into_iter()
+            .min_by_key(|(length, mode, _)| (*length, *mode))
+            .unwrap()
+            .2
+        })
+        .collect()
 }
 
 fn crc32c(bytes: &[u8]) -> u32 {

@@ -121,6 +121,7 @@ impl Dix1EntropyEncoder {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn event_count(&self) -> usize {
         self.coder.event_count()
     }
