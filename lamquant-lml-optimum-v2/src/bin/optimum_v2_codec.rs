@@ -14,6 +14,8 @@ use lamquant_lml_optimum_v2::bgf1_learned::{
     Bgf1ChannelIdentity, Bgf1LearnedCodec, Bgf1LearnedMode,
 };
 use lamquant_lml_optimum_v2::bgf1_model_pack::{BGF1_EXPECTED_PACK_BYTES, BGF1_MODEL_ID};
+use lamquant_lml_optimum_v2::derivation_incidence::ChannelIdentity;
+use lamquant_lml_optimum_v2::dix1_carrier::{Dix1CarrierMode, Dix1ConstructionCodec};
 use lamquant_lml_optimum_v2::{EncodeContext, OptimumV2Codec};
 use serde_json::json;
 
@@ -104,7 +106,7 @@ impl GovernedRawBoundary {
     fn reject_lexical(&self, path: &Path, operand: &str) -> Result<(), String> {
         if path.starts_with(&self.lexical_root) {
             return Err(format!(
-                "learned-encode {operand} is within the governed construction raw root"
+                "construction worker {operand} is within the governed construction raw root"
             ));
         }
         Ok(())
@@ -117,7 +119,7 @@ impl GovernedRawBoundary {
             .is_some_and(|root| path.starts_with(root))
         {
             return Err(format!(
-                "learned-encode {operand} resolves within the governed construction raw root"
+                "construction worker {operand} resolves within the governed construction raw root"
             ));
         }
         Ok(())
@@ -128,7 +130,7 @@ impl GovernedRawBoundary {
         self.reject_lexical(&lexical_normalize(&absolute), operand)?;
         let canonical = fs::canonicalize(&absolute).map_err(|error| {
             format!(
-                "canonicalize learned-encode {operand} {} before open: {error}",
+                "canonicalize construction worker {operand} {} before open: {error}",
                 absolute.display()
             )
         })?;
@@ -142,33 +144,33 @@ impl GovernedRawBoundary {
         self.reject_lexical(&lexical_normalize(&absolute), "OUTPUT")?;
         let parent_path = absolute
             .parent()
-            .ok_or_else(|| "learned-encode OUTPUT has no parent".to_owned())?;
+            .ok_or_else(|| "construction worker OUTPUT has no parent".to_owned())?;
         let name = absolute
             .file_name()
-            .ok_or_else(|| "learned-encode OUTPUT has no file name".to_owned())?
+            .ok_or_else(|| "construction worker OUTPUT has no file name".to_owned())?
             .to_owned();
         let parent = File::open(parent_path).map_err(|error| {
             format!(
-                "open learned-encode OUTPUT parent {}: {error}",
+                "open construction worker OUTPUT parent {}: {error}",
                 parent_path.display()
             )
         })?;
         let descriptor_parent = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()));
         let expected_parent = fs::canonicalize(&descriptor_parent).map_err(|error| {
             format!(
-                "resolve opened learned-encode OUTPUT parent {}: {error}",
+                "resolve opened construction worker OUTPUT parent {}: {error}",
                 parent_path.display()
             )
         })?;
         self.reject_canonical(&expected_parent, "OUTPUT")?;
         if fs::canonicalize(parent_path).map_err(|error| {
             format!(
-                "revalidate learned-encode OUTPUT parent {}: {error}",
+                "revalidate construction worker OUTPUT parent {}: {error}",
                 parent_path.display()
             )
         })? != expected_parent
         {
-            return Err("learned-encode OUTPUT parent changed during validation".to_owned());
+            return Err("construction worker OUTPUT parent changed during validation".to_owned());
         }
         Ok(GovernedOutputPath {
             path: expected_parent.join(&name),
@@ -180,27 +182,34 @@ impl GovernedRawBoundary {
 
     #[cfg(not(target_os = "linux"))]
     fn output_path(&self, _path: &Path) -> Result<GovernedOutputPath, String> {
-        Err("learned-encode OUTPUT requires Linux descriptor-bound creation".to_owned())
+        Err("construction worker OUTPUT requires Linux descriptor-bound creation".to_owned())
     }
 
     fn verify_opened(&self, file: &File, expected: &Path, operand: &str) -> Result<(), String> {
         let metadata = file
             .metadata()
-            .map_err(|error| format!("inspect opened learned-encode {operand}: {error}"))?;
+            .map_err(|error| format!("inspect opened construction worker {operand}: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "construction worker {operand} is not a regular file"
+            ));
+        }
         #[cfg(unix)]
         if metadata.nlink() != 1 {
             return Err(format!(
-                "learned-encode {operand} is hard-linked; governed boundary requires one link"
+                "construction worker {operand} is hard-linked; governed boundary requires one link"
             ));
         }
         #[cfg(target_os = "linux")]
         {
             let opened = fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(
-                |error| format!("resolve opened learned-encode {operand} before access: {error}"),
+                |error| {
+                    format!("resolve opened construction worker {operand} before access: {error}")
+                },
             )?;
             if opened != expected {
                 return Err(format!(
-                    "learned-encode {operand} changed between validation and open"
+                    "construction worker {operand} changed between validation and open"
                 ));
             }
             self.reject_canonical(&opened, operand)?;
@@ -209,8 +218,21 @@ impl GovernedRawBoundary {
     }
 
     fn open_existing(&self, path: &Path, operand: &str) -> Result<File, String> {
-        let file = File::open(path).map_err(|error| {
-            format!("open learned-encode {operand} {}: {error}", path.display())
+        #[cfg(target_os = "linux")]
+        let file = {
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+            options.open(path)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let file = File::open(path);
+        let file = file.map_err(|error| {
+            format!(
+                "open construction worker {operand} {}: {error}",
+                path.display()
+            )
         })?;
         self.verify_opened(&file, path, operand)?;
         Ok(file)
@@ -222,12 +244,12 @@ impl GovernedRawBoundary {
             PathBuf::from(format!("/proc/self/fd/{}", output.parent.as_raw_fd()));
         if fs::canonicalize(&descriptor_parent).map_err(|error| {
             format!(
-                "resolve opened learned-encode OUTPUT parent {}: {error}",
+                "resolve opened construction worker OUTPUT parent {}: {error}",
                 output.expected_parent.display()
             )
         })? != output.expected_parent
         {
-            return Err("learned-encode OUTPUT parent changed before creation".to_owned());
+            return Err("construction worker OUTPUT parent changed before creation".to_owned());
         }
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -237,12 +259,12 @@ impl GovernedRawBoundary {
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
                     format!(
-                        "refuse existing learned-encode OUTPUT {}",
+                        "refuse existing construction worker OUTPUT {}",
                         output.path.display()
                     )
                 } else {
                     format!(
-                        "open learned-encode OUTPUT {}: {error}",
+                        "open construction worker OUTPUT {}: {error}",
                         output.path.display()
                     )
                 }
@@ -250,27 +272,27 @@ impl GovernedRawBoundary {
         file.set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|error| {
                 format!(
-                    "set learned-encode OUTPUT mode {}: {error}",
+                    "set construction worker OUTPUT mode {}: {error}",
                     output.path.display()
                 )
             })?;
         self.verify_opened(&file, &output.path, "OUTPUT")?;
         if file
             .metadata()
-            .map_err(|error| format!("inspect learned-encode OUTPUT mode: {error}"))?
+            .map_err(|error| format!("inspect construction worker OUTPUT mode: {error}"))?
             .permissions()
             .mode()
             & 0o777
             != 0o600
         {
-            return Err("learned-encode OUTPUT mode is not exactly 0600".to_owned());
+            return Err("construction worker OUTPUT mode is not exactly 0600".to_owned());
         }
         Ok(file)
     }
 
     #[cfg(not(target_os = "linux"))]
     fn open_output(&self, _output: &GovernedOutputPath) -> Result<File, String> {
-        Err("learned-encode OUTPUT requires Linux descriptor-bound creation".to_owned())
+        Err("construction worker OUTPUT requires Linux descriptor-bound creation".to_owned())
     }
 }
 
@@ -385,30 +407,8 @@ fn read_learned_lqraw_file(
 }
 
 fn write_lqraw(path: &Path, signal: &[Vec<i64>], context: &EncodeContext) -> Result<(), String> {
-    if signal.is_empty()
-        || signal[0].is_empty()
-        || signal
-            .iter()
-            .any(|channel| channel.len() != signal[0].len())
-    {
-        return Err("decoded signal is not rectangular".into());
-    }
-    let n_channels = u32::try_from(signal.len()).map_err(|_| "too many channels".to_owned())?;
-    let n_samples = u32::try_from(signal[0].len()).map_err(|_| "too many samples".to_owned())?;
-    let mut bytes = Vec::with_capacity(RAW_HEADER_LEN + signal.len() * signal[0].len() * 4);
-    bytes.extend_from_slice(RAW_MAGIC);
-    bytes.extend_from_slice(&[1, 4, context.bit_depth, 0]);
-    bytes.extend_from_slice(&context.sample_rate_mhz.to_le_bytes());
-    bytes.extend_from_slice(&n_channels.to_le_bytes());
-    bytes.extend_from_slice(&n_samples.to_le_bytes());
-    for channel in signal {
-        for &sample in channel {
-            let sample =
-                i32::try_from(sample).map_err(|_| "decoded sample exceeds i32".to_owned())?;
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-    }
-    fs::write(path, bytes).map_err(|error| format!("write {}: {error}", path.display()))
+    fs::write(path, encode_lqraw(signal, context)?)
+        .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 fn read_bounded(path: &Path, maximum: u64, kind: &str) -> Result<Vec<u8>, String> {
@@ -491,13 +491,79 @@ fn read_learned_identities(
         .collect()
 }
 
+fn read_dix1_identities(
+    file: File,
+    path: &Path,
+    expected_channels: usize,
+) -> Result<Vec<ChannelIdentity>, String> {
+    let bytes = read_bounded_file(file, path, MAX_META_BYTES, "DIX1 metadata")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("parse metadata: {error}"))?;
+    let labels = value
+        .get("channel_labels")
+        .cloned()
+        .ok_or_else(|| "DIX1 metadata is missing channel_labels".to_owned())?;
+    let labels: Vec<String> = serde_json::from_value(labels)
+        .map_err(|error| format!("parse metadata channel_labels: {error}"))?;
+    if labels.len() != expected_channels {
+        return Err("DIX1 metadata channel_labels do not match LQR1 channels".into());
+    }
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(stable_id, exact_label)| {
+            let stable_id = u16::try_from(stable_id)
+                .map_err(|_| "DIX1 metadata has too many channels".to_owned())?;
+            Ok(ChannelIdentity::new(stable_id, exact_label))
+        })
+        .collect()
+}
+
+fn write_governed_bytes(
+    boundary: &GovernedRawBoundary,
+    output: &GovernedOutputPath,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let mut output_file = boundary.open_output(output)?;
+    output_file
+        .write_all(bytes)
+        .map_err(|error| format!("write {}: {error}", output.path().display()))
+}
+
+fn encode_lqraw(signal: &[Vec<i64>], context: &EncodeContext) -> Result<Vec<u8>, String> {
+    if signal.is_empty()
+        || signal[0].is_empty()
+        || signal
+            .iter()
+            .any(|channel| channel.len() != signal[0].len())
+    {
+        return Err("decoded signal is not rectangular".into());
+    }
+    let n_channels = u32::try_from(signal.len()).map_err(|_| "too many channels".to_owned())?;
+    let n_samples = u32::try_from(signal[0].len()).map_err(|_| "too many samples".to_owned())?;
+    let mut bytes = Vec::with_capacity(RAW_HEADER_LEN + signal.len() * signal[0].len() * 4);
+    bytes.extend_from_slice(RAW_MAGIC);
+    bytes.extend_from_slice(&[1, 4, context.bit_depth, 0]);
+    bytes.extend_from_slice(&context.sample_rate_mhz.to_le_bytes());
+    bytes.extend_from_slice(&n_channels.to_le_bytes());
+    bytes.extend_from_slice(&n_samples.to_le_bytes());
+    for channel in signal {
+        for &sample in channel {
+            let sample =
+                i32::try_from(sample).map_err(|_| "decoded sample exceeds i32".to_owned())?;
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     if args.len() == 3 && args[1] == "describe" {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let bytes = fs::read(&executable).map_err(|error| error.to_string())?;
         let descriptor = json!({
-            "codec": "LamQuant Optimum v2 native and BGF1 learned carrier",
-            "wire": "LMO1-v3/BGF1-v1",
+            "codec": "LamQuant Optimum v2 native, DIX1 construction, and BGF1 learned carrier",
+            "wire": "LMO1-v3/BGF1-v1/DIX1-v2-construction",
             "binary": executable,
             "binary_bytes": bytes.len(),
             "package_version": env!("CARGO_PKG_VERSION"),
@@ -507,12 +573,114 @@ fn run(args: &[String]) -> Result<(), String> {
                 "modes": [2, 3],
                 "model_id": BGF1_MODEL_ID,
             },
+            "dix1_worker": {
+                "encode": "dix1-encode PROFILE INPUT META_JSON OUTPUT",
+                "decode": "dix1-decode INPUT OUTPUT",
+                "profiles": [
+                    "product",
+                    "native",
+                    "raw",
+                    "delta",
+                    "incidence",
+                    "no-incidence",
+                ],
+                "body_version": 2,
+                "construction_private": true,
+            },
         });
         return fs::write(
             &args[2],
             serde_json::to_vec_pretty(&descriptor).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("write {}: {error}", args[2]));
+    }
+    if args.len() == 6 && args[1] == "dix1-encode" {
+        let profile = args[2].as_str();
+        if !matches!(
+            profile,
+            "product" | "native" | "raw" | "delta" | "incidence" | "no-incidence"
+        ) {
+            return Err(
+                "dix1-encode PROFILE must be product, native, raw, delta, incidence, or no-incidence"
+                    .into(),
+            );
+        }
+        let boundary = GovernedRawBoundary::fixed()?;
+        let input = boundary.existing_path(Path::new(&args[3]), "INPUT")?;
+        let metadata = boundary.existing_path(Path::new(&args[4]), "META_JSON")?;
+        let output = boundary.output_path(Path::new(&args[5]))?;
+        let input_file = boundary.open_existing(&input, "INPUT")?;
+        let metadata_file = boundary.open_existing(&metadata, "META_JSON")?;
+        let (signal, context) = read_learned_lqraw_file(input_file, &input)?;
+        let identities = read_dix1_identities(metadata_file, &metadata, signal.len())?;
+        let codec = Dix1ConstructionCodec;
+        let packet = match profile {
+            "product" => codec.encode_window(
+                &signal,
+                &identities,
+                context.sample_rate_mhz,
+                context.bit_depth,
+            ),
+            "native" => codec.encode_native_window(
+                &signal,
+                &identities,
+                context.sample_rate_mhz,
+                context.bit_depth,
+            ),
+            "raw" => codec.encode_forced(
+                &signal,
+                &identities,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                Dix1CarrierMode::Raw,
+            ),
+            "delta" => codec.encode_forced(
+                &signal,
+                &identities,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                Dix1CarrierMode::Delta,
+            ),
+            "incidence" => codec.encode_forced(
+                &signal,
+                &identities,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                Dix1CarrierMode::IncidenceRans,
+            ),
+            "no-incidence" => codec.encode_forced(
+                &signal,
+                &identities,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                Dix1CarrierMode::NoIncidenceRans,
+            ),
+            _ => unreachable!(),
+        }
+        .map_err(|error| error.to_string())?;
+        return write_governed_bytes(&boundary, &output, &packet);
+    }
+    if args.len() == 4 && args[1] == "dix1-decode" {
+        let boundary = GovernedRawBoundary::fixed()?;
+        let input = boundary.existing_path(Path::new(&args[2]), "INPUT")?;
+        let output = boundary.output_path(Path::new(&args[3]))?;
+        let input_file = boundary.open_existing(&input, "INPUT")?;
+        let packet =
+            read_bounded_file(input_file, &input, MAX_LEARNED_PACKET_BYTES, "DIX1 packet")?;
+        let decoded = Dix1ConstructionCodec
+            .decode_window(&packet)
+            .map_err(|error| error.to_string())?;
+        let context = EncodeContext {
+            sample_rate_mhz: decoded.sample_rate_mhz,
+            bit_depth: decoded.bit_depth,
+            channel_labels: decoded
+                .identities
+                .iter()
+                .map(|identity| identity.label.clone())
+                .collect(),
+        };
+        let raw = encode_lqraw(&decoded.samples, &context)?;
+        return write_governed_bytes(&boundary, &output, &raw);
     }
     if args.len() == 7 && args[1] == "learned-encode" {
         let mode = match args[2].as_str() {
@@ -571,7 +739,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }

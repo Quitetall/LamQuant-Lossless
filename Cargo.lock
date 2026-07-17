@@ -3362,6 +3362,7 @@ name = "lamquant-lml-optimum-v2"
 version = "0.1.0"
 dependencies = [
  "abir",
+ "libc",
  "serde_json",
  "sha2 0.10.9",
 ]

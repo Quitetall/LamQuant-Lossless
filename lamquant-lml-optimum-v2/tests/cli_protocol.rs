@@ -53,7 +53,7 @@ fn benchmark_cli_protocol_round_trips_lqraw() {
         .unwrap()
         .success());
     let value: serde_json::Value = serde_json::from_slice(&fs::read(descriptor).unwrap()).unwrap();
-    assert_eq!(value["wire"], "LMO1-v3/BGF1-v1");
+    assert_eq!(value["wire"], "LMO1-v3/BGF1-v1/DIX1-v2-construction");
 
     let oversized = root.join("oversized.lqraw");
     let file = fs::File::create(&oversized).unwrap();
