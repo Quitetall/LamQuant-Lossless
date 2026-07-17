@@ -497,8 +497,18 @@ fn read_dix1_identities(
     expected_channels: usize,
 ) -> Result<Vec<ChannelIdentity>, String> {
     let bytes = read_bounded_file(file, path, MAX_META_BYTES, "DIX1 metadata")?;
+    parse_dix1_identities(&bytes, expected_channels)
+}
+
+fn parse_dix1_identities(
+    bytes: &[u8],
+    expected_channels: usize,
+) -> Result<Vec<ChannelIdentity>, String> {
+    if bytes.len() as u64 > MAX_META_BYTES {
+        return Err("DIX1 metadata exceeds its byte bound".to_owned());
+    }
     let value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|error| format!("parse metadata: {error}"))?;
+        serde_json::from_slice(bytes).map_err(|error| format!("parse metadata: {error}"))?;
     let labels = value
         .get("channel_labels")
         .cloned()
@@ -517,6 +527,89 @@ fn read_dix1_identities(
             Ok(ChannelIdentity::new(stable_id, exact_label))
         })
         .collect()
+}
+
+fn encode_dix1_packet(
+    profile: &str,
+    signal: &[Vec<i64>],
+    identities: &[ChannelIdentity],
+    context: &EncodeContext,
+) -> Result<Vec<u8>, String> {
+    let codec = Dix1ConstructionCodec;
+    match profile {
+        "product" => codec.encode_window(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+        ),
+        "native" => codec.encode_native_window(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+        ),
+        "raw" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix1CarrierMode::Raw,
+        ),
+        "delta" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix1CarrierMode::Delta,
+        ),
+        "incidence" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix1CarrierMode::IncidenceRans,
+        ),
+        "no-incidence" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix1CarrierMode::NoIncidenceRans,
+        ),
+        _ => {
+            return Err(
+                "DIX1 PROFILE must be product, native, raw, delta, incidence, or no-incidence"
+                    .to_owned(),
+            );
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn read_standard_input(maximum: u64, kind: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(
+            maximum
+                .checked_add(1)
+                .ok_or_else(|| format!("{kind} byte bound overflows"))?,
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {kind} from standard input: {error}"))?;
+    if bytes.len() as u64 > maximum {
+        return Err(format!("{kind} exceeds its byte bound"));
+    }
+    Ok(bytes)
+}
+
+fn write_standard_output(bytes: &[u8]) -> Result<(), String> {
+    let mut output = std::io::stdout().lock();
+    output
+        .write_all(bytes)
+        .and_then(|()| output.flush())
+        .map_err(|error| format!("write construction worker standard output: {error}"))
 }
 
 fn write_governed_bytes(
@@ -576,6 +669,8 @@ fn run(args: &[String]) -> Result<(), String> {
             "dix1_worker": {
                 "encode": "dix1-encode PROFILE INPUT META_JSON OUTPUT",
                 "decode": "dix1-decode INPUT OUTPUT",
+                "encode_stdio": "dix1-encode-stdio PROFILE META_JSON",
+                "decode_stdio": "dix1-decode-stdio",
                 "profiles": [
                     "product",
                     "native",
@@ -593,6 +688,38 @@ fn run(args: &[String]) -> Result<(), String> {
             serde_json::to_vec_pretty(&descriptor).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("write {}: {error}", args[2]));
+    }
+    if args.len() == 4 && args[1] == "dix1-encode-stdio" {
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "DIX1 LQR1 standard input",
+        )?;
+        let (signal, context) = parse_lqraw_with_limits(
+            raw,
+            MAX_LEARNED_CHANNELS,
+            MAX_SAMPLES,
+            MAX_LEARNED_VALUES,
+            false,
+        )?;
+        let identities = parse_dix1_identities(args[3].as_bytes(), signal.len())?;
+        let packet = encode_dix1_packet(&args[2], &signal, &identities, &context)?;
+        return write_standard_output(&packet);
+    }
+    if args.len() == 2 && args[1] == "dix1-decode-stdio" {
+        let packet = read_standard_input(MAX_LEARNED_PACKET_BYTES, "DIX1 packet standard input")?;
+        let decoded = Dix1ConstructionCodec
+            .decode_window(&packet)
+            .map_err(|error| error.to_string())?;
+        let context = EncodeContext {
+            sample_rate_mhz: decoded.sample_rate_mhz,
+            bit_depth: decoded.bit_depth,
+            channel_labels: decoded
+                .identities
+                .iter()
+                .map(|identity| identity.label.clone())
+                .collect(),
+        };
+        return write_standard_output(&encode_lqraw(&decoded.samples, &context)?);
     }
     if args.len() == 6 && args[1] == "dix1-encode" {
         let profile = args[2].as_str();
@@ -613,51 +740,7 @@ fn run(args: &[String]) -> Result<(), String> {
         let metadata_file = boundary.open_existing(&metadata, "META_JSON")?;
         let (signal, context) = read_learned_lqraw_file(input_file, &input)?;
         let identities = read_dix1_identities(metadata_file, &metadata, signal.len())?;
-        let codec = Dix1ConstructionCodec;
-        let packet = match profile {
-            "product" => codec.encode_window(
-                &signal,
-                &identities,
-                context.sample_rate_mhz,
-                context.bit_depth,
-            ),
-            "native" => codec.encode_native_window(
-                &signal,
-                &identities,
-                context.sample_rate_mhz,
-                context.bit_depth,
-            ),
-            "raw" => codec.encode_forced(
-                &signal,
-                &identities,
-                context.sample_rate_mhz,
-                context.bit_depth,
-                Dix1CarrierMode::Raw,
-            ),
-            "delta" => codec.encode_forced(
-                &signal,
-                &identities,
-                context.sample_rate_mhz,
-                context.bit_depth,
-                Dix1CarrierMode::Delta,
-            ),
-            "incidence" => codec.encode_forced(
-                &signal,
-                &identities,
-                context.sample_rate_mhz,
-                context.bit_depth,
-                Dix1CarrierMode::IncidenceRans,
-            ),
-            "no-incidence" => codec.encode_forced(
-                &signal,
-                &identities,
-                context.sample_rate_mhz,
-                context.bit_depth,
-                Dix1CarrierMode::NoIncidenceRans,
-            ),
-            _ => unreachable!(),
-        }
-        .map_err(|error| error.to_string())?;
+        let packet = encode_dix1_packet(profile, &signal, &identities, &context)?;
         return write_governed_bytes(&boundary, &output, &packet);
     }
     if args.len() == 4 && args[1] == "dix1-decode" {
@@ -739,7 +822,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }
