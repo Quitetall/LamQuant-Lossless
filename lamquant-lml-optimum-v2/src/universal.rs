@@ -1,9 +1,10 @@
-//! Retired mode-`0x14` fixed-universal predictor conformance core.
+//! Fixed-integer adaptive prediction arithmetic and retired mode-`0x14`
+//! conformance core.
 //!
-//! This module intentionally stops at residual generation. It does not select
-//! an entropy coder or alter the existing BGF1 native packet path. It is kept
-//! only to preserve the completed Python/Rust conformance evidence; standalone
-//! BGF1 must not use this predictor or its graph law.
+//! [`FixedRlsExpert`] is the active, graph-independent arithmetic primitive used
+//! by DIX1. [`FixedUniversalGraph`] and [`UniversalSession`] preserve the retired
+//! mode-`0x14` Python/Rust conformance evidence only. This module intentionally
+//! stops at residual generation and does not alter the BGF1 packet path.
 
 use crate::OptimumV2Error;
 

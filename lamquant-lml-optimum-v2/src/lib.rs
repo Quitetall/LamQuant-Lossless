@@ -9,8 +9,16 @@ use std::fmt;
 pub mod bgf1_learned;
 pub mod bgf1_model_pack;
 #[doc(hidden)]
+pub mod derivation_incidence;
+#[doc(hidden)]
+pub mod dix1;
+#[doc(hidden)]
 #[path = "universal.rs"]
-pub mod fixed_universal_conformance;
+pub mod fixed_predictor;
+#[doc(hidden)]
+pub mod fixed_universal_conformance {
+    pub use crate::fixed_predictor::*;
+}
 pub mod model_pack;
 
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";
