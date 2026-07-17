@@ -480,33 +480,48 @@ fn learned_worker_protocol_forces_each_arm_and_round_trips_lqraw() {
 }
 
 #[test]
-fn learned_encode_rejects_direct_governed_construction_raw_paths_before_open() {
+fn learned_encode_rejects_governed_raw_paths_in_every_operand_before_open() {
     let root = std::env::temp_dir().join(format!(
         "optimum_v2_bgf1_governed_raw_guard_{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
-    let governed_input = Path::new("/mnt/4tb/LamQuant/outputs/optimum-v2-development-v2-2k/raw")
-        .join(format!("must-not-be-opened-{}.lqraw", std::process::id()));
-    let output = Command::new(env!("CARGO_BIN_EXE_optimum-v2-codec"))
-        .args([
-            "learned-encode",
-            "2",
-            root.join("absent-model.lqw1").to_str().unwrap(),
-            governed_input.to_str().unwrap(),
-            root.join("absent-meta.json").to_str().unwrap(),
-            root.join("must-not-exist.lmo").to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("governed construction raw root"),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!root.join("must-not-exist.lmo").exists());
+    let model = root.join("synthetic-model.lqw1");
+    let input = root.join("synthetic-input.lqraw");
+    let metadata = root.join("synthetic-meta.json");
+    let packet = root.join("must-not-exist.lmo");
+    fs::write(&model, b"not a model").unwrap();
+    fs::write(&input, b"not an LQR1").unwrap();
+    fs::write(&metadata, b"not metadata").unwrap();
+
+    for (operand, index) in [("MODEL", 2), ("INPUT", 3), ("META_JSON", 4), ("OUTPUT", 5)] {
+        let governed_path = Path::new("/mnt/4tb/LamQuant/outputs/optimum-v2-development-v2-2k/raw")
+            .join(format!(
+                "must-not-be-opened-{}-{operand}.lqraw",
+                std::process::id()
+            ));
+        let mut args = vec![
+            "learned-encode".to_owned(),
+            "2".to_owned(),
+            model.to_string_lossy().into_owned(),
+            input.to_string_lossy().into_owned(),
+            metadata.to_string_lossy().into_owned(),
+            packet.to_string_lossy().into_owned(),
+        ];
+        args[index] = governed_path.to_string_lossy().into_owned();
+        let output = Command::new(env!("CARGO_BIN_EXE_optimum-v2-codec"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{operand} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("governed construction raw root"),
+            "unexpected {operand} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!packet.exists());
+    }
     let _ = fs::remove_dir_all(root);
 }
 

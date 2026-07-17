@@ -1,5 +1,9 @@
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use lamquant_lml_optimum_v2::bgf1_learned::{
@@ -22,14 +26,17 @@ const MAX_LEARNED_PACKET_BYTES: u64 = 64 * 1024 * 1024;
 const GOVERNED_CONSTRUCTION_RAW_ROOT: &str =
     "/mnt/4tb/LamQuant/outputs/optimum-v2-development-v2-2k/raw";
 
-fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
+fn absolute_unresolved(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
     } else {
-        std::env::current_dir()
+        Ok(std::env::current_dir()
             .map_err(|error| format!("resolve current directory: {error}"))?
-            .join(path)
-    };
+            .join(path))
+    }
+}
+
+fn lexical_normalize(absolute: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -42,45 +49,148 @@ fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
             }
         }
     }
-    Ok(normalized)
+    normalized
 }
 
-fn canonical_input_outside_root(input: &Path, denied_root: &Path) -> Result<PathBuf, String> {
-    let lexical_input = lexical_absolute(input)?;
-    let lexical_root = lexical_absolute(denied_root)?;
-    if lexical_input.starts_with(&lexical_root) {
-        return Err("learned-encode input is within the governed construction raw root".into());
+struct GovernedRawBoundary {
+    lexical_root: PathBuf,
+    canonical_root: Option<PathBuf>,
+}
+
+impl GovernedRawBoundary {
+    fn new(root: &Path) -> Result<Self, String> {
+        let absolute_root = absolute_unresolved(root)?;
+        let lexical_root = lexical_normalize(&absolute_root);
+        let canonical_root = match fs::canonicalize(&absolute_root) {
+            Ok(root) => Some(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "cannot verify governed construction raw root {}: {error}",
+                    lexical_root.display()
+                ));
+            }
+        };
+        Ok(Self {
+            lexical_root,
+            canonical_root,
+        })
     }
 
-    let canonical_root = match fs::canonicalize(&lexical_root) {
-        Ok(root) => Some(root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
+    fn fixed() -> Result<Self, String> {
+        Self::new(Path::new(GOVERNED_CONSTRUCTION_RAW_ROOT))
+    }
+
+    fn reject_lexical(&self, path: &Path, operand: &str) -> Result<(), String> {
+        if path.starts_with(&self.lexical_root) {
             return Err(format!(
-                "cannot verify governed construction raw root {}: {error}",
-                lexical_root.display()
+                "learned-encode {operand} is within the governed construction raw root"
             ));
         }
-    };
-    let canonical_input = fs::canonicalize(&lexical_input).map_err(|error| {
-        format!(
-            "canonicalize learned-encode input {} before open: {error}",
-            lexical_input.display()
-        )
-    })?;
-    if canonical_root
-        .as_ref()
-        .is_some_and(|root| canonical_input.starts_with(root))
-    {
-        return Err(
-            "learned-encode input resolves within the governed construction raw root".into(),
-        );
+        Ok(())
     }
-    Ok(canonical_input)
-}
 
-fn governed_learned_input(input: &Path) -> Result<PathBuf, String> {
-    canonical_input_outside_root(input, Path::new(GOVERNED_CONSTRUCTION_RAW_ROOT))
+    fn reject_canonical(&self, path: &Path, operand: &str) -> Result<(), String> {
+        if self
+            .canonical_root
+            .as_ref()
+            .is_some_and(|root| path.starts_with(root))
+        {
+            return Err(format!(
+                "learned-encode {operand} resolves within the governed construction raw root"
+            ));
+        }
+        Ok(())
+    }
+
+    fn existing_path(&self, path: &Path, operand: &str) -> Result<PathBuf, String> {
+        let absolute = absolute_unresolved(path)?;
+        self.reject_lexical(&lexical_normalize(&absolute), operand)?;
+        let canonical = fs::canonicalize(&absolute).map_err(|error| {
+            format!(
+                "canonicalize learned-encode {operand} {} before open: {error}",
+                absolute.display()
+            )
+        })?;
+        self.reject_canonical(&canonical, operand)?;
+        Ok(canonical)
+    }
+
+    fn output_path(&self, path: &Path) -> Result<PathBuf, String> {
+        let absolute = absolute_unresolved(path)?;
+        self.reject_lexical(&lexical_normalize(&absolute), "OUTPUT")?;
+        let canonical = match fs::canonicalize(&absolute) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = absolute
+                    .parent()
+                    .ok_or_else(|| "learned-encode OUTPUT has no parent".to_owned())?;
+                let name = absolute
+                    .file_name()
+                    .ok_or_else(|| "learned-encode OUTPUT has no file name".to_owned())?;
+                fs::canonicalize(parent)
+                    .map_err(|error| {
+                        format!(
+                            "canonicalize learned-encode OUTPUT parent {} before open: {error}",
+                            parent.display()
+                        )
+                    })?
+                    .join(name)
+            }
+            Err(error) => {
+                return Err(format!(
+                    "canonicalize learned-encode OUTPUT {} before open: {error}",
+                    absolute.display()
+                ));
+            }
+        };
+        self.reject_canonical(&canonical, "OUTPUT")?;
+        Ok(canonical)
+    }
+
+    fn verify_opened(&self, file: &File, expected: &Path, operand: &str) -> Result<(), String> {
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("inspect opened learned-encode {operand}: {error}"))?;
+        #[cfg(unix)]
+        if metadata.nlink() != 1 {
+            return Err(format!(
+                "learned-encode {operand} is hard-linked; governed boundary requires one link"
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let opened = fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(
+                |error| format!("resolve opened learned-encode {operand} before access: {error}"),
+            )?;
+            if opened != expected {
+                return Err(format!(
+                    "learned-encode {operand} changed between validation and open"
+                ));
+            }
+            self.reject_canonical(&opened, operand)?;
+        }
+        Ok(())
+    }
+
+    fn open_existing(&self, path: &Path, operand: &str) -> Result<File, String> {
+        let file = File::open(path).map_err(|error| {
+            format!("open learned-encode {operand} {}: {error}", path.display())
+        })?;
+        self.verify_opened(&file, path, operand)?;
+        Ok(file)
+    }
+
+    fn open_output(&self, path: &Path) -> Result<File, String> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| format!("open learned-encode OUTPUT {}: {error}", path.display()))?;
+        self.verify_opened(&file, path, "OUTPUT")?;
+        Ok(file)
+    }
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, String> {
@@ -92,20 +202,24 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, String> {
         .map_err(|_| "LQR1 u32 parse failed".to_owned())
 }
 
-fn read_lqraw_with_limits(
-    path: &Path,
-    max_channels: usize,
-    max_samples: usize,
-    max_values: usize,
-) -> Result<(Vec<Vec<i64>>, EncodeContext), String> {
-    let maximum_bytes = RAW_HEADER_LEN
+fn lqraw_maximum_bytes(max_values: usize) -> Result<u64, String> {
+    RAW_HEADER_LEN
         .checked_add(
             max_values
                 .checked_mul(4)
                 .ok_or_else(|| "LQR1 resource bound overflows".to_owned())?,
         )
-        .ok_or_else(|| "LQR1 resource bound overflows".to_owned())? as u64;
-    let bytes = read_bounded(path, maximum_bytes, "LQR1 input")?;
+        .map(|maximum| maximum as u64)
+        .ok_or_else(|| "LQR1 resource bound overflows".to_owned())
+}
+
+fn parse_lqraw_with_limits(
+    bytes: Vec<u8>,
+    max_channels: usize,
+    max_samples: usize,
+    max_values: usize,
+    read_environment_labels: bool,
+) -> Result<(Vec<Vec<i64>>, EncodeContext), String> {
     if bytes.len() < RAW_HEADER_LEN
         || &bytes[0..4] != RAW_MAGIC
         || bytes[4] != 1
@@ -147,7 +261,9 @@ fn read_lqraw_with_limits(
         }
         signal.push(channel);
     }
-    let labels = std::env::var_os("LQ_CODEC_META_JSON")
+    let labels = read_environment_labels
+        .then(|| std::env::var_os("LQ_CODEC_META_JSON"))
+        .flatten()
         .and_then(|meta| fs::read_to_string(meta).ok())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|value| value.get("channel_labels").cloned())
@@ -164,11 +280,27 @@ fn read_lqraw_with_limits(
 
 fn read_lqraw(path: &Path) -> Result<(Vec<Vec<i64>>, EncodeContext), String> {
     debug_assert_eq!(MAX_LQRAW_BYTES, (RAW_HEADER_LEN + MAX_VALUES * 4) as u64);
-    read_lqraw_with_limits(path, MAX_CHANNELS, MAX_SAMPLES, MAX_VALUES)
+    let bytes = read_bounded(path, lqraw_maximum_bytes(MAX_VALUES)?, "LQR1 input")?;
+    parse_lqraw_with_limits(bytes, MAX_CHANNELS, MAX_SAMPLES, MAX_VALUES, true)
 }
 
-fn read_learned_lqraw(path: &Path) -> Result<(Vec<Vec<i64>>, EncodeContext), String> {
-    read_lqraw_with_limits(path, MAX_LEARNED_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES)
+fn read_learned_lqraw_file(
+    file: File,
+    path: &Path,
+) -> Result<(Vec<Vec<i64>>, EncodeContext), String> {
+    let bytes = read_bounded_file(
+        file,
+        path,
+        lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+        "LQR1 input",
+    )?;
+    parse_lqraw_with_limits(
+        bytes,
+        MAX_LEARNED_CHANNELS,
+        MAX_SAMPLES,
+        MAX_LEARNED_VALUES,
+        false,
+    )
 }
 
 fn write_lqraw(path: &Path, signal: &[Vec<i64>], context: &EncodeContext) -> Result<(), String> {
@@ -199,7 +331,16 @@ fn write_lqraw(path: &Path, signal: &[Vec<i64>], context: &EncodeContext) -> Res
 }
 
 fn read_bounded(path: &Path, maximum: u64, kind: &str) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let file = File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    read_bounded_file(file, path, maximum, kind)
+}
+
+fn read_bounded_file(
+    mut file: File,
+    path: &Path,
+    maximum: u64,
+    kind: &str,
+) -> Result<Vec<u8>, String> {
     let capacity = file
         .metadata()
         .ok()
@@ -209,7 +350,7 @@ fn read_bounded(path: &Path, maximum: u64, kind: &str) -> Result<Vec<u8>, String
         .checked_add(1)
         .ok_or_else(|| format!("{kind} byte bound overflows"))?;
     let mut bytes = Vec::with_capacity(capacity);
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read {}: {error}", path.display()))?;
@@ -221,6 +362,20 @@ fn read_bounded(path: &Path, maximum: u64, kind: &str) -> Result<Vec<u8>, String
 
 fn read_learned_model(path: &Path) -> Result<Bgf1LearnedCodec, String> {
     let bytes = read_bounded(path, BGF1_EXPECTED_PACK_BYTES as u64, "BGF1 LQW1 model")?;
+    parse_learned_model(bytes)
+}
+
+fn read_learned_model_file(file: File, path: &Path) -> Result<Bgf1LearnedCodec, String> {
+    let bytes = read_bounded_file(
+        file,
+        path,
+        BGF1_EXPECTED_PACK_BYTES as u64,
+        "BGF1 LQW1 model",
+    )?;
+    parse_learned_model(bytes)
+}
+
+fn parse_learned_model(bytes: Vec<u8>) -> Result<Bgf1LearnedCodec, String> {
     if bytes.len() != BGF1_EXPECTED_PACK_BYTES {
         return Err("BGF1 LQW1 model has the wrong profile length".into());
     }
@@ -228,10 +383,11 @@ fn read_learned_model(path: &Path) -> Result<Bgf1LearnedCodec, String> {
 }
 
 fn read_learned_identities(
+    file: File,
     path: &Path,
     expected_channels: usize,
 ) -> Result<Vec<Bgf1ChannelIdentity>, String> {
-    let bytes = read_bounded(path, MAX_META_BYTES, "BGF1 metadata")?;
+    let bytes = read_bounded_file(file, path, MAX_META_BYTES, "BGF1 metadata")?;
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| format!("parse metadata: {error}"))?;
     let labels = value
@@ -283,10 +439,17 @@ fn run(args: &[String]) -> Result<(), String> {
             "3" => Bgf1LearnedMode::Flow,
             _ => return Err("learned-encode MODE must be exactly 2 or 3".into()),
         };
-        let input = governed_learned_input(Path::new(&args[4]))?;
-        let codec = read_learned_model(Path::new(&args[3]))?;
-        let (signal, context) = read_learned_lqraw(&input)?;
-        let identities = read_learned_identities(Path::new(&args[5]), signal.len())?;
+        let boundary = GovernedRawBoundary::fixed()?;
+        let input = boundary.existing_path(Path::new(&args[4]), "INPUT")?;
+        let model = boundary.existing_path(Path::new(&args[3]), "MODEL")?;
+        let metadata = boundary.existing_path(Path::new(&args[5]), "META_JSON")?;
+        let output = boundary.output_path(Path::new(&args[6]))?;
+        let input_file = boundary.open_existing(&input, "INPUT")?;
+        let model_file = boundary.open_existing(&model, "MODEL")?;
+        let metadata_file = boundary.open_existing(&metadata, "META_JSON")?;
+        let codec = read_learned_model_file(model_file, &model)?;
+        let (signal, context) = read_learned_lqraw_file(input_file, &input)?;
+        let identities = read_learned_identities(metadata_file, &metadata, signal.len())?;
         let packet = codec
             .encode_window(
                 &signal,
@@ -296,7 +459,13 @@ fn run(args: &[String]) -> Result<(), String> {
                 mode,
             )
             .map_err(|error| error.to_string())?;
-        return fs::write(&args[6], packet).map_err(|error| format!("write {}: {error}", args[6]));
+        let mut output_file = boundary.open_output(&output)?;
+        output_file
+            .set_len(0)
+            .map_err(|error| format!("truncate {}: {error}", output.display()))?;
+        return output_file
+            .write_all(&packet)
+            .map_err(|error| format!("write {}: {error}", output.display()));
     }
     if args.len() == 5 && args[1] == "learned-decode" {
         let codec = read_learned_model(Path::new(&args[2]))?;
@@ -358,7 +527,7 @@ fn main() {
 
 #[cfg(test)]
 mod governed_raw_guard_tests {
-    use super::canonical_input_outside_root;
+    use super::GovernedRawBoundary;
     use std::fs;
 
     #[test]
@@ -373,21 +542,73 @@ mod governed_raw_guard_tests {
         fs::create_dir_all(&governed_root).unwrap();
         let governed_input = governed_root.join("input.lqraw");
         fs::write(&governed_input, b"synthetic").unwrap();
+        let boundary = GovernedRawBoundary::new(&governed_root).unwrap();
 
-        assert!(
-            canonical_input_outside_root(&governed_root.join("missing.lqraw"), &governed_root,)
-                .is_err()
-        );
+        assert!(boundary
+            .existing_path(&governed_root.join("missing.lqraw"), "INPUT")
+            .is_err());
 
         let alias = base.join("alias");
         symlink(&governed_root, &alias).unwrap();
-        assert!(canonical_input_outside_root(&alias.join("input.lqraw"), &governed_root).is_err());
+        assert!(boundary
+            .existing_path(&alias.join("input.lqraw"), "INPUT")
+            .is_err());
+        assert!(boundary.output_path(&alias.join("missing.lmo")).is_err());
+
+        let hardlink = base.join("hardlink.lqraw");
+        fs::hard_link(&governed_input, &hardlink).unwrap();
+        let hardlink = boundary.existing_path(&hardlink, "INPUT").unwrap();
+        let error = boundary.open_existing(&hardlink, "INPUT").unwrap_err();
+        assert!(error.contains("hard-linked"));
+        let hardlink_output = base.join("hardlink-output.lmo");
+        fs::hard_link(&governed_input, &hardlink_output).unwrap();
+        let hardlink_output = boundary.output_path(&hardlink_output).unwrap();
+        let error = boundary.open_output(&hardlink_output).unwrap_err();
+        assert!(error.contains("hard-linked"));
+        assert_eq!(fs::read(&governed_input).unwrap(), b"synthetic");
 
         let scratch = base.join("scratch.lqraw");
         fs::write(&scratch, b"synthetic").unwrap();
         assert_eq!(
-            canonical_input_outside_root(&scratch, &governed_root).unwrap(),
+            boundary.existing_path(&scratch, "INPUT").unwrap(),
             fs::canonicalize(&scratch).unwrap()
+        );
+        assert_eq!(
+            boundary.output_path(&base.join("scratch.lmo")).unwrap(),
+            fs::canonicalize(&base).unwrap().join("scratch.lmo")
+        );
+
+        let approved_parent = base.join("approved-parent");
+        let substitute_parent = base.join("substitute-parent");
+        fs::create_dir_all(&approved_parent).unwrap();
+        fs::create_dir_all(&substitute_parent).unwrap();
+        fs::write(approved_parent.join("input.lqraw"), b"approved").unwrap();
+        fs::write(substitute_parent.join("input.lqraw"), b"substitute").unwrap();
+        let approved_input = boundary
+            .existing_path(&approved_parent.join("input.lqraw"), "INPUT")
+            .unwrap();
+        fs::rename(&approved_parent, base.join("approved-parent-moved")).unwrap();
+        symlink(&substitute_parent, &approved_parent).unwrap();
+        let error = boundary
+            .open_existing(&approved_input, "INPUT")
+            .unwrap_err();
+        assert!(error.contains("changed between validation and open"));
+
+        let output_parent = base.join("output-parent");
+        let substitute_output_parent = base.join("substitute-output-parent");
+        fs::create_dir_all(&output_parent).unwrap();
+        fs::create_dir_all(&substitute_output_parent).unwrap();
+        fs::write(substitute_output_parent.join("result.lmo"), b"preserve").unwrap();
+        let approved_output = boundary
+            .output_path(&output_parent.join("result.lmo"))
+            .unwrap();
+        fs::rename(&output_parent, base.join("output-parent-moved")).unwrap();
+        symlink(&substitute_output_parent, &output_parent).unwrap();
+        let error = boundary.open_output(&approved_output).unwrap_err();
+        assert!(error.contains("changed between validation and open"));
+        assert_eq!(
+            fs::read(substitute_output_parent.join("result.lmo")).unwrap(),
+            b"preserve"
         );
         let _ = fs::remove_dir_all(base);
     }
