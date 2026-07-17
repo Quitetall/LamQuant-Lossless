@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+pub mod bgf1_learned;
 pub mod bgf1_model_pack;
 #[doc(hidden)]
 #[path = "universal.rs"]
