@@ -63,6 +63,24 @@ def test_verify_and_content_address_round_trip(rust_wheel):
     assert g.content_address() == g2.content_address()
 
 
+def test_fractional_uncertainty_round_trips_and_verifies(rust_wheel):
+    # Regression: a reloaded graph must VERIFY (not just have an equal content
+    # address) even when an uncertainty value is an f64 whose JSON number
+    # serialize/parse isn't bit-exact (e.g. 100.54785919189453). The content
+    # address must survive to_json -> from_json -> verify.
+    for v in (100.54785919189453, 18.4, 1.0 / 3.0):
+        g = rust_wheel.PyNeg()
+        m = g.add("measured", "abir-source", content_ref="sha256:aa")
+        g.add(
+            "estimated", "lqs@openecs", content_ref="sha256:bb", parents=[m],
+            uncertainty_metric="prd_pct", uncertainty_value=v,
+        )
+        g.materialize_provenance_edges()
+        back = rust_wheel.PyNeg.from_json(g.to_json())
+        back.verify()  # must not raise
+        assert g.content_address() == back.content_address()
+
+
 def test_verify_rejects_non_finite_uncertainty(rust_wheel):
     g = rust_wheel.PyNeg()
     g.add("estimated", "lmq", uncertainty_metric="prd", uncertainty_value=float("nan"))

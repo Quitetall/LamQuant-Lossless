@@ -378,6 +378,37 @@ mod tests {
     }
 
     #[test]
+    fn fractional_uncertainty_survives_json_round_trip_and_verifies() {
+        // Regression: a node's content address must be stable across a
+        // to_json/from_json round-trip even for an f64 whose JSON serialize→parse
+        // is not bit-exact (e.g. 100.54785919189453, an exact f32 promoted to
+        // f64). Hashing raw IEEE-754 bytes broke this; hashing the decimal form
+        // fixes it. `verify()` after reload is the real check (comparing only
+        // graph content_address would NOT have caught it).
+        for v in [100.54785919189453f64, 18.4, 1.0 / 3.0, 0.1 + 0.2] {
+            let mut g = NegGraph::new();
+            g.add_node(Node::<Estimated>::new(
+                NodePayload {
+                    content_ref: Some("sha256:bb".into()),
+                    summary: Some("R=0.24".into()),
+                    ..Default::default()
+                },
+                Provenance::root("lqs@openecs"),
+                Some(Uncertainty {
+                    metric: "prd_pct".into(),
+                    value: v,
+                }),
+            ));
+            let back = NegGraph::from_json(&g.to_json().unwrap()).unwrap();
+            assert!(
+                back.verify().is_ok(),
+                "reloaded node failed verify for uncertainty value {v}"
+            );
+            assert_eq!(g.content_address(), back.content_address());
+        }
+    }
+
+    #[test]
     fn verify_rejects_non_finite_uncertainty() {
         let mut g = NegGraph::new();
         g.add_node(Node::<Estimated>::new(

@@ -111,8 +111,31 @@ impl Provenance {
 pub struct Uncertainty {
     /// What the number measures (a PRD, an entropy in bits, a posterior width, …).
     pub metric: String,
-    /// The value. Must be finite (see the type note).
+    /// The value. Must be finite (see the type note). Serialized on the wire as
+    /// its Rust `Display` **string** (see [`value_as_str`]), not a JSON number, so
+    /// it survives a serialize→parse round-trip byte-for-byte — a JSON *number*
+    /// f64 does not (serde_json's decimal serialize→parse is not always bit-exact),
+    /// which would make the content address unstable across the wire.
+    #[serde(with = "value_as_str")]
     pub value: f64,
+}
+
+/// Serialize an `f64` as its shortest round-trippable `Display` string and parse
+/// it back with the std parser. The standard library guarantees
+/// `format!("{v}").parse::<f64>() == Ok(v)` for the shortest representation, so
+/// the wire form round-trips exactly and the content address (which hashes the
+/// same `Display` string) stays stable — independent of serde_json's float formatter.
+mod value_as_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("{v}"))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse::<f64>().map_err(serde::de::Error::custom)
+    }
 }
 
 /// The payload a node points at — the actual bytes/signal live elsewhere
@@ -193,7 +216,16 @@ impl NodeRecord {
             Some(u) => {
                 buf.push(1);
                 push_str(&mut buf, &u.metric);
-                buf.extend_from_slice(&u.value.to_le_bytes());
+                // Hash the value's Rust `Display` string — the SAME form it takes
+                // on the wire (see `Uncertainty::value` / `value_as_str`), NOT its
+                // raw IEEE-754 bytes. The wire is JSON; a bare f64 number's
+                // serialize→parse is not guaranteed bit-exact, so hashing
+                // `to_le_bytes()` made the content address unstable across a
+                // to_json/from_json round-trip (verify() flagged a faithfully
+                // reloaded node as "tampered"). The std `Display`↔`parse` round-trip
+                // IS exact, so both the wire and the hash use it. (finite value
+                // guaranteed by NegGraph::verify's NonFiniteUncertainty check.)
+                push_str(&mut buf, &format!("{}", u.value));
             }
             None => buf.push(0),
         }
