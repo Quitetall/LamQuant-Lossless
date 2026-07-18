@@ -2,10 +2,10 @@ use abir::{
     name_for_tag, Abir, Accel, Bcs1Header, Channel, Column, Ecg, Ecog, Eeg, Emg, Eog, Ieeg,
     Modality, ModalitySource, Other, Resp, Seeg, Untyped, BCS1_MAGIC,
 };
-use std::sync::Arc;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict};
+use std::sync::Arc;
 
 fn extract_bytes(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     if let Ok(b) = data.downcast::<PyBytes>() {
@@ -42,9 +42,8 @@ fn golomb_encode_dense<'py>(
     let slice = coeffs.as_slice().map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("array must be contiguous: {e}"))
     })?;
-    let result = lml::golomb::encode_dense(slice).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("{}", e))
-    })?;
+    let result = lml::golomb::encode_dense(slice)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?;
     Ok(PyBytes::new(py, &result))
 }
 
@@ -124,8 +123,7 @@ fn lml_compress<'py>(
 /// Decompress LML1 packet bytes → list of list of i64.
 #[pyfunction]
 fn lml_decompress(data: &[u8]) -> PyResult<Vec<Vec<i64>>> {
-    lml::lml::decompress(data)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    lml::lml::decompress(data).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Write LML container file from signal.
@@ -272,8 +270,13 @@ fn container_read_phys_selected<'py>(
         let out = arr.as_slice_mut().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
         })?;
-        lml::container::read_bytes_into_f32_calibrated_selected(data, out, calib_slice, &channel_mask)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        lml::container::read_bytes_into_f32_calibrated_selected(
+            data,
+            out,
+            calib_slice,
+            &channel_mask,
+        )
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
     };
 
     Ok((arr, header.metadata, header.n_windows))
@@ -320,8 +323,13 @@ fn lma_mmap_read_phys_selected<'py>(
         let out = arr.as_slice_mut().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
         })?;
-        lml::container::read_bytes_into_f32_calibrated_selected(data, out, calib_slice, &channel_mask)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        lml::container::read_bytes_into_f32_calibrated_selected(
+            data,
+            out,
+            calib_slice,
+            &channel_mask,
+        )
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
     };
 
     Ok((arr, header.metadata, header.n_windows))
@@ -419,12 +427,9 @@ fn lma_entry_headers<'py>(
     names: Vec<String>,
     n_bytes: usize,
 ) -> PyResult<Vec<Option<Bound<'py, PyBytes>>>> {
-    let results = lml::lma::read_entry_headers_path(
-        std::path::Path::new(archive_path),
-        &names,
-        n_bytes,
-    )
-    .map_err(lma_err_to_py)?;
+    let results =
+        lml::lma::read_entry_headers_path(std::path::Path::new(archive_path), &names, n_bytes)
+            .map_err(lma_err_to_py)?;
     Ok(results
         .into_iter()
         .map(|opt| opt.map(|b| PyBytes::new(py, &b)))
@@ -453,12 +458,18 @@ fn write_ca_lmq(
     channels: Option<Vec<String>>,
 ) -> PyResult<()> {
     let buf = lml::lmqc::encode_lmqc(
-        n_channels, latent_c, latent_t, sample_rate, window_samples,
-        payload_kind, coords.as_deref(), channels.as_deref(), payload,
+        n_channels,
+        latent_c,
+        latent_t,
+        sample_rate,
+        window_samples,
+        payload_kind,
+        coords.as_deref(),
+        channels.as_deref(),
+        payload,
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("LMQC encode: {:?}", e)))?;
-    std::fs::write(path, &buf)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    std::fs::write(path, &buf).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
 }
 
 /// Read an LMQC `.lmq` container → dict with montage + payload. Verifies
@@ -467,8 +478,8 @@ fn write_ca_lmq(
 /// `payload_kind`). Raises on corruption / bad magic / version.
 #[pyfunction]
 fn read_ca_lmq<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>> {
-    let buf = std::fs::read(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let buf =
+        std::fs::read(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     let c = lml::lmqc::decode_lmqc(&buf)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("LMQC decode: {:?}", e)))?;
     let d = PyDict::new(py);
@@ -689,7 +700,9 @@ fn build_pyabir(data: &[u8], signal: Vec<Vec<i64>>, metadata_json: &str) -> PyRe
     let phys_min = meta.get("phys_min").and_then(|v| v.as_array());
     let phys_max = meta.get("phys_max").and_then(|v| v.as_array());
     let at = |arr: Option<&Vec<serde_json::Value>>, i: usize| -> f64 {
-        arr.and_then(|a| a.get(i)).and_then(|v| v.as_f64()).unwrap_or(0.0)
+        arr.and_then(|a| a.get(i))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
     };
 
     // Build labeled `Channel`s from the metadata (not `from_channels_i64`, which
@@ -711,8 +724,8 @@ fn build_pyabir(data: &[u8], signal: Vec<Vec<i64>>, metadata_json: &str) -> PyRe
         .collect();
 
     let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let inner =
-        Abir::from_parts(channels, sample_rate, n_samples).with_inferred_modality(&label_refs, None);
+    let inner = Abir::from_parts(channels, sample_rate, n_samples)
+        .with_inferred_modality(&label_refs, None);
     Ok(PyAbir { inner })
 }
 
@@ -723,7 +736,8 @@ fn build_pyabir(data: &[u8], signal: Vec<Vec<i64>>, metadata_json: &str) -> PyRe
 fn container_read_abir(path: &str) -> PyResult<PyAbir> {
     // Read the bytes once, decode via the BCS1-aware `read_bytes` dispatch, and
     // keep the bytes so `build_pyabir` can read the authoritative header sample_rate.
-    let data = std::fs::read(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let data =
+        std::fs::read(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     let (signal, metadata) = lml::container::read_bytes(&data)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     build_pyabir(&data, signal, &metadata)
@@ -808,10 +822,14 @@ impl PyPackWriter {
         manifest_sha256: &[u8],
     ) -> PyResult<Self> {
         let dt = lml::tensor_pack::PackDtype::parse(dtype).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!("bad pack dtype '{dtype}' (int8|int16|f32)"))
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "bad pack dtype '{dtype}' (int8|int16|f32)"
+            ))
         })?;
         if manifest_sha256.len() != 32 {
-            return Err(pyo3::exceptions::PyValueError::new_err("manifest_sha256 must be 32 bytes"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "manifest_sha256 must be 32 bytes",
+            ));
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(manifest_sha256);
@@ -824,7 +842,11 @@ impl PyPackWriter {
             hash,
         )
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        Ok(Self { inner: Some(w), n_channels, window_len })
+        Ok(Self {
+            inner: Some(w),
+            n_channels,
+            window_len,
+        })
     }
 
     /// Append one `[n_channels, window_len]` f32 window at the next row (BFP-quantized).
@@ -840,10 +862,11 @@ impl PyPackWriter {
                 self.n_channels, self.window_len
             )));
         }
-        let slice = x
-            .as_slice()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("window not contiguous: {e:?}")))?;
-        w.write_window(slice).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        let slice = x.as_slice().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("window not contiguous: {e:?}"))
+        })?;
+        w.write_window(slice)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Flush, fsync, and atomically finalize the pack. The writer is consumed.
@@ -852,7 +875,8 @@ impl PyPackWriter {
             .inner
             .take()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("writer already finished"))?;
-        w.finish().map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        w.finish()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 }
 
@@ -873,7 +897,9 @@ impl PyPackReader {
         let exp = match expected_sha256 {
             Some(b) => {
                 if b.len() != 32 {
-                    return Err(pyo3::exceptions::PyValueError::new_err("expected_sha256 must be 32 bytes"));
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "expected_sha256 must be 32 bytes",
+                    ));
                 }
                 let mut h = [0u8; 32];
                 h.copy_from_slice(b);
@@ -912,12 +938,235 @@ impl PyPackReader {
         let arr = PyArray2::<f32>::zeros(py, [n_ch, t], false);
         // Safe: freshly allocated, GIL held, no aliasing; v is exactly n_ch*t long.
         unsafe {
-            let out = arr
-                .as_slice_mut()
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}")))?;
+            let out = arr.as_slice_mut().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
+            })?;
             out.copy_from_slice(&v);
         }
         Ok(arr)
+    }
+}
+
+// ───────────────── ADR 0114 N2: the Neural Evidence Graph handle ─────────────────
+
+use lamquant_neg::class::{
+    tag_is_evidence, Action, Derived, EpistemicClass, Estimated, Generated, Hypothesis, Measured,
+    Outcome,
+};
+use lamquant_neg::{
+    EdgeClass, NegGraph, Node, NodeId, NodePayload, NodeRecord, Provenance, Uncertainty,
+};
+
+/// A Neural Evidence Graph exposed to Python (ADR 0114 N2). The typed read
+/// accessors (`.measured()/.estimated()/.generated()`) raise `ValueError` on an
+/// epistemic-class mismatch — the runtime twin of the Rust compile-time barrier,
+/// so a Python consumer asking for measured evidence can never be handed a
+/// generated node. Construction is class-tagged; verification + content
+/// addressing run in Rust (the letter of the invariant is not re-implemented in
+/// Python).
+#[pyclass]
+struct PyNeg {
+    inner: NegGraph,
+}
+
+impl PyNeg {
+    fn node_to_dict<'py>(py: Python<'py>, rec: &NodeRecord) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("id", rec.id.as_str())?;
+        d.set_item("class", rec.class_name().unwrap_or("unknown"))?;
+        d.set_item("content_ref", rec.payload.content_ref.clone())?;
+        d.set_item("summary", rec.payload.summary.clone())?;
+        d.set_item("producer", rec.provenance.producer.clone())?;
+        let parents: Vec<String> = rec.provenance.parents.iter().map(|p| p.0.clone()).collect();
+        d.set_item("parents", parents)?;
+        d.set_item(
+            "is_evidence",
+            tag_is_evidence(rec.class_tag).unwrap_or(false),
+        )?;
+        if let Some(u) = &rec.uncertainty {
+            d.set_item("uncertainty_metric", u.metric.clone())?;
+            d.set_item("uncertainty_value", u.value)?;
+        }
+        Ok(d)
+    }
+
+    /// The verified typed boundary: return the node as a dict iff its class is
+    /// `C`, else raise `ValueError` (missing node → `KeyError`).
+    fn typed_view<'py, C: EpistemicClass>(
+        &self,
+        py: Python<'py>,
+        id: String,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rec = self
+            .inner
+            .get(&NodeId(id.clone()))
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("no such node {id}")))?;
+        rec.view::<C>()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Self::node_to_dict(py, rec)
+    }
+}
+
+#[pymethods]
+impl PyNeg {
+    #[new]
+    fn new() -> Self {
+        PyNeg {
+            inner: NegGraph::new(),
+        }
+    }
+
+    /// Add a typed node; returns its content-address id. `class` ∈
+    /// measured/derived/estimated/generated/hypothesis/action/outcome. The node
+    /// is *born* into its class in Rust — Python cannot cast one class to another.
+    #[pyo3(signature = (class, producer, content_ref=None, summary=None, parents=None, note=None, uncertainty_metric=None, uncertainty_value=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        class: &str,
+        producer: String,
+        content_ref: Option<String>,
+        summary: Option<String>,
+        parents: Option<Vec<String>>,
+        note: Option<String>,
+        uncertainty_metric: Option<String>,
+        uncertainty_value: Option<f64>,
+    ) -> PyResult<String> {
+        let payload = NodePayload {
+            content_ref,
+            summary,
+        };
+        let mut prov = Provenance::from_parents(
+            producer,
+            parents
+                .unwrap_or_default()
+                .into_iter()
+                .map(NodeId)
+                .collect(),
+        );
+        prov.note = note;
+        let unc = match (uncertainty_metric, uncertainty_value) {
+            (Some(metric), Some(value)) => Some(Uncertainty { metric, value }),
+            (None, None) => None,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "uncertainty needs both metric and value",
+                ))
+            }
+        };
+        let id = match class {
+            "measured" => self
+                .inner
+                .add_node(Node::<Measured>::new(payload, prov, unc)),
+            "derived" => self
+                .inner
+                .add_node(Node::<Derived>::new(payload, prov, unc)),
+            "estimated" => self
+                .inner
+                .add_node(Node::<Estimated>::new(payload, prov, unc)),
+            "generated" => self
+                .inner
+                .add_node(Node::<Generated>::new(payload, prov, unc)),
+            "hypothesis" => self
+                .inner
+                .add_node(Node::<Hypothesis>::new(payload, prov, unc)),
+            "action" => self.inner.add_node(Node::<Action>::new(payload, prov, unc)),
+            "outcome" => self
+                .inner
+                .add_node(Node::<Outcome>::new(payload, prov, unc)),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown epistemic class {other:?}"
+                )))
+            }
+        };
+        Ok(id.0)
+    }
+
+    /// Add a typed edge (`from`/`to` are content-address ids).
+    fn add_edge(&mut self, from: String, to: String, edge_class: &str) -> PyResult<()> {
+        let ec = match edge_class {
+            "deterministic-transform" => EdgeClass::DeterministicTransform,
+            "probabilistic-inference" => EdgeClass::ProbabilisticInference,
+            "temporal-dependence" => EdgeClass::TemporalDependence,
+            "spatial-correspondence" => EdgeClass::SpatialCorrespondence,
+            "causal-intervention" => EdgeClass::CausalIntervention,
+            "calibration-dependency" => EdgeClass::CalibrationDependency,
+            "provenance-dependency" => EdgeClass::ProvenanceDependency,
+            "uncertainty-propagation" => EdgeClass::UncertaintyPropagation,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown edge class {other:?}"
+                )))
+            }
+        };
+        self.inner.add_edge(NodeId(from), NodeId(to), ec);
+        Ok(())
+    }
+
+    /// Materialize every node's provenance parents as provenance-dependency edges.
+    fn materialize_provenance_edges(&mut self) {
+        self.inner.materialize_provenance_edges();
+    }
+
+    /// Integrity check; raises `ValueError` listing every violation (fail-closed).
+    fn verify(&self) -> PyResult<()> {
+        self.inner.verify().map_err(|errs| {
+            let msg = errs
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            pyo3::exceptions::PyValueError::new_err(format!("NEG verify failed: {msg}"))
+        })
+    }
+
+    /// The graph's own content address (stable across insertion order).
+    fn content_address(&self) -> String {
+        self.inner.content_address()
+    }
+
+    /// Deterministic canonical JSON.
+    fn to_json(&self) -> PyResult<String> {
+        self.inner
+            .to_json()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Parse a graph from JSON (does not verify — call `.verify()` after).
+    #[staticmethod]
+    fn from_json(s: &str) -> PyResult<Self> {
+        NegGraph::from_json(s)
+            .map(|inner| PyNeg { inner })
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// Typed accessor — raises unless the node's class is `measured`.
+    fn measured<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyDict>> {
+        self.typed_view::<Measured>(py, id)
+    }
+    /// Typed accessor — raises unless the node's class is `estimated`.
+    fn estimated<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyDict>> {
+        self.typed_view::<Estimated>(py, id)
+    }
+    /// Typed accessor — raises unless the node's class is `generated`.
+    fn generated<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyDict>> {
+        self.typed_view::<Generated>(py, id)
+    }
+
+    /// Whether the node may be treated as measured evidence (fail-closed on
+    /// unknown class). The type-erased twin of `EpistemicClass::IS_EVIDENCE`.
+    fn is_evidence(&self, id: String) -> PyResult<bool> {
+        let rec = self
+            .inner
+            .get(&NodeId(id))
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("no such node"))?;
+        tag_is_evidence(rec.class_tag)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("unknown epistemic class"))
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.nodes.len()
     }
 }
 
@@ -933,6 +1182,7 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(container_read, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_bytes, m)?)?;
     m.add_class::<PyAbir>()?;
+    m.add_class::<PyNeg>()?;
     m.add_class::<PyPackWriter>()?;
     m.add_class::<PyPackReader>()?;
     m.add_function(wrap_pyfunction!(container_read_abir, m)?)?;
