@@ -28,3 +28,6 @@ crate-type = ["rlib"]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 sha2 = { version = "0.10" }
+
+[dev-dependencies]
+trybuild = "1.0.116"
