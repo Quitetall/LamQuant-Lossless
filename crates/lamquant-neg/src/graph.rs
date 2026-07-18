@@ -332,13 +332,7 @@ mod tests {
     #[test]
     fn add_node_is_idempotent_by_content() {
         let mut g = NegGraph::new();
-        let mk = || {
-            Node::<Derived>::new(
-                NodePayload::default(),
-                Provenance::root("t"),
-                None,
-            )
-        };
+        let mk = || Node::<Derived>::new(NodePayload::default(), Provenance::root("t"), None);
         let a = g.add_node(mk());
         let b = g.add_node(mk());
         assert_eq!(a, b);

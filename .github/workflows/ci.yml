@@ -100,6 +100,12 @@ jobs:
       # once when the codec started stamping provenance onto metadata).
       - name: lml self-test (fresh-binary sanity)
         run: cargo run -p lamquant-lml --bin lml -- self-test
+      # ADR 0114 (Neural Evidence Graph): the epistemic-class type barrier. Pins
+      # the crate's unit + doctest + trybuild UI suite by name so the invariant
+      # "a Generated node can never reach a Measured consumer" (compile-fail,
+      # E0308-pinned in tests/ui/) can't be silently dropped by a feature trim.
+      - name: NEG type-barrier gate
+        run: cargo test -p lamquant-neg
 
   core-no_std:
     # The firmware BINARY moved to the LamQuant-Firmware submodule (ADR
