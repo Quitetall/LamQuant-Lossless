@@ -202,11 +202,11 @@ fn dix1_benchmark_worker_round_trips_every_profile_fail_closed() {
     let value: serde_json::Value = serde_json::from_slice(&fs::read(descriptor).unwrap()).unwrap();
     assert_eq!(
         value["codec"],
-        "LamQuant Optimum v2 native, DIX1/DIX2 construction, and BGF1 learned carrier"
+        "LamQuant Optimum v2 native, MIX1, DIX1/DIX2 construction, and BGF1 learned carrier"
     );
     assert_eq!(
         value["wire"],
-        "LMO1-v3/BGF1-v1/DIX1-v2/DIX2-v1-construction"
+        "LMO1-v3/BGF1-v1/OV2P-v2-MIX1/DIX1-v2/DIX2-v1-construction"
     );
     assert_eq!(
         value["dix1_worker"]["encode"],

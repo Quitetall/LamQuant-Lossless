@@ -17,6 +17,7 @@ use lamquant_lml_optimum_v2::bgf1_model_pack::{BGF1_EXPECTED_PACK_BYTES, BGF1_MO
 use lamquant_lml_optimum_v2::derivation_incidence::ChannelIdentity;
 use lamquant_lml_optimum_v2::dix1_carrier::{Dix1CarrierMode, Dix1ConstructionCodec};
 use lamquant_lml_optimum_v2::dix2_carrier::{Dix2CarrierMode, Dix2ConstructionCodec};
+use lamquant_lml_optimum_v2::mix1::Mix1Codec;
 use lamquant_lml_optimum_v2::{EncodeContext, OptimumV2Codec};
 use serde_json::json;
 
@@ -713,8 +714,8 @@ fn run(args: &[String]) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let bytes = fs::read(&executable).map_err(|error| error.to_string())?;
         let descriptor = json!({
-            "codec": "LamQuant Optimum v2 native, DIX1/DIX2 construction, and BGF1 learned carrier",
-            "wire": "LMO1-v3/BGF1-v1/DIX1-v2/DIX2-v1-construction",
+            "codec": "LamQuant Optimum v2 native, MIX1, DIX1/DIX2 construction, and BGF1 learned carrier",
+            "wire": "LMO1-v3/BGF1-v1/OV2P-v2-MIX1/DIX1-v2/DIX2-v1-construction",
             "binary": executable,
             "binary_bytes": bytes.len(),
             "package_version": env!("CARGO_PKG_VERSION"),
@@ -753,6 +754,13 @@ fn run(args: &[String]) -> Result<(), String> {
                 ],
                 "body_version": 1,
                 "construction_private": true,
+            },
+            "mix1_worker": {
+                "encode_stdio": "mix1-encode-stdio SCORE_SHIFT",
+                "encode_best_stdio": "mix1-encode-best-stdio",
+                "decode_stdio": "mix1-decode-stdio",
+                "score_shifts": [2, 3, 4, 5, 6, 7, 8],
+                "development_only": true,
             },
         });
         return fs::write(
@@ -822,6 +830,50 @@ fn run(args: &[String]) -> Result<(), String> {
                 .iter()
                 .map(|identity| identity.label.clone())
                 .collect(),
+        };
+        return write_standard_output(&encode_lqraw(&decoded.samples, &context)?);
+    }
+    if args.len() == 3 && args[1] == "mix1-encode-stdio" {
+        let score_shift: u8 = args[2]
+            .parse()
+            .map_err(|_| "MIX1 SCORE_SHIFT must be an integer in 2..=8".to_owned())?;
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "MIX1 LQR1 standard input",
+        )?;
+        let (signal, context) =
+            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
+        let packet = Mix1Codec
+            .encode_window(
+                &signal,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                score_shift,
+            )
+            .map_err(|error| error.to_string())?;
+        return write_standard_output(&packet);
+    }
+    if args.len() == 2 && args[1] == "mix1-encode-best-stdio" {
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "MIX1 LQR1 standard input",
+        )?;
+        let (signal, context) =
+            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
+        let packet = Mix1Codec
+            .encode_best_score_window(&signal, context.sample_rate_mhz, context.bit_depth)
+            .map_err(|error| error.to_string())?;
+        return write_standard_output(&packet);
+    }
+    if args.len() == 2 && args[1] == "mix1-decode-stdio" {
+        let packet = read_standard_input(MAX_LEARNED_PACKET_BYTES, "MIX1 packet standard input")?;
+        let decoded = Mix1Codec
+            .decode_window(&packet)
+            .map_err(|error| error.to_string())?;
+        let context = EncodeContext {
+            sample_rate_mhz: decoded.sample_rate_mhz,
+            bit_depth: decoded.bit_depth,
+            channel_labels: Vec::new(),
         };
         return write_standard_output(&encode_lqraw(&decoded.samples, &context)?);
     }
@@ -926,7 +978,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }

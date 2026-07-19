@@ -29,6 +29,9 @@ pub mod fixed_predictor;
 pub mod fixed_universal_conformance {
     pub use crate::fixed_predictor::*;
 }
+pub mod mix1;
+mod mix1_entropy;
+mod mix1_lattice;
 pub mod model_pack;
 
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";

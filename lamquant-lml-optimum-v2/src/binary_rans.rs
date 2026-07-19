@@ -33,7 +33,6 @@ impl BinaryRansEncoder {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn event_count(&self) -> usize {
         self.events.len()
     }
