@@ -82,6 +82,24 @@ fn standalone_python_decoder_matches_every_profile_and_boundary() {
     assert!(mixed_modes[1..].contains(&Dix2CarrierMode::TreeMedRans));
     cases.push(mixed_packet);
 
+    // Mixed referential/bipolar labels carry frozen DIX1 topology priors even
+    // while incidence prediction is disabled. This catches an oracle that
+    // incorrectly starts the temporal state machine with empty supports.
+    let mixed_montage_identities = vec![
+        identity(0, "F3-REF"),
+        identity(1, "C3-REF"),
+        identity(2, "F3-C3"),
+        identity(3, "ECG"),
+    ];
+    let mixed_montage = common_reference_signal(257);
+    for mode in [Dix2CarrierMode::TemporalRans, Dix2CarrierMode::TreeMedRans] {
+        cases.push(
+            codec
+                .encode_forced(&mixed_montage, &mixed_montage_identities, 500_000, 24, mode)
+                .unwrap(),
+        );
+    }
+
     for packet in cases {
         let production = codec.decode_window(&packet).expect("Rust decode");
         let reference = reference_decode(&packet).expect("Python decode");

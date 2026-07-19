@@ -345,7 +345,12 @@ def decode_packet(packet: bytes) -> dict[str, object]:
     if payload_sum != len(payload):
         raise DecodeError("DIX2 directory does not cover payload exactly")
 
-    temporal = d1.Dix1Session([[] for _ in identities], bit_depth, sample_rate_mhz, False)
+    # Disabled incidence still retains topology-conditioned temporal priors in
+    # the frozen DIX1 state machine.  Supplying empty supports changes those
+    # priors and eventually diverges on mixed referential/bipolar montages.
+    temporal = d1.Dix1Session(
+        d1.derive_topology(identities), bit_depth, sample_rate_mhz, False
+    )
     stable_signal: list[list[int]] = [[] for _ in range(channels)]
     tile_modes: list[int] = []
     payload_offset = 0
