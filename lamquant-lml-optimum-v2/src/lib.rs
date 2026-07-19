@@ -10,6 +10,8 @@ pub mod bgf1_learned;
 pub mod bgf1_model_pack;
 mod binary_rans;
 #[doc(hidden)]
+pub mod derivation_forest;
+#[doc(hidden)]
 pub mod derivation_incidence;
 #[doc(hidden)]
 pub mod dix1;
