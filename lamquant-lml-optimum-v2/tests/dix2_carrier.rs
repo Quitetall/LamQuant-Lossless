@@ -110,6 +110,31 @@ fn all_profiles_roundtrip_and_product_selects_exact_complete_bytes() {
             assert_eq!(decoded.samples, signal);
             assert_eq!(decoded.identities, identities);
             assert_eq!(decoded.tile_modes, vec![mode; 4]);
+            println!(
+                "DIX2 forced golden: mode={mode:?} len={} sha256={:x}",
+                packet.len(),
+                Sha256::digest(&packet)
+            );
+            let (expected_len, expected_sha256) = match mode {
+                Dix2CarrierMode::Raw => (
+                    8_352,
+                    "649e5073c392a9268f9f88a2124ede3875c9bf6dc310c37402c0b46407f749a5",
+                ),
+                Dix2CarrierMode::Delta => (
+                    4_256,
+                    "199a6f6cf3c43bf73aeeba0f58ad16bd218906286ac4390871524e09055139d9",
+                ),
+                Dix2CarrierMode::TemporalRans => (
+                    2_605,
+                    "333289bfebbf2422ca6bd6df2115fa8eb96add315874334060e942352fe64ac3",
+                ),
+                Dix2CarrierMode::TreeMedRans => (
+                    1_371,
+                    "2668126c3ff3f94c23bcc91fd5d68cdcd1ad3495661676f00618796aa7a15a1a",
+                ),
+            };
+            assert_eq!(packet.len(), expected_len);
+            assert_eq!(format!("{:x}", Sha256::digest(&packet)), expected_sha256);
             (mode, packet)
         })
         .collect::<Vec<_>>();
@@ -119,6 +144,26 @@ fn all_profiles_roundtrip_and_product_selects_exact_complete_bytes() {
     let native = codec
         .encode_native_window(&signal, &identities, 500_000, 24)
         .expect("native");
+    println!(
+        "DIX2 product golden: len={} sha256={:x}",
+        product.len(),
+        Sha256::digest(&product)
+    );
+    println!(
+        "DIX2 native golden: len={} sha256={:x}",
+        native.len(),
+        Sha256::digest(&native)
+    );
+    assert_eq!(product.len(), 1_371);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&product)),
+        "960aae8e28178846f7f2b905d15c48bbc9e5f027c09e24710537fbce031707e3"
+    );
+    assert_eq!(native.len(), 4_256);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&native)),
+        "bbb649ee39ac694d88882de5a02d0ed3c177c2bfb3f19906dd342713ccee6243"
+    );
     let smallest = forced.iter().map(|(_, packet)| packet.len()).min().unwrap();
     let native_smallest = forced[..2]
         .iter()
