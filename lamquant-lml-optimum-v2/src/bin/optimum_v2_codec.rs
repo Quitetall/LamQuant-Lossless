@@ -16,6 +16,7 @@ use lamquant_lml_optimum_v2::bgf1_learned::{
 use lamquant_lml_optimum_v2::bgf1_model_pack::{BGF1_EXPECTED_PACK_BYTES, BGF1_MODEL_ID};
 use lamquant_lml_optimum_v2::derivation_incidence::ChannelIdentity;
 use lamquant_lml_optimum_v2::dix1_carrier::{Dix1CarrierMode, Dix1ConstructionCodec};
+use lamquant_lml_optimum_v2::dix2_carrier::{Dix2CarrierMode, Dix2ConstructionCodec};
 use lamquant_lml_optimum_v2::{EncodeContext, OptimumV2Codec};
 use serde_json::json;
 
@@ -587,6 +588,63 @@ fn encode_dix1_packet(
     .map_err(|error| error.to_string())
 }
 
+fn encode_dix2_packet(
+    profile: &str,
+    signal: &[Vec<i64>],
+    identities: &[ChannelIdentity],
+    context: &EncodeContext,
+) -> Result<Vec<u8>, String> {
+    let codec = Dix2ConstructionCodec;
+    match profile {
+        "product" => codec.encode_window(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+        ),
+        "native" => codec.encode_native_window(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+        ),
+        "raw" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix2CarrierMode::Raw,
+        ),
+        "delta" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix2CarrierMode::Delta,
+        ),
+        "temporal" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix2CarrierMode::TemporalRans,
+        ),
+        "tree" => codec.encode_forced(
+            signal,
+            identities,
+            context.sample_rate_mhz,
+            context.bit_depth,
+            Dix2CarrierMode::TreeMedRans,
+        ),
+        _ => {
+            return Err(
+                "DIX2 PROFILE must be product, native, raw, delta, temporal, or tree".to_owned(),
+            );
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
 fn read_standard_input(maximum: u64, kind: &str) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     std::io::stdin()
@@ -655,8 +713,8 @@ fn run(args: &[String]) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let bytes = fs::read(&executable).map_err(|error| error.to_string())?;
         let descriptor = json!({
-            "codec": "LamQuant Optimum v2 native, DIX1 construction, and BGF1 learned carrier",
-            "wire": "LMO1-v3/BGF1-v1/DIX1-v2-construction",
+            "codec": "LamQuant Optimum v2 native, DIX1/DIX2 construction, and BGF1 learned carrier",
+            "wire": "LMO1-v3/BGF1-v1/DIX1-v2/DIX2-v1-construction",
             "binary": executable,
             "binary_bytes": bytes.len(),
             "package_version": env!("CARGO_PKG_VERSION"),
@@ -680,6 +738,20 @@ fn run(args: &[String]) -> Result<(), String> {
                     "no-incidence",
                 ],
                 "body_version": 2,
+                "construction_private": true,
+            },
+            "dix2_worker": {
+                "encode_stdio": "dix2-encode-stdio PROFILE META_JSON",
+                "decode_stdio": "dix2-decode-stdio",
+                "profiles": [
+                    "product",
+                    "native",
+                    "raw",
+                    "delta",
+                    "temporal",
+                    "tree",
+                ],
+                "body_version": 1,
                 "construction_private": true,
             },
         });
@@ -708,6 +780,38 @@ fn run(args: &[String]) -> Result<(), String> {
     if args.len() == 2 && args[1] == "dix1-decode-stdio" {
         let packet = read_standard_input(MAX_LEARNED_PACKET_BYTES, "DIX1 packet standard input")?;
         let decoded = Dix1ConstructionCodec
+            .decode_window(&packet)
+            .map_err(|error| error.to_string())?;
+        let context = EncodeContext {
+            sample_rate_mhz: decoded.sample_rate_mhz,
+            bit_depth: decoded.bit_depth,
+            channel_labels: decoded
+                .identities
+                .iter()
+                .map(|identity| identity.label.clone())
+                .collect(),
+        };
+        return write_standard_output(&encode_lqraw(&decoded.samples, &context)?);
+    }
+    if args.len() == 4 && args[1] == "dix2-encode-stdio" {
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "DIX2 LQR1 standard input",
+        )?;
+        let (signal, context) = parse_lqraw_with_limits(
+            raw,
+            MAX_LEARNED_CHANNELS,
+            MAX_SAMPLES,
+            MAX_LEARNED_VALUES,
+            false,
+        )?;
+        let identities = parse_dix1_identities(args[3].as_bytes(), signal.len())?;
+        let packet = encode_dix2_packet(&args[2], &signal, &identities, &context)?;
+        return write_standard_output(&packet);
+    }
+    if args.len() == 2 && args[1] == "dix2-decode-stdio" {
+        let packet = read_standard_input(MAX_LEARNED_PACKET_BYTES, "DIX2 packet standard input")?;
+        let decoded = Dix2ConstructionCodec
             .decode_window(&packet)
             .map_err(|error| error.to_string())?;
         let context = EncodeContext {
@@ -822,7 +926,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }

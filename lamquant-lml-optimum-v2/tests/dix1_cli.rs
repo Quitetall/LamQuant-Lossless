@@ -202,9 +202,12 @@ fn dix1_benchmark_worker_round_trips_every_profile_fail_closed() {
     let value: serde_json::Value = serde_json::from_slice(&fs::read(descriptor).unwrap()).unwrap();
     assert_eq!(
         value["codec"],
-        "LamQuant Optimum v2 native, DIX1 construction, and BGF1 learned carrier"
+        "LamQuant Optimum v2 native, DIX1/DIX2 construction, and BGF1 learned carrier"
     );
-    assert_eq!(value["wire"], "LMO1-v3/BGF1-v1/DIX1-v2-construction");
+    assert_eq!(
+        value["wire"],
+        "LMO1-v3/BGF1-v1/DIX1-v2/DIX2-v1-construction"
+    );
     assert_eq!(
         value["dix1_worker"]["encode"],
         "dix1-encode PROFILE INPUT META_JSON OUTPUT"
@@ -217,6 +220,17 @@ fn dix1_benchmark_worker_round_trips_every_profile_fail_closed() {
     assert_eq!(value["dix1_worker"]["decode_stdio"], "dix1-decode-stdio");
     assert_eq!(value["dix1_worker"]["body_version"], 2);
     assert_eq!(value["dix1_worker"]["construction_private"], true);
+    assert_eq!(
+        value["dix2_worker"]["encode_stdio"],
+        "dix2-encode-stdio PROFILE META_JSON"
+    );
+    assert_eq!(value["dix2_worker"]["decode_stdio"], "dix2-decode-stdio");
+    assert_eq!(value["dix2_worker"]["body_version"], 1);
+    assert_eq!(value["dix2_worker"]["construction_private"], true);
+    assert_eq!(
+        value["dix2_worker"]["profiles"],
+        serde_json::json!(["product", "native", "raw", "delta", "temporal", "tree"])
+    );
     assert_eq!(
         value["dix1_worker"]["profiles"],
         serde_json::json!([
