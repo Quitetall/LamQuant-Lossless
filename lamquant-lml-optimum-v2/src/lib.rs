@@ -19,6 +19,7 @@ mod dix1_blocks;
 #[doc(hidden)]
 pub mod dix1_carrier;
 mod dix1_entropy;
+pub mod dix2_blocks;
 #[doc(hidden)]
 #[path = "universal.rs"]
 pub mod fixed_predictor;

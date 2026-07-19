@@ -96,6 +96,46 @@ impl DerivationForest {
     pub fn channels(&self) -> &[ForestChannel] {
         &self.channels
     }
+
+    /// Remove the causal TreeMED prediction from one canonical innovation row.
+    pub fn forward_canonical_innovations(
+        &self,
+        innovations: &[i64],
+    ) -> Result<Vec<i64>, OptimumV2Error> {
+        if innovations.len() != self.channels.len() {
+            return Err(invalid(
+                "DIX2 innovation row has the wrong canonical channel count",
+            ));
+        }
+        let mut residuals = Vec::with_capacity(innovations.len());
+        for (channel, &innovation) in innovations.iter().enumerate() {
+            let prediction = parent_prediction(&self.channels[channel], innovations)?;
+            residuals.push(innovation.checked_sub(prediction).ok_or_else(|| {
+                invalid("DIX2 tree residual overflowed signed 64-bit arithmetic")
+            })?);
+        }
+        Ok(residuals)
+    }
+
+    /// Restore one canonical innovation row from causal TreeMED residuals.
+    pub fn inverse_canonical_innovations(
+        &self,
+        residuals: &[i64],
+    ) -> Result<Vec<i64>, OptimumV2Error> {
+        if residuals.len() != self.channels.len() {
+            return Err(invalid(
+                "DIX2 residual row has the wrong canonical channel count",
+            ));
+        }
+        let mut innovations = Vec::with_capacity(residuals.len());
+        for (channel, &residual) in residuals.iter().enumerate() {
+            let prediction = parent_prediction(&self.channels[channel], &innovations)?;
+            innovations.push(residual.checked_add(prediction).ok_or_else(|| {
+                invalid("DIX2 inverse innovation overflowed signed 64-bit arithmetic")
+            })?);
+        }
+        Ok(innovations)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,18 +166,13 @@ impl TreeInnovationSession {
     pub fn forward_row(&mut self, presented: &[i64]) -> Result<Vec<i64>, OptimumV2Error> {
         let canonical = self.forest.incidence.canonicalize_row(presented)?;
         let mut innovations = Vec::with_capacity(canonical.len());
-        let mut residuals = Vec::with_capacity(canonical.len());
         for (channel, &sample) in canonical.iter().enumerate() {
             let innovation = sample.checked_sub(self.previous[channel]).ok_or_else(|| {
                 invalid("DIX2 temporal innovation overflowed signed 64-bit arithmetic")
             })?;
-            let prediction = parent_prediction(&self.forest.channels[channel], &innovations)?;
-            let residual = innovation
-                .checked_sub(prediction)
-                .ok_or_else(|| invalid("DIX2 tree residual overflowed signed 64-bit arithmetic"))?;
             innovations.push(innovation);
-            residuals.push(residual);
         }
+        let residuals = self.forest.forward_canonical_innovations(&innovations)?;
         let row_count = self
             .row_count
             .checked_add(1)
@@ -151,19 +186,14 @@ impl TreeInnovationSession {
         if residuals.len() != self.forest.channels.len() {
             return Err(invalid("DIX2 residual row has the wrong channel count"));
         }
-        let mut innovations = Vec::with_capacity(residuals.len());
+        let innovations = self.forest.inverse_canonical_innovations(residuals)?;
         let mut canonical = Vec::with_capacity(residuals.len());
-        for (channel, &residual) in residuals.iter().enumerate() {
-            let prediction = parent_prediction(&self.forest.channels[channel], &innovations)?;
-            let innovation = residual.checked_add(prediction).ok_or_else(|| {
-                invalid("DIX2 inverse innovation overflowed signed 64-bit arithmetic")
-            })?;
+        for (channel, &innovation) in innovations.iter().enumerate() {
             let sample = self.previous[channel]
                 .checked_add(innovation)
                 .ok_or_else(|| {
                     invalid("DIX2 inverse sample overflowed signed 64-bit arithmetic")
                 })?;
-            innovations.push(innovation);
             canonical.push(sample);
         }
         let presented = self.forest.incidence.restore_presented_row(&canonical)?;

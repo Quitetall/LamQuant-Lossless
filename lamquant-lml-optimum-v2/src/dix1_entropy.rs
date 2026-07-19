@@ -7,7 +7,9 @@
 use crate::binary_rans::{BinaryRansDecoder, BinaryRansEncoder, CDF_TOTAL};
 use crate::OptimumV2Error;
 
-const MAX_BIT_DEPTH: usize = 32;
+// DIX1 callers remain capped at 32 bits. DIX2 TreeMED needs one guard bit
+// because subtracting two valid temporal residuals can add one magnitude bit.
+const MAX_BIT_DEPTH: usize = 33;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Counts {
