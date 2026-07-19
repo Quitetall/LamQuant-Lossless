@@ -23,7 +23,7 @@ pub enum Dix2CarrierMode {
 }
 
 impl Dix2CarrierMode {
-    fn wire(self) -> u8 {
+    pub(crate) fn wire(self) -> u8 {
         match self {
             Self::Raw => 0,
             Self::Delta => 1,
@@ -32,7 +32,7 @@ impl Dix2CarrierMode {
         }
     }
 
-    fn from_wire(value: u8) -> Result<Self, OptimumV2Error> {
+    pub(crate) fn from_wire(value: u8) -> Result<Self, OptimumV2Error> {
         match value {
             0 => Ok(Self::Raw),
             1 => Ok(Self::Delta),
@@ -68,7 +68,29 @@ impl Dix2BlockCodec {
         sample_rate_mhz: u32,
         bit_depth: u8,
     ) -> Result<EncodedDix2Blocks, OptimumV2Error> {
-        self.encode(signal, identities, sample_rate_mhz, bit_depth, None)
+        self.encode(
+            signal,
+            identities,
+            sample_rate_mhz,
+            bit_depth,
+            BlockProfile::Product,
+        )
+    }
+
+    pub fn encode_native_window(
+        &self,
+        signal: &[Vec<i64>],
+        identities: &[ChannelIdentity],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<EncodedDix2Blocks, OptimumV2Error> {
+        self.encode(
+            signal,
+            identities,
+            sample_rate_mhz,
+            bit_depth,
+            BlockProfile::Native,
+        )
     }
 
     #[doc(hidden)]
@@ -80,7 +102,13 @@ impl Dix2BlockCodec {
         bit_depth: u8,
         mode: Dix2CarrierMode,
     ) -> Result<EncodedDix2Blocks, OptimumV2Error> {
-        self.encode(signal, identities, sample_rate_mhz, bit_depth, Some(mode))
+        self.encode(
+            signal,
+            identities,
+            sample_rate_mhz,
+            bit_depth,
+            BlockProfile::Forced(mode),
+        )
     }
 
     pub fn decode_window(
@@ -203,7 +231,7 @@ impl Dix2BlockCodec {
         identities: &[ChannelIdentity],
         sample_rate_mhz: u32,
         bit_depth: u8,
-        forced: Option<Dix2CarrierMode>,
+        profile: BlockProfile,
     ) -> Result<EncodedDix2Blocks, OptimumV2Error> {
         let prepared = PreparedInput::new(signal, identities, sample_rate_mhz, bit_depth)?;
         let mut temporal = Dix1Session::new_with_incidence_mode(
@@ -250,17 +278,11 @@ impl Dix2BlockCodec {
                     payload: tree_rans,
                 },
             ];
-            let candidate = if let Some(mode) = forced {
-                candidates
-                    .into_iter()
-                    .find(|candidate| candidate.mode == mode)
-                    .ok_or_else(|| input_error("DIX2 forced candidate is unavailable"))?
-            } else {
-                candidates
-                    .into_iter()
-                    .min_by_key(|candidate| (candidate.payload.len(), candidate.mode))
-                    .ok_or_else(|| input_error("DIX2 candidate set is empty"))?
-            };
+            let candidate = candidates
+                .into_iter()
+                .filter(|candidate| profile.permits(candidate.mode))
+                .min_by_key(|candidate| (candidate.payload.len(), candidate.mode))
+                .ok_or_else(|| input_error("DIX2 candidate set is empty"))?;
             let length = u32::try_from(candidate.payload.len())
                 .map_err(|_| input_error("DIX2 block payload length exceeds u32"))?;
             directory.push(candidate.mode.wire());
@@ -273,6 +295,23 @@ impl Dix2BlockCodec {
             payload,
             modes,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BlockProfile {
+    Product,
+    Native,
+    Forced(Dix2CarrierMode),
+}
+
+impl BlockProfile {
+    fn permits(self, mode: Dix2CarrierMode) -> bool {
+        match self {
+            Self::Product => true,
+            Self::Native => matches!(mode, Dix2CarrierMode::Raw | Dix2CarrierMode::Delta),
+            Self::Forced(forced) => mode == forced,
+        }
     }
 }
 
