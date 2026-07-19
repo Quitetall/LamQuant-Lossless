@@ -106,6 +106,70 @@ fn score_family_reuses_analysis_but_matches_independent_packets() {
 }
 
 #[test]
+fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1() {
+    let incumbent = Mix1Codec
+        .encode_best_score_window(&signal(), 256_000, 16)
+        .expect("encode MIX1 incumbent");
+    let multivariate = Mix1Codec
+        .encode_multivariate_window(&signal(), 256_000, 16, 4)
+        .expect("encode multivariate carrier");
+    assert_eq!(&multivariate[72..76], b"MMV1");
+    assert_eq!(
+        Mix1Codec.decode_window(&multivariate).unwrap().samples,
+        signal()
+    );
+    assert_eq!(
+        multivariate,
+        Mix1Codec
+            .encode_multivariate_window(&signal(), 256_000, 16, 4)
+            .expect("repeat multivariate carrier")
+    );
+
+    let hierarchical = Mix1Codec
+        .encode_hierarchical_multivariate_window(&signal(), 256_000, 16, 4)
+        .expect("encode hierarchical multivariate carrier");
+    assert_eq!(&hierarchical[72..76], b"MCH1");
+    assert_eq!(
+        Mix1Codec.decode_window(&hierarchical).unwrap().samples,
+        signal()
+    );
+    assert_eq!(
+        hierarchical,
+        Mix1Codec
+            .encode_hierarchical_multivariate_window(&signal(), 256_000, 16, 4)
+            .expect("repeat hierarchical carrier")
+    );
+
+    for packet in [&multivariate, &hierarchical] {
+        for end in 0..packet.len() {
+            assert!(
+                Mix1Codec.decode_window(&packet[..end]).is_err(),
+                "accepted truncated peer prefix {end}"
+            );
+        }
+        let mut corrupted = packet.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert!(Mix1Codec.decode_window(&corrupted).is_err());
+        let mut trailed = packet.clone();
+        trailed.push(0);
+        assert!(Mix1Codec.decode_window(&trailed).is_err());
+    }
+
+    let best = Mix1Codec
+        .encode_best_peer_window(&signal(), 256_000, 16)
+        .expect("encode best peer carrier");
+    assert!(best.len() <= incumbent.len());
+    assert!(matches!(&best[72..76], b"MIX1" | b"MMV1" | b"MCH1"));
+    assert_eq!(Mix1Codec.decode_window(&best).unwrap().samples, signal());
+    assert_eq!(
+        best,
+        Mix1Codec
+            .encode_best_peer_window(&signal(), 256_000, 16)
+            .expect("repeat best peer carrier")
+    );
+}
+
+#[test]
 fn rust_mix1_rejects_every_truncated_python_prefix() {
     let packet = python_golden();
     for end in 0..packet.len() {

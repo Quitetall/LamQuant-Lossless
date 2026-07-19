@@ -44,6 +44,7 @@ impl Counts {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BucketKey {
+    channel: u16,
     relative_level: i8,
     previous_survives: bool,
     parent_survival: u8,
@@ -52,6 +53,7 @@ struct BucketKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SignKey {
+    channel: u16,
     relative_bucket: i8,
     previous_sign: u8,
     parent_sign: u8,
@@ -60,23 +62,29 @@ struct SignKey {
 #[derive(Debug, Clone)]
 struct FiniteStateSession {
     scale_shift: u8,
+    channel_context_mask: u8,
     scale: Vec<u64>,
     previous: Vec<i64>,
     previous2: Vec<i64>,
     bucket_counts: HashMap<BucketKey, Counts>,
-    magnitude_counts: HashMap<i8, Counts>,
+    magnitude_counts: HashMap<(u16, i8), Counts>,
     sign_counts: HashMap<SignKey, Counts>,
     channel: Option<usize>,
     parents: Vec<i64>,
 }
 
 impl FiniteStateSession {
-    fn new(channels: usize, scale_shift: u8) -> Result<Self, OptimumV2Error> {
+    fn new(
+        channels: usize,
+        scale_shift: u8,
+        channel_context_mask: u8,
+    ) -> Result<Self, OptimumV2Error> {
         if !(1..=256).contains(&channels) || !matches!(scale_shift, 2 | 3) {
             return Err(input_error("MIX1 finite-state shape is invalid"));
         }
         Ok(Self {
             scale_shift,
+            channel_context_mask,
             scale: vec![1; channels],
             previous: vec![0; channels],
             previous2: vec![0; channels],
@@ -146,6 +154,7 @@ impl FiniteStateSession {
     fn bucket_key(&self, level: u8) -> Result<BucketKey, OptimumV2Error> {
         let channel = self.channel()?;
         Ok(BucketKey {
+            channel: self.context_channel(channel, 1)?,
             relative_level: clamp_relative(i32::from(level) - self.scale_log()?, 6),
             previous_survives: bit_length(self.previous[channel].unsigned_abs()) > u32::from(level),
             parent_survival: self.parent_survival(level),
@@ -154,18 +163,31 @@ impl FiniteStateSession {
         })
     }
 
-    fn magnitude_key(&self, shift: u8) -> Result<i8, OptimumV2Error> {
-        self.channel()?;
-        Ok(clamp_relative(i32::from(shift) - self.scale_log()?, 6))
+    fn magnitude_key(&self, shift: u8) -> Result<(u16, i8), OptimumV2Error> {
+        let channel = self.channel()?;
+        Ok((
+            self.context_channel(channel, 2)?,
+            clamp_relative(i32::from(shift) - self.scale_log()?, 6),
+        ))
     }
 
     fn sign_key(&self, bucket: u8) -> Result<SignKey, OptimumV2Error> {
         let channel = self.channel()?;
         Ok(SignKey {
+            channel: self.context_channel(channel, 4)?,
             relative_bucket: clamp_relative(i32::from(bucket) - self.scale_log()?, 4),
             previous_sign: sign_category(self.previous[channel]),
             parent_sign: self.parent_sign(),
         })
+    }
+
+    fn context_channel(&self, channel: usize, flag: u8) -> Result<u16, OptimumV2Error> {
+        if self.channel_context_mask & flag != 0 {
+            u16::try_from(channel)
+                .map_err(|_| input_error("MIX1 entropy channel context exceeds u16"))
+        } else {
+            Ok(256)
+        }
     }
 
     fn bucket_probability(&mut self, level: u8) -> Result<u16, OptimumV2Error> {
@@ -261,10 +283,10 @@ struct BayesianMixture {
 }
 
 impl BayesianMixture {
-    fn new(channels: usize) -> Result<Self, OptimumV2Error> {
+    fn new(channels: usize, channel_context_mask: u8) -> Result<Self, OptimumV2Error> {
         Ok(Self {
-            expert2: FiniteStateSession::new(channels, 2)?,
-            expert3: FiniteStateSession::new(channels, 3)?,
+            expert2: FiniteStateSession::new(channels, 2, channel_context_mask)?,
+            expert3: FiniteStateSession::new(channels, 3, channel_context_mask)?,
             weight2: POSTERIOR_TOTAL / 2,
             pending: None,
         })
@@ -382,13 +404,245 @@ impl BayesianMixture {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ContextPending {
+    kind: EventKind,
+    index: u8,
+    channel: usize,
+    global_probability: u16,
+    local_probability: u16,
+}
+
+#[derive(Debug, Clone)]
+struct ChannelBucketMixture {
+    global: BayesianMixture,
+    local: BayesianMixture,
+    global_weights: Vec<u64>,
+    channel: Option<usize>,
+    pending: Option<ContextPending>,
+}
+
+impl ChannelBucketMixture {
+    fn new(channels: usize) -> Result<Self, OptimumV2Error> {
+        Ok(Self {
+            global: BayesianMixture::new(channels, 0)?,
+            local: BayesianMixture::new(channels, 1)?,
+            global_weights: vec![POSTERIOR_TOTAL / 2; channels],
+            channel: None,
+            pending: None,
+        })
+    }
+
+    fn begin_sample(&mut self, channel: usize, parents: &[i64]) -> Result<(), OptimumV2Error> {
+        if self.channel.is_some() || self.pending.is_some() || channel >= self.global_weights.len()
+        {
+            return Err(input_error(
+                "MIX1 hierarchical context sample order is invalid",
+            ));
+        }
+        self.global.begin_sample(channel, parents)?;
+        self.local.begin_sample(channel, parents)?;
+        self.channel = Some(channel);
+        Ok(())
+    }
+
+    fn probability(
+        &mut self,
+        kind: EventKind,
+        index: u8,
+        global_probability: u16,
+        local_probability: u16,
+    ) -> Result<u16, OptimumV2Error> {
+        if self.pending.is_some() {
+            return Err(input_error(
+                "MIX1 hierarchical context event is still pending",
+            ));
+        }
+        let channel = self
+            .channel
+            .ok_or_else(|| input_error("MIX1 hierarchical context sample is not open"))?;
+        let global_weight = self.global_weights[channel];
+        let local_weight = POSTERIOR_TOTAL - global_weight;
+        let numerator = global_weight * u64::from(global_probability)
+            + local_weight * u64::from(local_probability)
+            + POSTERIOR_TOTAL / 2;
+        let mixed = (numerator / POSTERIOR_TOTAL).clamp(1, u64::from(CDF_TOTAL - 1)) as u16;
+        self.pending = Some(ContextPending {
+            kind,
+            index,
+            channel,
+            global_probability,
+            local_probability,
+        });
+        Ok(mixed)
+    }
+
+    fn bucket_probability(&mut self, level: u8) -> Result<u16, OptimumV2Error> {
+        let global = self.global.bucket_probability(level)?;
+        let local = self.local.bucket_probability(level)?;
+        self.probability(EventKind::Bucket, level, global, local)
+    }
+
+    fn magnitude_probability(&mut self, shift: u8) -> Result<u16, OptimumV2Error> {
+        let global = self.global.magnitude_probability(shift)?;
+        let local = self.local.magnitude_probability(shift)?;
+        self.probability(EventKind::Magnitude, shift, global, local)
+    }
+
+    fn sign_probability(&mut self, bucket: u8) -> Result<u16, OptimumV2Error> {
+        let global = self.global.sign_probability(bucket)?;
+        let local = self.local.sign_probability(bucket)?;
+        self.probability(EventKind::Sign, bucket, global, local)
+    }
+
+    fn observe(&mut self, kind: EventKind, index: u8, symbol: u8) -> Result<(), OptimumV2Error> {
+        if symbol > 1 {
+            return Err(input_error(
+                "MIX1 hierarchical context symbol must be binary",
+            ));
+        }
+        let pending = self
+            .pending
+            .ok_or_else(|| input_error("MIX1 hierarchical observation has no pending event"))?;
+        if pending.kind != kind || pending.index != index || self.channel != Some(pending.channel) {
+            return Err(input_error(
+                "MIX1 hierarchical observation does not match pending event",
+            ));
+        }
+        let likelihood = |probability: u16| {
+            if symbol == 1 {
+                u64::from(probability)
+            } else {
+                u64::from(CDF_TOTAL - u32::from(probability))
+            }
+        };
+        let global_mass =
+            self.global_weights[pending.channel] * likelihood(pending.global_probability);
+        let local_mass = (POSTERIOR_TOTAL - self.global_weights[pending.channel])
+            * likelihood(pending.local_probability);
+        let denominator = global_mass + local_mass;
+        self.global_weights[pending.channel] = ((global_mass * POSTERIOR_TOTAL + denominator / 2)
+            / denominator)
+            .clamp(1, POSTERIOR_TOTAL - 1);
+        self.global.observe(kind, index, symbol)?;
+        self.local.observe(kind, index, symbol)?;
+        self.pending = None;
+        Ok(())
+    }
+
+    fn finish_sample(&mut self, residual: i64) -> Result<(), OptimumV2Error> {
+        if self.pending.is_some() || self.channel.is_none() {
+            return Err(input_error(
+                "MIX1 hierarchical context sample is incomplete",
+            ));
+        }
+        self.global.finish_sample(residual)?;
+        self.local.finish_sample(residual)?;
+        self.channel = None;
+        Ok(())
+    }
+
+    fn finish_time(&mut self, current: &[i64]) -> Result<(), OptimumV2Error> {
+        if self.channel.is_some() || self.pending.is_some() {
+            return Err(input_error(
+                "MIX1 hierarchical context time row is incomplete",
+            ));
+        }
+        self.global.finish_time(current)?;
+        self.local.finish_time(current)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum EntropySession {
+    Base(Box<BayesianMixture>),
+    Hierarchical(Box<ChannelBucketMixture>),
+}
+
+impl EntropySession {
+    fn new(channels: usize, context: u8) -> Result<Self, OptimumV2Error> {
+        match context {
+            0 => Ok(Self::Base(Box::new(BayesianMixture::new(channels, 0)?))),
+            8 => Ok(Self::Hierarchical(Box::new(ChannelBucketMixture::new(
+                channels,
+            )?))),
+            _ => Err(input_error("MIX1 entropy context identity is invalid")),
+        }
+    }
+
+    fn begin_sample(&mut self, channel: usize, parents: &[i64]) -> Result<(), OptimumV2Error> {
+        match self {
+            Self::Base(session) => session.begin_sample(channel, parents),
+            Self::Hierarchical(session) => session.begin_sample(channel, parents),
+        }
+    }
+
+    fn bucket_probability(&mut self, level: u8) -> Result<u16, OptimumV2Error> {
+        match self {
+            Self::Base(session) => session.bucket_probability(level),
+            Self::Hierarchical(session) => session.bucket_probability(level),
+        }
+    }
+
+    fn magnitude_probability(&mut self, shift: u8) -> Result<u16, OptimumV2Error> {
+        match self {
+            Self::Base(session) => session.magnitude_probability(shift),
+            Self::Hierarchical(session) => session.magnitude_probability(shift),
+        }
+    }
+
+    fn sign_probability(&mut self, bucket: u8) -> Result<u16, OptimumV2Error> {
+        match self {
+            Self::Base(session) => session.sign_probability(bucket),
+            Self::Hierarchical(session) => session.sign_probability(bucket),
+        }
+    }
+
+    fn observe(&mut self, kind: EventKind, index: u8, symbol: u8) -> Result<(), OptimumV2Error> {
+        match self {
+            Self::Base(session) => session.observe(kind, index, symbol),
+            Self::Hierarchical(session) => session.observe(kind, index, symbol),
+        }
+    }
+
+    fn finish_sample(&mut self, residual: i64) -> Result<(), OptimumV2Error> {
+        match self {
+            Self::Base(session) => session.finish_sample(residual),
+            Self::Hierarchical(session) => session.finish_sample(residual),
+        }
+    }
+
+    fn finish_time(&mut self, current: &[i64]) -> Result<(), OptimumV2Error> {
+        match self {
+            Self::Base(session) => session.finish_time(current),
+            Self::Hierarchical(session) => session.finish_time(current),
+        }
+    }
+}
+
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn encode(
     residuals: &[Vec<i64>],
     parents: &[Vec<usize>],
 ) -> Result<(Vec<u8>, u32), OptimumV2Error> {
+    encode_with_channel_context(residuals, parents, 0)
+}
+
+pub(crate) fn encode_hierarchical(
+    residuals: &[Vec<i64>],
+    parents: &[Vec<usize>],
+) -> Result<(Vec<u8>, u32), OptimumV2Error> {
+    encode_with_channel_context(residuals, parents, 8)
+}
+
+#[allow(clippy::needless_range_loop)]
+fn encode_with_channel_context(
+    residuals: &[Vec<i64>],
+    parents: &[Vec<usize>],
+    channel_context_mask: u8,
+) -> Result<(Vec<u8>, u32), OptimumV2Error> {
     let (channels, samples, max_events) = shape(residuals, parents)?;
-    let mut session = BayesianMixture::new(channels)?;
+    let mut session = EntropySession::new(channels, channel_context_mask)?;
     let mut coder = BinaryRansEncoder::new(max_events)?;
     for time in 0..samples {
         let mut current = vec![0i64; channels];
@@ -443,6 +697,28 @@ pub(crate) fn decode(
     samples: usize,
     parents: &[Vec<usize>],
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    decode_with_channel_context(payload, event_count, channels, samples, parents, 0)
+}
+
+pub(crate) fn decode_hierarchical(
+    payload: &[u8],
+    event_count: u32,
+    channels: usize,
+    samples: usize,
+    parents: &[Vec<usize>],
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    decode_with_channel_context(payload, event_count, channels, samples, parents, 8)
+}
+
+#[allow(clippy::needless_range_loop)]
+fn decode_with_channel_context(
+    payload: &[u8],
+    event_count: u32,
+    channels: usize,
+    samples: usize,
+    parents: &[Vec<usize>],
+    channel_context_mask: u8,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     let values = channels
         .checked_mul(samples)
         .ok_or_else(|| packet_error("MIX1 value count overflows"))?;
@@ -452,7 +728,8 @@ pub(crate) fn decode(
     if parents.len() != channels {
         return Err(packet_error("MIX1 entropy graph channel count differs"));
     }
-    let mut session = BayesianMixture::new(channels).map_err(as_packet_error)?;
+    let mut session =
+        EntropySession::new(channels, channel_context_mask).map_err(as_packet_error)?;
     let mut coder = BinaryRansDecoder::new(payload, max_events)?;
     let mut residuals = vec![vec![0i64; samples]; channels];
     let mut events = 0u32;

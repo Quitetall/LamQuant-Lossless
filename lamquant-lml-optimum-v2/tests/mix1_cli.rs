@@ -96,3 +96,17 @@ fn mix1_best_stdio_worker_selects_an_actual_complete_packet() {
     let restored = stdio_worker(binary, &["mix1-decode-stdio"], &best.stdout);
     assert_eq!(restored.stdout, raw);
 }
+
+#[test]
+fn peer_stdio_worker_emits_a_complete_exact_packet() {
+    let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
+    let raw = lqraw_fixture();
+    let incumbent = stdio_worker(binary, &["mix1-encode-best-stdio"], &raw);
+    let best = stdio_worker(binary, &["mix1-peer-encode-best-stdio"], &raw);
+
+    assert!(best.status.success());
+    assert!(best.stdout.len() <= incumbent.stdout.len());
+    assert!(matches!(&best.stdout[72..76], b"MIX1" | b"MMV1" | b"MCH1"));
+    let restored = stdio_worker(binary, &["mix1-decode-stdio"], &best.stdout);
+    assert_eq!(restored.stdout, raw);
+}

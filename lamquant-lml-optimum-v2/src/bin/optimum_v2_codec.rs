@@ -758,6 +758,7 @@ fn run(args: &[String]) -> Result<(), String> {
             "mix1_worker": {
                 "encode_stdio": "mix1-encode-stdio SCORE_SHIFT",
                 "encode_best_stdio": "mix1-encode-best-stdio",
+                "encode_peer_best_stdio": "mix1-peer-encode-best-stdio",
                 "decode_stdio": "mix1-decode-stdio",
                 "score_shifts": [2, 3, 4, 5, 6, 7, 8],
                 "development_only": true,
@@ -862,6 +863,18 @@ fn run(args: &[String]) -> Result<(), String> {
             parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
         let packet = Mix1Codec
             .encode_best_score_window(&signal, context.sample_rate_mhz, context.bit_depth)
+            .map_err(|error| error.to_string())?;
+        return write_standard_output(&packet);
+    }
+    if args.len() == 2 && args[1] == "mix1-peer-encode-best-stdio" {
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "MIX peer LQR1 standard input",
+        )?;
+        let (signal, context) =
+            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
+        let packet = Mix1Codec
+            .encode_best_peer_window(&signal, context.sample_rate_mhz, context.bit_depth)
             .map_err(|error| error.to_string())?;
         return write_standard_output(&packet);
     }
@@ -978,7 +991,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }
