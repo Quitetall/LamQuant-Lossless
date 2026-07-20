@@ -759,8 +759,11 @@ fn run(args: &[String]) -> Result<(), String> {
                 "encode_stdio": "mix1-encode-stdio SCORE_SHIFT",
                 "encode_best_stdio": "mix1-encode-best-stdio",
                 "encode_peer_best_stdio": "mix1-peer-encode-best-stdio",
+                "encode_peer_permuted_stdio": "mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK",
                 "decode_stdio": "mix1-decode-stdio",
                 "score_shifts": [2, 3, 4, 5, 6, 7, 8],
+                "channel_context_masks": [2, 3, 4, 5, 6, 7],
+                "peer_magics": ["MIX1", "MMV1", "MCH1", "MCX1", "MQX1", "MPX1"],
                 "development_only": true,
             },
         });
@@ -878,6 +881,30 @@ fn run(args: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         return write_standard_output(&packet);
     }
+    if args.len() == 4 && args[1] == "mix1-peer-permuted-encode-stdio" {
+        let score_shift: u8 = args[2]
+            .parse()
+            .map_err(|_| "MIX peer SCORE_SHIFT must be an integer in 2..=8".to_owned())?;
+        let channel_context_mask: u8 = args[3]
+            .parse()
+            .map_err(|_| "MIX peer CHANNEL_CONTEXT_MASK must be an integer in 2..=7".to_owned())?;
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "MIX peer permuted LQR1 standard input",
+        )?;
+        let (signal, context) =
+            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
+        let packet = Mix1Codec
+            .encode_permuted_common_mode_window(
+                &signal,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                score_shift,
+                channel_context_mask,
+            )
+            .map_err(|error| error.to_string())?;
+        return write_standard_output(&packet);
+    }
     if args.len() == 2 && args[1] == "mix1-decode-stdio" {
         let packet = read_standard_input(MAX_LEARNED_PACKET_BYTES, "MIX1 packet standard input")?;
         let decoded = Mix1Codec
@@ -991,7 +1018,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }

@@ -423,10 +423,15 @@ struct ChannelBucketMixture {
 }
 
 impl ChannelBucketMixture {
-    fn new(channels: usize) -> Result<Self, OptimumV2Error> {
+    fn new(channels: usize, channel_context_mask: u8) -> Result<Self, OptimumV2Error> {
+        if !(1..=7).contains(&channel_context_mask) {
+            return Err(input_error(
+                "MIX1 hierarchical channel-context mask is invalid",
+            ));
+        }
         Ok(Self {
             global: BayesianMixture::new(channels, 0)?,
-            local: BayesianMixture::new(channels, 1)?,
+            local: BayesianMixture::new(channels, channel_context_mask)?,
             global_weights: vec![POSTERIOR_TOTAL / 2; channels],
             channel: None,
             pending: None,
@@ -563,8 +568,8 @@ impl EntropySession {
     fn new(channels: usize, context: u8) -> Result<Self, OptimumV2Error> {
         match context {
             0 => Ok(Self::Base(Box::new(BayesianMixture::new(channels, 0)?))),
-            8 => Ok(Self::Hierarchical(Box::new(ChannelBucketMixture::new(
-                channels,
+            1..=7 => Ok(Self::Hierarchical(Box::new(ChannelBucketMixture::new(
+                channels, context,
             )?))),
             _ => Err(input_error("MIX1 entropy context identity is invalid")),
         }
@@ -632,7 +637,20 @@ pub(crate) fn encode_hierarchical(
     residuals: &[Vec<i64>],
     parents: &[Vec<usize>],
 ) -> Result<(Vec<u8>, u32), OptimumV2Error> {
-    encode_with_channel_context(residuals, parents, 8)
+    encode_with_channel_context(residuals, parents, 1)
+}
+
+pub(crate) fn encode_channel_context(
+    residuals: &[Vec<i64>],
+    parents: &[Vec<usize>],
+    channel_context_mask: u8,
+) -> Result<(Vec<u8>, u32), OptimumV2Error> {
+    if !(2..=7).contains(&channel_context_mask) {
+        return Err(input_error(
+            "MIX1 extended channel-context mask must be in 2..=7",
+        ));
+    }
+    encode_with_channel_context(residuals, parents, channel_context_mask)
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -707,7 +725,30 @@ pub(crate) fn decode_hierarchical(
     samples: usize,
     parents: &[Vec<usize>],
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
-    decode_with_channel_context(payload, event_count, channels, samples, parents, 8)
+    decode_with_channel_context(payload, event_count, channels, samples, parents, 1)
+}
+
+pub(crate) fn decode_channel_context(
+    payload: &[u8],
+    event_count: u32,
+    channels: usize,
+    samples: usize,
+    parents: &[Vec<usize>],
+    channel_context_mask: u8,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    if !(2..=7).contains(&channel_context_mask) {
+        return Err(packet_error(
+            "MIX1 extended channel-context mask must be in 2..=7",
+        ));
+    }
+    decode_with_channel_context(
+        payload,
+        event_count,
+        channels,
+        samples,
+        parents,
+        channel_context_mask,
+    )
 }
 
 #[allow(clippy::needless_range_loop)]

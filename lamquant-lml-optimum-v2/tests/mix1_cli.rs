@@ -106,7 +106,26 @@ fn peer_stdio_worker_emits_a_complete_exact_packet() {
 
     assert!(best.status.success());
     assert!(best.stdout.len() <= incumbent.stdout.len());
-    assert!(matches!(&best.stdout[72..76], b"MIX1" | b"MMV1" | b"MCH1"));
+    assert!(matches!(
+        &best.stdout[72..76],
+        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1"
+    ));
     let restored = stdio_worker(binary, &["mix1-decode-stdio"], &best.stdout);
+    assert_eq!(restored.stdout, raw);
+}
+
+#[test]
+fn permuted_peer_stdio_worker_emits_a_complete_exact_packet() {
+    let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
+    let raw = lqraw_fixture();
+    let encoded = stdio_worker(binary, &["mix1-peer-permuted-encode-stdio", "4", "7"], &raw);
+
+    assert!(
+        encoded.status.success(),
+        "permuted peer encode failed: {}",
+        String::from_utf8_lossy(&encoded.stderr)
+    );
+    assert_eq!(&encoded.stdout[72..79], b"MPX1\xA7\x04\x07");
+    let restored = stdio_worker(binary, &["mix1-decode-stdio"], &encoded.stdout);
     assert_eq!(restored.stdout, raw);
 }

@@ -159,7 +159,10 @@ fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1
         .encode_best_peer_window(&signal(), 256_000, 16)
         .expect("encode best peer carrier");
     assert!(best.len() <= incumbent.len());
-    assert!(matches!(&best[72..76], b"MIX1" | b"MMV1" | b"MCH1"));
+    assert!(matches!(
+        &best[72..76],
+        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1"
+    ));
     assert_eq!(Mix1Codec.decode_window(&best).unwrap().samples, signal());
     assert_eq!(
         best,
@@ -167,6 +170,95 @@ fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1
             .encode_best_peer_window(&signal(), 256_000, 16)
             .expect("repeat best peer carrier")
     );
+}
+
+#[test]
+fn peer_channel_context_carrier_roundtrips_and_rejects_noncanonical_masks() {
+    let packet = Mix1Codec
+        .encode_channel_context_window(&signal(), 256_000, 16, 4, 7)
+        .expect("encode all-event channel-context carrier");
+    assert_eq!(&packet[72..76], b"MCX1");
+    assert_eq!(packet[78], 7);
+    assert_eq!(Mix1Codec.decode_window(&packet).unwrap().samples, signal());
+    assert_eq!(
+        packet,
+        Mix1Codec
+            .encode_channel_context_window(&signal(), 256_000, 16, 4, 7)
+            .expect("repeat all-event channel-context carrier")
+    );
+
+    for mask in [0, 1, 8] {
+        assert!(Mix1Codec
+            .encode_channel_context_window(&signal(), 256_000, 16, 4, mask)
+            .is_err());
+    }
+}
+
+#[test]
+fn peer_common_mode_carrier_roundtrips_deterministically() {
+    let packet = Mix1Codec
+        .encode_common_mode_window(&signal(), 256_000, 16, 4, 7)
+        .expect("encode causal common-mode carrier");
+    assert_eq!(&packet[72..76], b"MQX1");
+    assert_eq!(packet[78], 7);
+    assert_eq!(Mix1Codec.decode_window(&packet).unwrap().samples, signal());
+    assert_eq!(
+        packet,
+        Mix1Codec
+            .encode_common_mode_window(&signal(), 256_000, 16, 4, 7)
+            .expect("repeat causal common-mode carrier")
+    );
+}
+
+#[test]
+fn peer_permuted_common_mode_carrier_roundtrips_deterministically() {
+    let packet = Mix1Codec
+        .encode_permuted_common_mode_window(&signal(), 256_000, 16, 4, 7)
+        .expect("encode permuted causal common-mode carrier");
+    assert_eq!(&packet[72..76], b"MPX1");
+    assert_eq!(packet[78], 7);
+    assert_eq!(Mix1Codec.decode_window(&packet).unwrap().samples, signal());
+    assert_eq!(
+        packet,
+        Mix1Codec
+            .encode_permuted_common_mode_window(&signal(), 256_000, 16, 4, 7)
+            .expect("repeat permuted causal common-mode carrier")
+    );
+    for end in 0..packet.len() {
+        assert!(
+            Mix1Codec.decode_window(&packet[..end]).is_err(),
+            "accepted truncated MPX1 prefix {end}"
+        );
+    }
+    let mut corrupted = packet;
+    corrupted[79] = corrupted[80];
+    assert!(Mix1Codec.decode_window(&corrupted).is_err());
+}
+
+#[test]
+fn peer_permuted_common_mode_roundtrips_correlated_channel_families() {
+    for channels in 1..=6 {
+        let signal = (0..channels)
+            .map(|channel| {
+                (0..37)
+                    .map(|time| {
+                        let shared = 5 * time as i64 + ((time * 7) % 11) as i64 - 5;
+                        shared + channel as i64 * 3 + ((time + channel * 2) % 5) as i64
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for mask in 2..=7 {
+            let packet = Mix1Codec
+                .encode_permuted_common_mode_window(&signal, 512_000, 16, 5, mask)
+                .expect("encode correlated MPX1 family");
+            assert_eq!(
+                Mix1Codec.decode_window(&packet).unwrap().samples,
+                signal,
+                "MPX1 roundtrip differs for {channels} channels and mask {mask}"
+            );
+        }
+    }
 }
 
 #[test]
