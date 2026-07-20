@@ -13,6 +13,36 @@ fn signal() -> Vec<Vec<i64>> {
     ]
 }
 
+fn aliased_signal() -> Vec<Vec<i64>> {
+    let shared = (0..2_000)
+        .map(|time| i64::from((time / 37) % 5) - 2)
+        .collect::<Vec<_>>();
+    let mut signal = vec![shared; 33];
+    signal.extend((0..8).map(|channel| {
+        (0..2_000)
+            .map(|time| i64::from((time * (channel + 3) + channel * 17) % 101) - 50)
+            .collect()
+    }));
+    signal
+}
+
+fn all_aliased_signal() -> Vec<Vec<i64>> {
+    let shared = (0..200)
+        .map(|time| i64::from((time / 37) % 5) - 2)
+        .collect::<Vec<_>>();
+    vec![shared; 41]
+}
+
+fn alias_golden() -> Vec<u8> {
+    hex(
+        "4f5632500410290290d00300c80030002201c8ffa7cf7c84414c5831a7010100\
+         0000000000000000000000000000000000000000000000000000000000000000\
+         00000000000000004f5632500410010290d00300c8002800003f6622af1f49a7\
+         42515831a70a0354040c00fffe7aa21291548d6459236925c9564bf27493b4a2\
+         a51b2a3959fc765031f76301864378fcd76510d21512",
+    )
+}
+
 fn peer_magic(packet: &[u8]) -> &[u8] {
     if packet.get(4) == Some(&4) {
         &packet[24..28]
@@ -169,7 +199,7 @@ fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1
     assert!(best.len() <= incumbent.len());
     assert!(matches!(
         peer_magic(&best),
-        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1"
+        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1" | b"ALX1"
     ));
     assert_eq!(Mix1Codec.decode_window(&best).unwrap().samples, signal());
     assert_eq!(
@@ -364,6 +394,53 @@ fn peer_tuned_permuted_carrier_roundtrips_deterministically() {
                 parent_penalty: 16,
             },
         )
+        .is_err());
+}
+
+#[test]
+fn peer_alias_carrier_is_exact_canonical_and_portfolio_selected() {
+    let golden = Mix1Codec
+        .encode_alias_window(&all_aliased_signal(), 250_000, 16)
+        .expect("encode frozen ALX1 golden");
+    assert_eq!(golden, alias_golden());
+    assert_eq!(
+        Mix1Codec.decode_window(&golden).unwrap().samples,
+        all_aliased_signal()
+    );
+
+    let aliased = aliased_signal();
+    let packet = Mix1Codec
+        .encode_alias_window(&aliased, 250_000, 16)
+        .expect("encode ALX1 alias carrier");
+    assert_eq!(&packet[24..28], b"ALX1");
+    assert_eq!(Mix1Codec.decode_window(&packet).unwrap().samples, aliased);
+    assert_eq!(
+        packet,
+        Mix1Codec
+            .encode_alias_window(&aliased, 250_000, 16)
+            .expect("repeat ALX1 alias carrier")
+    );
+    assert_eq!(
+        Mix1Codec
+            .encode_best_peer_window(&aliased, 250_000, 16)
+            .expect("encode alias-aware portfolio"),
+        packet
+    );
+
+    for end in 0..packet.len() {
+        assert!(
+            Mix1Codec.decode_window(&packet[..end]).is_err(),
+            "accepted truncated ALX1 prefix {end}"
+        );
+    }
+    let mut trailed = packet.clone();
+    trailed.push(0);
+    assert!(Mix1Codec.decode_window(&trailed).is_err());
+    let mut corrupted = packet;
+    *corrupted.last_mut().unwrap() ^= 1;
+    assert!(Mix1Codec.decode_window(&corrupted).is_err());
+    assert!(Mix1Codec
+        .encode_alias_window(&signal(), 256_000, 16)
         .is_err());
 }
 

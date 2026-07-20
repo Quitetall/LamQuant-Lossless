@@ -715,7 +715,7 @@ fn run(args: &[String]) -> Result<(), String> {
         let bytes = fs::read(&executable).map_err(|error| error.to_string())?;
         let descriptor = json!({
             "codec": "LamQuant Optimum v2 native, MIX1, DIX1/DIX2 construction, and BGF1 learned carrier",
-            "wire": "LMO1-v3/BGF1-v1/OV2P-v2-MIX1/DIX1-v2/DIX2-v1-construction",
+            "wire": "LMO1-v3/BGF1-v1/OV2P-v2-v4-MIX1-ALX1/DIX1-v2/DIX2-v1-construction",
             "binary": executable,
             "binary_bytes": bytes.len(),
             "package_version": env!("CARGO_PKG_VERSION"),
@@ -765,7 +765,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 "decode_stdio": "mix1-decode-stdio",
                 "score_shifts": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                 "channel_context_masks": [2, 3, 4, 5, 6, 7],
-                "peer_magics": ["MIX1", "MMV1", "MCH1", "MCX1", "MQX1", "MPX1", "APX1", "BQX1"],
+                "peer_magics": ["MIX1", "MMV1", "MCH1", "MCX1", "MQX1", "MPX1", "APX1", "BQX1", "ALX1"],
                 "development_only": true,
             },
         });

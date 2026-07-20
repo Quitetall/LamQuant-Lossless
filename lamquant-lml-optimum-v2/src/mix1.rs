@@ -9,6 +9,7 @@ use crate::mix1_entropy;
 use crate::mix1_lattice::{self, LatticeSide, ORDER};
 use crate::mix1_multivariate::MultivariateSession;
 use crate::{canonical_i32_bytes, crc32c, OptimumV2Error};
+use std::collections::HashMap;
 
 const HEADER_LEN: usize = 72;
 const COMPACT_HEADER_LEN: usize = 40;
@@ -593,6 +594,73 @@ impl Mix1Codec {
         sample_rate_mhz: u32,
         bit_depth: u8,
     ) -> Result<Vec<u8>, OptimumV2Error> {
+        let mut best =
+            self.encode_best_peer_window_without_alias(signal, sample_rate_mhz, bit_depth)?;
+        if let Some(alias) =
+            self.encode_alias_window_optional(signal, sample_rate_mhz, bit_depth)?
+        {
+            if alias.len() < best.len() {
+                best = alias;
+            }
+        }
+        Ok(best)
+    }
+
+    pub fn encode_alias_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        self.encode_alias_window_optional(signal, sample_rate_mhz, bit_depth)?
+            .ok_or_else(|| input_error("ALX1 requires at least one exact channel alias"))
+    }
+
+    fn encode_alias_window_optional(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Option<Vec<u8>>, OptimumV2Error> {
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        let (representatives, aliases) = fit_channel_aliases(signal)?;
+        if representatives.len() == channels {
+            return Ok(None);
+        }
+        let unique = representatives
+            .iter()
+            .map(|&index| signal[index].clone())
+            .collect::<Vec<_>>();
+        let nested =
+            self.encode_best_peer_window_without_alias(&unique, sample_rate_mhz, bit_depth)?;
+        let unique_count = u8::try_from(unique.len())
+            .map_err(|_| input_error("ALX1 unique channel count exceeds u8"))?;
+        let mut graph = Vec::with_capacity(7 + channels);
+        graph.extend_from_slice(b"ALX1");
+        graph.extend_from_slice(&[0xa7, 1, unique_count]);
+        graph.extend_from_slice(&aliases);
+        let values = channels
+            .checked_mul(samples)
+            .ok_or_else(|| input_error("ALX1 value count overflows"))?;
+        Ok(Some(pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count: u32::try_from(values)
+                .map_err(|_| input_error("ALX1 value count exceeds u32"))?,
+            graph,
+            payload: nested,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })?))
+    }
+
+    fn encode_best_peer_window_without_alias(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
         let mut candidates =
             vec![self.encode_baseline_peer_window(signal, sample_rate_mhz, bit_depth)?];
         candidates.push(self.encode_tuned_permuted_window(
@@ -729,6 +797,9 @@ impl Mix1Codec {
     pub fn decode_window(&self, packet: &[u8]) -> Result<Mix1Decoded, OptimumV2Error> {
         let frame = unpack_frame(packet)?;
         let magic = frame.graph.get(..4);
+        if magic == Some(&b"ALX1"[..]) {
+            return decode_alias_frame(frame);
+        }
         let hierarchical = magic == Some(&b"MCH1"[..]);
         let channel_context = magic == Some(&b"MCX1"[..]);
         let tuned_permuted = magic == Some(&b"APX1"[..]);
@@ -973,6 +1044,104 @@ impl Mix1Codec {
             score_shift,
         })
     }
+}
+
+fn fit_channel_aliases(signal: &[Vec<i64>]) -> Result<(Vec<usize>, Vec<u8>), OptimumV2Error> {
+    let mut lookup: HashMap<&[i64], u8> = HashMap::new();
+    let mut representatives = Vec::new();
+    let mut aliases = Vec::with_capacity(signal.len());
+    for (channel_index, channel) in signal.iter().enumerate() {
+        if let Some(&index) = lookup.get(channel.as_slice()) {
+            aliases.push(index);
+            continue;
+        }
+        let index = u8::try_from(representatives.len())
+            .map_err(|_| input_error("ALX1 unique channel index exceeds u8"))?;
+        lookup.insert(channel.as_slice(), index);
+        representatives.push(channel_index);
+        aliases.push(index);
+    }
+    Ok((representatives, aliases))
+}
+
+fn decode_alias_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
+    let expected_graph_len = 7usize
+        .checked_add(frame.channels)
+        .ok_or_else(|| packet_error("ALX1 map length overflows"))?;
+    if frame.graph.len() != expected_graph_len || frame.graph[4] != 0xa7 || frame.graph[5] != 1 {
+        return Err(packet_error("ALX1 side data is invalid or noncanonical"));
+    }
+    let unique_count = usize::from(frame.graph[6]);
+    if unique_count == 0 || unique_count >= frame.channels {
+        return Err(packet_error("ALX1 unique channel count is invalid"));
+    }
+    let aliases = &frame.graph[7..];
+    let mut seen = vec![false; unique_count];
+    let mut next = 0usize;
+    for &alias in aliases {
+        let alias = usize::from(alias);
+        if alias >= unique_count {
+            return Err(packet_error("ALX1 alias index is out of range"));
+        }
+        if !seen[alias] {
+            if alias != next {
+                return Err(packet_error(
+                    "ALX1 representatives are not first-occurrence ordered",
+                ));
+            }
+            seen[alias] = true;
+            next += 1;
+        }
+    }
+    if next != unique_count {
+        return Err(packet_error("ALX1 contains an unused representative"));
+    }
+
+    let nested_frame = unpack_frame(&frame.payload)?;
+    if nested_frame.graph.get(..4) == Some(&b"ALX1"[..]) {
+        return Err(packet_error("ALX1 nesting depth exceeds one"));
+    }
+    let nested = Mix1Codec.decode_window(&frame.payload)?;
+    if nested.samples.len() != unique_count
+        || nested
+            .samples
+            .iter()
+            .any(|channel| channel.len() != frame.samples)
+        || nested.sample_rate_mhz != frame.sample_rate_mhz
+        || nested.bit_depth != frame.bit_depth
+    {
+        return Err(packet_error(
+            "ALX1 nested peer dimensions or metadata disagree",
+        ));
+    }
+    let samples = aliases
+        .iter()
+        .map(|&alias| nested.samples[usize::from(alias)].clone())
+        .collect::<Vec<_>>();
+    let (canonical_representatives, canonical_aliases) =
+        fit_channel_aliases(&samples).map_err(as_packet_error)?;
+    if canonical_aliases != aliases
+        || canonical_representatives.len() != nested.samples.len()
+        || canonical_representatives
+            .iter()
+            .zip(&nested.samples)
+            .any(|(&representative, unique)| {
+                samples[representative].as_slice() != unique.as_slice()
+            })
+    {
+        return Err(packet_error("ALX1 alias partition is noncanonical"));
+    }
+    if crc32c(&canonical_i32_bytes(&samples).map_err(as_packet_error)?) != frame.decoded_crc {
+        return Err(OptimumV2Error::Integrity(
+            "ALX1 decoded sample CRC32C mismatch".into(),
+        ));
+    }
+    Ok(Mix1Decoded {
+        samples,
+        sample_rate_mhz: frame.sample_rate_mhz,
+        bit_depth: frame.bit_depth,
+        score_shift: nested.score_shift,
+    })
 }
 
 #[derive(Debug)]

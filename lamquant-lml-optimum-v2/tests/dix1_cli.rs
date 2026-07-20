@@ -206,7 +206,7 @@ fn dix1_benchmark_worker_round_trips_every_profile_fail_closed() {
     );
     assert_eq!(
         value["wire"],
-        "LMO1-v3/BGF1-v1/OV2P-v2-MIX1/DIX1-v2/DIX2-v1-construction"
+        "LMO1-v3/BGF1-v1/OV2P-v2-v4-MIX1-ALX1/DIX1-v2/DIX2-v1-construction"
     );
     assert_eq!(
         value["dix1_worker"]["encode"],

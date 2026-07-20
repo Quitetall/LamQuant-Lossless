@@ -116,7 +116,7 @@ fn peer_stdio_worker_emits_a_complete_exact_packet() {
     assert!(best.stdout.len() <= incumbent.stdout.len());
     assert!(matches!(
         peer_magic(&best.stdout),
-        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1"
+        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1" | b"ALX1"
     ));
     let restored = stdio_worker(binary, &["mix1-decode-stdio"], &best.stdout);
     assert_eq!(restored.stdout, raw);
