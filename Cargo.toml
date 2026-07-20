@@ -16,6 +16,7 @@ members = [
     # so a bare `cargo build` must not pull it in. Build it explicitly with
     # `cargo build -p lamquant-lml-h5filter --release`.
     "lamquant-lml-h5filter",
+    "crates/lamquant-abir-bridge",
 ]
 # Firmware + weights moved to the LamQuant-Firmware submodule (ADR 0026
 # phase B.1, 2026-05-30). lamquant-lsl moved to the Vision submodule

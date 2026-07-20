@@ -1,0 +1,12 @@
+[package]
+name = "lamquant-abir-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+publish = false
+
+[dependencies]
+"legacy-abir" = { package = "abir", path = "../abir" }
+"semantic-abir" = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "63a28426b933b347d45a94af61730da0652d1fed", default-features = false, features = ["alloc"] }
+blake3 = { version = "=1.5.5", default-features = false }
+bytemuck = { version = "=1.25.0" }
