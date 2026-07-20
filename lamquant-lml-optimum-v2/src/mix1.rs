@@ -655,7 +655,7 @@ impl Mix1Codec {
         })?))
     }
 
-    fn encode_best_peer_window_without_alias(
+    pub fn encode_best_peer_window_without_alias(
         &self,
         signal: &[Vec<i64>],
         sample_rate_mhz: u32,

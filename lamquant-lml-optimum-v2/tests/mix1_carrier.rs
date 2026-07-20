@@ -426,6 +426,14 @@ fn peer_alias_carrier_is_exact_canonical_and_portfolio_selected() {
             .expect("encode alias-aware portfolio"),
         packet
     );
+    let incumbent = Mix1Codec
+        .encode_best_peer_window_without_alias(&aliased, 250_000, 16)
+        .expect("encode frozen non-alias control");
+    assert!(packet.len() < incumbent.len());
+    assert_eq!(
+        Mix1Codec.decode_window(&incumbent).unwrap().samples,
+        aliased
+    );
 
     for end in 0..packet.len() {
         assert!(

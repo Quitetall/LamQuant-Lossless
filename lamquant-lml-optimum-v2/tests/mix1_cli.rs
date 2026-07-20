@@ -123,6 +123,18 @@ fn peer_stdio_worker_emits_a_complete_exact_packet() {
 }
 
 #[test]
+fn peer_no_alias_control_worker_emits_a_complete_exact_packet() {
+    let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
+    let raw = lqraw_fixture();
+    let control = stdio_worker(binary, &["mix1-peer-encode-best-no-alias-stdio"], &raw);
+
+    assert!(control.status.success());
+    assert_ne!(peer_magic(&control.stdout), b"ALX1");
+    let restored = stdio_worker(binary, &["mix1-decode-stdio"], &control.stdout);
+    assert_eq!(restored.stdout, raw);
+}
+
+#[test]
 fn permuted_peer_stdio_worker_emits_a_complete_exact_packet() {
     let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
     let raw = lqraw_fixture();
