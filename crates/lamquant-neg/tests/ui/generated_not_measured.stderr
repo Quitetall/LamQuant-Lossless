@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/generated_not_measured.rs:19:14
+   |
+19 |     diagnose(&synthetic);
+   |     -------- ^^^^^^^^^^ expected `&Node<Measured>`, found `&Node<Generated>`
+   |     |
+   |     arguments to this function are incorrect
+   |
+   = note: expected reference `&Node<Measured>`
+              found reference `&Node<Generated>`
+note: function defined here
+  --> tests/ui/generated_not_measured.rs:9:4
+   |
+ 9 | fn diagnose(_evidence: &Node<Measured>) {}
+   |    ^^^^^^^^ --------------------------

@@ -9,6 +9,7 @@ name = "lamquant-lml-optimum"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.81"
+build = "build.rs"
 description = "LamQuant Optimum (LMO) — deterministic max-ratio lossless/near-lossless codec, host-only encode, no_std-capable decode. The H.BWC ratio attack (ADR 0052/0054)."
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/LamQuant-Lossless"
@@ -16,6 +17,11 @@ repository = "https://github.com/Quitetall/LamQuant-Lossless"
 [lib]
 name = "lamquant_lml_optimum"
 crate-type = ["rlib"]
+
+[[bin]]
+name = "optimum-v1-codec"
+path = "src/bin/optimum_v1_codec.rs"
+required-features = ["benchmark-cli"]
 
 [features]
 # Default = the no_std-capable LMO DECODER (the module Desktop ships standard
@@ -35,6 +41,10 @@ decode = []
 # reachable for the `Mode::TargetBps` (WP1-WP8) path via `std`.
 encode = ["std", "decode", "dep:rayon"]
 
+# Host-only benchmark adapter CLI. Keep its JSON/provenance dependencies out of
+# the library's established encode feature and the no_std decoder graph.
+benchmark-cli = ["encode", "dep:serde_json", "dep:sha2"]
+
 # Host std (f64, std::io). Implied by `encode`.
 std = ["lamquant-lml-mcu/std"]
 
@@ -52,3 +62,5 @@ lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-fe
 # Host-only (encode feature): rayon parallelizes the keep-best across channels +
 # configs. std-only; never in the no_std/firmware decode graph.
 rayon = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
