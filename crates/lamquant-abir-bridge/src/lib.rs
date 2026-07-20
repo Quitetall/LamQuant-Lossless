@@ -602,10 +602,30 @@ fn column_bytes(column: &legacy::Column) -> &[u8] {
 fn content_id(element: semantic::ElementType, bytes: &[u8]) -> semantic::ContentId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"abir.semantic-v1.payload\0");
-    hasher.update(format!("{element:?}").as_bytes());
+    hasher.update(element_tag(element));
     hasher.update(&[0]);
     hasher.update(bytes);
     semantic::ContentId::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn element_tag(element: semantic::ElementType) -> &'static [u8] {
+    match element {
+        semantic::ElementType::I8 => b"i8",
+        semantic::ElementType::I16 => b"i16",
+        semantic::ElementType::I24 => b"i24",
+        semantic::ElementType::I32 => b"i32",
+        semantic::ElementType::I64 => b"i64",
+        semantic::ElementType::U8 => b"u8",
+        semantic::ElementType::U16 => b"u16",
+        semantic::ElementType::U32 => b"u32",
+        semantic::ElementType::U64 => b"u64",
+        semantic::ElementType::F16 => b"f16",
+        semantic::ElementType::F32 => b"f32",
+        semantic::ElementType::F64 => b"f64",
+        semantic::ElementType::Bool => b"bool",
+        semantic::ElementType::Utf8 => b"utf8",
+        semantic::ElementType::Bytes => b"bytes",
+    }
 }
 
 fn dataset_seed<M: legacy::Modality>(source: &legacy::Abir<M>) -> [u8; 32] {
@@ -650,6 +670,9 @@ fn exact_positive_f64(value: f64) -> Result<semantic::Rational, BridgeError> {
     if !value.is_finite() || value <= 0.0 {
         return Err(BridgeError::InvalidSampleRate);
     }
+    // Decompose the IEEE-754 value into its integer significand and base-two
+    // exponent, cancel powers of two, then construct the same value as a
+    // reduced rational without a decimal or lossy floating-point round trip.
     let bits = value.to_bits();
     let exponent = ((bits >> 52) & 0x7ff) as i32;
     let fraction = bits & ((1_u64 << 52) - 1);
