@@ -22,6 +22,14 @@ fn lqraw_fixture() -> Vec<u8> {
     bytes
 }
 
+fn peer_magic(packet: &[u8]) -> &[u8] {
+    if packet.get(4) == Some(&4) {
+        &packet[24..28]
+    } else {
+        &packet[72..76]
+    }
+}
+
 fn stdio_worker(binary: &str, arguments: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(binary)
         .args(arguments)
@@ -107,8 +115,8 @@ fn peer_stdio_worker_emits_a_complete_exact_packet() {
     assert!(best.status.success());
     assert!(best.stdout.len() <= incumbent.stdout.len());
     assert!(matches!(
-        &best.stdout[72..76],
-        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1"
+        peer_magic(&best.stdout),
+        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1"
     ));
     let restored = stdio_worker(binary, &["mix1-decode-stdio"], &best.stdout);
     assert_eq!(restored.stdout, raw);

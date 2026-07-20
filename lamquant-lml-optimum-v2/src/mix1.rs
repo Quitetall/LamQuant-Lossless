@@ -11,6 +11,8 @@ use crate::mix1_multivariate::MultivariateSession;
 use crate::{canonical_i32_bytes, crc32c, OptimumV2Error};
 
 const HEADER_LEN: usize = 72;
+const COMPACT_HEADER_LEN: usize = 40;
+const ULTRA_COMPACT_HEADER_LEN: usize = 24;
 const MAX_CHANNELS: usize = 256;
 const MAX_SAMPLES: usize = 32_768;
 const MAX_VALUES: usize = 131_072;
@@ -22,6 +24,21 @@ pub struct Mix1Decoded {
     pub sample_rate_mhz: u32,
     pub bit_depth: u8,
     pub score_shift: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mix1EntropyProfile {
+    pub score_shift: u8,
+    pub channel_context_mask: u8,
+    pub history_context: u8,
+    pub scale_profile: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mix1TunedProfile {
+    pub entropy: Mix1EntropyProfile,
+    pub parent_history_depth: u8,
+    pub parent_penalty: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -266,6 +283,71 @@ impl Mix1Codec {
         .ok_or_else(|| input_error("MIX peer common-mode family is empty"))
     }
 
+    pub fn encode_compact_common_profile_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+        profile: Mix1EntropyProfile,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let Mix1EntropyProfile {
+            score_shift,
+            channel_context_mask,
+            history_context,
+            scale_profile,
+        } = profile;
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        validate_score_shifts(&[score_shift])?;
+        if !(2..=7).contains(&channel_context_mask)
+            || !valid_profile_history(history_context)
+            || scale_profile > 6
+        {
+            return Err(input_error(
+                "MIX peer compact common-mode entropy profile is invalid",
+            ));
+        }
+        let universal = universal_residuals(signal, bit_depth)?;
+        let (side, lattice) = mix1_lattice::fit_and_analyze(signal)?;
+        let multivariate = multivariate_residuals(signal, &side.parents, bit_depth)?;
+        let common_mode = common_mode_residuals(signal)?;
+        let selected = select_four_residuals(
+            &universal,
+            &lattice,
+            &multivariate,
+            &common_mode,
+            score_shift,
+        )?;
+        let (payload, event_count) = mix1_entropy::encode_profile_channel_context(
+            &selected,
+            &side.parents,
+            channel_context_mask,
+            history_context,
+            scale_profile,
+        )?;
+        let (mut graph, coefficient_rice_k, weight_rice_k) =
+            mix1_lattice::pack_side_adaptive(&side, score_shift)?;
+        graph[..4].copy_from_slice(b"BQX1");
+        let tail = graph.split_off(6);
+        graph.extend_from_slice(&[
+            channel_context_mask,
+            history_context,
+            scale_profile,
+            coefficient_rice_k,
+            weight_rice_k,
+        ]);
+        graph.extend_from_slice(&tail);
+        pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count,
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
     fn encode_common_mode_family(
         &self,
         signal: &[Vec<i64>],
@@ -423,7 +505,161 @@ impl Mix1Codec {
         Ok(packets)
     }
 
+    pub fn encode_tuned_permuted_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+        profile: Mix1TunedProfile,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let Mix1TunedProfile {
+            entropy:
+                Mix1EntropyProfile {
+                    score_shift,
+                    channel_context_mask,
+                    history_context,
+                    scale_profile,
+                },
+            parent_history_depth,
+            parent_penalty,
+        } = profile;
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        validate_score_shifts(&[score_shift])?;
+        if !(2..=7).contains(&channel_context_mask)
+            || scale_profile > 6
+            || parent_history_depth > 4
+            || !valid_profile_history(history_context)
+        {
+            return Err(input_error("MIX peer tuned entropy profile is invalid"));
+        }
+        let permutation = fit_channel_permutation(signal)?;
+        let permuted = permutation
+            .iter()
+            .map(|&channel| signal[channel].clone())
+            .collect::<Vec<_>>();
+        let universal = universal_residuals(&permuted, bit_depth)?;
+        let (side, lattice) =
+            mix1_lattice::fit_and_analyze_with_parent_penalty(&permuted, parent_penalty)?;
+        let multivariate = multivariate_residuals_with_parent_history(
+            &permuted,
+            &side.parents,
+            bit_depth,
+            usize::from(parent_history_depth),
+        )?;
+        let common_mode = common_mode_residuals(&permuted)?;
+        let selected = select_four_residuals(
+            &universal,
+            &lattice,
+            &multivariate,
+            &common_mode,
+            score_shift,
+        )?;
+        let (payload, event_count) = mix1_entropy::encode_profile_channel_context(
+            &selected,
+            &side.parents,
+            channel_context_mask,
+            history_context,
+            scale_profile,
+        )?;
+        let (mut graph, coefficient_rice_k, weight_rice_k) =
+            mix1_lattice::pack_side_adaptive(&side, score_shift)?;
+        graph[..4].copy_from_slice(b"APX1");
+        let tail = graph.split_off(6);
+        graph.extend_from_slice(&[
+            channel_context_mask,
+            history_context,
+            scale_profile,
+            parent_history_depth,
+            coefficient_rice_k,
+            weight_rice_k,
+        ]);
+        graph.extend_from_slice(&pack_permutation_indices(&permutation)?);
+        graph.extend_from_slice(&tail);
+        pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count,
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
     pub fn encode_best_peer_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let mut candidates =
+            vec![self.encode_baseline_peer_window(signal, sample_rate_mhz, bit_depth)?];
+        candidates.push(self.encode_tuned_permuted_window(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            Mix1TunedProfile {
+                entropy: Mix1EntropyProfile {
+                    score_shift: 8,
+                    channel_context_mask: 7,
+                    history_context: 52,
+                    scale_profile: 4,
+                },
+                parent_history_depth: 2,
+                parent_penalty: 6,
+            },
+        )?);
+        candidates.push(self.encode_tuned_permuted_window(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            Mix1TunedProfile {
+                entropy: Mix1EntropyProfile {
+                    score_shift: 11,
+                    channel_context_mask: 3,
+                    history_context: 84,
+                    scale_profile: 6,
+                },
+                parent_history_depth: 1,
+                parent_penalty: 32,
+            },
+        )?);
+        candidates.push(self.encode_tuned_permuted_window(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            Mix1TunedProfile {
+                entropy: Mix1EntropyProfile {
+                    score_shift: 8,
+                    channel_context_mask: 3,
+                    history_context: 84,
+                    scale_profile: 6,
+                },
+                parent_history_depth: 1,
+                parent_penalty: 32,
+            },
+        )?);
+        candidates.push(self.encode_compact_common_profile_window(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            Mix1EntropyProfile {
+                score_shift: 10,
+                channel_context_mask: 3,
+                history_context: 84,
+                scale_profile: 4,
+            },
+        )?);
+        candidates
+            .into_iter()
+            .enumerate()
+            .min_by_key(|(priority, packet)| (packet.len(), *priority))
+            .map(|(_, packet)| packet)
+            .ok_or_else(|| input_error("MIX peer portfolio is empty"))
+    }
+
+    fn encode_baseline_peer_window(
         &self,
         signal: &[Vec<i64>],
         sample_rate_mhz: u32,
@@ -445,13 +681,7 @@ impl Mix1Codec {
             .map(|(_, _, packet)| packet)
             .ok_or_else(|| input_error("MIX peer family is empty"))?;
         let extended = self
-            .encode_channel_context_family(
-                signal,
-                sample_rate_mhz,
-                bit_depth,
-                &[2, 3, 4, 5, 6, 7, 8],
-                &[2, 3, 4, 5, 6, 7],
-            )?
+            .encode_channel_context_family(signal, sample_rate_mhz, bit_depth, &[8], &[5])?
             .into_iter()
             .min_by_key(|(channel_context_mask, score_shift, packet)| {
                 (packet.len(), *channel_context_mask, *score_shift)
@@ -459,13 +689,7 @@ impl Mix1Codec {
             .map(|(_, _, packet)| packet)
             .ok_or_else(|| input_error("MIX peer channel-context family is empty"))?;
         let common_mode = self
-            .encode_common_mode_family(
-                signal,
-                sample_rate_mhz,
-                bit_depth,
-                &[2, 3, 4, 5, 6, 7, 8],
-                &[2, 3, 4, 5, 6, 7],
-            )?
+            .encode_common_mode_family(signal, sample_rate_mhz, bit_depth, &[5, 6, 8], &[3])?
             .into_iter()
             .min_by_key(|(channel_context_mask, score_shift, packet)| {
                 (packet.len(), *channel_context_mask, *score_shift)
@@ -477,8 +701,8 @@ impl Mix1Codec {
                 signal,
                 sample_rate_mhz,
                 bit_depth,
-                &[2, 3, 4, 5, 6, 7, 8],
-                &[2, 3, 4, 5, 6, 7],
+                &[3, 5, 6, 7, 8],
+                &[3, 4, 5, 7],
             )?
             .into_iter()
             .min_by_key(|(channel_context_mask, score_shift, packet)| {
@@ -507,20 +731,98 @@ impl Mix1Codec {
         let magic = frame.graph.get(..4);
         let hierarchical = magic == Some(&b"MCH1"[..]);
         let channel_context = magic == Some(&b"MCX1"[..]);
-        let permuted_common_mode = magic == Some(&b"MPX1"[..]);
-        let common_mode = magic == Some(&b"MQX1"[..]) || permuted_common_mode;
+        let tuned_permuted = magic == Some(&b"APX1"[..]);
+        let compact_common_profile = magic == Some(&b"BQX1"[..]);
+        let permuted_mode = magic == Some(&b"MPX1"[..]) || tuned_permuted;
+        let common_mode = magic == Some(&b"MQX1"[..])
+            || magic == Some(&b"MPX1"[..])
+            || tuned_permuted
+            || compact_common_profile;
         let multivariate =
             magic == Some(&b"MMV1"[..]) || hierarchical || channel_context || common_mode;
         let mut graph = frame.graph.clone();
-        let permutation = if permuted_common_mode {
+
+        let tuned_profile = if tuned_permuted {
+            let history = *graph
+                .get(7)
+                .ok_or_else(|| packet_error("MIX peer tuned history context is truncated"))?;
+            let scale = *graph
+                .get(8)
+                .ok_or_else(|| packet_error("MIX peer tuned scale profile is truncated"))?;
+            let parent_history_depth = *graph
+                .get(9)
+                .ok_or_else(|| packet_error("MIX peer parent history depth is truncated"))?;
+            let coefficient_rice_k = *graph
+                .get(10)
+                .ok_or_else(|| packet_error("MIX peer coefficient Rice parameter is truncated"))?;
+            let weight_rice_k = *graph
+                .get(11)
+                .ok_or_else(|| packet_error("MIX peer weight Rice parameter is truncated"))?;
+            if scale > 6
+                || !valid_profile_history(history)
+                || parent_history_depth > 4
+                || coefficient_rice_k > 15
+                || weight_rice_k > 10
+            {
+                return Err(packet_error("MIX peer tuned entropy profile is invalid"));
+            }
+            Some((
+                history,
+                scale,
+                parent_history_depth,
+                coefficient_rice_k,
+                weight_rice_k,
+            ))
+        } else {
+            None
+        };
+        let compact_profile = if compact_common_profile {
+            let history = *graph
+                .get(7)
+                .ok_or_else(|| packet_error("MIX peer compact history context is truncated"))?;
+            let scale = *graph
+                .get(8)
+                .ok_or_else(|| packet_error("MIX peer compact scale profile is truncated"))?;
+            let coefficient_rice_k = *graph
+                .get(9)
+                .ok_or_else(|| packet_error("MIX peer coefficient Rice parameter is truncated"))?;
+            let weight_rice_k = *graph
+                .get(10)
+                .ok_or_else(|| packet_error("MIX peer weight Rice parameter is truncated"))?;
+            if !valid_profile_history(history)
+                || scale > 6
+                || coefficient_rice_k > 15
+                || weight_rice_k > 10
+            {
+                return Err(packet_error(
+                    "MIX peer compact common-mode profile is invalid",
+                ));
+            }
+            Some((history, scale, coefficient_rice_k, weight_rice_k))
+        } else {
+            None
+        };
+
+        let permutation = if tuned_permuted {
+            let start = 12usize;
+            let end = start
+                .checked_add(packed_permutation_len(frame.channels)?)
+                .ok_or_else(|| packet_error("MIX peer permutation length overflows"))?;
+            if graph.len() < end {
+                return Err(packet_error("MIX peer permutation is truncated"));
+            }
+            Some(unpack_permutation_indices(
+                &graph.drain(start..end).collect::<Vec<_>>(),
+                frame.channels,
+            )?)
+        } else if permuted_mode {
             let end = 7usize
                 .checked_add(frame.channels)
                 .ok_or_else(|| packet_error("MIX peer permutation length overflows"))?;
             if graph.len() < end {
                 return Err(packet_error("MIX peer permutation is truncated"));
             }
-            let bytes = graph.drain(7..end).collect::<Vec<_>>();
-            let permutation = bytes.into_iter().map(usize::from).collect::<Vec<_>>();
+            let permutation = graph.drain(7..end).map(usize::from).collect::<Vec<_>>();
             if permutation.iter().enumerate().any(|(index, channel)| {
                 *channel >= frame.channels || permutation[..index].contains(channel)
             }) {
@@ -530,6 +832,12 @@ impl Mix1Codec {
         } else {
             None
         };
+
+        if tuned_permuted {
+            graph.drain(7..12);
+        } else if compact_common_profile {
+            graph.drain(7..11);
+        }
         let channel_context_mask = if channel_context || common_mode {
             if graph.len() < 7 {
                 return Err(packet_error("MIX peer channel context is truncated"));
@@ -547,16 +855,58 @@ impl Mix1Codec {
         if multivariate {
             graph[..4].copy_from_slice(b"MIX1");
         }
-        let (score_shift, side) = mix1_lattice::parse_side(&graph, frame.channels, frame.samples)?;
+        let (score_shift, side) =
+            if let Some((_, _, _, coefficient_rice_k, weight_rice_k)) = tuned_profile {
+                mix1_lattice::parse_side_adaptive(
+                    &graph,
+                    frame.channels,
+                    frame.samples,
+                    coefficient_rice_k,
+                    weight_rice_k,
+                )?
+            } else if let Some((_, _, coefficient_rice_k, weight_rice_k)) = compact_profile {
+                mix1_lattice::parse_side_adaptive(
+                    &graph,
+                    frame.channels,
+                    frame.samples,
+                    coefficient_rice_k,
+                    weight_rice_k,
+                )?
+            } else {
+                mix1_lattice::parse_side(&graph, frame.channels, frame.samples)?
+            };
+
         let residuals = if let Some(mask) = channel_context_mask {
-            mix1_entropy::decode_channel_context(
-                &frame.payload,
-                frame.event_count,
-                frame.channels,
-                frame.samples,
-                &side.parents,
-                mask,
-            )?
+            if let Some((history, scale, _, _)) = compact_profile {
+                mix1_entropy::decode_profile_channel_context(
+                    &frame.payload,
+                    frame.event_count,
+                    (frame.channels, frame.samples),
+                    &side.parents,
+                    mask,
+                    history,
+                    scale,
+                )?
+            } else if let Some((history, scale, _, _, _)) = tuned_profile {
+                mix1_entropy::decode_profile_channel_context(
+                    &frame.payload,
+                    frame.event_count,
+                    (frame.channels, frame.samples),
+                    &side.parents,
+                    mask,
+                    history,
+                    scale,
+                )?
+            } else {
+                mix1_entropy::decode_channel_context(
+                    &frame.payload,
+                    frame.event_count,
+                    frame.channels,
+                    frame.samples,
+                    &side.parents,
+                    mask,
+                )?
+            }
         } else if hierarchical {
             mix1_entropy::decode_hierarchical(
                 &frame.payload,
@@ -574,14 +924,26 @@ impl Mix1Codec {
                 &side.parents,
             )?
         };
+
         let mut samples = if common_mode {
-            decode_common_mode_samples(
-                &residuals,
-                score_shift,
-                &side,
-                &side.parents,
-                frame.bit_depth,
-            )?
+            if let Some((_, _, parent_history_depth, _, _)) = tuned_profile {
+                decode_common_mode_samples_with_parent_history(
+                    &residuals,
+                    score_shift,
+                    &side,
+                    &side.parents,
+                    frame.bit_depth,
+                    usize::from(parent_history_depth),
+                )?
+            } else {
+                decode_common_mode_samples(
+                    &residuals,
+                    score_shift,
+                    &side,
+                    &side.parents,
+                    frame.bit_depth,
+                )?
+            }
         } else if multivariate {
             decode_multivariate_samples(
                 &residuals,
@@ -659,41 +1021,114 @@ fn pack_frame(frame: Frame) -> Result<Vec<u8>, OptimumV2Error> {
     Ok(packet)
 }
 
+fn pack_frame_ultracompact(frame: Frame) -> Result<Vec<u8>, OptimumV2Error> {
+    validate_frame(&frame, InputKind::Caller)?;
+    let channels = if frame.channels == 256 {
+        0
+    } else {
+        u8::try_from(frame.channels)
+            .map_err(|_| input_error("MIX1 channel count exceeds compact u8"))?
+    };
+    let samples = u16::try_from(frame.samples)
+        .map_err(|_| input_error("MIX1 sample count exceeds compact u16"))?;
+    let graph_len = u16::try_from(frame.graph.len())
+        .map_err(|_| input_error("MIX1 graph length exceeds compact u16"))?;
+    let mut packet =
+        Vec::with_capacity(ULTRA_COMPACT_HEADER_LEN + frame.graph.len() + frame.payload.len());
+    packet.extend_from_slice(b"OV2P");
+    packet.extend_from_slice(&[4, frame.bit_depth, channels, 2]);
+    packet.extend_from_slice(&frame.sample_rate_mhz.to_le_bytes());
+    packet.extend_from_slice(&samples.to_le_bytes());
+    packet.extend_from_slice(&graph_len.to_le_bytes());
+    packet.extend_from_slice(&frame.decoded_crc.to_le_bytes());
+    packet.extend_from_slice(&0u32.to_le_bytes());
+    debug_assert_eq!(packet.len(), ULTRA_COMPACT_HEADER_LEN);
+    packet.extend_from_slice(&frame.graph);
+    packet.extend_from_slice(&frame.payload);
+    let packet_crc = crc32c(&packet);
+    packet[20..24].copy_from_slice(&packet_crc.to_le_bytes());
+    Ok(packet)
+}
+
 fn unpack_frame(packet: &[u8]) -> Result<Frame, OptimumV2Error> {
-    if packet.len() < HEADER_LEN {
+    if packet.len() < ULTRA_COMPACT_HEADER_LEN {
         return Err(packet_error("OV2P header is truncated"));
     }
-    if &packet[..4] != b"OV2P" || packet[4] != 2 {
+    if &packet[..4] != b"OV2P" || !matches!(packet[4], 2..=4) {
         return Err(packet_error("OV2P magic or version is invalid"));
     }
-    if packet[5] != 0 || packet[7] != 2 || packet[36..68].iter().any(|&byte| byte != 0) {
+    let version = packet[4];
+    let header_len = match version {
+        2 => HEADER_LEN,
+        3 => COMPACT_HEADER_LEN,
+        4 => ULTRA_COMPACT_HEADER_LEN,
+        _ => unreachable!(),
+    };
+    if packet.len() < header_len
+        || packet[7] != 2
+        || version < 4 && packet[5] != 0
+        || version == 2 && packet[36..68].iter().any(|&byte| byte != 0)
+    {
         return Err(packet_error("MIX1 frame identity is invalid"));
     }
-    let graph_len = read_u32(packet, 24)? as usize;
-    let payload_len = read_u32(packet, 28)? as usize;
-    let expected_len = HEADER_LEN
+    let graph_len = if version == 4 {
+        usize::from(u16::from_le_bytes(packet[14..16].try_into().unwrap()))
+    } else {
+        read_u32(packet, 24)? as usize
+    };
+    let graph_end = header_len
         .checked_add(graph_len)
-        .and_then(|value| value.checked_add(payload_len))
-        .ok_or_else(|| packet_error("OV2P section lengths overflow"))?;
-    if expected_len != packet.len() {
-        return Err(packet_error("OV2P section lengths do not match packet"));
+        .ok_or_else(|| packet_error("OV2P graph length overflows"))?;
+    if graph_end > packet.len() {
+        return Err(packet_error("OV2P graph length exceeds packet"));
     }
-    let packet_crc = read_u32(packet, 68)?;
+    if version < 4 {
+        let payload_len = read_u32(packet, 28)? as usize;
+        let expected_len = graph_end
+            .checked_add(payload_len)
+            .ok_or_else(|| packet_error("OV2P payload length overflows"))?;
+        if expected_len != packet.len() {
+            return Err(packet_error("OV2P section lengths do not match packet"));
+        }
+    }
+    let crc_offset = header_len - 4;
+    let packet_crc = read_u32(packet, crc_offset)?;
     let mut zeroed = packet.to_vec();
-    zeroed[68..72].fill(0);
+    zeroed[crc_offset..header_len].fill(0);
     if crc32c(&zeroed) != packet_crc {
         return Err(OptimumV2Error::Integrity("OV2P packet CRC mismatch".into()));
     }
-    let graph_end = HEADER_LEN + graph_len;
+    let (bit_depth, channels, samples, event_count, decoded_crc) = if version == 4 {
+        let encoded_channels = usize::from(packet[6]);
+        (
+            packet[5],
+            if encoded_channels == 0 {
+                256
+            } else {
+                encoded_channels
+            },
+            usize::from(u16::from_le_bytes(packet[12..14].try_into().unwrap())),
+            0,
+            read_u32(packet, 16)?,
+        )
+    } else {
+        (
+            packet[6],
+            read_u32(packet, 12)? as usize,
+            read_u32(packet, 16)? as usize,
+            read_u32(packet, 20)?,
+            read_u32(packet, 32)?,
+        )
+    };
     let frame = Frame {
-        bit_depth: packet[6],
+        bit_depth,
         sample_rate_mhz: read_u32(packet, 8)?,
-        channels: read_u32(packet, 12)? as usize,
-        samples: read_u32(packet, 16)? as usize,
-        event_count: read_u32(packet, 20)?,
-        graph: packet[HEADER_LEN..graph_end].to_vec(),
+        channels,
+        samples,
+        event_count,
+        graph: packet[header_len..graph_end].to_vec(),
         payload: packet[graph_end..].to_vec(),
-        decoded_crc: read_u32(packet, 32)?,
+        decoded_crc,
     };
     validate_frame(&frame, InputKind::Packet)?;
     Ok(frame)
@@ -702,13 +1137,15 @@ fn unpack_frame(packet: &[u8]) -> Result<Frame, OptimumV2Error> {
 fn validate_frame(frame: &Frame, kind: InputKind) -> Result<(), OptimumV2Error> {
     let values = frame.channels.checked_mul(frame.samples);
     let maximum_events = values.and_then(|count| count.checked_mul(MAX_EVENTS_PER_VALUE));
+    let event_count_valid = frame.event_count == 0 && matches!(kind, InputKind::Packet)
+        || values.is_some_and(|count| frame.event_count as usize >= count)
+            && maximum_events.is_some_and(|count| frame.event_count as usize <= count);
     let valid = (1..=MAX_CHANNELS).contains(&frame.channels)
         && (1..=MAX_SAMPLES).contains(&frame.samples)
         && values.is_some_and(|count| count <= MAX_VALUES)
         && (1..=32).contains(&frame.bit_depth)
         && frame.sample_rate_mhz != 0
-        && values.is_some_and(|count| frame.event_count as usize >= count)
-        && maximum_events.is_some_and(|count| frame.event_count as usize <= count)
+        && event_count_valid
         && frame.payload.len() >= 4;
     if valid {
         Ok(())
@@ -762,9 +1199,19 @@ fn multivariate_residuals(
     parents: &[Vec<usize>],
     bit_depth: u8,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    multivariate_residuals_with_parent_history(signal, parents, bit_depth, 1)
+}
+
+fn multivariate_residuals_with_parent_history(
+    signal: &[Vec<i64>],
+    parents: &[Vec<usize>],
+    bit_depth: u8,
+    parent_history_depth: usize,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     let channels = signal.len();
     let samples = signal[0].len();
-    let mut session = MultivariateSession::new(parents, bit_depth)?;
+    let mut session =
+        MultivariateSession::new_with_parent_history(parents, bit_depth, parent_history_depth)?;
     let mut residuals = vec![vec![0i64; samples]; channels];
     for time in 0..samples {
         let mut current = vec![0i64; channels];
@@ -848,6 +1295,135 @@ fn common_mode_prediction(
         .map_err(|_| arithmetic_error("MIX1 common-mode prediction exceeds i64"))
 }
 
+fn packed_permutation_len(channels: usize) -> Result<usize, OptimumV2Error> {
+    if !(1..=MAX_CHANNELS).contains(&channels) {
+        return Err(packet_error(
+            "MIX peer permutation channel count is invalid",
+        ));
+    }
+    let bits = (1..=channels)
+        .map(|remaining| usize::BITS as usize - (remaining - 1).leading_zeros() as usize)
+        .sum::<usize>();
+    Ok(bits.div_ceil(8))
+}
+
+fn pack_permutation_indices(permutation: &[usize]) -> Result<Vec<u8>, OptimumV2Error> {
+    if permutation.is_empty()
+        || permutation.len() > MAX_CHANNELS
+        || permutation.iter().enumerate().any(|(index, channel)| {
+            *channel >= permutation.len() || permutation[..index].contains(channel)
+        })
+    {
+        return Err(input_error("MIX peer permutation is invalid"));
+    }
+    let mut remaining = (0..permutation.len()).collect::<Vec<_>>();
+    let mut writer = PermutationBitWriter::default();
+    for &channel in permutation {
+        let index = remaining
+            .iter()
+            .position(|candidate| *candidate == channel)
+            .expect("validated permutation channel remains");
+        let width = usize::BITS as u8 - (remaining.len() - 1).leading_zeros() as u8;
+        writer.write(index, width)?;
+        remaining.remove(index);
+    }
+    let packed = writer.finish();
+    debug_assert_eq!(packed.len(), packed_permutation_len(permutation.len())?);
+    Ok(packed)
+}
+
+fn unpack_permutation_indices(
+    packed: &[u8],
+    channels: usize,
+) -> Result<Vec<usize>, OptimumV2Error> {
+    if packed.len() != packed_permutation_len(channels)? {
+        return Err(packet_error("MIX peer packed permutation length differs"));
+    }
+    let mut remaining = (0..channels).collect::<Vec<_>>();
+    let mut reader = PermutationBitReader::new(packed);
+    let mut permutation = Vec::with_capacity(channels);
+    while !remaining.is_empty() {
+        let width = usize::BITS as u8 - (remaining.len() - 1).leading_zeros() as u8;
+        let index = reader.read(width)?;
+        if index >= remaining.len() {
+            return Err(packet_error("MIX peer packed permutation index is unused"));
+        }
+        permutation.push(remaining.remove(index));
+    }
+    reader.finish()?;
+    Ok(permutation)
+}
+
+#[derive(Default)]
+struct PermutationBitWriter {
+    bytes: Vec<u8>,
+    current: u8,
+    used: u8,
+}
+
+impl PermutationBitWriter {
+    fn write(&mut self, value: usize, width: u8) -> Result<(), OptimumV2Error> {
+        if width < usize::BITS as u8 && value >= 1usize << width {
+            return Err(input_error("MIX peer permutation index exceeds width"));
+        }
+        for shift in (0..width).rev() {
+            self.current = (self.current << 1) | ((value >> shift) & 1) as u8;
+            self.used += 1;
+            if self.used == 8 {
+                self.bytes.push(self.current);
+                self.current = 0;
+                self.used = 0;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.used != 0 {
+            self.bytes.push(self.current << (8 - self.used));
+        }
+        self.bytes
+    }
+}
+
+struct PermutationBitReader<'a> {
+    packed: &'a [u8],
+    position: usize,
+}
+
+impl<'a> PermutationBitReader<'a> {
+    fn new(packed: &'a [u8]) -> Self {
+        Self {
+            packed,
+            position: 0,
+        }
+    }
+
+    fn read(&mut self, width: u8) -> Result<usize, OptimumV2Error> {
+        if self.position + usize::from(width) > self.packed.len() * 8 {
+            return Err(packet_error("MIX peer packed permutation is truncated"));
+        }
+        let mut value = 0usize;
+        for _ in 0..width {
+            value = (value << 1)
+                | usize::from((self.packed[self.position / 8] >> (7 - self.position % 8)) & 1);
+            self.position += 1;
+        }
+        Ok(value)
+    }
+
+    fn finish(&mut self) -> Result<(), OptimumV2Error> {
+        while self.position < self.packed.len() * 8 {
+            if self.read(1)? != 0 {
+                return Err(packet_error(
+                    "MIX peer packed permutation has nonzero padding",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn fit_channel_permutation(signal: &[Vec<i64>]) -> Result<Vec<usize>, OptimumV2Error> {
     if signal.is_empty()
         || signal[0].is_empty()
@@ -925,17 +1501,21 @@ fn unpermute_signal(
 
 fn validate_score_shifts(score_shifts: &[u8]) -> Result<(), OptimumV2Error> {
     if score_shifts.is_empty()
-        || score_shifts.iter().any(|shift| !(2..=8).contains(shift))
+        || score_shifts.iter().any(|shift| !(2..=12).contains(shift))
         || score_shifts
             .iter()
             .enumerate()
             .any(|(index, shift)| score_shifts[..index].contains(shift))
     {
         return Err(input_error(
-            "MIX1 score shifts must be a nonempty unique list in 2..=8",
+            "MIX1 score shifts must be a nonempty unique list in 2..=12",
         ));
     }
     Ok(())
+}
+
+fn valid_profile_history(history_context: u8) -> bool {
+    history_context & 0x0f == 4 && (1..=7).contains(&(history_context >> 4))
 }
 
 fn select_residuals(
@@ -1319,6 +1899,42 @@ fn decode_common_mode_samples(
     multivariate_parents: &[Vec<usize>],
     bit_depth: u8,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    decode_four_mode_samples(
+        residuals,
+        score_shift,
+        side,
+        multivariate_parents,
+        bit_depth,
+        1,
+    )
+}
+
+fn decode_common_mode_samples_with_parent_history(
+    residuals: &[Vec<i64>],
+    score_shift: u8,
+    side: &LatticeSide,
+    multivariate_parents: &[Vec<usize>],
+    bit_depth: u8,
+    parent_history_depth: usize,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    decode_four_mode_samples(
+        residuals,
+        score_shift,
+        side,
+        multivariate_parents,
+        bit_depth,
+        parent_history_depth,
+    )
+}
+
+fn decode_four_mode_samples(
+    residuals: &[Vec<i64>],
+    score_shift: u8,
+    side: &LatticeSide,
+    multivariate_parents: &[Vec<usize>],
+    bit_depth: u8,
+    parent_history_depth: usize,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     let channels = residuals.len();
     if channels == 0
         || side.parents.len() != channels
@@ -1326,7 +1942,7 @@ fn decode_common_mode_samples(
         || residuals.iter().any(|row| row.len() != residuals[0].len())
     {
         return Err(packet_error(
-            "MIX1 common-mode residual dimensions are invalid",
+            "MIX1 four-mode residual dimensions are invalid",
         ));
     }
     let samples = residuals[0].len();
@@ -1345,8 +1961,12 @@ fn decode_common_mode_samples(
     )
     .map_err(as_packet_error)?;
     let mut universal = UniversalSession::new(graph, bit_depth).map_err(as_packet_error)?;
-    let mut multivariate =
-        MultivariateSession::new(multivariate_parents, bit_depth).map_err(as_packet_error)?;
+    let mut multivariate = MultivariateSession::new_with_parent_history(
+        multivariate_parents,
+        bit_depth,
+        parent_history_depth,
+    )
+    .map_err(as_packet_error)?;
     let mut selector = QuadSelector::new(channels, score_shift).map_err(as_packet_error)?;
     let mut previous_backward = vec![vec![0i128; ORDER + 1]; channels];
     let mut previous_samples = vec![0i64; channels];
@@ -1366,7 +1986,7 @@ fn decode_common_mode_samples(
             let multivariate_prediction = multivariate
                 .prediction(channel, &current_samples)
                 .map_err(as_packet_error)?;
-            let common_prediction =
+            let fourth_prediction =
                 common_mode_prediction(channel, &current_samples, &previous_samples)
                     .map_err(as_packet_error)?;
             let graph_prediction =
@@ -1381,9 +2001,9 @@ fn decode_common_mode_samples(
                 QuadExpertChoice::Multivariate => multivariate_prediction
                     .checked_add(coded)
                     .ok_or_else(|| packet_error("MIX1 multivariate reconstruction exceeds i64"))?,
-                QuadExpertChoice::CommonMode => common_prediction
+                QuadExpertChoice::CommonMode => fourth_prediction
                     .checked_add(coded)
-                    .ok_or_else(|| packet_error("MIX1 common-mode reconstruction exceeds i64"))?,
+                    .ok_or_else(|| packet_error("MIX1 fourth-mode reconstruction exceeds i64"))?,
                 QuadExpertChoice::Lattice => {
                     let innovation = coded
                         .checked_add(graph_prediction)
@@ -1398,7 +2018,7 @@ fn decode_common_mode_samples(
             };
             if !(minimum..=maximum).contains(&sample) {
                 return Err(packet_error(
-                    "decoded MIX1 common-mode sample exceeds declared bit depth",
+                    "decoded MIX1 four-mode sample exceeds declared bit depth",
                 ));
             }
             let innovation = mix1_lattice::analyze_sample(
@@ -1417,18 +2037,18 @@ fn decode_common_mode_samples(
             let multivariate_residual = sample
                 .checked_sub(multivariate_prediction)
                 .ok_or_else(|| packet_error("MIX1 multivariate residual exceeds i64"))?;
-            let common_residual = sample
-                .checked_sub(common_prediction)
-                .ok_or_else(|| packet_error("MIX1 common-mode residual exceeds i64"))?;
+            let fourth_residual = sample
+                .checked_sub(fourth_prediction)
+                .ok_or_else(|| packet_error("MIX1 fourth-mode residual exceeds i64"))?;
             let selected = match choice {
                 QuadExpertChoice::Universal => universal_residual,
                 QuadExpertChoice::Lattice => lattice_residual,
                 QuadExpertChoice::Multivariate => multivariate_residual,
-                QuadExpertChoice::CommonMode => common_residual,
+                QuadExpertChoice::CommonMode => fourth_residual,
             };
             if selected != coded {
                 return Err(packet_error(
-                    "decoded MIX1 common-mode selector residual is inconsistent",
+                    "decoded MIX1 four-mode selector residual is inconsistent",
                 ));
             }
             universal
@@ -1443,7 +2063,7 @@ fn decode_common_mode_samples(
                     universal_residual,
                     lattice_residual,
                     multivariate_residual,
-                    common_residual,
+                    fourth_residual,
                 )
                 .map_err(as_packet_error)?;
             reconstructed[channel][time] = sample;
@@ -1471,7 +2091,7 @@ struct Selector {
 
 impl Selector {
     fn new(channels: usize, score_shift: u8) -> Result<Self, OptimumV2Error> {
-        if channels == 0 || !(2..=8).contains(&score_shift) {
+        if channels == 0 || !(2..=12).contains(&score_shift) {
             return Err(input_error("MIX1 selector shape is invalid"));
         }
         Ok(Self {
@@ -1530,7 +2150,7 @@ struct TripleSelector {
 
 impl TripleSelector {
     fn new(channels: usize, score_shift: u8) -> Result<Self, OptimumV2Error> {
-        if channels == 0 || !(2..=8).contains(&score_shift) {
+        if channels == 0 || !(2..=12).contains(&score_shift) {
             return Err(input_error("MIX1 three-expert selector shape is invalid"));
         }
         Ok(Self {
@@ -1611,7 +2231,7 @@ struct QuadSelector {
 
 impl QuadSelector {
     fn new(channels: usize, score_shift: u8) -> Result<Self, OptimumV2Error> {
-        if channels == 0 || !(2..=8).contains(&score_shift) {
+        if channels == 0 || !(2..=12).contains(&score_shift) {
             return Err(input_error("MIX1 four-expert selector shape is invalid"));
         }
         Ok(Self {

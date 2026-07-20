@@ -17,7 +17,7 @@ use lamquant_lml_optimum_v2::bgf1_model_pack::{BGF1_EXPECTED_PACK_BYTES, BGF1_MO
 use lamquant_lml_optimum_v2::derivation_incidence::ChannelIdentity;
 use lamquant_lml_optimum_v2::dix1_carrier::{Dix1CarrierMode, Dix1ConstructionCodec};
 use lamquant_lml_optimum_v2::dix2_carrier::{Dix2CarrierMode, Dix2ConstructionCodec};
-use lamquant_lml_optimum_v2::mix1::Mix1Codec;
+use lamquant_lml_optimum_v2::mix1::{Mix1Codec, Mix1EntropyProfile, Mix1TunedProfile};
 use lamquant_lml_optimum_v2::{EncodeContext, OptimumV2Codec};
 use serde_json::json;
 
@@ -760,10 +760,12 @@ fn run(args: &[String]) -> Result<(), String> {
                 "encode_best_stdio": "mix1-encode-best-stdio",
                 "encode_peer_best_stdio": "mix1-peer-encode-best-stdio",
                 "encode_peer_permuted_stdio": "mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK",
+                "encode_peer_tuned_stdio": "mix1-peer-tuned-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE PARENT_HISTORY_DEPTH PARENT_PENALTY",
+                "encode_peer_compact_common_profile_stdio": "mix1-peer-compact-common-profile-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE",
                 "decode_stdio": "mix1-decode-stdio",
-                "score_shifts": [2, 3, 4, 5, 6, 7, 8],
+                "score_shifts": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                 "channel_context_masks": [2, 3, 4, 5, 6, 7],
-                "peer_magics": ["MIX1", "MMV1", "MCH1", "MCX1", "MQX1", "MPX1"],
+                "peer_magics": ["MIX1", "MMV1", "MCH1", "MCX1", "MQX1", "MPX1", "APX1", "BQX1"],
                 "development_only": true,
             },
         });
@@ -905,6 +907,84 @@ fn run(args: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         return write_standard_output(&packet);
     }
+    if args.len() == 8 && args[1] == "mix1-peer-tuned-encode-stdio" {
+        let score_shift: u8 = args[2]
+            .parse()
+            .map_err(|_| "MIX peer SCORE_SHIFT must be an integer in 2..=8".to_owned())?;
+        let channel_context_mask: u8 = args[3]
+            .parse()
+            .map_err(|_| "MIX peer CHANNEL_CONTEXT_MASK must be an integer in 2..=7".to_owned())?;
+        let history_context: u8 = args[4]
+            .parse()
+            .map_err(|_| "MIX peer HISTORY_CONTEXT must be an integer in 0..=15".to_owned())?;
+        let scale_profile: u8 = args[5]
+            .parse()
+            .map_err(|_| "MIX peer SCALE_PROFILE must be an integer in 0..=6".to_owned())?;
+        let parent_history_depth: u8 = args[6]
+            .parse()
+            .map_err(|_| "MIX peer PARENT_HISTORY_DEPTH must be an integer in 0..=4".to_owned())?;
+        let parent_penalty: u64 = args[7]
+            .parse()
+            .map_err(|_| "MIX peer PARENT_PENALTY must be a nonnegative integer".to_owned())?;
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "MIX peer tuned-profile LQR1 standard input",
+        )?;
+        let (signal, context) =
+            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
+        let packet = Mix1Codec
+            .encode_tuned_permuted_window(
+                &signal,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                Mix1TunedProfile {
+                    entropy: Mix1EntropyProfile {
+                        score_shift,
+                        channel_context_mask,
+                        history_context,
+                        scale_profile,
+                    },
+                    parent_history_depth,
+                    parent_penalty,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        return write_standard_output(&packet);
+    }
+    if args.len() == 6 && args[1] == "mix1-peer-compact-common-profile-encode-stdio" {
+        let score_shift: u8 = args[2]
+            .parse()
+            .map_err(|_| "MIX peer SCORE_SHIFT must be an integer in 2..=12".to_owned())?;
+        let channel_context_mask: u8 = args[3]
+            .parse()
+            .map_err(|_| "MIX peer CHANNEL_CONTEXT_MASK must be an integer in 2..=7".to_owned())?;
+        let history_context: u8 = args[4]
+            .parse()
+            .map_err(|_| "MIX peer HISTORY_CONTEXT must be a nonzero byte".to_owned())?;
+        let scale_profile: u8 = args[5]
+            .parse()
+            .map_err(|_| "MIX peer SCALE_PROFILE must be an integer in 0..=6".to_owned())?;
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "MIX peer compact common-mode profile LQR1 standard input",
+        )?;
+        let (signal, context) =
+            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
+        let packet = Mix1Codec
+            .encode_compact_common_profile_window(
+                &signal,
+                context.sample_rate_mhz,
+                context.bit_depth,
+                Mix1EntropyProfile {
+                    score_shift,
+                    channel_context_mask,
+                    history_context,
+                    scale_profile,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        return write_standard_output(&packet);
+    }
     if args.len() == 2 && args[1] == "mix1-decode-stdio" {
         let packet = read_standard_input(MAX_LEARNED_PACKET_BYTES, "MIX1 packet standard input")?;
         let decoded = Mix1Codec
@@ -1018,7 +1098,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK | mix1-peer-tuned-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE PARENT_HISTORY_DEPTH PARENT_PENALTY | mix1-peer-compact-common-profile-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }

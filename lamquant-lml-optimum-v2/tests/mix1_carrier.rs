@@ -1,4 +1,4 @@
-use lamquant_lml_optimum_v2::mix1::{Mix1Codec, Mix1Decoded};
+use lamquant_lml_optimum_v2::mix1::{Mix1Codec, Mix1Decoded, Mix1EntropyProfile, Mix1TunedProfile};
 
 fn signal() -> Vec<Vec<i64>> {
     vec![
@@ -11,6 +11,14 @@ fn signal() -> Vec<Vec<i64>> {
             .map(i64::from)
             .collect(),
     ]
+}
+
+fn peer_magic(packet: &[u8]) -> &[u8] {
+    if packet.get(4) == Some(&4) {
+        &packet[24..28]
+    } else {
+        &packet[72..76]
+    }
 }
 
 fn python_golden() -> Vec<u8> {
@@ -160,8 +168,8 @@ fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1
         .expect("encode best peer carrier");
     assert!(best.len() <= incumbent.len());
     assert!(matches!(
-        &best[72..76],
-        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1"
+        peer_magic(&best),
+        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1"
     ));
     assert_eq!(Mix1Codec.decode_window(&best).unwrap().samples, signal());
     assert_eq!(
@@ -211,6 +219,63 @@ fn peer_common_mode_carrier_roundtrips_deterministically() {
 }
 
 #[test]
+fn peer_compact_common_profile_carrier_roundtrips_deterministically() {
+    let packet = Mix1Codec
+        .encode_compact_common_profile_window(
+            &signal(),
+            256_000,
+            16,
+            Mix1EntropyProfile {
+                score_shift: 4,
+                channel_context_mask: 7,
+                history_context: 52,
+                scale_profile: 4,
+            },
+        )
+        .expect("encode compact common-mode profile carrier");
+    assert_eq!(&packet[24..28], b"BQX1");
+    assert_eq!(&packet[30..33], &[7, 52, 4]);
+    assert_eq!(Mix1Codec.decode_window(&packet).unwrap().samples, signal());
+    assert_eq!(
+        packet,
+        Mix1Codec
+            .encode_compact_common_profile_window(
+                &signal(),
+                256_000,
+                16,
+                Mix1EntropyProfile {
+                    score_shift: 4,
+                    channel_context_mask: 7,
+                    history_context: 52,
+                    scale_profile: 4,
+                },
+            )
+            .expect("repeat compact common-mode profile carrier")
+    );
+    for end in 0..packet.len() {
+        assert!(
+            Mix1Codec.decode_window(&packet[..end]).is_err(),
+            "accepted truncated BQX1 prefix {end}"
+        );
+    }
+    for history_context in [0, 4, 5, 132] {
+        assert!(Mix1Codec
+            .encode_compact_common_profile_window(
+                &signal(),
+                256_000,
+                16,
+                Mix1EntropyProfile {
+                    score_shift: 4,
+                    channel_context_mask: 7,
+                    history_context,
+                    scale_profile: 4,
+                },
+            )
+            .is_err());
+    }
+}
+
+#[test]
 fn peer_permuted_common_mode_carrier_roundtrips_deterministically() {
     let packet = Mix1Codec
         .encode_permuted_common_mode_window(&signal(), 256_000, 16, 4, 7)
@@ -233,6 +298,73 @@ fn peer_permuted_common_mode_carrier_roundtrips_deterministically() {
     let mut corrupted = packet;
     corrupted[79] = corrupted[80];
     assert!(Mix1Codec.decode_window(&corrupted).is_err());
+}
+
+#[test]
+fn peer_tuned_permuted_carrier_roundtrips_deterministically() {
+    let packet = Mix1Codec
+        .encode_tuned_permuted_window(
+            &signal(),
+            256_000,
+            16,
+            Mix1TunedProfile {
+                entropy: Mix1EntropyProfile {
+                    score_shift: 4,
+                    channel_context_mask: 7,
+                    history_context: 52,
+                    scale_profile: 4,
+                },
+                parent_history_depth: 2,
+                parent_penalty: 16,
+            },
+        )
+        .expect("encode tuned permuted carrier");
+    assert_eq!(&packet[24..28], b"APX1");
+    assert_eq!(&packet[30..34], &[7, 52, 4, 2]);
+    assert_eq!(Mix1Codec.decode_window(&packet).unwrap().samples, signal());
+    assert_eq!(
+        packet,
+        Mix1Codec
+            .encode_tuned_permuted_window(
+                &signal(),
+                256_000,
+                16,
+                Mix1TunedProfile {
+                    entropy: Mix1EntropyProfile {
+                        score_shift: 4,
+                        channel_context_mask: 7,
+                        history_context: 52,
+                        scale_profile: 4,
+                    },
+                    parent_history_depth: 2,
+                    parent_penalty: 16,
+                },
+            )
+            .expect("repeat tuned permuted carrier")
+    );
+    for end in 0..packet.len() {
+        assert!(
+            Mix1Codec.decode_window(&packet[..end]).is_err(),
+            "accepted truncated APX1 prefix {end}"
+        );
+    }
+    assert!(Mix1Codec
+        .encode_tuned_permuted_window(
+            &signal(),
+            256_000,
+            16,
+            Mix1TunedProfile {
+                entropy: Mix1EntropyProfile {
+                    score_shift: 4,
+                    channel_context_mask: 7,
+                    history_context: 52,
+                    scale_profile: 4,
+                },
+                parent_history_depth: 5,
+                parent_penalty: 16,
+            },
+        )
+        .is_err());
 }
 
 #[test]

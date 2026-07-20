@@ -9,6 +9,23 @@ const RESCALE_AT: u32 = 4096;
 const POSTERIOR_TOTAL: u64 = 1 << 24;
 const MAX_EVENTS_PER_VALUE: usize = 129;
 
+fn scale_pair(profile: u8) -> Result<(u8, u8), OptimumV2Error> {
+    match profile {
+        0 => Ok((2, 3)),
+        1 => Ok((1, 2)),
+        2 => Ok((1, 3)),
+        3 => Ok((2, 4)),
+        4 => Ok((3, 4)),
+        5 => Ok((3, 5)),
+        6 => Ok((4, 5)),
+        _ => Err(input_error("MIX1 entropy scale profile exceeds 6")),
+    }
+}
+
+fn valid_profile_history(history_context: u8) -> bool {
+    history_context & 0x0f == 4 && (1..=7).contains(&(history_context >> 4))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Counts {
     zero: u32,
@@ -56,6 +73,7 @@ struct SignKey {
     channel: u16,
     relative_bucket: i8,
     previous_sign: u8,
+    previous2_sign: u8,
     parent_sign: u8,
 }
 
@@ -63,6 +81,7 @@ struct SignKey {
 struct FiniteStateSession {
     scale_shift: u8,
     channel_context_mask: u8,
+    magnitude_history_context: u8,
     scale: Vec<u64>,
     previous: Vec<i64>,
     previous2: Vec<i64>,
@@ -78,13 +97,15 @@ impl FiniteStateSession {
         channels: usize,
         scale_shift: u8,
         channel_context_mask: u8,
+        magnitude_history_context: u8,
     ) -> Result<Self, OptimumV2Error> {
-        if !(1..=256).contains(&channels) || !matches!(scale_shift, 2 | 3) {
+        if !(1..=256).contains(&channels) || !(1..=6).contains(&scale_shift) {
             return Err(input_error("MIX1 finite-state shape is invalid"));
         }
         Ok(Self {
             scale_shift,
             channel_context_mask,
+            magnitude_history_context,
             scale: vec![1; channels],
             previous: vec![0; channels],
             previous2: vec![0; channels],
@@ -173,12 +194,31 @@ impl FiniteStateSession {
 
     fn sign_key(&self, bucket: u8) -> Result<SignKey, OptimumV2Error> {
         let channel = self.channel()?;
+        self.sign_key_with_context_channel(bucket, self.context_channel(channel, 4)?)
+    }
+
+    fn sign_key_with_context_channel(
+        &self,
+        bucket: u8,
+        context_channel: u16,
+    ) -> Result<SignKey, OptimumV2Error> {
+        let channel = self.channel()?;
         Ok(SignKey {
-            channel: self.context_channel(channel, 4)?,
+            channel: context_channel,
             relative_bucket: clamp_relative(i32::from(bucket) - self.scale_log()?, 4),
             previous_sign: sign_category(self.previous[channel]),
+            previous2_sign: if self.magnitude_history_context & 4 != 0 {
+                sign_category(self.previous2[channel])
+            } else {
+                0
+            },
             parent_sign: self.parent_sign(),
         })
+    }
+
+    fn sign_backoff_lambda(&self) -> Option<u32> {
+        let code = self.magnitude_history_context >> 4;
+        (code != 0).then(|| 1u32 << (u32::from(code) + 1))
     }
 
     fn context_channel(&self, channel: usize, flag: u8) -> Result<u16, OptimumV2Error> {
@@ -227,13 +267,58 @@ impl FiniteStateSession {
         if !(1..=64).contains(&bucket) {
             return Err(input_error("MIX1 sign bucket is outside 1..=64"));
         }
-        let key = self.sign_key(bucket)?;
-        Ok(self.sign_counts.entry(key).or_default().probability_one())
+        if let Some(lambda) = self.sign_backoff_lambda() {
+            let channel = self.channel()?;
+            let global_key = self.sign_key_with_context_channel(bucket, 256)?;
+            let local_key = self.sign_key_with_context_channel(
+                bucket,
+                u16::try_from(channel).map_err(|_| input_error("MIX1 sign channel exceeds u16"))?,
+            )?;
+            let global_probability = u64::from(
+                self.sign_counts
+                    .entry(global_key)
+                    .or_default()
+                    .probability_one(),
+            );
+            let local = *self.sign_counts.entry(local_key).or_default();
+            let local_total = u64::from(local.zero) + u64::from(local.one);
+            let lambda = u64::from(lambda);
+            let numerator =
+                u64::from(local.one) * u64::from(CDF_TOTAL) + lambda * global_probability;
+            let denominator = local_total + lambda;
+            Ok(
+                ((numerator + denominator / 2) / denominator).clamp(1, u64::from(CDF_TOTAL - 1))
+                    as u16,
+            )
+        } else {
+            let key = self.sign_key(bucket)?;
+            Ok(self.sign_counts.entry(key).or_default().probability_one())
+        }
     }
 
     fn observe_sign(&mut self, bucket: u8, symbol: u8) -> Result<(), OptimumV2Error> {
-        let key = self.sign_key(bucket)?;
-        self.sign_counts.entry(key).or_default().observe(symbol)
+        if self.sign_backoff_lambda().is_some() {
+            let channel = self.channel()?;
+            let global_key = self.sign_key_with_context_channel(bucket, 256)?;
+            let local_key = self.sign_key_with_context_channel(
+                bucket,
+                u16::try_from(channel).map_err(|_| input_error("MIX1 sign channel exceeds u16"))?,
+            )?;
+            self.sign_counts
+                .entry(global_key)
+                .or_default()
+                .observe(symbol)?;
+            if local_key != global_key {
+                self.sign_counts
+                    .entry(local_key)
+                    .or_default()
+                    .observe(symbol)?;
+            }
+            Ok(())
+        } else {
+            let key = self.sign_key(bucket)?;
+            self.sign_counts.entry(key).or_default().observe(symbol)
+        }
     }
 
     fn finish_sample(&mut self, residual: i64) -> Result<(), OptimumV2Error> {
@@ -283,10 +368,26 @@ struct BayesianMixture {
 }
 
 impl BayesianMixture {
-    fn new(channels: usize, channel_context_mask: u8) -> Result<Self, OptimumV2Error> {
+    fn new(
+        channels: usize,
+        channel_context_mask: u8,
+        magnitude_history_context: u8,
+        scale_profile: u8,
+    ) -> Result<Self, OptimumV2Error> {
+        let (scale_shift_a, scale_shift_b) = scale_pair(scale_profile)?;
         Ok(Self {
-            expert2: FiniteStateSession::new(channels, 2, channel_context_mask)?,
-            expert3: FiniteStateSession::new(channels, 3, channel_context_mask)?,
+            expert2: FiniteStateSession::new(
+                channels,
+                scale_shift_a,
+                channel_context_mask,
+                magnitude_history_context,
+            )?,
+            expert3: FiniteStateSession::new(
+                channels,
+                scale_shift_b,
+                channel_context_mask,
+                magnitude_history_context,
+            )?,
             weight2: POSTERIOR_TOTAL / 2,
             pending: None,
         })
@@ -423,15 +524,25 @@ struct ChannelBucketMixture {
 }
 
 impl ChannelBucketMixture {
-    fn new(channels: usize, channel_context_mask: u8) -> Result<Self, OptimumV2Error> {
+    fn new(
+        channels: usize,
+        channel_context_mask: u8,
+        magnitude_history_context: u8,
+        scale_profile: u8,
+    ) -> Result<Self, OptimumV2Error> {
         if !(1..=7).contains(&channel_context_mask) {
             return Err(input_error(
                 "MIX1 hierarchical channel-context mask is invalid",
             ));
         }
         Ok(Self {
-            global: BayesianMixture::new(channels, 0)?,
-            local: BayesianMixture::new(channels, channel_context_mask)?,
+            global: BayesianMixture::new(channels, 0, magnitude_history_context, scale_profile)?,
+            local: BayesianMixture::new(
+                channels,
+                channel_context_mask,
+                magnitude_history_context,
+                scale_profile,
+            )?,
             global_weights: vec![POSTERIOR_TOTAL / 2; channels],
             channel: None,
             pending: None,
@@ -565,11 +676,24 @@ enum EntropySession {
 }
 
 impl EntropySession {
-    fn new(channels: usize, context: u8) -> Result<Self, OptimumV2Error> {
+    fn new(
+        channels: usize,
+        context: u8,
+        magnitude_history_context: u8,
+        scale_profile: u8,
+    ) -> Result<Self, OptimumV2Error> {
         match context {
-            0 => Ok(Self::Base(Box::new(BayesianMixture::new(channels, 0)?))),
+            0 => Ok(Self::Base(Box::new(BayesianMixture::new(
+                channels,
+                0,
+                magnitude_history_context,
+                scale_profile,
+            )?))),
             1..=7 => Ok(Self::Hierarchical(Box::new(ChannelBucketMixture::new(
-                channels, context,
+                channels,
+                context,
+                magnitude_history_context,
+                scale_profile,
             )?))),
             _ => Err(input_error("MIX1 entropy context identity is invalid")),
         }
@@ -630,14 +754,14 @@ pub(crate) fn encode(
     residuals: &[Vec<i64>],
     parents: &[Vec<usize>],
 ) -> Result<(Vec<u8>, u32), OptimumV2Error> {
-    encode_with_channel_context(residuals, parents, 0)
+    encode_with_channel_context(residuals, parents, 0, 0, 0)
 }
 
 pub(crate) fn encode_hierarchical(
     residuals: &[Vec<i64>],
     parents: &[Vec<usize>],
 ) -> Result<(Vec<u8>, u32), OptimumV2Error> {
-    encode_with_channel_context(residuals, parents, 1)
+    encode_with_channel_context(residuals, parents, 1, 0, 0)
 }
 
 pub(crate) fn encode_channel_context(
@@ -650,7 +774,29 @@ pub(crate) fn encode_channel_context(
             "MIX1 extended channel-context mask must be in 2..=7",
         ));
     }
-    encode_with_channel_context(residuals, parents, channel_context_mask)
+    encode_with_channel_context(residuals, parents, channel_context_mask, 0, 0)
+}
+
+pub(crate) fn encode_profile_channel_context(
+    residuals: &[Vec<i64>],
+    parents: &[Vec<usize>],
+    channel_context_mask: u8,
+    history_context: u8,
+    scale_profile: u8,
+) -> Result<(Vec<u8>, u32), OptimumV2Error> {
+    if !(2..=7).contains(&channel_context_mask)
+        || scale_profile > 6
+        || !valid_profile_history(history_context)
+    {
+        return Err(input_error("MIX1 combined entropy profile is invalid"));
+    }
+    encode_with_channel_context(
+        residuals,
+        parents,
+        channel_context_mask,
+        history_context,
+        scale_profile,
+    )
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -658,9 +804,16 @@ fn encode_with_channel_context(
     residuals: &[Vec<i64>],
     parents: &[Vec<usize>],
     channel_context_mask: u8,
+    magnitude_history_context: u8,
+    scale_profile: u8,
 ) -> Result<(Vec<u8>, u32), OptimumV2Error> {
     let (channels, samples, max_events) = shape(residuals, parents)?;
-    let mut session = EntropySession::new(channels, channel_context_mask)?;
+    let mut session = EntropySession::new(
+        channels,
+        channel_context_mask,
+        magnitude_history_context,
+        scale_profile,
+    )?;
     let mut coder = BinaryRansEncoder::new(max_events)?;
     for time in 0..samples {
         let mut current = vec![0i64; channels];
@@ -715,7 +868,7 @@ pub(crate) fn decode(
     samples: usize,
     parents: &[Vec<usize>],
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
-    decode_with_channel_context(payload, event_count, channels, samples, parents, 0)
+    decode_with_channel_context(payload, event_count, (channels, samples), parents, 0, 0, 0)
 }
 
 pub(crate) fn decode_hierarchical(
@@ -725,7 +878,7 @@ pub(crate) fn decode_hierarchical(
     samples: usize,
     parents: &[Vec<usize>],
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
-    decode_with_channel_context(payload, event_count, channels, samples, parents, 1)
+    decode_with_channel_context(payload, event_count, (channels, samples), parents, 1, 0, 0)
 }
 
 pub(crate) fn decode_channel_context(
@@ -744,10 +897,37 @@ pub(crate) fn decode_channel_context(
     decode_with_channel_context(
         payload,
         event_count,
-        channels,
-        samples,
+        (channels, samples),
         parents,
         channel_context_mask,
+        0,
+        0,
+    )
+}
+
+pub(crate) fn decode_profile_channel_context(
+    payload: &[u8],
+    event_count: u32,
+    dimensions: (usize, usize),
+    parents: &[Vec<usize>],
+    channel_context_mask: u8,
+    history_context: u8,
+    scale_profile: u8,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    if !(2..=7).contains(&channel_context_mask)
+        || scale_profile > 6
+        || !valid_profile_history(history_context)
+    {
+        return Err(packet_error("MIX1 combined entropy profile is invalid"));
+    }
+    decode_with_channel_context(
+        payload,
+        event_count,
+        dimensions,
+        parents,
+        channel_context_mask,
+        history_context,
+        scale_profile,
     )
 }
 
@@ -755,11 +935,13 @@ pub(crate) fn decode_channel_context(
 fn decode_with_channel_context(
     payload: &[u8],
     event_count: u32,
-    channels: usize,
-    samples: usize,
+    dimensions: (usize, usize),
     parents: &[Vec<usize>],
     channel_context_mask: u8,
+    magnitude_history_context: u8,
+    scale_profile: u8,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    let (channels, samples) = dimensions;
     let values = channels
         .checked_mul(samples)
         .ok_or_else(|| packet_error("MIX1 value count overflows"))?;
@@ -769,8 +951,13 @@ fn decode_with_channel_context(
     if parents.len() != channels {
         return Err(packet_error("MIX1 entropy graph channel count differs"));
     }
-    let mut session =
-        EntropySession::new(channels, channel_context_mask).map_err(as_packet_error)?;
+    let mut session = EntropySession::new(
+        channels,
+        channel_context_mask,
+        magnitude_history_context,
+        scale_profile,
+    )
+    .map_err(as_packet_error)?;
     let mut coder = BinaryRansDecoder::new(payload, max_events)?;
     let mut residuals = vec![vec![0i64; samples]; channels];
     let mut events = 0u32;
@@ -842,7 +1029,7 @@ fn decode_with_channel_context(
         }
         session.finish_time(&current).map_err(as_packet_error)?;
     }
-    if events != event_count {
+    if event_count != 0 && events != event_count {
         return Err(packet_error("decoded MIX1 event count differs from frame"));
     }
     coder.finish()?;

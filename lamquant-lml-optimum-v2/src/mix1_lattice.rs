@@ -8,6 +8,7 @@ const PARENT_CAP: usize = 4;
 const CANDIDATE_LIMIT: usize = 6;
 const COEFFICIENT_RICE_K: u8 = 10;
 const WEIGHT_RICE_K: u8 = 7;
+const PARENT_GAP_RICE_K: u8 = 1;
 const WEIGHT_MIN: i16 = -1024;
 const WEIGHT_MAX: i16 = 1024;
 const LOCAL_STEPS: [i16; 8] = [128, 64, 32, 16, 8, 4, 2, 1];
@@ -27,13 +28,35 @@ pub(crate) struct LatticeSide {
 pub(crate) fn fit_and_analyze(
     signal: &[Vec<i64>],
 ) -> Result<(LatticeSide, Vec<Vec<i64>>), OptimumV2Error> {
+    fit_and_analyze_with_parent_cap(signal, PARENT_CAP)
+}
+
+pub(crate) fn fit_and_analyze_with_parent_cap(
+    signal: &[Vec<i64>],
+    parent_cap: usize,
+) -> Result<(LatticeSide, Vec<Vec<i64>>), OptimumV2Error> {
+    fit_and_analyze_with_graph_policy(signal, parent_cap, 0)
+}
+
+pub(crate) fn fit_and_analyze_with_parent_penalty(
+    signal: &[Vec<i64>],
+    parent_penalty: u64,
+) -> Result<(LatticeSide, Vec<Vec<i64>>), OptimumV2Error> {
+    fit_and_analyze_with_graph_policy(signal, PARENT_CAP, parent_penalty)
+}
+
+fn fit_and_analyze_with_graph_policy(
+    signal: &[Vec<i64>],
+    parent_cap: usize,
+    parent_penalty: u64,
+) -> Result<(LatticeSide, Vec<Vec<i64>>), OptimumV2Error> {
     let (channels, samples) = validate_signal(signal)?;
-    if samples <= ORDER {
+    if samples <= ORDER || parent_cap > PARENT_CAP {
         return Err(input_error("MIX1 lattice requires more than 16 samples"));
     }
     let coefficients = fit_coefficients(signal)?;
     let innovations = analyze(signal, &coefficients)?;
-    let (mut parents, mut weights_q8) = sparse_graph(&innovations)?;
+    let (mut parents, mut weights_q8) = sparse_graph(&innovations, parent_cap, parent_penalty)?;
     for channel in 0..channels {
         let mut pairs = parents[channel]
             .iter()
@@ -54,13 +77,57 @@ pub(crate) fn fit_and_analyze(
 }
 
 pub(crate) fn pack_side(side: &LatticeSide, score_shift: u8) -> Result<Vec<u8>, OptimumV2Error> {
+    pack_side_with_rice(side, score_shift, COEFFICIENT_RICE_K, WEIGHT_RICE_K)
+}
+
+pub(crate) fn pack_side_adaptive(
+    side: &LatticeSide,
+    score_shift: u8,
+) -> Result<(Vec<u8>, u8, u8), OptimumV2Error> {
     validate_side(side)?;
-    if !(2..=8).contains(&score_shift) {
-        return Err(input_error("MIX1 score shift must be in 2..=8"));
+    let coefficient_k = best_rice_k(
+        side.coefficients
+            .iter()
+            .map(|&value| zigzag(i64::from(value))),
+        15,
+    )?;
+    let weight_k = best_rice_k(
+        side.weights_q8
+            .iter()
+            .flatten()
+            .map(|&value| zigzag(i64::from(value))),
+        10,
+    )?;
+    Ok((
+        pack_side_with_rice_and_parent_mode(side, score_shift, coefficient_k, weight_k, true)?,
+        coefficient_k,
+        weight_k,
+    ))
+}
+
+fn pack_side_with_rice(
+    side: &LatticeSide,
+    score_shift: u8,
+    coefficient_k: u8,
+    weight_k: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    pack_side_with_rice_and_parent_mode(side, score_shift, coefficient_k, weight_k, false)
+}
+
+fn pack_side_with_rice_and_parent_mode(
+    side: &LatticeSide,
+    score_shift: u8,
+    coefficient_k: u8,
+    weight_k: u8,
+    local_parent_gaps: bool,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    validate_side(side)?;
+    if !(2..=12).contains(&score_shift) || coefficient_k > 15 || weight_k > 10 {
+        return Err(input_error("MIX1 score shift must be in 2..=12"));
     }
     let mut writer = BitWriter::default();
     for &coefficient in &side.coefficients {
-        writer.write_rice(zigzag(i64::from(coefficient)), COEFFICIENT_RICE_K)?;
+        writer.write_rice(zigzag(i64::from(coefficient)), coefficient_k)?;
     }
     for channel in 0..side.parents.len() {
         let parents = &side.parents[channel];
@@ -73,11 +140,21 @@ pub(crate) fn pack_side(side: &LatticeSide, score_shift: u8) -> Result<Vec<u8>, 
         } else {
             return Err(input_error("MIX1 graph parent count is noncanonical"));
         }
-        let combinations = combination(channel, parents.len())?;
-        let width = bit_length(combinations - 1) as u8;
-        writer.write_bits(colex_rank(parents)?, width)?;
+        if local_parent_gaps {
+            let mut previous_distance = None;
+            for &parent in parents.iter().rev() {
+                let distance = channel - 1 - parent;
+                let gap = previous_distance.map_or(distance, |previous| distance - previous - 1);
+                writer.write_rice(gap as u64, PARENT_GAP_RICE_K)?;
+                previous_distance = Some(distance);
+            }
+        } else {
+            let combinations = combination(channel, parents.len())?;
+            let width = bit_length(combinations - 1) as u8;
+            writer.write_bits(colex_rank(parents)?, width)?;
+        }
         for &weight in &side.weights_q8[channel] {
-            writer.write_rice(zigzag(i64::from(weight)), WEIGHT_RICE_K)?;
+            writer.write_rice(zigzag(i64::from(weight)), weight_k)?;
         }
     }
     let mut packed = Vec::from(&b"MIX1"[..]);
@@ -91,20 +168,56 @@ pub(crate) fn parse_side(
     channels: usize,
     samples: usize,
 ) -> Result<(u8, LatticeSide), OptimumV2Error> {
+    parse_side_with_rice(packed, channels, samples, COEFFICIENT_RICE_K, WEIGHT_RICE_K)
+}
+
+pub(crate) fn parse_side_with_rice(
+    packed: &[u8],
+    channels: usize,
+    samples: usize,
+    coefficient_k: u8,
+    weight_k: u8,
+) -> Result<(u8, LatticeSide), OptimumV2Error> {
+    parse_side_with_rice_and_parent_mode(packed, channels, samples, coefficient_k, weight_k, false)
+}
+
+pub(crate) fn parse_side_adaptive(
+    packed: &[u8],
+    channels: usize,
+    samples: usize,
+    coefficient_k: u8,
+    weight_k: u8,
+) -> Result<(u8, LatticeSide), OptimumV2Error> {
+    parse_side_with_rice_and_parent_mode(packed, channels, samples, coefficient_k, weight_k, true)
+}
+
+fn parse_side_with_rice_and_parent_mode(
+    packed: &[u8],
+    channels: usize,
+    samples: usize,
+    coefficient_k: u8,
+    weight_k: u8,
+    local_parent_gaps: bool,
+) -> Result<(u8, LatticeSide), OptimumV2Error> {
     if packed.len() < 6 || &packed[..4] != b"MIX1" || packed[4] != 0xA7 {
         return Err(packet_error("MIX1 side identity is invalid"));
     }
-    if !(1..=256).contains(&channels) || samples <= ORDER || samples > 32_768 {
+    if !(1..=256).contains(&channels)
+        || samples <= ORDER
+        || samples > 32_768
+        || coefficient_k > 15
+        || weight_k > 10
+    {
         return Err(packet_error("MIX1 side dimensions are invalid"));
     }
     let score_shift = packed[5];
-    if !(2..=8).contains(&score_shift) {
-        return Err(packet_error("MIX1 score shift must be in 2..=8"));
+    if !(2..=12).contains(&score_shift) {
+        return Err(packet_error("MIX1 score shift must be in 2..=12"));
     }
     let mut reader = BitReader::new(&packed[6..]);
     let mut coefficients = [0i16; ORDER];
     for coefficient in &mut coefficients {
-        let value = reader.read_rice(COEFFICIENT_RICE_K, 2 * ((Q_ONE - 1) as u64))?;
+        let value = reader.read_rice(coefficient_k, 2 * ((Q_ONE - 1) as u64))?;
         let signed = unzigzag(value)?;
         *coefficient = i16::try_from(signed)
             .map_err(|_| packet_error("MIX1 lattice coefficient exceeds i16"))?;
@@ -125,16 +238,37 @@ pub(crate) fn parse_side(
             }
             count
         };
-        let combinations = combination(channel, count)?;
-        let width = bit_length(combinations - 1) as u8;
-        let rank = reader.read_bits(width)?;
-        if rank >= combinations {
-            return Err(packet_error("MIX1 graph parent rank is unused"));
-        }
-        let row = colex_unrank(rank, channel, count)?;
+        let row = if local_parent_gaps {
+            let mut distances = Vec::with_capacity(count);
+            let mut previous_distance = None;
+            for _ in 0..count {
+                let gap = usize::try_from(reader.read_rice(PARENT_GAP_RICE_K, channel as u64)?)
+                    .map_err(|_| packet_error("MIX1 parent gap exceeds usize"))?;
+                let distance = previous_distance.map_or(gap, |previous| previous + 1 + gap);
+                if distance >= channel {
+                    return Err(packet_error("MIX1 parent gap exceeds channel"));
+                }
+                distances.push(distance);
+                previous_distance = Some(distance);
+            }
+            let mut row = distances
+                .into_iter()
+                .map(|distance| channel - 1 - distance)
+                .collect::<Vec<_>>();
+            row.sort_unstable();
+            row
+        } else {
+            let combinations = combination(channel, count)?;
+            let width = bit_length(combinations - 1) as u8;
+            let rank = reader.read_bits(width)?;
+            if rank >= combinations {
+                return Err(packet_error("MIX1 graph parent rank is unused"));
+            }
+            colex_unrank(rank, channel, count)?
+        };
         let mut row_weights = Vec::with_capacity(count);
         for _ in 0..count {
-            let value = reader.read_rice(WEIGHT_RICE_K, zigzag(i64::from(WEIGHT_MAX)))?;
+            let value = reader.read_rice(weight_k, zigzag(i64::from(WEIGHT_MAX)))?;
             let weight = i16::try_from(unzigzag(value)?)
                 .map_err(|_| packet_error("MIX1 graph weight exceeds i16"))?;
             if !(WEIGHT_MIN..=WEIGHT_MAX).contains(&weight) {
@@ -152,10 +286,39 @@ pub(crate) fn parse_side(
         weights_q8,
     };
     validate_side(&side).map_err(as_packet_error)?;
-    if pack_side(&side, score_shift).map_err(as_packet_error)? != packed {
+    if pack_side_with_rice_and_parent_mode(
+        &side,
+        score_shift,
+        coefficient_k,
+        weight_k,
+        local_parent_gaps,
+    )
+    .map_err(as_packet_error)?
+        != packed
+    {
         return Err(packet_error("MIX1 side information is noncanonical"));
     }
     Ok((score_shift, side))
+}
+
+fn best_rice_k(
+    values: impl Iterator<Item = u64> + Clone,
+    maximum_k: u8,
+) -> Result<u8, OptimumV2Error> {
+    let mut best = None;
+    for k in 0..=maximum_k {
+        let mut bits = 0u128;
+        for value in values.clone() {
+            bits = bits
+                .checked_add(u128::from(value >> k) + 1 + u128::from(k))
+                .ok_or_else(|| input_error("MIX1 Rice bit cost overflows"))?;
+        }
+        let candidate = (bits, k);
+        if best.map_or(true, |current| candidate < current) {
+            best = Some(candidate);
+        }
+    }
+    Ok(best.expect("Rice search includes k=0").1)
 }
 
 pub(crate) fn graph_prediction(
@@ -335,7 +498,11 @@ fn lift(innovations: &[Vec<i64>], side: &LatticeSide) -> Result<Vec<Vec<i64>>, O
     Ok(residuals)
 }
 
-fn sparse_graph(innovations: &[Vec<i64>]) -> Result<SparseGraph, OptimumV2Error> {
+fn sparse_graph(
+    innovations: &[Vec<i64>],
+    parent_cap: usize,
+    parent_penalty: u64,
+) -> Result<SparseGraph, OptimumV2Error> {
     let channels = innovations.len();
     let mut dots = vec![vec![0i128; channels]; channels];
     for left in 0..channels {
@@ -355,7 +522,7 @@ fn sparse_graph(innovations: &[Vec<i64>]) -> Result<SparseGraph, OptimumV2Error>
     let mut parents = Vec::with_capacity(channels);
     let mut weights = Vec::with_capacity(channels);
     for channel in 0..channels {
-        let snapshot = sparse_row(channel, innovations, &dots)?;
+        let snapshot = sparse_row(channel, innovations, &dots, parent_cap, parent_penalty)?;
         parents.push(snapshot.0);
         weights.push(snapshot.1);
     }
@@ -366,12 +533,14 @@ fn sparse_row(
     channel: usize,
     innovations: &[Vec<i64>],
     dots: &[Vec<i128>],
+    parent_cap: usize,
+    parent_penalty: u64,
 ) -> Result<(Vec<usize>, Vec<i16>), OptimumV2Error> {
     let target = &innovations[channel];
     let mut selected: Vec<usize> = Vec::new();
     let mut weights: Vec<i16> = Vec::new();
     let mut best_cost = sparse_cost(target);
-    for _ in 0..PARENT_CAP {
+    for _ in 0..parent_cap {
         let current_residuals = sparse_residuals(target, innovations, &selected, &weights)?;
         let mut candidates = (0..channel)
             .filter(|parent| !selected.contains(parent))
@@ -403,7 +572,7 @@ fn sparse_row(
         let Some((cost, parent, fitted)) = best else {
             break;
         };
-        if cost >= best_cost {
+        if cost.saturating_add(parent_penalty) >= best_cost {
             break;
         }
         best_cost = cost;

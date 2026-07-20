@@ -5,6 +5,7 @@ use crate::OptimumV2Error;
 
 const MAX_ORDER: usize = 7;
 const MAX_PARENTS: usize = 4;
+const MAX_RLS_WIDTH: usize = 15;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MultivariateSession {
@@ -15,13 +16,23 @@ pub(crate) struct MultivariateSession {
     next_channel: usize,
     sample_min: i64,
     sample_max: i64,
+    parent_history_depth: usize,
 }
 
 impl MultivariateSession {
     pub(crate) fn new(parents: &[Vec<usize>], bit_depth: u8) -> Result<Self, OptimumV2Error> {
+        Self::new_with_parent_history(parents, bit_depth, 1)
+    }
+
+    pub(crate) fn new_with_parent_history(
+        parents: &[Vec<usize>],
+        bit_depth: u8,
+        parent_history_depth: usize,
+    ) -> Result<Self, OptimumV2Error> {
         if parents.is_empty()
             || parents.len() > 256
             || !(1..=32).contains(&bit_depth)
+            || parent_history_depth > 4
             || parents.iter().enumerate().any(|(channel, row)| {
                 row.len() > MAX_PARENTS
                     || row.iter().any(|&parent| parent >= channel)
@@ -34,12 +45,23 @@ impl MultivariateSession {
         }
         let mut states = Vec::with_capacity(parents.len());
         for row in parents {
-            let mut experts = Vec::with_capacity(MAX_ORDER + 1);
-            for order in 0..=MAX_ORDER {
+            let parent_width = if row.is_empty() {
+                0
+            } else {
+                (1 + parent_history_depth)
+                    * row.len().min(MAX_RLS_WIDTH / (1 + parent_history_depth))
+            };
+            let maximum_order = if row.is_empty() {
+                MAX_ORDER
+            } else {
+                MAX_ORDER.min(MAX_RLS_WIDTH - parent_width)
+            };
+            let mut experts = Vec::with_capacity(maximum_order + 1);
+            for order in 0..=maximum_order {
                 let width = if row.is_empty() {
                     order + 1
                 } else {
-                    order + 2 * row.len()
+                    order + parent_width
                 };
                 experts.push(FixedRlsExpert::new(width, bit_depth)?);
             }
@@ -54,6 +76,7 @@ impl MultivariateSession {
             next_channel: 0,
             sample_min: -magnitude,
             sample_max: magnitude - 1,
+            parent_history_depth,
         })
     }
 
@@ -115,7 +138,7 @@ impl MultivariateSession {
 
     fn selected_order(&self, channel: usize) -> usize {
         let mut selected = 0usize;
-        for order in 1..=MAX_ORDER {
+        for order in 1..self.states[channel].len() {
             if self.states[channel][order].score_q20() < self.states[channel][selected].score_q20()
             {
                 selected = order;
@@ -131,9 +154,10 @@ impl MultivariateSession {
         }
         let mut features = Vec::with_capacity(order + 2 * parents.len());
         features.extend_from_slice(&self.history[channel][..order]);
-        for &parent in parents {
+        let parent_cap = MAX_RLS_WIDTH / (1 + self.parent_history_depth);
+        for &parent in parents.iter().take(parent_cap) {
             features.push(current[parent]);
-            features.push(self.history[parent][0]);
+            features.extend_from_slice(&self.history[parent][..self.parent_history_depth]);
         }
         features
     }
