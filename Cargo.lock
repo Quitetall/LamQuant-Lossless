@@ -9,7 +9,7 @@ version = "0.1.0"
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=63a28426b933b347d45a94af61730da0652d1fed#63a28426b933b347d45a94af61730da0652d1fed"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=ddee8b7f981cbb810306be7f98c644a9a7366915#ddee8b7f981cbb810306be7f98c644a9a7366915"
 dependencies = [
  "blake3",
  "serde_json",
@@ -3261,7 +3261,7 @@ name = "lamquant-abir-bridge"
 version = "0.1.0"
 dependencies = [
  "abir 0.1.0",
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=63a28426b933b347d45a94af61730da0652d1fed)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=ddee8b7f981cbb810306be7f98c644a9a7366915)",
  "blake3",
  "bytemuck",
 ]
