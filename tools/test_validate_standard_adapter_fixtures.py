@@ -160,6 +160,12 @@ class ReceiptTests(unittest.TestCase):
             ("reject", 1, 0),
         )
         self.assertEqual(
+            standard_receipts.classify_dicom(
+                0, b"Information - recognized IOD: TwelveLeadECG\n", b""
+            ),
+            ("accept", 0, 0),
+        )
+        self.assertEqual(
             standard_receipts.classify_pynwb(0, b"No errors found.\n", b""),
             ("accept", 0, 0),
         )

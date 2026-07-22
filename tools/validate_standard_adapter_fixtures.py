@@ -231,7 +231,7 @@ def classify_dicom(exit_code: int, stdout: bytes, stderr: bytes) -> tuple[str, i
     lines = _combined(stdout, stderr)
     errors = sum(line.startswith("Error -") or " - Error - " in line for line in lines)
     warnings = sum(line.startswith("Warning -") or " - Warning - " in line for line in lines)
-    recognized_iod = any(line == "TwelveLeadECG" for line in lines)
+    recognized_iod = any("TwelveLeadECG" in line for line in lines)
     if exit_code != 0 or errors:
         return "reject", errors, warnings
     if recognized_iod:
