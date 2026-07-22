@@ -458,14 +458,38 @@ pub fn payload_content_id(bytes: &[u8]) -> ContentId {
 fn plan_id(plan: &ExportPlan) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"abir.adapter.export-plan.v1\0");
-    hasher.update(plan.source_dataset.as_bytes());
-    hasher.update(plan.target_profile.0.as_bytes());
+    hash_field(&mut hasher, plan.source_dataset.as_bytes());
+    hash_field(&mut hasher, plan.target_profile.0.as_bytes());
     hasher.update(&[plan.requires_user_acceptance as u8, plan.unsupported as u8]);
     for mapping in &plan.mappings {
-        hasher.update(mapping.source_path.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(mapping.target.as_bytes());
-        hasher.update(&[mapping.disposition as u8]);
+        hash_field(&mut hasher, mapping.source_path.as_bytes());
+        hash_field(&mut hasher, mapping.target.as_bytes());
+        hash_field(&mut hasher, disposition_label(mapping.disposition));
+        match &mapping.reason {
+            Some(reason) => {
+                hasher.update(&[1]);
+                hash_field(&mut hasher, reason.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
     }
     hasher.finalize().to_hex().to_string()
+}
+
+fn hash_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn disposition_label(disposition: MappingDisposition) -> &'static [u8] {
+    match disposition {
+        MappingDisposition::Exact => b"exact",
+        MappingDisposition::Projected => b"projected",
+        MappingDisposition::Lossy => b"lossy",
+        MappingDisposition::Quarantined => b"quarantined",
+        MappingDisposition::Unsupported => b"unsupported",
+        MappingDisposition::UserDecision => b"user-decision",
+    }
 }
