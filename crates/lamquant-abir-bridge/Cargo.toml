@@ -7,6 +7,6 @@ publish = false
 
 [dependencies]
 "legacy-abir" = { package = "abir", path = "../abir" }
-"semantic-abir" = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "7be40e21621121492a996be71d9f9f0490a6efec", default-features = false, features = ["alloc"] }
+"semantic-abir" = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "e78df4c6df71339ad598487408a7cc9b42bdfff7", default-features = false, features = ["alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 bytemuck = { version = "=1.25.0" }
