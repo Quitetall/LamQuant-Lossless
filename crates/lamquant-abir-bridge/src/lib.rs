@@ -59,6 +59,15 @@ pub struct LegacyMapped<'a, M: legacy::Modality> {
     pub fidelity: FidelityReport,
 }
 
+/// Exact foreign source material that must remain bound to the semantic root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceCapsuleMapping {
+    pub namespace: String,
+    pub value: String,
+    pub content_id: semantic::ContentId,
+    pub media_type: Option<String>,
+}
+
 /// Failures are structured and conversion never silently drops semantics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BridgeError {
@@ -162,6 +171,15 @@ impl<M: legacy::Modality> PayloadAccess for LegacyPayloadAccess<'_, M> {
 pub fn from_legacy<M: legacy::Modality>(
     source: &legacy::Abir<M>,
 ) -> Result<LegacyMapped<'_, M>, BridgeError> {
+    from_legacy_with_source_capsules(source, &[])
+}
+
+/// Convert legacy semantics while binding exact foreign source capsules into
+/// the same immutable dataset identity.
+pub fn from_legacy_with_source_capsules<'a, M: legacy::Modality>(
+    source: &'a legacy::Abir<M>,
+    source_capsules: &[SourceCapsuleMapping],
+) -> Result<LegacyMapped<'a, M>, BridgeError> {
     require_little_endian()?;
     source
         .verify()
@@ -265,6 +283,15 @@ pub fn from_legacy<M: legacy::Modality>(
     ));
     for atom in atoms {
         draft.add_atom(atom);
+    }
+    for capsule in source_capsules {
+        let source_key = semantic::SourceKey::new(&capsule.namespace, &capsule.value)
+            .map_err(|error| BridgeError::Identifier(error.to_string()))?;
+        draft.add_source_capsule(semantic::SourceCapsule::new(
+            source_key,
+            capsule.content_id,
+            capsule.media_type.as_deref(),
+        ));
     }
     let dataset = draft
         .validate(semantic::ValidationLimits::default())
@@ -823,5 +850,24 @@ mod tests {
             from_legacy(&source),
             Err(BridgeError::InvalidPhysicalRange { channel: 0 })
         ));
+    }
+
+    #[test]
+    fn forward_mapping_can_bind_exact_source_capsules() {
+        let source = legacy_fixture();
+        let content_id = semantic::ContentId::from_bytes([0x42; 32]);
+        let capsule = SourceCapsuleMapping {
+            namespace: "adapter.edfplus.1".to_owned(),
+            value: "recording.edf".to_owned(),
+            content_id,
+            media_type: Some("application/edf".to_owned()),
+        };
+        let mapped = from_legacy_with_source_capsules(&source, &[capsule]).unwrap();
+        assert_eq!(mapped.dataset.source_capsules().len(), 1);
+        let actual = &mapped.dataset.source_capsules()[0];
+        assert_eq!(actual.content_id(), content_id);
+        assert_eq!(actual.source().namespace(), "adapter.edfplus.1");
+        assert_eq!(actual.source().value(), "recording.edf");
+        assert_eq!(actual.media_type(), Some("application/edf"));
     }
 }
