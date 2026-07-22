@@ -2,7 +2,6 @@ use abir_adapter::{Adapter, ForeignEntry, ForeignObject, PayloadResolver, Profil
 use lamquant_standard_adapters::{DicomAdapter, NwbAdapter};
 use semantic_abir::{ContentId, ValidationLimits};
 use std::collections::BTreeMap;
-use std::process::Command;
 
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
 
@@ -54,22 +53,7 @@ fn dicom_waveform_maps_semantics_and_restores_exact_source() {
 
 #[test]
 fn nwb_integer_timeseries_maps_semantics_and_restores_exact_source() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("fixture.nwb");
-    let status = Command::new("python3")
-        .arg("-c")
-        .arg(
-            "import h5py,numpy as np,sys; f=h5py.File(sys.argv[1],'w'); \
-             f.attrs['nwb_version']='2.10.0'; a=f.create_group('acquisition'); \
-             e=a.create_group('ElectricalSeries'); \
-             e.create_dataset('data',data=np.array([[1,10],[-2,20],[3,30],[-4,40]],dtype='<i2')); \
-             t=e.create_dataset('starting_time',data=0.0); t.attrs['rate']=200.0; \
-             f.close()",
-        )
-        .arg(&path)
-        .status()
-        .expect("python3 and h5py are required conformance tools");
-    assert!(status.success(), "h5py NWB fixture generation failed");
+    let bytes = include_bytes!("fixtures/single_integer_timeseries.nwb").to_vec();
     assert_semantic_round_trip(
         &NwbAdapter::new(16 * 1024 * 1024),
         ForeignObject {
@@ -77,7 +61,7 @@ fn nwb_integer_timeseries_maps_semantics_and_restores_exact_source() {
             entries: vec![ForeignEntry {
                 path: "fixture.nwb".to_owned(),
                 media_type: Some("application/x-nwb".to_owned()),
-                bytes: std::fs::read(path).unwrap(),
+                bytes,
             }],
         },
     );

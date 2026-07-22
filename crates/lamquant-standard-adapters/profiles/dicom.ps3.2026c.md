@@ -8,5 +8,8 @@
   and referenced-media promotion is not yet claimed.
 - Unsupported Waveform IODs, sample interpretations, and incompatible multiplex
   groups fail closed.
+- The bounded 12-lead fixture is prepared by
+  `tools/generate_standard_adapter_fixtures.py` and passes `dciodvfy` with zero
+  `Error -` diagnostics; warnings remain outside the bounded semantic claim.
 - The broad DICOM PS3 2026c profile remains non-first-class until those mappings
   and independent `dciodvfy` evidence pass.
