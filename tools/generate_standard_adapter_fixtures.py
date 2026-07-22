@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pydicom
+import pyedflib
 from pynwb import NWBHDF5IO, NWBFile, TimeSeries
 from pynwb.file import Subject
 
@@ -45,6 +46,86 @@ DEFAULT_DICOM = (
     / "dicom"
     / "12lead_ecg.dcm"
 )
+DEFAULT_BIDS = (
+    REPO
+    / "crates"
+    / "lamquant-standard-adapters"
+    / "tests"
+    / "fixtures"
+    / "bids-single-edf-eeg"
+)
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def write_bids(output: Path) -> None:
+    """Write the bounded, independently validated single-recording BIDS tree."""
+
+    eeg = output / "sub-01" / "eeg"
+    eeg.mkdir(parents=True, exist_ok=True)
+    write_text(
+        output / "dataset_description.json",
+        '{\n  "Name": "ABIR BIDS EEG conformance fixture",\n'
+        '  "BIDSVersion": "1.11.1",\n  "DatasetType": "raw",\n'
+        '  "Authors": ["ABIR conformance fixture generator"],\n'
+        '  "License": "CC0"\n}\n',
+    )
+    write_text(output / "README", "Synthetic bounded BIDS EEG conformance fixture.\n")
+    write_text(
+        output / "participants.tsv",
+        "participant_id\tsex\tage\nsub-01\tn/a\t30\n",
+    )
+    write_text(
+        eeg / "sub-01_task-rest_eeg.json",
+        '{\n  "TaskName": "rest",\n  "TaskDescription": "Synthetic resting EEG",\n'
+        '  "EEGReference": "Cz",\n  "EEGGround": "n/a",\n'
+        '  "EEGPlacementScheme": "10-20",\n  "SamplingFrequency": 200,\n'
+        '  "PowerLineFrequency": 60,\n  "SoftwareFilters": "n/a",\n'
+        '  "HardwareFilters": "n/a",\n  "RecordingType": "continuous",\n'
+        '  "EEGChannelCount": 2,\n  "EOGChannelCount": 0,\n'
+        '  "ECGChannelCount": 0,\n  "EMGChannelCount": 0,\n'
+        '  "MiscChannelCount": 0,\n  "TriggerChannelCount": 0,\n'
+        '  "RecordingDuration": 2,\n  "Manufacturer": "ABIR"\n}\n',
+    )
+    write_text(
+        eeg / "sub-01_task-rest_channels.tsv",
+        "name\ttype\tunits\tdescription\tsampling_frequency\tstatus\tstatus_description\n"
+        "Fz\tEEG\tuV\tSynthetic frontal channel\t200\tgood\tn/a\n"
+        "Cz\tEEG\tuV\tSynthetic central channel\t200\tgood\tn/a\n",
+    )
+    write_text(
+        eeg / "sub-01_task-rest_events.tsv",
+        "onset\tduration\ttrial_type\n0.5\t0.1\tstimulus\n",
+    )
+    path = eeg / "sub-01_task-rest_eeg.edf"
+    signals = [
+        np.arange(400, dtype=np.float64) % 101 - 50,
+        np.arange(400, dtype=np.float64) % 83 - 41,
+    ]
+    headers = [
+        {
+            "label": label,
+            "dimension": "uV",
+            "sample_frequency": 200,
+            "physical_min": -100.0,
+            "physical_max": 100.0,
+            "digital_min": -32768,
+            "digital_max": 32767,
+            "transducer": "AgAgCl",
+            "prefilter": "HP:0.1Hz LP:70Hz",
+        }
+        for label in ("Fz", "Cz")
+    ]
+    with pyedflib.EdfWriter(
+        str(path), 2, file_type=pyedflib.FILETYPE_EDFPLUS
+    ) as writer:
+        writer.setSignalHeaders(headers)
+        writer.setPatientCode("sub-01")
+        writer.setEquipment("ABIR")
+        writer.writeSamples(signals)
 
 
 def write_nwb(output: Path) -> None:
@@ -115,6 +196,7 @@ def repair_dicom(source: Path, output: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--bids-output", type=Path, default=DEFAULT_BIDS)
     parser.add_argument("--nwb-output", type=Path, default=DEFAULT_NWB)
     parser.add_argument("--dicom-source", type=Path, default=DEFAULT_DICOM)
     parser.add_argument("--dicom-output", type=Path, default=DEFAULT_DICOM)
@@ -123,8 +205,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    write_bids(args.bids_output.resolve())
     write_nwb(args.nwb_output.resolve())
     repair_dicom(args.dicom_source.resolve(), args.dicom_output.resolve())
+    print(f"wrote {args.bids_output}")
     print(f"wrote {args.nwb_output}")
     print(f"wrote {args.dicom_output}")
 

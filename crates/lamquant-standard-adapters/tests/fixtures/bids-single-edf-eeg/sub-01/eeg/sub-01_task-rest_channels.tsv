@@ -1,0 +1,3 @@
+name	type	units	description	sampling_frequency	status	status_description
+Fz	EEG	uV	Synthetic frontal channel	200	good	n/a
+Cz	EEG	uV	Synthetic central channel	200	good	n/a

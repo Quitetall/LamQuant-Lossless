@@ -21,17 +21,50 @@ fn bids_source() -> ForeignObject {
             ForeignEntry {
                 path: "dataset_description.json".to_owned(),
                 media_type: Some("application/json".to_owned()),
-                bytes: br#"{"Name":"ABIR conformance","BIDSVersion":"1.11.1"}"#.to_vec(),
+                bytes: include_bytes!("fixtures/bids-single-edf-eeg/dataset_description.json")
+                    .to_vec(),
+            },
+            ForeignEntry {
+                path: "README".to_owned(),
+                media_type: Some("text/plain".to_owned()),
+                bytes: include_bytes!("fixtures/bids-single-edf-eeg/README").to_vec(),
+            },
+            ForeignEntry {
+                path: "participants.tsv".to_owned(),
+                media_type: Some("text/tab-separated-values".to_owned()),
+                bytes: include_bytes!("fixtures/bids-single-edf-eeg/participants.tsv").to_vec(),
             },
             ForeignEntry {
                 path: "sub-01/eeg/sub-01_task-rest_eeg.edf".to_owned(),
                 media_type: Some("application/edf".to_owned()),
-                bytes: lamquant_common::ingest::synth_single_channel_edf(&[1, -2, 3, -4], 250.0),
+                bytes: include_bytes!(
+                    "fixtures/bids-single-edf-eeg/sub-01/eeg/sub-01_task-rest_eeg.edf"
+                )
+                .to_vec(),
+            },
+            ForeignEntry {
+                path: "sub-01/eeg/sub-01_task-rest_eeg.json".to_owned(),
+                media_type: Some("application/json".to_owned()),
+                bytes: include_bytes!(
+                    "fixtures/bids-single-edf-eeg/sub-01/eeg/sub-01_task-rest_eeg.json"
+                )
+                .to_vec(),
+            },
+            ForeignEntry {
+                path: "sub-01/eeg/sub-01_task-rest_channels.tsv".to_owned(),
+                media_type: Some("text/tab-separated-values".to_owned()),
+                bytes: include_bytes!(
+                    "fixtures/bids-single-edf-eeg/sub-01/eeg/sub-01_task-rest_channels.tsv"
+                )
+                .to_vec(),
             },
             ForeignEntry {
                 path: "sub-01/eeg/sub-01_task-rest_events.tsv".to_owned(),
                 media_type: Some("text/tab-separated-values".to_owned()),
-                bytes: b"onset\tduration\n0\t1\n".to_vec(),
+                bytes: include_bytes!(
+                    "fixtures/bids-single-edf-eeg/sub-01/eeg/sub-01_task-rest_events.tsv"
+                )
+                .to_vec(),
             },
         ],
     }
@@ -45,7 +78,10 @@ fn bids_tree_maps_signal_semantics_and_restores_every_source_byte() {
         .import(&source, ValidationLimits::default())
         .expect("semantic BIDS import");
     assert!(imported.report.first_class_semantic());
-    assert_eq!(imported.report.preserved_unknowns, 2);
+    assert_eq!(
+        imported.report.preserved_unknowns,
+        source.entries.len() as u64 - 1
+    );
     assert_eq!(
         imported.dataset.source_capsules().len(),
         source.entries.len()
@@ -71,12 +107,18 @@ fn bids_tree_maps_signal_semantics_and_restores_every_source_byte() {
 fn bids_rejects_missing_or_unpinned_description_and_multiple_recordings() {
     let adapter = BidsAdapter::new(2 * 1024 * 1024);
     let mut missing = bids_source();
-    missing.entries.remove(0);
+    missing
+        .entries
+        .retain(|entry| entry.path != "dataset_description.json");
     assert!(adapter.inspect(&missing).is_err());
 
     let mut wrong_version = bids_source();
-    wrong_version.entries[0].bytes =
-        br#"{"Name":"ABIR conformance","BIDSVersion":"1.10.1"}"#.to_vec();
+    wrong_version
+        .entries
+        .iter_mut()
+        .find(|entry| entry.path == "dataset_description.json")
+        .unwrap()
+        .bytes = br#"{"Name":"ABIR conformance","BIDSVersion":"1.10.1"}"#.to_vec();
     assert!(adapter.inspect(&wrong_version).is_err());
 
     let mut multiple = bids_source();
@@ -104,7 +146,9 @@ fn bids_rejects_ambiguous_paths_duplicates_and_oversized_trees() {
     }
 
     let mut duplicate = bids_source();
-    duplicate.entries.push(duplicate.entries[2].clone());
+    duplicate
+        .entries
+        .push(duplicate.entries.last().unwrap().clone());
     assert!(adapter.inspect(&duplicate).is_err());
 
     assert!(BidsAdapter::new(1).inspect(&bids_source()).is_err());

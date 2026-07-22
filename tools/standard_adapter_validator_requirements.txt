@@ -6,4 +6,5 @@ hdmf==6.1.0
 numpy==2.5.1
 nwbinspector==0.7.2
 pydicom==3.0.2
+pyedflib==0.1.42
 pynwb==4.0.0

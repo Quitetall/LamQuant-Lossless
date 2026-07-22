@@ -35,6 +35,14 @@ DEFAULT_DICOM = (
     / "dicom"
     / "12lead_ecg.dcm"
 )
+DEFAULT_BIDS = (
+    REPO
+    / "crates"
+    / "lamquant-standard-adapters"
+    / "tests"
+    / "fixtures"
+    / "bids-single-edf-eeg"
+)
 
 
 def sha256(path: Path) -> str:
@@ -42,6 +50,18 @@ def sha256(path: Path) -> str:
     with path.open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def tree_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    for entry in sorted(item for item in path.rglob("*") if item.is_file()):
+        relative = entry.relative_to(path).as_posix().encode("utf-8")
+        payload = entry.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
     return digest.hexdigest()
 
 
@@ -72,6 +92,24 @@ def validate_nwb(executable: str, path: Path) -> dict[str, object]:
         "validator": "pynwb-validate --no-cached-namespace",
         "return_code": return_code,
         "error_count": len(errors),
+        "passed": passed,
+    }
+
+
+def validate_bids(executable: str, path: Path) -> dict[str, object]:
+    return_code, diagnostics = run([executable, str(path)])
+    error_lines = [
+        line.strip()
+        for line in diagnostics.splitlines()
+        if line.lstrip().startswith("[ERROR]")
+    ]
+    passed = return_code == 0 and not error_lines and "Summary:" in diagnostics
+    return {
+        "fixture_sha256": tree_sha256(path),
+        "profile": "bids.1.11.1.single-edf-eeg",
+        "validator": "bids-validator 3.0.1",
+        "return_code": return_code,
+        "error_count": len(error_lines),
         "passed": passed,
     }
 
@@ -121,11 +159,13 @@ def validate_dicom(executable: str, path: Path) -> dict[str, object]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--bids", type=Path, default=DEFAULT_BIDS)
     parser.add_argument("--nwb", type=Path, default=DEFAULT_NWB)
     parser.add_argument("--dicom", type=Path, default=DEFAULT_DICOM)
     parser.add_argument("--pynwb-validate", default="pynwb-validate")
     parser.add_argument("--nwbinspector", default="nwbinspector")
     parser.add_argument("--dciodvfy", default="dciodvfy")
+    parser.add_argument("--bids-validator", default="bids-validator-deno")
     return parser.parse_args()
 
 
@@ -135,6 +175,7 @@ def main() -> int:
         "receipt_version": 1,
         "scope": "bounded-standard-adapter-fixtures",
         "results": [
+            validate_bids(args.bids_validator, args.bids.resolve()),
             validate_dicom(args.dciodvfy, args.dicom.resolve()),
             validate_nwb(args.pynwb_validate, args.nwb.resolve()),
             inspect_nwb(args.nwbinspector, args.nwb.resolve()),
