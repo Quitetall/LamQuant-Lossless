@@ -83,7 +83,7 @@ pub use lamquant_lml_optimum_v2 as optimum_v2;
 /// facade always links the LMO decoder.
 pub fn decode(bytes: &[u8]) -> Result<codec::Signal, codec::CodecError> {
     #[cfg(feature = "archive")]
-    if bytes.get(..4) == Some(b"LMO1") && bytes.get(4) == Some(&3) {
+    if bytes.get(..4) == Some(&b"LMO1"[..]) && bytes.get(4) == Some(&3) {
         return optimum_v2::OptimumV2Codec
             .decode_window(bytes)
             .map(|window| window.samples)
@@ -97,43 +97,21 @@ pub fn decode(bytes: &[u8]) -> Result<codec::Signal, codec::CodecError> {
 
 #[cfg(feature = "async")]
 pub mod async_io;
-// ADR 0069 L6.2: the clean, self-contained ABIR container writer — a
-// byte-identical clone of the legacy v1 `encode_into`, sourced from
-// `abir::Abir`. See module docs for what's cloned vs reused from
-// `lamquant-lml-legacy`.
+// ADR 0139/0143: current LML archives are semantic ABIR BCS2 codec bundles.
+// Retired containers are reachable only through the supervised legacy Adapter.
 #[cfg(feature = "archive")]
-pub mod abir_container;
+pub mod bcs2_container;
 // ADR 0069 S7b: the LMQ training normalization pipeline (channel-select →
 // resample → 0.5 Hz zero-phase HP → Q31), hoisted from Python. Host-only Lossy
 // DSP — see module docs (non-causal filtfilt ⇒ no MCU variant).
 #[cfg(feature = "archive")]
+pub mod codec_stages;
+#[cfg(feature = "archive")]
 pub mod normalize;
 /// ADR 0075 — the LQTP1 training tensor pack (BFP window store). Host-only.
 pub mod tensor_pack;
-// ADR 0069/0071 L9 (read-side completion): the BCS1-aware streaming reader
-// (`Bcs1StreamReader`) + the magic-dispatching `AnyLmlReader` facade that
-// `range::RangeReader` and `bin/lml.rs`'s streaming decode paths use instead
-// of hardcoding the frozen `stream::LmlReader`. See module docs.
 #[cfg(feature = "archive")]
-pub mod bcs1_stream;
-#[cfg(feature = "archive")]
-pub mod codec_stages;
-// ADR 0069 L8 (cutover): `lamquant_core::container` now aliases the clean
-// `abir_container` facade, NOT the legacy crate directly. The write half
-// (`write_into`/`write_file*`) dispatches through `write_abir`
-// (byte-identical to the legacy `encode_into` by construction — see L1
-// oracle); the read half + shared types (`read_file`, `read_bytes`,
-// `ContainerHeader`, `ContainerStats`, `OffsetEntry`, `OffsetTable`, ...) are
-// re-exported by `abir_container` straight from `lamquant_lml_legacy::container`
-// (frozen, unchanged). Every call site + the S1 golden + legacy_crc_decode +
-// the L1 oracle stay byte-identical by construction — the goldens are the
-// cutover proof, not a re-generation target. `lamquant-lml-legacy`'s
-// `legacy-encode` (the retiring `encode_into`/`write_into` v1 writer) is no
-// longer part of `archive` (see Cargo.toml); it now lives under `oracle`
-// only, where `tests/oracle_diff.rs` links it DIRECTLY (not through this
-// alias) to keep the differential oracle a real two-implementation check.
-#[cfg(feature = "archive")]
-pub use crate::abir_container as container;
+pub use crate::bcs2_container as container;
 #[cfg(feature = "archive")]
 pub mod edf;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
@@ -145,8 +123,6 @@ pub use lamquant_common::ingest;
 pub mod io;
 #[cfg(feature = "archive")]
 pub mod lma;
-#[cfg(feature = "archive")]
-pub use lamquant_lml_legacy::offset_table;
 // NWB/HDF5 integer-signal reader → LML ingest (ADR 0051 Track 3). Host-only:
 // the `nwb` feature gates in libhdf5 via hdf5-metno; never in the no_std build.
 #[cfg(feature = "nwb")]
@@ -171,13 +147,6 @@ pub mod pass;
 // `run_in_lml`/`DynPass` UNCHANGED (including the runtime Lossy refusal).
 #[cfg(feature = "archive")]
 pub mod pipeline_dsl;
-// ADR 0074 Track M: the typed stage-DAG authoring layer. Owned newtypes
-// (`Raw<M>` … `Coded<M>`) generic over modality; `lower_*` dispatches to the
-// fused kernel (never reimplements the DSP). Host-only like `pass`.
-#[cfg(feature = "archive")]
-pub mod stage;
-#[cfg(feature = "archive")]
-pub mod range;
 // `source::descriptor` (ADR 0069 Pillar 3 / S5 Increment 3, task #20) is
 // declared inside `source/mod.rs`, not here — it's a submodule of
 // `source` (file lives at `src/source/descriptor.rs`), gated by this
@@ -187,8 +156,6 @@ pub mod range;
 // sample-rate transform).
 #[cfg(feature = "archive")]
 pub mod source;
-#[cfg(feature = "archive")]
-pub use lamquant_lml_legacy::stream;
 
 // ─── security: encryption / signing primitives ────────────────────
 #[cfg(feature = "security")]

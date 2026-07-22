@@ -486,30 +486,8 @@ mod tests {
     // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
     //
     // EeglabReader is the one reader that stays on `SignalSourceReader`'s
-    // DEFAULT `lower_to_abir` (see `source/reader.rs` docs) — this test
+    // DEFAULT `lower_to_legacy_recording` (see `source/reader.rs` docs) — this test
     // exercises that shared default path, not a reader-specific override.
-
-    #[test]
-    fn lower_to_abir_infers_eeg_from_channel_labels() {
-        use abir::{Ecg, Eeg, Modality, ModalitySource};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let set = tmp.path().join("e.set");
-        std::fs::write(&set, b"").unwrap();
-        std::fs::write(tmp.path().join("e.fdt"), synth_fdt(2, 8)).unwrap();
-        std::fs::write(
-            tmp.path().join("e.lml-meta.json"),
-            "{\"n_channels\":2,\"n_samples\":8,\"sample_rate\":250.0,\
-             \"channels\":[\"Fp1\",\"Cz\"],\"phys_dim\":\"uV\"}",
-        )
-        .unwrap();
-
-        let abir = EeglabReader::new(&set).lower_to_abir().unwrap();
-        assert_eq!(abir.provenance().tag, Eeg::TAG);
-        assert_eq!(abir.provenance().source, ModalitySource::ChannelLabel);
-        assert!(abir.clone().try_into_modality::<Eeg>().is_ok());
-        assert!(abir.try_into_modality::<Ecg>().is_err());
-    }
 
     #[test]
     fn missing_fdt_errors_explicitly() {

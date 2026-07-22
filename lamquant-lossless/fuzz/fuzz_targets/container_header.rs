@@ -1,8 +1,8 @@
-//! Phase 8 / Item F — fuzz the container header + first window parse.
+//! Fuzz the current ABIR/BCS2 container authentication and semantic open.
 //!
-//! Feeds arbitrary bytes into `container::read_from(&mut Cursor)`.
+//! Feeds arbitrary bytes into `container::read_bytes`.
 //! The reader must never panic on adversarial input — every malformed
-//! magic byte / bad length / bogus flag combination has to surface as
+//! magic byte / bad length / bogus catalog combination has to surface as
 //! a typed `LmlError`. Catches integer overflow, OOB read, alloc bomb
 //! patterns that hand-rolled test cases can miss.
 //!
@@ -18,6 +18,5 @@ fuzz_target!(|data: &[u8]| {
     // Don't care about the result — only that the parser doesn't
     // panic. `container::read_from` should return Err on every
     // malformed input the fuzzer produces.
-    let mut cursor = std::io::Cursor::new(data);
-    let _ = lamquant_core::container::read_from(&mut cursor);
+    let _ = lamquant_core::container::read_bytes(data);
 });

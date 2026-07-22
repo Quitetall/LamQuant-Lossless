@@ -1,12 +1,8 @@
 //! ADR 0074 · Track I — the per-dataset ingest manifest (host-only, `archive`).
 //!
 //! A serde config declaring, per dataset, the AUTHORITATIVE modality — so a
-//! dataset is born-TYPED (`ModalitySource::Manual`) instead of falling to the
-//! label-heuristic's `Untyped` default (`infer_modality` resolves to `Untyped` on
-//! any ambiguity, and the live CLI path never even runs it — every file is born
-//! Untyped today). Consulted before the CLI's extension dispatch; applying it is
-//! byte-neutral (only BCS1 header byte 6 changes — see
-//! `tests/modality_provenance_snapshot.rs`), so it is safe on every existing corpus.
+//! dataset receives an explicit ABIR modality concept instead of depending on
+//! filename or channel-label heuristics.
 //!
 //! Parsed from JSON (`serde_json`, already linked under `archive`). A dataset is
 //! matched by a path substring (its directory / name); first match wins. The
@@ -14,13 +10,11 @@
 
 use std::path::Path;
 
-use abir::{Accel, Ecg, Ecog, Eeg, Emg, Eog, Ieeg, Modality, Other, Resp, Seeg, Untyped};
 use serde::Deserialize;
 
 use super::descriptor::FormatDescriptor;
 
-/// A modality declaration — maps 1:1 to the sealed [`abir::Modality`] markers
-/// (serde `lowercase`, matching `Modality::NAME`: `eeg`, `ieeg`, `ecg`, …).
+/// A modality declaration mapped to the canonical ABIR concept registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModalityDecl {
@@ -38,21 +32,19 @@ pub enum ModalityDecl {
 }
 
 impl ModalityDecl {
-    /// The wire tag ([`Modality::TAG`]) this declaration corresponds to. Used by
-    /// the CLI to dispatch to the compile-time-typed `into_modality::<M>` arm.
-    pub fn tag(self) -> u8 {
+    pub const fn concept(self) -> &'static str {
         match self {
-            Self::Eeg => Eeg::TAG,
-            Self::Ieeg => Ieeg::TAG,
-            Self::Ecog => Ecog::TAG,
-            Self::Seeg => Seeg::TAG,
-            Self::Ecg => Ecg::TAG,
-            Self::Emg => Emg::TAG,
-            Self::Eog => Eog::TAG,
-            Self::Resp => Resp::TAG,
-            Self::Accel => Accel::TAG,
-            Self::Other => Other::TAG,
-            Self::Untyped => Untyped::TAG,
+            Self::Eeg => "abir:modality/eeg",
+            Self::Ieeg => "abir:modality/ieeg",
+            Self::Ecog => "abir:modality/ecog",
+            Self::Seeg => "abir:modality/seeg",
+            Self::Ecg => "abir:modality/ecg",
+            Self::Emg => "abir:modality/emg",
+            Self::Eog => "abir:modality/eog",
+            Self::Resp => "abir:modality/respiration",
+            Self::Accel => "abir:modality/acceleration",
+            Self::Other => "abir:modality/other",
+            Self::Untyped => "abir:modality/unknown",
         }
     }
 }
@@ -150,12 +142,18 @@ mod tests {
         }"#;
         let m = IngestManifest::from_json(json).unwrap();
         assert_eq!(m.version, 1);
-        assert_eq!(m.resolve(Path::new("/data/chbmit/chb01_03.edf")), Some(ModalityDecl::Eeg));
-        assert_eq!(m.resolve(Path::new("/data/ptbxl/rec_001.edf")), Some(ModalityDecl::Ecg));
+        assert_eq!(
+            m.resolve(Path::new("/data/chbmit/chb01_03.edf")),
+            Some(ModalityDecl::Eeg)
+        );
+        assert_eq!(
+            m.resolve(Path::new("/data/ptbxl/rec_001.edf")),
+            Some(ModalityDecl::Ecg)
+        );
         assert_eq!(m.resolve(Path::new("/data/unknown/x.edf")), None);
-        assert_eq!(ModalityDecl::Eeg.tag(), Eeg::TAG);
-        assert_eq!(ModalityDecl::Ecg.tag(), Ecg::TAG);
-        assert_eq!(ModalityDecl::Untyped.tag(), Untyped::TAG);
+        assert_eq!(ModalityDecl::Eeg.concept(), "abir:modality/eeg");
+        assert_eq!(ModalityDecl::Ecg.concept(), "abir:modality/ecg");
+        assert_eq!(ModalityDecl::Untyped.concept(), "abir:modality/unknown");
     }
 
     #[test]
@@ -173,14 +171,28 @@ mod tests {
             ]
         }"#;
         let m = IngestManifest::from_json(json).unwrap();
-        let entry = m.resolve_entry(Path::new("/data/myraw/rec.bin")).expect("match");
+        let entry = m
+            .resolve_entry(Path::new("/data/myraw/rec.bin"))
+            .expect("match");
         assert_eq!(entry.modality, ModalityDecl::Eeg);
-        assert_eq!(entry.descriptor.as_ref().expect("descriptor present").format_name, "RAWBIN");
+        assert_eq!(
+            entry
+                .descriptor
+                .as_ref()
+                .expect("descriptor present")
+                .format_name,
+            "RAWBIN"
+        );
         // A dataset WITHOUT a descriptor → None (falls to the extension dispatch).
-        let plain =
-            IngestManifest::from_json(r#"{"version":1,"datasets":[{"match":"x","modality":"ecg"}]}"#)
-                .unwrap();
-        assert!(plain.resolve_entry(Path::new("/x/y")).unwrap().descriptor.is_none());
+        let plain = IngestManifest::from_json(
+            r#"{"version":1,"datasets":[{"match":"x","modality":"ecg"}]}"#,
+        )
+        .unwrap();
+        assert!(plain
+            .resolve_entry(Path::new("/x/y"))
+            .unwrap()
+            .descriptor
+            .is_none());
     }
 
     #[test]
@@ -190,7 +202,10 @@ mod tests {
         assert!(m.datasets.is_empty());
         assert!(m.resolve(Path::new("/anything")).is_none());
         // Bad JSON → Json error.
-        assert!(matches!(IngestManifest::from_json("{ not json"), Err(ManifestError::Json(_))));
+        assert!(matches!(
+            IngestManifest::from_json("{ not json"),
+            Err(ManifestError::Json(_))
+        ));
         // Unsupported version → fail-closed (NOT a silent parse into defaults).
         assert!(matches!(
             IngestManifest::from_json(r#"{"version": 2}"#),

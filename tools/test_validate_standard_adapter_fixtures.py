@@ -78,6 +78,7 @@ class ReceiptTests(unittest.TestCase):
                 observed_outcome="accept",
                 error_count=0,
                 warning_count=1,
+                semantic_profile=True,
             )
 
             self.assertEqual(
@@ -145,10 +146,50 @@ class ReceiptTests(unittest.TestCase):
                 observed_outcome="accept",
                 error_count=0,
                 warning_count=0,
+                semantic_profile=True,
             )
 
             self.assertFalse(receipt["pass"])
             self.assertFalse(receipt["semantic_profile_promoted"])
+
+    def test_successful_forensic_candidate_receipt_cannot_promote(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "fixture.tsv"
+            fixture.write_bytes(b"onset\tduration\ttrial_type\n0\t1\tstimulus\n")
+            authority = root / "authority"
+            authority.write_bytes(b"authority")
+            executable = root / "validator"
+            executable.write_bytes(b"validator")
+            receipt = standard_receipts.make_receipt(
+                profile="bids.1.11.1.single-edf-eeg-events",
+                edition="1.11.1",
+                adapter_revision="c" * 40,
+                fixture=fixture,
+                fixture_root=root,
+                fixture_kind="file",
+                expected_outcome="accept",
+                internal_valid=True,
+                validator_name="bids-validator",
+                validator_version="3.0.1",
+                validator_executable=executable,
+                authority_artifact=authority,
+                argv=[str(executable), "fixture.tsv"],
+                execution=standard_receipts.Execution(0, b"Summary: valid\n", b""),
+                executed_at_utc="2026-07-22T12:00:00Z",
+                authority="conformance",
+                observed_outcome="accept",
+                error_count=0,
+                warning_count=0,
+                semantic_profile=False,
+            )
+            self.assertTrue(receipt["pass"])
+            self.assertFalse(receipt["semantic_profile_promoted"])
+            self.assertFalse(
+                standard_receipts._profile_is_semantic(
+                    standard_receipts.DEFAULT_ABIR, receipt["profile"]
+                )
+            )
 
     def test_error_diagnostics_produce_reject_outcomes(self) -> None:
         self.assertEqual(
@@ -210,6 +251,34 @@ class ReceiptTests(unittest.TestCase):
                     authority_artifact=authority,
                     pins=pins,
                 )
+
+    def test_validator_pin_can_authorize_multiple_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "validator"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            authority = root / "authority"
+            authority.write_bytes(b"authority")
+            digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+            pins = {
+                "validator": {
+                    "profiles": ["profile-a", "profile-b"],
+                    "version": "1",
+                    "executable_sha256": digest,
+                    "authority_sha256": hashlib.sha256(b"authority").hexdigest(),
+                    "authority": "conformance",
+                }
+            }
+            standard_receipts._bind_validator(
+                name="validator",
+                profile="profile-b",
+                version="1",
+                evidence_authority="conformance",
+                executable=str(executable),
+                authority_artifact=authority,
+                pins=pins,
+            )
 
     def test_unavailable_evidence_is_a_schema_valid_failed_receipt(self) -> None:
         receipt = standard_receipts.make_unavailable_receipt(

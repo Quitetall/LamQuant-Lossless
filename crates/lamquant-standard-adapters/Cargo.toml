@@ -7,13 +7,11 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
-abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "7be40e21621121492a996be71d9f9f0490a6efec" }
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432" }
 blake3 = "=1.5.5"
 hdf5-metno = "0.12"
-lamquant-abir-bridge = { path = "../lamquant-abir-bridge" }
 lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom", "nwb"] }
-legacy-abir = { package = "abir", path = "../abir" }
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "7be40e21621121492a996be71d9f9f0490a6efec" }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432" }
 serde_json = "1"
 tempfile = "3"
 

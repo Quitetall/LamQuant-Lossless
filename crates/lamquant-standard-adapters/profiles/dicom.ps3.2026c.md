@@ -2,8 +2,9 @@
 
 - Current semantic coverage is the validated 12-Lead ECG and General ECG
   Waveform Storage subset using signed 16-bit samples.
-- Maps channel order, integer samples, declared sampling frequency, labels, and
-  declared modality; preserves the complete DICOM object as a source capsule.
+- Projects channel order, integer samples, declared sampling frequency, labels,
+  and ECG modality; calibration/sensitivity and absolute timing remain in the
+  complete DICOM source capsule.
 - Patient, study, series, device, annotation, report, private-tag, sensitivity,
   and referenced-media promotion is not yet claimed.
 - Unsupported Waveform IODs, sample interpretations, and incompatible multiplex
@@ -13,3 +14,5 @@
   `Error -` diagnostics; warnings remain outside the bounded semantic claim.
 - The broad DICOM PS3 2026c profile remains non-first-class until those mappings
   and independent `dciodvfy` evidence pass.
+- This bounded profile also remains forensic/projected until validator receipts
+  are consumed by the runtime status decision rather than documented only.

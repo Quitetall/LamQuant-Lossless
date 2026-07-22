@@ -179,7 +179,7 @@ mod tests {
     use crate::source::SourceMetadata;
 
     fn synth_bundle(n_ch: usize, n_samples: usize) -> SignalBundle {
-        let mut state: u64 = 0xC0FFEE_BABE_DEAD;
+        let mut state: u64 = 0x00C0_FFEE_BABE_DEAD;
         let mut signal: Vec<Vec<i64>> = (0..n_ch).map(|_| Vec::with_capacity(n_samples)).collect();
         for ch in &mut signal {
             for _ in 0..n_samples {
@@ -209,15 +209,13 @@ mod tests {
     }
 
     #[test]
-    fn compress_yields_encoded_container_with_bcs1_magic() {
-        // ADR 0069/0071 L9: `CompressStage` routes through `write_abir`,
-        // which now emits the `BCS1` typed header (wrapping the
-        // byte-unchanged `LML1` per-window payloads inside) instead of a
-        // bare `LML1`-prefixed container — see `abir::bcs1`.
+    fn compress_yields_current_abir_bcs2_container() {
+        // ADR 0139/0143: the current archive is an authenticated ABIR/BCS2
+        // codec bundle. The deterministic LML1 packet is sealed inside it.
         let bundle = synth_bundle(2, 256);
         let mut stage = CompressStage::new(250.0);
         let encoded = stage.process(bundle).unwrap();
-        assert_eq!(&encoded.as_bytes()[0..4], b"BCS1");
+        assert_eq!(&encoded.as_bytes()[0..4], b"ABIR");
     }
 
     #[test]
@@ -240,31 +238,17 @@ mod tests {
             .then(DecompressStage);
         let decoded = chain.process(bundle).unwrap();
         assert_eq!(decoded.signal, original);
-        // Metadata is augmented with the self-describing codec_mode stamp
-        // (deployment tier); caller fields are preserved.
-        assert!(
-            decoded.metadata_json.contains("\"src\":\"unit-test\"")
-                && decoded.metadata_json.contains("\"codec_mode\""),
-            "metadata must preserve caller fields + carry codec_mode: {}",
-            decoded.metadata_json
-        );
+        assert_eq!(decoded.metadata_json, "{\"src\":\"unit-test\"}");
     }
 
     #[test]
-    fn compress_with_noise_bits_lossy() {
+    fn compress_refuses_unregistered_lossy_profile() {
         let bundle = synth_bundle(1, 128);
         let mut stage = CompressStage::new(250.0).with_noise_bits(4);
-        let encoded = stage.process(bundle).unwrap();
-        // Confirm the encoder ran end-to-end through the noise_bits
-        // path. Lossy round-trip correctness is pinned in container
-        // tests; here we only verify the config threaded through.
-        assert!(
-            !encoded.is_empty(),
-            "noise_bits=4 encoder must still produce non-empty output"
-        );
-        // ADR 0069/0071 L9: BCS1, not LML1 — see
-        // `compress_yields_encoded_container_with_bcs1_magic` above.
-        assert_eq!(&encoded.as_bytes()[0..4], b"BCS1");
+        let error = stage
+            .process(bundle)
+            .expect_err("unregistered lossy profile");
+        assert!(error.to_string().contains("registered lossy profile"));
     }
 
     #[test]

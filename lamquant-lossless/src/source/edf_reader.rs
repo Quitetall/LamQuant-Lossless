@@ -12,11 +12,9 @@
 //!   reconstruction; fails when sidecar entries are missing or malformed)
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use crate::edf::{read_edf, EdfFile};
 use crate::error::{LmlError, LmlResult};
-use abir::{Abir, Channel, Column};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
@@ -48,73 +46,6 @@ impl SignalSourceReader for EdfReader {
     fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let edf = read_edf(&self.path)?;
         Ok(edf.into())
-    }
-
-    /// ADR 0069 L7: specialize to the native EDF/BDF sample width instead
-    /// of the trait default's all-`I64` `Abir`. `read_edf` itself is
-    /// untouched (it feeds the oracle-frozen legacy writer) — this reads
-    /// its already-decoded `EdfFile.signal` and narrows.
-    ///
-    /// Byte-exact because every value in `e.signal[j]` originated as a
-    /// native-width read widened via a plain `as i64`:
-    ///   - EDF: `i16::from_le_bytes(..) as i64` (edf.rs)
-    ///   - BDF: `read_i24_le(..) as i64`, and `read_i24_le` returns an
-    ///     already sign-extended `i32` within `[-2^23, 2^23-1]`
-    ///
-    /// So narrowing back with `as i16` / `as i32` exactly inverts the
-    /// widen for both cases — no value in either range can be altered by
-    /// the round trip.
-    ///
-    /// `e.signal` only carries the `eeg_idx`-order EEG channels at the
-    /// mode sample rate; annotation/off-rate channels were already
-    /// diverted into `e.non_eeg_data` by `read_edf` and never appear
-    /// here (matches `read_bundle`'s codec input exactly).
-    ///
-    /// TRAP: BDF is NOT representable in `i16` (24-bit values overflow
-    /// it) — the `is_bdf` branch below is mandatory, not an optimization
-    /// nicety.
-    fn lower_to_abir(&mut self) -> LmlResult<Abir> {
-        let e = read_edf(&self.path)?;
-        let n_samples = e.total_samples;
-        let sample_rate = e.sample_rate;
-        let is_bdf = e.is_bdf;
-        let EdfFile {
-            signal,
-            channels: ch_names,
-            phys_min,
-            phys_max,
-            ..
-        } = e;
-        let channels: Vec<Channel> = signal
-            .into_iter()
-            .enumerate()
-            .map(|(j, ch)| {
-                let data = if is_bdf {
-                    Column::I24(Arc::from(
-                        ch.iter().map(|&v| v as i32).collect::<Vec<i32>>(),
-                    ))
-                } else {
-                    Column::I16(Arc::from(
-                        ch.iter().map(|&v| v as i16).collect::<Vec<i16>>(),
-                    ))
-                };
-                Channel {
-                    label: Arc::from(ch_names[j].as_str()),
-                    data,
-                    phys_min: phys_min[j],
-                    phys_max: phys_max[j],
-                }
-            })
-            .collect();
-        // ADR 0069 S3b: EDF/BDF is a modality-agnostic container (no
-        // declared-modality field), so `format` is `None` — inference runs
-        // purely off `ch_names` (e.g. a "EEG Fp1" label, or a bare 10-20
-        // electrode name).
-        let labels: Vec<&str> = ch_names.iter().map(String::as_str).collect();
-        Ok(
-            Abir::from_parts(channels, sample_rate, n_samples)
-                .with_inferred_modality(&labels, None),
-        )
     }
 }
 
@@ -463,7 +394,7 @@ mod tests {
         let mut bundle: SignalBundle = edf.into();
         bundle.sidecar.retain(|s| s.key != "raw_header");
         let r: LmlResult<EdfFile> = bundle.try_into();
-        assert!(matches!(r, Err(_)));
+        assert!(r.is_err());
     }
 
     #[test]
@@ -472,7 +403,7 @@ mod tests {
         let mut bundle: SignalBundle = edf.into();
         bundle.sidecar.retain(|s| s.key != "edf_meta");
         let r: LmlResult<EdfFile> = bundle.try_into();
-        assert!(matches!(r, Err(_)));
+        assert!(r.is_err());
     }
 
     #[test]
@@ -483,224 +414,6 @@ mod tests {
             s.bytes = b"not valid json".to_vec();
         }
         let r: LmlResult<EdfFile> = bundle.try_into();
-        assert!(matches!(r, Err(_)));
-    }
-
-    // ─── ADR 0069 L7 gate: lower_to_abir byte-exactness ─────────────
-
-    /// Minimal valid single-channel BDF (BioSemi 24-bit) byte buffer.
-    /// Mirrors `crate::ingest::synth_single_channel_edf`'s field layout
-    /// (same fixed-width ASCII header, same 512-byte header total) but
-    /// with the `0xFF` + `"BIOSEMI"` magic and 3-byte little-endian
-    /// two's-complement samples. Local to this test: no reusable BDF
-    /// synth exists elsewhere in the crate (only the EDF one is shared
-    /// via `crate::ingest`), and exercising the `is_bdf` branch is
-    /// mandatory for this gate (BDF can't reuse the I16 path).
-    fn push_padded(out: &mut Vec<u8>, value: &[u8], width: usize) {
-        if value.len() >= width {
-            out.extend_from_slice(&value[..width]);
-        } else {
-            out.extend_from_slice(value);
-            out.resize(out.len() + (width - value.len()), b' ');
-        }
-    }
-
-    fn synth_single_channel_bdf(samples: &[i32], sample_rate: f64) -> Vec<u8> {
-        let n_samples = samples.len();
-        let header_bytes = 512usize;
-        let mut out = Vec::with_capacity(header_bytes + n_samples * 3);
-
-        // ─── Main header (256 bytes) ───
-        out.push(0xFF);
-        out.extend_from_slice(b"BIOSEMI"); // bytes 1..8 — the BDF magic
-        push_padded(&mut out, b"X X X X", 80); // patient_id
-        push_padded(&mut out, b"Startdate X X X X", 80); // recording_id
-        push_padded(&mut out, b"01.01.01", 8); // startdate
-        push_padded(&mut out, b"00.00.00", 8); // starttime
-        push_padded(&mut out, header_bytes.to_string().as_bytes(), 8);
-        push_padded(&mut out, b"", 44); // reserved
-        push_padded(&mut out, b"1", 8); // n_records
-        let record_dur = if sample_rate > 0.0 {
-            (n_samples as f64 / sample_rate).max(1e-6)
-        } else {
-            1.0
-        };
-        push_padded(&mut out, format!("{:.6}", record_dur).as_bytes(), 8);
-        push_padded(&mut out, b"1", 4); // n_signals
-        assert_eq!(out.len(), 256, "BDF main header must be exactly 256 bytes");
-
-        // ─── Signal header (256 bytes) ───
-        push_padded(&mut out, b"EEG ch0", 16); // label
-        push_padded(&mut out, b"", 80); // transducer
-        push_padded(&mut out, b"uV", 8); // phys_dim
-        push_padded(&mut out, b"-8388608", 8);
-        push_padded(&mut out, b"8388607", 8);
-        push_padded(&mut out, b"-8388608", 8);
-        push_padded(&mut out, b"8388607", 8);
-        push_padded(&mut out, b"", 80); // prefiltering
-        push_padded(&mut out, n_samples.to_string().as_bytes(), 8);
-        push_padded(&mut out, b"", 32); // reserved
-        assert_eq!(out.len(), 512, "BDF signal header must bring total to 512");
-
-        // ─── Sample data: 3-byte LE two's complement ───
-        for &s in samples {
-            let v = s & 0x00FF_FFFF;
-            out.push((v & 0xFF) as u8);
-            out.push(((v >> 8) & 0xFF) as u8);
-            out.push(((v >> 16) & 0xFF) as u8);
-        }
-        out
-    }
-
-    #[test]
-    fn lower_to_abir_edf_matches_read_bundle_i64() {
-        let samples: Vec<i16> = (0..500).map(|t| ((t % 613) - 306) as i16).collect();
-        let bytes = crate::ingest::synth_single_channel_edf(&samples, 250.0);
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("synth.edf");
-        std::fs::write(&path, &bytes).unwrap();
-
-        let bundle = EdfReader::new(&path).read_bundle().unwrap();
-        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
-
-        assert_eq!(abir.n_channels(), bundle.signal.len());
-        assert_eq!(abir.sample_rate, bundle.sample_rate);
-        for (j, ch) in abir.channels.iter().enumerate() {
-            assert!(
-                matches!(ch.data, Column::I16(_)),
-                "EDF must specialize to Column::I16"
-            );
-            let widened = ch.data.window_i64(0, abir.n_samples);
-            assert_eq!(
-                widened.as_ref(),
-                bundle.signal[j].as_slice(),
-                "channel {j}: lower_to_abir must equal read_bundle's i64 exactly"
-            );
-        }
-    }
-
-    /// Task #33 (ADR 0069 L9 hardening): the gate above only exercises
-    /// small values (±306) that fit comfortably in `i16` — it would PASS
-    /// even if EDF wrongly narrowed to something smaller than `i16` (e.g.
-    /// `i8`). Prove the actual boundary: `i16::MIN`/`i16::MAX` must
-    /// survive the `Column::I16` widen exactly, with no clipping or wrap
-    /// at either extreme.
-    #[test]
-    fn lower_to_abir_edf_i16_extremes_round_trip_exactly() {
-        let samples: Vec<i16> = vec![i16::MIN, i16::MAX, 0, i16::MIN, i16::MAX];
-        let bytes = crate::ingest::synth_single_channel_edf(&samples, 250.0);
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("synth_extremes.edf");
-        std::fs::write(&path, &bytes).unwrap();
-
-        let bundle = EdfReader::new(&path).read_bundle().unwrap();
-        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
-
-        assert!(
-            matches!(abir.channels[0].data, Column::I16(_)),
-            "EDF must specialize to Column::I16"
-        );
-        let widened = abir.channels[0].data.window_i64(0, abir.n_samples);
-        assert_eq!(
-            widened.as_ref(),
-            bundle.signal[0].as_slice(),
-            "lower_to_abir must equal read_bundle's i64 exactly at the i16 extremes"
-        );
-        assert_eq!(widened[0], i16::MIN as i64, "i16::MIN must round-trip exactly");
-        assert_eq!(widened[1], i16::MAX as i64, "i16::MAX must round-trip exactly");
-        assert_eq!(widened[3], i16::MIN as i64, "second i16::MIN must round-trip exactly");
-        assert_eq!(widened[4], i16::MAX as i64, "second i16::MAX must round-trip exactly");
-    }
-
-    #[test]
-    fn lower_to_abir_bdf_matches_read_bundle_i64() {
-        // Values span the full 24-bit-ish range this synth encodes so
-        // both the sign bit and mid-magnitude bytes are exercised.
-        let samples: Vec<i32> = (0..500).map(|t| ((t % 6000) as i32) - 3000).collect();
-        let bytes = synth_single_channel_bdf(&samples, 250.0);
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("synth.bdf");
-        std::fs::write(&path, &bytes).unwrap();
-
-        let bundle = EdfReader::new(&path).read_bundle().unwrap();
-        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
-
-        assert_eq!(abir.n_channels(), bundle.signal.len());
-        for (j, ch) in abir.channels.iter().enumerate() {
-            assert!(
-                matches!(ch.data, Column::I24(_)),
-                "BDF must specialize to Column::I24, NOT I16 (24-bit overflows i16)"
-            );
-            let widened = ch.data.window_i64(0, abir.n_samples);
-            assert_eq!(
-                widened.as_ref(),
-                bundle.signal[j].as_slice(),
-                "channel {j}: lower_to_abir must equal read_bundle's i64 exactly"
-            );
-        }
-    }
-
-    /// Task #33 (ADR 0069 L9 hardening): the BDF gate above uses values
-    /// spanning ±3000 — well inside `i16` range (±32767) — so it would
-    /// PASS even if `lower_to_abir`'s `is_bdf` branch wrongly picked
-    /// `Column::I16` for BDF. Prove the specialization is load-bearing
-    /// with values that overflow `i16` but are still valid 24-bit BDF
-    /// samples: `-8_388_608` (min) and `8_388_607` (max). A confirmed
-    /// fail-then-fix pass (temporarily forcing BDF to `Column::I16`) shows
-    /// these exact extremes corrupt under an `i16` narrow — see the
-    /// commit message for the observed failure.
-    #[test]
-    fn lower_to_abir_bdf_i24_extremes_round_trip_exactly() {
-        let samples: Vec<i32> = vec![-8_388_608, 8_388_607, 0, -8_388_608, 8_388_607];
-        let bytes = synth_single_channel_bdf(&samples, 250.0);
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("synth_extremes.bdf");
-        std::fs::write(&path, &bytes).unwrap();
-
-        let bundle = EdfReader::new(&path).read_bundle().unwrap();
-        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
-
-        assert!(
-            matches!(abir.channels[0].data, Column::I24(_)),
-            "BDF must specialize to Column::I24, NOT I16 (24-bit overflows i16)"
-        );
-        let widened = abir.channels[0].data.window_i64(0, abir.n_samples);
-        assert_eq!(
-            widened.as_ref(),
-            bundle.signal[0].as_slice(),
-            "lower_to_abir must equal read_bundle's i64 exactly at the i24 extremes"
-        );
-        assert_eq!(widened[0], -8_388_608i64, "i24 min must round-trip exactly");
-        assert_eq!(widened[1], 8_388_607i64, "i24 max must round-trip exactly");
-        assert_eq!(widened[3], -8_388_608i64, "second i24 min must round-trip exactly");
-        assert_eq!(widened[4], 8_388_607i64, "second i24 max must round-trip exactly");
-    }
-
-    // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
-
-    #[test]
-    fn lower_to_abir_infers_eeg_from_edf_channel_label() {
-        use abir::{Ecg, Eeg, Modality, ModalitySource};
-
-        // The synth fixture's single channel is labeled "EEG ch0" (see
-        // `synth_single_channel_edf`) — an explicit "EEG" substring match.
-        let samples: Vec<i16> = (0..200).map(|t| (t % 100) as i16).collect();
-        let bytes = crate::ingest::synth_single_channel_edf(&samples, 250.0);
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("synth.edf");
-        std::fs::write(&path, &bytes).unwrap();
-
-        let abir = EdfReader::new(&path).lower_to_abir().unwrap();
-        assert_eq!(abir.provenance().tag, Eeg::TAG);
-        assert_eq!(abir.provenance().source, ModalitySource::ChannelLabel);
-
-        let eeg = abir.clone().try_into_modality::<Eeg>();
-        assert!(eeg.is_ok(), "recorded EEG inference must promote cleanly");
-
-        let ecg_attempt = abir.try_into_modality::<Ecg>();
-        assert!(
-            ecg_attempt.is_err(),
-            "an EEG-inferred Abir must refuse promotion to Ecg"
-        );
+        assert!(r.is_err());
     }
 }

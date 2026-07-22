@@ -35,16 +35,35 @@ use std::collections::HashMap;
 // `Box`/`String`/`Vec` come from the std prelude (this module is gated
 // behind `archive`, which implies `std`) — no explicit import needed.
 
-// ─── Reversibility markers (ADR 0074: relocated to the no_std `abir` crate) ───
-//
-// The pure ZST tags [`Reversible`]/[`Lossy`] + the [`Reversibility`] trait now
-// live in `abir` (no_std), co-located with the modality markers — the two
-// typestate families that make the codecs safe. Re-exported here UNCHANGED so
-// `lamquant_core::pass::{Reversibility, Reversible, Lossy}`, every
-// `Pass<Rev = Reversible>` bound, and the `compile_fail` doctest below all
-// resolve exactly as before. The `Pass`/`LmlPipeline` machinery that gates on
-// these (and composes the host [`Stage`]) stays in this host-gated module.
-pub use abir::{Lossy, Reversibility, Reversible};
+// ─── Reversibility markers ───
+
+/// Sealed type-level classification for processing passes.
+pub trait Reversibility: private::Sealed {
+    /// Whether a pass is contractually reversible.
+    const REVERSIBLE: bool;
+}
+
+/// Marker for passes with a tested inverse.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Reversible;
+
+/// Marker for passes which may discard information.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Lossy;
+
+impl Reversibility for Reversible {
+    const REVERSIBLE: bool = true;
+}
+
+impl Reversibility for Lossy {
+    const REVERSIBLE: bool = false;
+}
+
+mod private {
+    pub trait Sealed {}
+    impl Sealed for super::Reversible {}
+    impl Sealed for super::Lossy {}
+}
 
 // ─── Pass ───────────────────────────────────────────────────────────────
 
@@ -238,7 +257,7 @@ where
     }
 
     fn lossy(&self) -> bool {
-        <P::Rev as Reversibility>::LOSSY
+        !<P::Rev as Reversibility>::REVERSIBLE
     }
 
     fn run(&mut self, input: ErasedPayload) -> LmlResult<ErasedPayload> {
@@ -264,9 +283,7 @@ pub struct PassRegistry {
     /// `key=value` params and may fail on a bad value.
     param_ctors: HashMap<
         String,
-        Box<
-            dyn Fn(&[(String, String)]) -> LmlResult<Box<dyn DynPass + Send + Sync>> + Send + Sync,
-        >,
+        Box<dyn Fn(&[(String, String)]) -> LmlResult<Box<dyn DynPass + Send + Sync>> + Send + Sync>,
     >,
 }
 
@@ -417,8 +434,10 @@ mod tests {
 
     #[test]
     fn reversibility_lossy_const_matches_tag() {
-        assert!(!<Reversible as Reversibility>::LOSSY);
-        assert!(<Lossy as Reversibility>::LOSSY);
+        const {
+            assert!(<Reversible as Reversibility>::REVERSIBLE);
+            assert!(!<Lossy as Reversibility>::REVERSIBLE);
+        }
     }
 
     #[test]
@@ -437,7 +456,8 @@ mod tests {
 
     #[test]
     fn lml_pipeline_composes_reversible_passes() {
-        let mut pipeline = LmlPipeline::start(XorCipher { key: 0x11 }).then(XorCipher { key: 0x22 });
+        let mut pipeline =
+            LmlPipeline::start(XorCipher { key: 0x11 }).then(XorCipher { key: 0x22 });
         let out = pipeline.process(std::vec![9, 8, 7]).unwrap();
         assert_eq!(
             out,

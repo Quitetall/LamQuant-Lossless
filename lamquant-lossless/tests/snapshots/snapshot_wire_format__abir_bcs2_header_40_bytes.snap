@@ -1,0 +1,5 @@
+---
+source: lamquant-lossless/tests/snapshot_wire_format.rs
+expression: "hex_prefix(&sink, 40)"
+---
+41 42 49 52 42 43 53 32 02 00 00 00 80 00 00 00 01 00 01 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

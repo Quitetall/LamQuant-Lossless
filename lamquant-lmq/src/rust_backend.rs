@@ -16,6 +16,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use semantic_abir::ContentId;
+use semantic_abir_bcs::{ModelProvenance, PccpStatus};
 
 use crate::backend::{BackendError, NeuralBackend, NeuralTokens};
 
@@ -47,7 +49,9 @@ pub struct RustBackend {
 impl RustBackend {
     /// Construct with the embedded weights.
     pub fn new() -> Self {
-        Self { weights: EmbeddedWeights::embedded() }
+        Self {
+            weights: EmbeddedWeights::embedded(),
+        }
     }
 }
 
@@ -55,7 +59,21 @@ const DEFERRED: &str =
     "RustBackend forward-pass port is deferred (ADR 0074 N3) — use PyBackend for now";
 
 impl NeuralBackend for RustBackend {
-    fn encode(&self, _signal: &[Vec<i64>], _sample_rate: f64) -> Result<NeuralTokens, BackendError> {
+    fn model_provenance(&self) -> ModelProvenance {
+        ModelProvenance {
+            checkpoint_content_id: ContentId::from_bytes([0x61; 32]),
+            checkpoint_sha256: [0x62; 32],
+            pccp_change_id: String::from("LMQ-RUST-DEFERRED"),
+            pccp_evidence_id: ContentId::from_bytes([0x63; 32]),
+            pccp_status: PccpStatus::Candidate,
+        }
+    }
+
+    fn encode(
+        &self,
+        _signal: &[Vec<i64>],
+        _sample_rate: f64,
+    ) -> Result<NeuralTokens, BackendError> {
         Err(BackendError(String::from(DEFERRED)))
     }
 
@@ -74,14 +92,15 @@ mod tests {
         // Wired behind the trait (so the swap is a drop-in), but the forward pass
         // returns a clear deferred error — never a panic.
         assert!(b.encode(&[alloc::vec![0i64, 1]], 250.0).is_err());
-        assert!(b.decode(&NeuralTokens {
-            tokens: alloc::vec![0],
-            schedule: alloc::vec![2],
-            alphabet: 2,
-            n_channels: 1,
-            n_samples: 1,
-            backend_meta: alloc::vec::Vec::new(),
-        })
-        .is_err());
+        assert!(b
+            .decode(&NeuralTokens {
+                tokens: alloc::vec![0],
+                schedule: alloc::vec![2],
+                alphabet: 2,
+                n_channels: 1,
+                n_samples: 1,
+                backend_meta: alloc::vec::Vec::new(),
+            })
+            .is_err());
     }
 }

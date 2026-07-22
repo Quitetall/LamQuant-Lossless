@@ -23,6 +23,7 @@ Protocol (all arrays are plain JSON numbers):
           resp: {signal:[[i64]...]}
 """
 import json
+import hashlib
 import sys
 
 SELFTEST_ALPHABET = 5
@@ -86,16 +87,31 @@ def selftest_decode(req):
     return {"signal": signal}
 
 
-def model_encode(signal, sample_rate):
+def _load_bound_model(req):
+    """Resolve once, bind the exact checkpoint bytes, then load that path."""
+    from lamquant_neural.codec import SubbandCodec, _resolve_checkpoint
+
+    checkpoint_path = _resolve_checkpoint(None, "student_subband.ckpt")
+    with open(checkpoint_path, "rb") as checkpoint:
+        actual_sha256 = hashlib.sha256(checkpoint.read()).hexdigest()
+    expected_sha256 = req.get("expected_checkpoint_sha256")
+    if expected_sha256 != actual_sha256:
+        raise ValueError(
+            "checkpoint provenance mismatch: "
+            f"expected {expected_sha256!r}, loaded {actual_sha256}"
+        )
+    return SubbandCodec.from_checkpoint(checkpoint_path), actual_sha256
+
+
+def model_encode(req):
     """Drive the real SubbandCodec (env-gated). Returns integer FSQ tokens + the
     per-channel preprocessing metadata (serialized into backend_meta) the decoder
     needs. Raises if the codec-neural env / weights are unavailable — the Rust gate
     treats a non-zero exit as SKIP when it detects a missing environment."""
     import numpy as np
     import torch
-    from lamquant_neural.codec import SubbandCodec
-
-    codec = SubbandCodec.from_checkpoint()  # $LAMQUANT_WEIGHTS_DIR / ./weights
+    signal = req["signal"]
+    codec, checkpoint_sha256 = _load_bound_model(req)
     x = torch.tensor(np.asarray(signal, dtype=np.float32)).unsqueeze(0)  # [1, C, T]
     latent, metadata = codec.encode(x)  # latent [1, 32, 79] float, metadata list
     l = 32  # CLINICAL FSQ level (FSQ_LEVELS_BY_MODE[2])
@@ -115,15 +131,14 @@ def model_encode(signal, sample_rate):
         "n_channels": len(signal),
         "n_samples": len(signal[0]) if signal else 0,
         "backend_meta": list(meta_bytes),
+        "checkpoint_sha256": checkpoint_sha256,
     }
 
 
 def model_decode(req):
     import numpy as np
     import torch
-    from lamquant_neural.codec import SubbandCodec
-
-    codec = SubbandCodec.from_checkpoint()
+    codec, checkpoint_sha256 = _load_bound_model(req)
     meta = _from_jsonable(json.loads(bytes(req["backend_meta"]).decode("utf-8")))
     l = int(req["alphabet"])
     shape = meta["shape"]
@@ -133,7 +148,10 @@ def model_decode(req):
     latent = torch.tensor(lat).unsqueeze(0)
     recon = codec.decode(latent, meta["metadata"])  # [1, C, T]
     sig = recon.detach().cpu().numpy()[0]
-    return {"signal": [[int(round(v)) for v in ch] for ch in sig]}
+    return {
+        "signal": [[int(round(v)) for v in ch] for ch in sig],
+        "checkpoint_sha256": checkpoint_sha256,
+    }
 
 
 def main():
@@ -143,7 +161,7 @@ def main():
         if mode == "selftest":
             resp = selftest_encode(req["signal"], req["sample_rate"]) if op == "encode" else selftest_decode(req)
         elif op == "encode":
-            resp = model_encode(req["signal"], req["sample_rate"])
+            resp = model_encode(req)
         else:
             resp = model_decode(req)
         json.dump(resp, sys.stdout)

@@ -37,13 +37,14 @@ fn hex_prefix(bytes: &[u8], n: usize) -> String {
 #[test]
 fn lma_header_magic_version_count() {
     let staging = TempDir::new().expect("tmpdir");
-    fs::write(staging.path().join("hello.txt"),
-              b"deterministic content for wire-format snapshot")
-        .expect("write");
+    fs::write(
+        staging.path().join("hello.txt"),
+        b"deterministic content for wire-format snapshot",
+    )
+    .expect("write");
 
     let archive: PathBuf = staging.path().join("out.lma");
-    lma::pack_archive(staging.path(), &archive, 9, false, None)
-        .expect("pack_archive");
+    lma::pack_archive(staging.path(), &archive, 9, false, None).expect("pack_archive");
 
     let bytes = fs::read(&archive).expect("read .lma");
     // 12 bytes = magic(4) + version_le(4) + entry_count_le(4). The writer
@@ -58,29 +59,16 @@ fn lma_header_magic_version_count() {
     );
 }
 
-/// ADR 0069/0071 L9 — snapshot the full 40-byte `BCS1` typed header
-/// `container::write_into` (→ `write_abir`) now emits, in place of the
-/// legacy 32-byte `LML1` header. Deterministic inputs: a fixed synthetic
+/// ADR 0139/0143 — snapshot the deterministic 40-byte prefix of the current
+/// canonical ABIR/BCS2 codec bundle. Deterministic inputs: a fixed synthetic
 /// signal, 250 Hz, 256-sample windows, `noise_bits=0`, `LpcMode::default()`
 /// (`Anytime{deadline:None}`, never reads a clock), `"{}"` metadata (so
-/// `metadata_length` is the deterministic codec-stamp JSON's own byte
-/// count, not caller-supplied content). See `abir::bcs1` for the
-/// field-by-field layout.
-///
-/// **NEW snapshot — no `.snap` committed yet.** Per the L9 STRICT-DISCIPLINE
-/// mandate ("prove correctness before touching any golden; do NOT
-/// regenerate goldens"), this test is added but its snapshot is
-/// intentionally left UNACCEPTED: the first run produces a
-/// `snapshot_wire_format__bcs1_header_40_bytes.snap.new` pending file (and
-/// the test itself fails, by insta's own design, until accepted) rather
-/// than a human running `cargo insta accept`. A human reviews the pending
-/// snapshot and runs `cargo insta review` to freeze it once the L9 wire is
-/// accepted.
+/// the semantic envelope is stable). Packet bytes are pinned separately.
 #[test]
-fn bcs1_header_40_bytes() {
+fn abir_bcs2_header_40_bytes() {
     let sig: Vec<Vec<i64>> = vec![(0..600i64).map(|t| ((t * 37) % 4001) - 2000).collect()];
     let mut sink = Vec::new();
     lamquant_core::container::write_into(&mut sink, &sig, 250.0, 256, 0, "{}", LpcMode::default())
         .expect("write_into");
-    insta::assert_snapshot!("bcs1_header_40_bytes", hex_prefix(&sink, 40));
+    insta::assert_snapshot!("abir_bcs2_header_40_bytes", hex_prefix(&sink, 40));
 }

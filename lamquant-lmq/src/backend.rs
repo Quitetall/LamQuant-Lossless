@@ -1,13 +1,15 @@
 //! ADR 0074 Track N — the `NeuralBackend` seam.
 //!
 //! The shell owns everything wire-critical (Rust, stable); a **backend** owns
-//! ONLY the neural network. The trait is object-safe (no generics, no `Abir<M>`)
+//! ONLY the neural network. The trait is object-safe (no generic dataset type)
 //! so the shell can hold a `&dyn NeuralBackend` and swap a Python backend now for
 //! a fully-Rust one later WITHOUT a wire change — the wire is the [`crate::body`]
 //! format either way.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use semantic_abir::ContentId;
+use semantic_abir_bcs::{ModelProvenance, PccpStatus};
 
 /// Neural tokens + the shape/model metadata the shell needs to wire them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +29,7 @@ pub struct NeuralTokens {
     pub n_samples: u32,
     /// Opaque backend state the DECODER needs but that isn't a token — e.g. the
     /// Python codec's per-channel LPC/lifting preprocessing metadata, or latent
-    /// normalization. The shell carries it verbatim in the BCS1 header's metadata
+    /// normalization. The shell carries it verbatim in the LMQ packet metadata
     /// section (never interprets it). Empty for backends that need none (Stub).
     pub backend_meta: Vec<u8>,
 }
@@ -40,6 +42,11 @@ pub struct BackendError(pub String);
 
 /// The swappable neural inference seam. Object-safe by design.
 pub trait NeuralBackend {
+    /// Immutable identity of the exact checkpoint and PCCP evidence this
+    /// backend executes. The shell seals and verifies this value; callers
+    /// cannot claim provenance independently of the inference implementation.
+    fn model_provenance(&self) -> ModelProvenance;
+
     /// Encode a modality-blind signal (`[n_channels][n_samples]`, sampled at
     /// `sample_rate` Hz) into tokens.
     fn encode(&self, signal: &[Vec<i64>], sample_rate: f64) -> Result<NeuralTokens, BackendError>;
@@ -66,6 +73,16 @@ impl Default for StubBackend {
 }
 
 impl NeuralBackend for StubBackend {
+    fn model_provenance(&self) -> ModelProvenance {
+        ModelProvenance {
+            checkpoint_content_id: ContentId::from_bytes([0x51; 32]),
+            checkpoint_sha256: [0x52; 32],
+            pccp_change_id: String::from("LMQ-STUB-REFERENCE"),
+            pccp_evidence_id: ContentId::from_bytes([0x53; 32]),
+            pccp_status: PccpStatus::Candidate,
+        }
+    }
+
     fn encode(&self, signal: &[Vec<i64>], _sample_rate: f64) -> Result<NeuralTokens, BackendError> {
         if signal.is_empty() {
             return Err(BackendError(String::from("stub: empty signal")));
@@ -99,11 +116,18 @@ impl NeuralBackend for StubBackend {
         let n_ch = t.n_channels as usize;
         let n_s = t.n_samples as usize;
         if t.tokens.len() != n_ch.saturating_mul(n_s) {
-            return Err(BackendError(String::from("stub: token count != n_channels * n_samples")));
+            return Err(BackendError(String::from(
+                "stub: token count != n_channels * n_samples",
+            )));
         }
         let mut out = Vec::with_capacity(n_ch);
         for c in 0..n_ch {
-            out.push(t.tokens[c * n_s..(c + 1) * n_s].iter().map(|&x| x as i64).collect());
+            out.push(
+                t.tokens[c * n_s..(c + 1) * n_s]
+                    .iter()
+                    .map(|&x| x as i64)
+                    .collect(),
+            );
         }
         Ok(out)
     }
@@ -115,7 +139,10 @@ mod tests {
 
     #[test]
     fn stub_encode_decode_is_deterministic_mod_alphabet() {
-        let signal = alloc::vec![alloc::vec![0i64, 6, 12, -1, 20], alloc::vec![3, 3, 3, 8, 100]];
+        let signal = alloc::vec![
+            alloc::vec![0i64, 6, 12, -1, 20],
+            alloc::vec![3, 3, 3, 8, 100]
+        ];
         let b = StubBackend { alphabet: 5 };
         let t = b.encode(&signal, 250.0).unwrap();
         assert_eq!(t.n_channels, 2);
@@ -123,8 +150,10 @@ mod tests {
         assert_eq!(t.tokens.len(), 10);
         let recon = b.decode(&t).unwrap();
         // decode(encode(x)) == x mod alphabet.
-        let expect: Vec<Vec<i64>> =
-            signal.iter().map(|ch| ch.iter().map(|&s| s.rem_euclid(5)).collect()).collect();
+        let expect: Vec<Vec<i64>> = signal
+            .iter()
+            .map(|ch| ch.iter().map(|&s| s.rem_euclid(5)).collect())
+            .collect();
         assert_eq!(recon, expect);
     }
 
@@ -132,6 +161,8 @@ mod tests {
     fn stub_rejects_empty_and_ragged() {
         let b = StubBackend::default();
         assert!(b.encode(&[], 250.0).is_err());
-        assert!(b.encode(&alloc::vec![alloc::vec![0i64, 1], alloc::vec![0i64]], 250.0).is_err());
+        assert!(b
+            .encode(&alloc::vec![alloc::vec![0i64, 1], alloc::vec![0i64]], 250.0)
+            .is_err());
     }
 }

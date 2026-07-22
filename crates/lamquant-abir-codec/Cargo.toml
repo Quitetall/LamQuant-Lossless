@@ -8,17 +8,19 @@ build = "build.rs"
 
 [features]
 default = ["std"]
-std = ["semantic-abir/std", "semantic-abir-bcs/std", "lamquant-lml-mcu/std"]
+std = [
+    "semantic-abir/std",
+    "semantic-abir-bcs/std",
+    "lamquant-lml-mcu/std",
+    "dep:lamquant-lml-desktop",
+]
 
 [dependencies]
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "e78df4c6df71339ad598487408a7cc9b42bdfff7", default-features = false, features = ["alloc"] }
-semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "e78df4c6df71339ad598487408a7cc9b42bdfff7", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432", default-features = false, features = ["alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
+lamquant-lml-desktop = { version = "0.9.3", path = "../../lamquant-lml-desktop", optional = true }
 
 [build-dependencies]
 blake3 = { version = "=1.5.5" }
-
-[dev-dependencies]
-legacy-abir = { package = "abir", path = "../abir" }
-lamquant-abir-bridge = { path = "../lamquant-abir-bridge" }

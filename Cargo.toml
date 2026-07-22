@@ -2,9 +2,7 @@
 resolver = "2"
 members = [
     "crates/lamquant-common",
-    "crates/abir",
     "crates/lamquant-neg",
-    "crates/lamquant-lml-legacy",
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
     "lamquant-lml-optimum",
@@ -16,7 +14,6 @@ members = [
     # so a bare `cargo build` must not pull it in. Build it explicitly with
     # `cargo build -p lamquant-lml-h5filter --release`.
     "lamquant-lml-h5filter",
-    "crates/lamquant-abir-bridge",
     "crates/lamquant-abir-codec",
     "crates/lamquant-standard-adapters",
 ]
@@ -27,9 +24,7 @@ members = [
 # This workspace is now host codec-only.
 default-members = [
     "crates/lamquant-common",
-    "crates/abir",
     "crates/lamquant-neg",
-    "crates/lamquant-lml-legacy",
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",
     "lamquant-lml-optimum",

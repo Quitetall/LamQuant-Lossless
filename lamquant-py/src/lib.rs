@@ -1,11 +1,6 @@
-use abir::{
-    name_for_tag, Abir, Accel, Bcs1Header, Channel, Column, Ecg, Ecog, Eeg, Emg, Eog, Ieeg,
-    Modality, ModalitySource, Other, Resp, Seeg, Untyped, BCS1_MAGIC,
-};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict};
-use std::sync::Arc;
 
 fn extract_bytes(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     if let Ok(b) = data.downcast::<PyBytes>() {
@@ -166,13 +161,11 @@ fn container_read_bytes(data: &[u8]) -> PyResult<(Vec<Vec<i64>>, String)> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
-/// Parse the LML/BCS1 container header from in-memory bytes — metadata
+/// Parse the current ABIR/BCS2 LML bundle header from in-memory bytes — metadata
 /// only, no window decode.
 ///
 /// Returns `(metadata_json, n_ch, n_windows, total_samples,
-/// window_size)`. Cheap: a fixed-size header read (legacy 32/20/18-byte
-/// LML1 or the 40-byte BCS1 header — `lml::container::parse_header`
-/// dispatches on magic, task #34) + UTF-8 metadata parse. Use this when
+/// window_size)`. Use this when
 /// you need only the calibration / sample-rate dict, not the signal —
 /// saves the ~5 MB / ~50 ms cost of decoding a window just for its
 /// metadata side-channel.
@@ -182,7 +175,7 @@ fn container_metadata(data: &[u8]) -> PyResult<(String, usize, usize, usize, usi
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     Ok((
         header.metadata,
-        header.n_ch,
+        header.n_channels,
         header.n_windows,
         header.total_samples,
         header.window_size,
@@ -206,7 +199,7 @@ fn container_read_phys_f32<'py>(
 ) -> PyResult<(Bound<'py, PyArray2<f32>>, String, usize)> {
     let dims = lml::container::parse_header(data)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let n_ch = dims.n_ch;
+    let n_ch = dims.n_channels;
     let total = dims.total_samples;
 
     let calib_slice = calib_f32.as_slice().map_err(|e| {
@@ -352,7 +345,7 @@ fn lma_mmap_entry_metadata(
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     Ok((
         header.metadata,
-        header.n_ch,
+        header.n_channels,
         header.n_windows,
         header.total_samples,
         header.window_size,
@@ -494,262 +487,6 @@ fn read_ca_lmq<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>>
     d.set_item("channels", c.channels)?;
     d.set_item("payload", PyBytes::new(py, &c.payload))?;
     Ok(d)
-}
-
-/// A typed, verifier-checked handle to a decoded ABIR recording (ADR 0069 S7a).
-///
-/// Wraps `Abir<Untyped>` — the born-typed modality lives in the recording's
-/// provenance (`prov.tag`), assigned at read time by label inference. The
-/// modality accessors (`.eeg()`, `.ecg()`, …) are the sanctioned way to get
-/// sample arrays out: each runs the ABIR verifier's `try_into_modality` check
-/// and raises `ValueError` on a modality mismatch, so an ECG recording can
-/// never be pulled into an EEG training path (and vice versa) by accident. The
-/// one modality-BLIND escape hatch, `.samples_i64()`, is explicit and named.
-///
-/// NB (S7a scope): a mixed-modality (PSG) file types as its majority modality;
-/// per-modality sub-views (`view::<M>()`, ADR 0069 criterion (b)) are deferred,
-/// so `.eeg()` on a PSG file would return every channel. Single-modality files
-/// (the common case) are fully enforced.
-#[pyclass]
-struct PyAbir {
-    inner: Abir<Untyped>,
-}
-
-impl PyAbir {
-    /// Materialize a recording as a `[n_ch, n_samples]` int64 PyArray. The
-    /// modality marker `M` is only a compile-time witness that the caller
-    /// already passed the verifier — the samples are modality-blind (the same
-    /// `window_views` egress the encoder uses).
-    fn to_i64_array<'py, M: Modality>(
-        py: Python<'py>,
-        abir: &Abir<M>,
-    ) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        let n_ch = abir.n_channels();
-        let t = abir.n_samples();
-        let arr = PyArray2::<i64>::zeros(py, [n_ch, t], false);
-        let cows = abir.window_views(0, t);
-        // Only `as_slice_mut` is the unsafe intrinsic: safe here because `arr`
-        // was just allocated (no aliasing), the GIL is held, and `zeros` gives a
-        // contiguous C-order buffer. The fill loop below operates on the safe
-        // `&mut [i64]`.
-        let slice = unsafe { arr.as_slice_mut() }.map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("PyArray slice: {e:?}"))
-        })?;
-        for (ch, cow) in cows.iter().enumerate() {
-            let row = cow.as_ref();
-            // All channels of a verified `Abir` share `n_samples`, so `copy == t`
-            // in practice; the `.min` is a defensive clamp (never truncates real,
-            // uniform-length data) so a malformed handle can't index OOB.
-            let copy = row.len().min(t);
-            let dst = ch * t;
-            slice[dst..dst + copy].copy_from_slice(&row[..copy]);
-        }
-        Ok(arr)
-    }
-
-    /// Verifier-checked promotion + materialization for one modality. Clones the
-    /// inner `Abir` (pymethods take `&self`; `try_into_modality` consumes),
-    /// checks `prov.tag == M::TAG`, runs the full `verify()`, then materializes.
-    fn typed<'py, M: Modality>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        let typed = self
-            .inner
-            .clone()
-            .try_into_modality::<M>()
-            .map_err(|(_orig, e)| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "ABIR modality mismatch: recording is not {} ({e})",
-                    M::NAME
-                ))
-            })?;
-        typed
-            .verify()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        Self::to_i64_array(py, &typed)
-    }
-}
-
-#[pymethods]
-impl PyAbir {
-    /// The born-typed modality name ("eeg"/"ecg"/…/"untyped"), from provenance.
-    /// Uses `abir::name_for_tag` (single source of truth) — an unknown
-    /// tag reports "unknown" rather than a stale hard-coded name.
-    fn modality(&self) -> &'static str {
-        name_for_tag(self.inner.provenance().tag).unwrap_or("unknown")
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "PyAbir(modality={:?}, n_channels={}, n_samples={}, sample_rate={})",
-            self.modality(),
-            self.inner.n_channels(),
-            self.inner.n_samples(),
-            self.inner.sample_rate,
-        )
-    }
-
-    /// How the modality was decided ("channel_label"/"format_declared"/"manual").
-    fn modality_source(&self) -> &'static str {
-        match self.inner.provenance().source {
-            ModalitySource::ChannelLabel => "channel_label",
-            ModalitySource::FormatDeclared => "format_declared",
-            ModalitySource::Manual => "manual",
-        }
-    }
-
-    fn n_channels(&self) -> usize {
-        self.inner.n_channels()
-    }
-
-    fn n_samples(&self) -> usize {
-        self.inner.n_samples()
-    }
-
-    fn sample_rate(&self) -> f64 {
-        self.inner.sample_rate
-    }
-
-    fn channels(&self) -> Vec<String> {
-        self.inner
-            .channels
-            .iter()
-            .map(|c| c.label.to_string())
-            .collect()
-    }
-
-    /// EEG samples `[n_ch, n_samples]` int64 — raises `ValueError` if the
-    /// recording is not born-typed EEG. Same shape for every modality accessor.
-    fn eeg<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Eeg>(py)
-    }
-    fn ieeg<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Ieeg>(py)
-    }
-    fn ecog<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Ecog>(py)
-    }
-    fn seeg<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Seeg>(py)
-    }
-    fn ecg<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Ecg>(py)
-    }
-    fn emg<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Emg>(py)
-    }
-    fn eog<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Eog>(py)
-    }
-    fn resp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Resp>(py)
-    }
-    fn accel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Accel>(py)
-    }
-    fn other<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.typed::<Other>(py)
-    }
-
-    /// The one sanctioned modality-BLIND egress: samples `[n_ch, n_samples]`
-    /// int64 with no modality check. Named + explicit so it can never happen by
-    /// accident — the trust model lives at the typed accessors above.
-    fn samples_i64<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        Self::to_i64_array(py, &self.inner)
-    }
-}
-
-/// Build a born-typed `PyAbir` from a decoded container's raw bytes + `(signal,
-/// metadata_json)`. Channel labels come from the metadata JSON; sample_rate is
-/// taken from the authoritative BCS1 header when present (else the JSON);
-/// modality is inferred from the labels (`with_inferred_modality`) — the same
-/// deterministic inference the reader ran at born-typing, so `.eeg()`/`.ecg()`
-/// check against the modality the file was written as.
-fn build_pyabir(data: &[u8], signal: Vec<Vec<i64>>, metadata_json: &str) -> PyResult<PyAbir> {
-    let meta: serde_json::Value = serde_json::from_str(metadata_json)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("metadata JSON: {e}")))?;
-    // sample_rate: prefer the authoritative BCS1 header field (write_abir stores
-    // it there as milli-Hz, NOT in the JSON), fall back to the metadata JSON
-    // (legacy LML1 carries it only there), then validate. A zero/absent rate is a
-    // broken container, not a usable default — it would silently break any
-    // Hz-normalizing downstream pass (e.g. S7b resampling).
-    let header_sr = if data.len() >= 4 && data[0..4] == *BCS1_MAGIC {
-        Bcs1Header::parse(data)
-            .ok()
-            .map(|h| h.sample_rate_mhz as f64 / 1000.0)
-    } else {
-        None
-    };
-    let sample_rate = header_sr
-        .filter(|r| *r > 0.0)
-        .or_else(|| meta.get("sample_rate").and_then(|v| v.as_f64()).filter(|r| *r > 0.0))
-        .ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(
-                "container has no valid sample_rate (absent/zero in both the BCS1 header and metadata JSON)",
-            )
-        })?;
-    let labels: Vec<String> = meta
-        .get("channels")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|x| x.as_str().unwrap_or("").to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    // Optional per-channel physical calibration; the i64 samples are the codec
-    // currency and are unaffected, so absent → 0.0 (matches `from_channels_i64`).
-    let phys_min = meta.get("phys_min").and_then(|v| v.as_array());
-    let phys_max = meta.get("phys_max").and_then(|v| v.as_array());
-    let at = |arr: Option<&Vec<serde_json::Value>>, i: usize| -> f64 {
-        arr.and_then(|a| a.get(i))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-    };
-
-    // Build labeled `Channel`s from the metadata (not `from_channels_i64`, which
-    // leaves labels empty) so `.channels()` round-trips and born-typed inference
-    // reads the same labels the reader used at write time.
-    let n_samples = signal.first().map(|c| c.len()).unwrap_or(0);
-    let channels: Vec<Channel> = signal
-        .into_iter()
-        .enumerate()
-        .map(|(i, ch)| Channel {
-            label: labels
-                .get(i)
-                .map(|s| Arc::from(s.as_str()))
-                .unwrap_or_else(|| Arc::from("")),
-            data: Column::I64(Arc::from(ch)),
-            phys_min: at(phys_min, i),
-            phys_max: at(phys_max, i),
-        })
-        .collect();
-
-    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let inner = Abir::from_parts(channels, sample_rate, n_samples)
-        .with_inferred_modality(&label_refs, None);
-    Ok(PyAbir { inner })
-}
-
-/// Read an LML/BCS1 container file → a typed `PyAbir` (ADR 0069 S7a). Unlike
-/// `container_read` (a raw `(signal, metadata)` tuple), this returns a handle
-/// whose `.eeg()`/`.ecg()` accessors enforce modality at the boundary.
-#[pyfunction]
-fn container_read_abir(path: &str) -> PyResult<PyAbir> {
-    // Read the bytes once, decode via the BCS1-aware `read_bytes` dispatch, and
-    // keep the bytes so `build_pyabir` can read the authoritative header sample_rate.
-    let data =
-        std::fs::read(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    let (signal, metadata) = lml::container::read_bytes(&data)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    build_pyabir(&data, signal, &metadata)
-}
-
-/// Read an LML/BCS1 container from in-memory bytes → a typed `PyAbir` (ADR 0069
-/// S7a). BCS1-aware via the L9/#34 magic dispatch.
-#[pyfunction]
-fn container_read_bytes_abir(data: &[u8]) -> PyResult<PyAbir> {
-    let (signal, metadata) = lml::container::read_bytes(data)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    build_pyabir(data, signal, &metadata)
 }
 
 /// ADR 0069 S7b: the LMQ training normalization DSP, in Rust. Takes the
@@ -1181,12 +918,9 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(container_write, m)?)?;
     m.add_function(wrap_pyfunction!(container_read, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_bytes, m)?)?;
-    m.add_class::<PyAbir>()?;
     m.add_class::<PyNeg>()?;
     m.add_class::<PyPackWriter>()?;
     m.add_class::<PyPackReader>()?;
-    m.add_function(wrap_pyfunction!(container_read_abir, m)?)?;
-    m.add_function(wrap_pyfunction!(container_read_bytes_abir, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_eeg_f32, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_window_np, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_phys_f32, m)?)?;

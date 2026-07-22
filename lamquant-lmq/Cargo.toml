@@ -3,7 +3,10 @@ name = "lamquant-lmq"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.81"
-description = "LamQuant LMQ — the Rust neural (lossy) codec shell (ADR 0074 Track N): the BCS1-Lmq wire body (FSQ tokens -> rANS) + a swappable NeuralBackend seam. no_std-first shell + entropy body; the Python backend is host-gated. Sits one layer above `abir`, sibling of the LML tiers."
+description = "LamQuant LMQ — a current-ABIR BCS2 neural codec shell with entropy-coded FSQ tokens and a swappable backend."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+homepage = "https://github.com/Quitetall/LamQuant-Lossless"
 
 [lib]
 name = "lamquant_lmq"
@@ -12,14 +15,15 @@ crate-type = ["rlib"]
 [features]
 default = ["std"]
 # Host build (default). The no_std firmware floor is `--no-default-features`.
-std = ["lamquant-lml-mcu/std", "abir/std", "lamquant-common/std"]
+std = ["lamquant-lml-mcu/std", "semantic-abir/std", "semantic-abir-bcs/std"]
 # ADR 0074 N2: the PyBackend subprocess bridge (drives the Python SubbandCodec).
 # Host-only — needs std (process) + a JSON protocol. NOT part of `default`, so a
 # bare host build / firmware never pulls in the Python path.
 python = ["std", "dep:serde_json"]
 
 [dependencies]
-abir = { path = "../crates/abir", default-features = false }
-lamquant-lml-mcu = { path = "../lamquant-lml-mcu", default-features = false }
-lamquant-common = { path = "../crates/lamquant-common", default-features = false }
+lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432", default-features = false, features = ["alloc"] }
+blake3 = { version = "=1.5.5", default-features = false }
 serde_json = { version = "1", optional = true }

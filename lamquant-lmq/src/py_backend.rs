@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 use std::string::{String, ToString};
 use std::vec::Vec;
 
+use semantic_abir_bcs::ModelProvenance;
 use serde_json::{json, Value};
 
 use crate::backend::{BackendError, NeuralBackend, NeuralTokens};
@@ -29,17 +30,36 @@ pub struct PyBackend {
     /// `"selftest"` (deterministic, no weights — proves the bridge) or `"model"`
     /// (the real `SubbandCodec`, env-gated).
     mode: String,
+    model: ModelProvenance,
 }
 
 impl PyBackend {
     /// Drive the real `SubbandCodec` (`mode = "model"`).
-    pub fn model(python: impl Into<String>, helper: impl Into<PathBuf>) -> Self {
-        Self { python: python.into(), helper: helper.into(), mode: "model".to_string() }
+    pub fn model(
+        python: impl Into<String>,
+        helper: impl Into<PathBuf>,
+        model: ModelProvenance,
+    ) -> Self {
+        Self {
+            python: python.into(),
+            helper: helper.into(),
+            mode: "model".to_string(),
+            model,
+        }
     }
     /// Drive the helper's deterministic self-test transform (`mode = "selftest"`) —
     /// no weights, for verifying the subprocess bridge itself.
-    pub fn selftest(python: impl Into<String>, helper: impl Into<PathBuf>) -> Self {
-        Self { python: python.into(), helper: helper.into(), mode: "selftest".to_string() }
+    pub fn selftest(
+        python: impl Into<String>,
+        helper: impl Into<PathBuf>,
+        model: ModelProvenance,
+    ) -> Self {
+        Self {
+            python: python.into(),
+            helper: helper.into(),
+            mode: "selftest".to_string(),
+            model,
+        }
     }
 
     // NB: `call` blocks on `wait_with_output` with NO timeout — a hung helper
@@ -47,20 +67,34 @@ impl PyBackend {
     // path; a watchdog-thread kill is a tracked follow-up before any unattended use.
     fn call(&self, mut request: Value) -> Result<Value, BackendError> {
         request["mode"] = json!(self.mode);
+        if self.mode == "model" {
+            request["expected_checkpoint_sha256"] =
+                json!(encode_hex(&self.model.checkpoint_sha256));
+        }
         let child = Command::new(&self.python)
             .arg(&self.helper)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| BackendError(format!("spawn `{} {}`: {e}", self.python, self.helper.display())))?;
+            .map_err(|e| {
+                BackendError(format!(
+                    "spawn `{} {}`: {e}",
+                    self.python,
+                    self.helper.display()
+                ))
+            })?;
         {
             use std::io::Write;
-            let mut stdin =
-                child.stdin.as_ref().ok_or_else(|| BackendError("no child stdin".to_string()))?;
+            let mut stdin = child
+                .stdin
+                .as_ref()
+                .ok_or_else(|| BackendError("no child stdin".to_string()))?;
             let buf = serde_json::to_vec(&request)
                 .map_err(|e| BackendError(format!("serialize request: {e}")))?;
-            stdin.write_all(&buf).map_err(|e| BackendError(format!("write request: {e}")))?;
+            stdin
+                .write_all(&buf)
+                .map_err(|e| BackendError(format!("write request: {e}")))?;
         }
         let out = child
             .wait_with_output()
@@ -72,13 +106,39 @@ impl PyBackend {
                 String::from_utf8_lossy(&out.stderr)
             )));
         }
-        serde_json::from_slice(&out.stdout).map_err(|e| {
-            BackendError(format!("parse response: {e} (stderr: {})", String::from_utf8_lossy(&out.stderr)))
-        })
+        let response: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
+            BackendError(format!(
+                "parse response: {e} (stderr: {})",
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        })?;
+        if self.mode == "model"
+            && response.get("checkpoint_sha256").and_then(Value::as_str)
+                != Some(encode_hex(&self.model.checkpoint_sha256).as_str())
+        {
+            return Err(BackendError(
+                "helper executed a checkpoint different from model provenance".to_string(),
+            ));
+        }
+        Ok(response)
     }
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
 impl NeuralBackend for PyBackend {
+    fn model_provenance(&self) -> ModelProvenance {
+        self.model.clone()
+    }
+
     fn encode(&self, signal: &[Vec<i64>], sample_rate: f64) -> Result<NeuralTokens, BackendError> {
         let resp = self.call(json!({
             "op": "encode",
@@ -105,15 +165,19 @@ impl NeuralBackend for PyBackend {
             "n_samples": t.n_samples,
             "backend_meta": t.backend_meta,
         }))?;
-        let rows = resp.get("signal").and_then(|v| v.as_array()).ok_or_else(|| {
-            BackendError("response missing `signal` array".to_string())
-        })?;
+        let rows = resp
+            .get("signal")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| BackendError("response missing `signal` array".to_string()))?;
         rows.iter()
             .map(|row| {
                 row.as_array()
                     .ok_or_else(|| BackendError("signal row is not an array".to_string()))?
                     .iter()
-                    .map(|x| x.as_i64().ok_or_else(|| BackendError("signal sample not an i64".to_string())))
+                    .map(|x| {
+                        x.as_i64()
+                            .ok_or_else(|| BackendError("signal sample not an i64".to_string()))
+                    })
                     .collect::<Result<Vec<i64>, _>>()
             })
             .collect()
@@ -140,8 +204,11 @@ fn i32_array(v: &Value, key: &str) -> Result<Vec<i32>, BackendError> {
         .ok_or_else(|| BackendError(format!("response missing array `{key}`")))?
         .iter()
         .map(|x| {
-            let n = x.as_i64().ok_or_else(|| BackendError(format!("`{key}`: element not an int")))?;
-            i32::try_from(n).map_err(|_| BackendError(format!("`{key}`: element {n} out of i32 range")))
+            let n = x
+                .as_i64()
+                .ok_or_else(|| BackendError(format!("`{key}`: element not an int")))?;
+            i32::try_from(n)
+                .map_err(|_| BackendError(format!("`{key}`: element {n} out of i32 range")))
         })
         .collect()
 }
@@ -152,8 +219,11 @@ fn u8_array(v: &Value, key: &str) -> Result<Vec<u8>, BackendError> {
         .ok_or_else(|| BackendError(format!("response missing array `{key}`")))?
         .iter()
         .map(|x| {
-            let n = x.as_u64().ok_or_else(|| BackendError(format!("`{key}`: element not a uint")))?;
-            u8::try_from(n).map_err(|_| BackendError(format!("`{key}`: element {n} out of u8 range")))
+            let n = x
+                .as_u64()
+                .ok_or_else(|| BackendError(format!("`{key}`: element not a uint")))?;
+            u8::try_from(n)
+                .map_err(|_| BackendError(format!("`{key}`: element {n} out of u8 range")))
         })
         .collect()
 }

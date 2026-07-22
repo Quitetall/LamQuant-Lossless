@@ -295,17 +295,16 @@ fn choose_method_matches_archived_method_by_extension() {
 fn pack_lml_with_siblings_copies_non_edf_byte_exact() {
     let src = tempfile::tempdir().unwrap();
     let files: Vec<(&str, &[u8])> = vec![
-        ("notes.csv", b"a,b,c\n1,2,3\n"),                  // Zstd-method but copied here
+        ("notes.csv", b"a,b,c\n1,2,3\n"), // Zstd-method but copied here
         ("dir/labels.tse", b"0.0 1.0 seiz\n1.0 2.0 bckg"), // Zstd-method
-        ("dir/sub/blob.bin", &[0x42u8; 256]),              // Zstd-method (unknown ext)
-        ("packaged.zip", b"PK\x03\x04..."),                // Store-method
+        ("dir/sub/blob.bin", &[0x42u8; 256]), // Zstd-method (unknown ext)
+        ("packaged.zip", b"PK\x03\x04..."), // Store-method
     ];
     write_tree(src.path(), &files);
 
     let dst = tempfile::tempdir().unwrap();
     // Pre-existing tempdir is empty -> function must accept it.
-    let summary =
-        pack_lml_with_siblings(src.path(), dst.path(), false, None).expect("pack ok");
+    let summary = pack_lml_with_siblings(src.path(), dst.path(), false, None).expect("pack ok");
 
     assert_eq!(summary.counts_lml, 0, "no EDFs in fixture");
     assert_eq!(summary.counts_copied, files.len());
@@ -392,11 +391,7 @@ fn ingest_ascii_int_lines_roundtrip() {
         .join("conformance")
         .join("ascii_vectors")
         .join("bonn_z_like_4097s.txt");
-    assert!(
-        fixture.exists(),
-        "fixture not found: {}",
-        fixture.display()
-    );
+    assert!(fixture.exists(), "fixture not found: {}", fixture.display());
     let original_bytes = fs::read(&fixture).expect("read fixture");
     let original_sha = sha256_hex(&original_bytes);
 
@@ -448,7 +443,8 @@ fn ingest_ascii_int_lines_roundtrip() {
         "extracted bytes don't match original SHA-256"
     );
     assert_eq!(
-        extracted_bytes, original_bytes,
+        extracted_bytes,
+        original_bytes,
         "byte-for-byte roundtrip mismatch (len {} vs {})",
         extracted_bytes.len(),
         original_bytes.len()
@@ -457,8 +453,9 @@ fn ingest_ascii_int_lines_roundtrip() {
 
 /// Force-exercise the ingest path by generating ASCII content where
 /// LPC strictly beats zstd (linear ramp — LPC-1 predicts perfectly,
-/// residuals all zero except for the wrap-around; zstd has to encode
-/// 4097 unique values). This validates that try_ingest_to_lml is
+/// residuals all zero; zstd has to encode thousands of unique values).
+/// The fixture is deliberately long enough to amortize the authenticated
+/// ABIR/BCS2 semantic envelope. This validates that try_ingest_to_lml is
 /// wired in and produces a valid LML payload when it wins, and that
 /// the extract path re-emits byte-exact ASCII.
 #[test]
@@ -466,10 +463,10 @@ fn ingest_fires_when_lml_strictly_beats_zstd() {
     let src = tempfile::tempdir().unwrap();
     let path = src.path().join("Z001.txt"); // matches Bonn naming → 173.61 Hz hint
 
-    // Linear ramp 0..4097 with CRLF. Each line is a different int
+    // Linear ramp 0..32767 with CRLF. Each line is a different int
     // (zstd-hostile, LPC predictable). Range in i16 trivially.
-    let mut buf = Vec::with_capacity(4097 * 8);
-    for i in 0..4097_i32 {
+    let mut buf = Vec::with_capacity(32768 * 8);
+    for i in 0..32768_i32 {
         buf.extend_from_slice(format!("{}\r\n", i).as_bytes());
     }
     let original_sha = sha256_hex(&buf);
@@ -508,7 +505,11 @@ fn ingest_fires_when_lml_strictly_beats_zstd() {
         unpack_summary.errors
     );
     let extracted = fs::read(dst.path().join("Z001.txt")).expect("read extracted");
-    assert_eq!(sha256_hex(&extracted), original_sha, "byte-roundtrip SHA mismatch");
+    assert_eq!(
+        sha256_hex(&extracted),
+        original_sha,
+        "byte-roundtrip SHA mismatch"
+    );
     assert_eq!(extracted, buf);
 }
 
@@ -519,9 +520,16 @@ fn ingest_fires_when_lml_strictly_beats_zstd() {
 #[test]
 fn ingest_skips_non_matching_files() {
     let src = tempfile::tempdir().unwrap();
-    fs::write(src.path().join("README.txt"), b"This is a readme.\nNot integers.\nLicense info.\n")
-        .unwrap();
-    fs::write(src.path().join("data.bin"), &[0u8, 1, 2, 3, 4, 5, 0xFF, 0xFE]).unwrap();
+    fs::write(
+        src.path().join("README.txt"),
+        b"This is a readme.\nNot integers.\nLicense info.\n",
+    )
+    .unwrap();
+    fs::write(
+        src.path().join("data.bin"),
+        &[0u8, 1, 2, 3, 4, 5, 0xFF, 0xFE],
+    )
+    .unwrap();
 
     let archive = tempfile::Builder::new()
         .prefix("ingest_skip_")
@@ -533,5 +541,3 @@ fn ingest_skips_non_matching_files() {
     assert_eq!(summary.counts_lml, 0);
     assert!(summary.counts_zstd + summary.counts_store == 2);
 }
-
-

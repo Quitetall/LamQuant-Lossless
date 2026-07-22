@@ -73,8 +73,7 @@ const LMA_V2_FOOTER_LEN: u64 = 12;
 /// 0021 Tier 2 audit (N1) introduced this to close the `.tmp.extract`
 /// / `.new` / `.bak` collision races identified by
 /// defensive-code-validator at lma.rs:2305, 1867, 1923.
-static APPEND_TMP_SEQ: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static APPEND_TMP_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Returns true if `path` should be rejected as unsafe during archive
 /// extraction (Audit-2026-05-11 Fix-#45).
@@ -457,9 +456,9 @@ struct LmaIndex {
 ///     ends where the manifest begins.
 ///   - v1 (`LMA1` / version <= 1): legacy front-manifest layout. The
 ///     manifest sits right after the 16-byte header; payloads follow
-///     it. payload_base = 16 + manifest_len, payload_end = file_size
-///     - 32 (sha trailer). v1 read retained for migration; remove once
-///     all archives are v2.
+///     it. payload_base = 16 + manifest_len, while payload_end is 32 bytes
+///     before file_size (the sha trailer). v1 read retained for migration; remove once all
+///     archives are v2.
 ///
 /// The manifest *decode* (alloc caps, top-bit uncompressed flag,
 /// zstd-vs-raw, serde parse, `parse_manifest_entries`) is byte-
@@ -476,11 +475,7 @@ fn read_lma_index<R: Read + Seek>(
     // always >= 60 bytes and the footer read below bounds-checks
     // itself.)
     if file_size < 48 {
-        return Err(format!(
-            "Archive too small ({} bytes, minimum 48)",
-            file_size
-        )
-        .into());
+        return Err(format!("Archive too small ({} bytes, minimum 48)", file_size).into());
     }
 
     // Header: [4 magic][4 version][8 ...]. For v1 the trailing 8 bytes
@@ -547,7 +542,12 @@ fn read_lma_index<R: Read + Seek>(
         f.seek(SeekFrom::Start(manifest_start))?;
         let mut manifest_payload = vec![0u8; manifest_len];
         f.read_exact(&mut manifest_payload)?;
-        (manifest_payload, manifest_uncompressed, 16u64, manifest_start)
+        (
+            manifest_payload,
+            manifest_uncompressed,
+            16u64,
+            manifest_start,
+        )
     } else if &magic == LMA_MAGIC && version <= LMA_VERSION {
         // ── v1: front manifest ──────────────────────────────────────
         // v1 read retained for migration; remove once all archives are v2.
@@ -576,7 +576,12 @@ fn read_lma_index<R: Read + Seek>(
         f.read_exact(&mut manifest_payload)?;
         let payload_base = 16u64 + manifest_len as u64;
         let payload_end = file_size.saturating_sub(32);
-        (manifest_payload, manifest_uncompressed, payload_base, payload_end)
+        (
+            manifest_payload,
+            manifest_uncompressed,
+            payload_base,
+            payload_end,
+        )
     } else {
         return Err(format!(
             "Not an LMA archive / unsupported version (magic: {:?}, version: {})",
@@ -951,6 +956,7 @@ fn guess_synth_sample_rate(filename: Option<&str>) -> f64 {
 ///      zstd-of-original output (`zstd_bytes_len`), so the ingest
 ///      path never makes the archive larger than the legacy zstd
 ///      fallback.
+///
 /// `None` means caller keeps the zstd path. Hard errors bubble through
 /// `eprintln!` warnings — they're best-effort, not fatal.
 fn try_ingest_to_lml(
@@ -1068,8 +1074,8 @@ fn re_emit_synthetic(
     Ok(crate::ingest::render_ascii_int_lines(&samples, &template))
 }
 
-/// ADR 0023 Track B3 — pick `window_size` based on the signal length
-/// + sample rate so short single-record sources (Bonn EEG, gait
+/// ADR 0023 Track B3 — pick `window_size` based on the signal length and
+/// sample rate so short single-record sources (Bonn EEG, gait
 /// snippets, EEG MMIDB tasks) land in a single window with full LPC
 /// context, while long clinical clips keep the legacy chunking that
 /// `cr_regression` baselines were measured against.
@@ -1945,9 +1951,8 @@ pub fn pack_lml_with_siblings(
         // staging dir would suddenly hit "not a directory" when
         // the old `exists() + read_dir` chain followed the link.
         // V4 Pro review of db033e9 caught the regression.
-        let meta = std::fs::metadata(output_dir).map_err(|e| {
-            format!("Cannot stat output dir {}: {}", output_dir.display(), e)
-        })?;
+        let meta = std::fs::metadata(output_dir)
+            .map_err(|e| format!("Cannot stat output dir {}: {}", output_dir.display(), e))?;
         if !meta.is_dir() {
             return Err(format!(
                 "Output path exists but is not a directory: {}",
@@ -1955,9 +1960,8 @@ pub fn pack_lml_with_siblings(
             )
             .into());
         }
-        let mut entries = std::fs::read_dir(output_dir).map_err(|e| {
-            format!("Cannot read output dir {}: {}", output_dir.display(), e)
-        })?;
+        let mut entries = std::fs::read_dir(output_dir)
+            .map_err(|e| format!("Cannot read output dir {}: {}", output_dir.display(), e))?;
         if entries.next().is_some() {
             return Err(format!(
                 "Output dir already exists and is not empty: {}",
@@ -2049,9 +2053,8 @@ pub fn pack_lml_with_siblings(
                         .and_then(|s| s.to_str())
                         .ok_or_else(|| format!("Invalid file name: {}", rel_path))?;
                     let dest = dest_parent.join(format!("{}.lml", stem));
-                    std::fs::write(&dest, &lml_bytes).map_err(|e| {
-                        format!("Cannot write {}: {}", dest.display(), e)
-                    })?;
+                    std::fs::write(&dest, &lml_bytes)
+                        .map_err(|e| format!("Cannot write {}: {}", dest.display(), e))?;
                     let sha = sha256_hex(&lml_bytes);
                     let written = lml_bytes.len() as u64;
                     summary.written_bytes += written;
@@ -2089,9 +2092,8 @@ pub fn pack_lml_with_siblings(
     // .lml in-place without unpacking anything.
     let manifest_json = build_sibling_manifest_json(&summary)?;
     let manifest_path = output_dir.join("MANIFEST.json");
-    std::fs::write(&manifest_path, manifest_json.as_bytes()).map_err(|e| {
-        format!("Cannot write {}: {}", manifest_path.display(), e)
-    })?;
+    std::fs::write(&manifest_path, manifest_json.as_bytes())
+        .map_err(|e| format!("Cannot write {}: {}", manifest_path.display(), e))?;
 
     if verbose {
         eprintln!(
@@ -2119,8 +2121,7 @@ fn copy_as_sibling(
     let dest = dest_parent.join(name);
     let data = std::fs::read(abs_path)
         .map_err(|e| format!("Cannot read {}: {}", abs_path.display(), e))?;
-    std::fs::write(&dest, &data)
-        .map_err(|e| format!("Cannot write {}: {}", dest.display(), e))?;
+    std::fs::write(&dest, &data).map_err(|e| format!("Cannot write {}: {}", dest.display(), e))?;
     let sha = sha256_hex(&data);
     let written = data.len() as u64;
     summary.written_bytes += written;
@@ -2179,8 +2180,7 @@ fn build_sibling_manifest_json(
     // empty "{}" manifest. Downstream tooling that opens the
     // manifest as source-of-truth must NOT see a sentinel-shaped
     // empty file masquerading as a real manifest (Bible R5).
-    serde_json::to_string_pretty(&v)
-        .map_err(|e| format!("manifest serialize failed: {}", e).into())
+    serde_json::to_string_pretty(&v).map_err(|e| format!("manifest serialize failed: {}", e).into())
 }
 
 /// List contents of an LMA archive without extracting.
@@ -2267,7 +2267,7 @@ pub fn extract_entry(
     // both because a 10 MB compressed entry that decompresses to
     // 100 GB (zstd bomb) still OOMs even though the compressed
     // bound passes. Bible R30.
-    if entry.compressed_size > MAX_ENTRY_DECOMPRESS_SIZE as u64 {
+    if entry.compressed_size > MAX_ENTRY_DECOMPRESS_SIZE {
         return Err(format!(
             "lma extract-entry: entry '{entry_path}' compressed_size {} > MAX_ENTRY_DECOMPRESS_SIZE",
             entry.compressed_size
@@ -2300,13 +2300,15 @@ pub fn extract_entry(
             payload_start, entry.offset,
         )
     })?;
-    let entry_end = abs_offset.checked_add(entry.compressed_size).ok_or_else(|| {
-        format!(
-            "lma extract-entry: entry '{entry_path}' size overflow \
+    let entry_end = abs_offset
+        .checked_add(entry.compressed_size)
+        .ok_or_else(|| {
+            format!(
+                "lma extract-entry: entry '{entry_path}' size overflow \
              (offset={} + compressed_size={})",
-            abs_offset, entry.compressed_size,
-        )
-    })?;
+                abs_offset, entry.compressed_size,
+            )
+        })?;
     if entry_end > payload_end {
         return Err(format!(
             "lma extract-entry: entry '{entry_path}' extends past payload section end \
@@ -2335,9 +2337,7 @@ pub fn extract_entry(
         Method::Store => compressed,
         Method::Zstd => decode_zstd_bounded(
             &compressed,
-            entry
-                .original_size
-                .min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
+            entry.original_size.min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
             &entry.path,
         )?,
     };
@@ -2494,13 +2494,14 @@ pub fn append_entry(
             return Err("lma append: input is not an LMA archive (bad magic)".into());
         };
         if (mlf & 0x8000_0000) != 0 {
-            return Err(format!(
+            return Err(
                 "lma append: source archive has uncompressed-manifest flag set \
                  (manifest_len_field high bit = 1); refusing to append because the \
                  rebuild path always re-compresses the manifest. Repack the archive \
                  first or use a future `--preserve-manifest-codec` flag."
-            )
-            .into());
+                    .to_string()
+                    .into(),
+            );
         }
     }
     // Verbatim-copy region = [0 .. old payload_end] = header + old
@@ -2743,8 +2744,7 @@ pub fn append_entry(
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("lma");
-    let new_path =
-        archive_path.with_extension(format!("{}.new.{}.{}", base_ext, pid, seq));
+    let new_path = archive_path.with_extension(format!("{}.new.{}.{}", base_ext, pid, seq));
     std::fs::create_dir_all(archive_dir)?;
 
     {
@@ -2829,8 +2829,7 @@ pub fn append_entry(
     // Same PID + seq suffix as `.new` -- two concurrent appends
     // would otherwise both stomp on the same `.bak` and corrupt
     // each other's backup.
-    let bak_path =
-        archive_path.with_extension(format!("{}.bak.{}.{}", base_ext, pid, seq));
+    let bak_path = archive_path.with_extension(format!("{}.bak.{}.{}", base_ext, pid, seq));
     if bak_path.exists() {
         std::fs::remove_file(&bak_path)?;
     }
@@ -3007,8 +3006,7 @@ pub fn unpack_archive(
         if &magic != LMA_MAGIC && &magic != LMA_MAGIC_V2 {
             if magic[0] == 0xEF && magic[1] == 0xBB && magic[2] == 0xBF {
                 return Err(
-                    "File starts with UTF-8 BOM — not a valid LMA archive. Strip the BOM."
-                        .into(),
+                    "File starts with UTF-8 BOM — not a valid LMA archive. Strip the BOM.".into(),
                 );
             }
             if (magic[0] == 0xFF && magic[1] == 0xFE) || (magic[0] == 0xFE && magic[1] == 0xFF) {
@@ -3121,9 +3119,8 @@ pub fn unpack_archive(
             // follows existing symlinks silently; an attacker who
             // plants a symlink under `output_dir` before unpack
             // runs can redirect entries outside the destination.
-            let meta = std::fs::symlink_metadata(parent).map_err(|e| {
-                format!("Cannot stat parent {}: {}", parent.display(), e)
-            })?;
+            let meta = std::fs::symlink_metadata(parent)
+                .map_err(|e| format!("Cannot stat parent {}: {}", parent.display(), e))?;
             if meta.file_type().is_symlink() {
                 errors.push((
                     entry.path.clone(),
@@ -3169,19 +3166,19 @@ pub fn unpack_archive(
                 } else {
                     Some(entry.original_size)
                 };
-                let edf_bytes = match decode_lml_to_edf(
-                    &compressed,
-                    original_size_hint,
-                    Some(output_dir),
-                ) {
-                    Ok(edf_bytes) => edf_bytes,
-                    Err(e) => {
-                        eprintln!("  FAIL EDF reconstruct {}: {}", entry.path, e);
-                        errors.push((entry.path.clone(), format!("EDF reconstruct failed: {}", e)));
-                        failed += 1;
-                        continue;
-                    }
-                };
+                let edf_bytes =
+                    match decode_lml_to_edf(&compressed, original_size_hint, Some(output_dir)) {
+                        Ok(edf_bytes) => edf_bytes,
+                        Err(e) => {
+                            eprintln!("  FAIL EDF reconstruct {}: {}", entry.path, e);
+                            errors.push((
+                                entry.path.clone(),
+                                format!("EDF reconstruct failed: {}", e),
+                            ));
+                            failed += 1;
+                            continue;
+                        }
+                    };
                 // If this entry was ingest-synthesised, re-emit the
                 // original non-EDF bytes from the recovered samples
                 // + manifest template. SHA-256 verify below catches
@@ -3209,9 +3206,7 @@ pub fn unpack_archive(
             Method::Store => compressed,
             Method::Zstd => match decode_zstd_bounded(
                 &compressed,
-                entry
-                    .original_size
-                    .min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
+                entry.original_size.min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
                 &entry.path,
             ) {
                 Ok(decompressed) => decompressed,
@@ -3371,12 +3366,10 @@ pub fn unpack_archive(
 ///   - `Method::Store`  → raw stored bytes (no-op).
 ///   - `Method::Zstd`   → zstd-decompressed bytes.
 ///   - `Method::Lml`    → raw LML packet bytes (NOT reconstructed EDF).
-///                        The original source for this entry was an EDF
-///                        that was LML-encoded at pack time; the manifest's
-///                        `sha256` is the EDF hash, so SHA verification of
-///                        the LML payload alone is NOT performed here.
-///                        Pass these bytes straight to `lml::decompress`.
-///                        Use `unpack_archive` if you want EDF bytes back.
+///     The original source for this entry was an EDF that was LML-encoded at
+///     pack time; the manifest's `sha256` is the EDF hash, so SHA verification
+///     of the LML payload alone is NOT performed here. Pass these bytes straight
+///     to `lml::decompress`. Use `unpack_archive` if you want EDF bytes back.
 ///
 /// A coarse classification of an LMA read error, for callers (e.g. the PyO3
 /// bindings) that must map to their own error taxonomy. The LMA layer uses
@@ -3465,7 +3458,10 @@ impl MmapArchive {
     /// decompressed (which allocates), so it cannot be borrowed — use [`read_entry`].
     /// Bytes are returned UNVERIFIED (zero-copy precludes hashing); the Lml decode path
     /// SHA-checks after `lml::decompress`, exactly as with `read_entry`.
-    pub fn entry_bytes(&self, entry_name: &str) -> Result<&[u8], Box<dyn std::error::Error + Send + Sync>> {
+    pub fn entry_bytes(
+        &self,
+        entry_name: &str,
+    ) -> Result<&[u8], Box<dyn std::error::Error + Send + Sync>> {
         let entry = self
             .entries
             .iter()
@@ -3473,11 +3469,12 @@ impl MmapArchive {
             .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
                 format!("Entry '{entry_name}' not found in mmap'd archive").into()
             })?;
-        let payload_section_size = self.payload_end.checked_sub(self.payload_start).ok_or_else(
-            || -> Box<dyn std::error::Error + Send + Sync> {
+        let payload_section_size = self
+            .payload_end
+            .checked_sub(self.payload_start)
+            .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
                 "archive payload_start > payload_end (underflow)".into()
-            },
-        )?;
+            })?;
         if entry.offset.saturating_add(entry.compressed_size) > payload_section_size {
             return Err(format!(
                 "Entry '{}' exceeds archive bounds (offset={}, size={}, max={})",
@@ -3590,9 +3587,7 @@ pub fn read_entry(
         Method::Store => compressed,
         Method::Zstd => decode_zstd_bounded(
             &compressed,
-            entry
-                .original_size
-                .min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
+            entry.original_size.min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
             &entry.path,
         )?,
         Method::Lml => compressed, // raw LML bytes, caller feeds to lml::decompress
@@ -3815,9 +3810,7 @@ pub fn read_entry_decoded(
         Method::Store => compressed,
         Method::Zstd => decode_zstd_bounded(
             &compressed,
-            entry
-                .original_size
-                .min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
+            entry.original_size.min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
             &entry.path,
         )?,
         // In-memory decode used by callers who want bytes back, not
@@ -3905,8 +3898,8 @@ fn build_manifest_json(
                 // recursion-depth limit that flat Value trees never
                 // hit. Default to "null" if it ever did to keep the
                 // manifest as well-formed JSON.
-                let template_str = serde_json::to_string(&sf.template_json)
-                    .unwrap_or_else(|_| "null".into());
+                let template_str =
+                    serde_json::to_string(&sf.template_json).unwrap_or_else(|_| "null".into());
                 // V4 Pro review nit (A-2#1): NaN/Inf would serialise
                 // to the literal `NaN`/`Inf` which is invalid JSON.
                 // Floor to a JSON-safe finite number; preserve the
@@ -4017,13 +4010,15 @@ fn parse_manifest_entries(
             .get("method")
             .and_then(|v| v.as_str())
             .ok_or_else(|| parse_err("method"))?;
-        let method = Method::from_str(method_str).ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-            format!(
-                "lma manifest entry [{}]: unknown method '{}'",
-                idx, method_str
-            )
-            .into()
-        })?;
+        let method = Method::from_str(method_str).ok_or_else(
+            || -> Box<dyn std::error::Error + Send + Sync> {
+                format!(
+                    "lma manifest entry [{}]: unknown method '{}'",
+                    idx, method_str
+                )
+                .into()
+            },
+        )?;
         let sha256 = entry
             .get("sha256")
             .and_then(|v| v.as_str())
@@ -4109,7 +4104,6 @@ fn parse_manifest_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     // ─── Method enum + dispatch ────────────────────────────────
 
@@ -4244,7 +4238,7 @@ mod tests {
     fn make_tiny_tree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.csv"), b"a,b,c\n1,2,3\n").unwrap();
-        std::fs::write(dir.path().join("blob.bin"), &[0xABu8; 64]).unwrap();
+        std::fs::write(dir.path().join("blob.bin"), [0xABu8; 64]).unwrap();
         dir
     }
 
@@ -4377,7 +4371,7 @@ mod tests {
 
         let names = vec![
             "a.lml".to_string(),
-            "notes.csv".to_string(),  // zstd -> None
+            "notes.csv".to_string(),   // zstd -> None
             "missing.lml".to_string(), // absent -> None
             "b.lml".to_string(),
         ];
@@ -4396,17 +4390,12 @@ mod tests {
 
         // Truncating prefix: 100 bytes -> exactly the first 100 bytes of
         // the raw payload, which (Store tier) equals the original file.
-        let out_short = read_entry_headers_path(
-            archive.path(),
-            &["a.lml".to_string()],
-            100,
-        )
-        .unwrap();
+        let out_short =
+            read_entry_headers_path(archive.path(), &["a.lml".to_string()], 100).unwrap();
         assert_eq!(out_short[0].as_deref(), Some(&fake_lml[..100]));
 
         // n_bytes == 0 -> empty buffer (caller-decides), not None.
-        let out_zero =
-            read_entry_headers_path(archive.path(), &["a.lml".to_string()], 0).unwrap();
+        let out_zero = read_entry_headers_path(archive.path(), &["a.lml".to_string()], 0).unwrap();
         assert_eq!(out_zero[0].as_deref(), Some(&[][..]));
 
         // Index is parsed ONCE per call regardless of name count: a
@@ -4656,7 +4645,7 @@ mod tests {
         let ws = auto_window_size(4097, 173.61);
         // ref ≈ 5900; >= DEFAULT, ≤ MAX_AUTO_WINDOW.
         assert!(
-            ws >= 2500 && ws <= 16384,
+            (2500..=16384).contains(&ws),
             "Bonn signal should pick a single window in [2500, 16384]; got {}",
             ws
         );
@@ -4737,8 +4726,7 @@ mod tests {
         // 3) text file at a deep, long relative path (> 60 chars total).
         //    The leaf filename alone is > 60 chars to catch any
         //    fixed-width path truncation in the manifest roundtrip.
-        let deep_rel =
-            "00_epilepsy/aaaa/s001/02_tcp_le/rec_long_name_over_sixty_chars_total.txt";
+        let deep_rel = "00_epilepsy/aaaa/s001/02_tcp_le/rec_long_name_over_sixty_chars_total.txt";
         assert!(
             deep_rel.len() > 60,
             "deep path must exceed 60 chars to exercise truncation; got {}",
@@ -4770,7 +4758,11 @@ mod tests {
         let entries = list_archive(&archive).unwrap();
         assert_eq!(entries.len(), 3);
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
-        assert!(paths.contains(&empty_rel), "empty path missing: {:?}", paths);
+        assert!(
+            paths.contains(&empty_rel),
+            "empty path missing: {:?}",
+            paths
+        );
         assert!(paths.contains(&bin_rel), "bin path missing: {:?}", paths);
         assert!(
             paths.contains(&deep_rel),
@@ -4804,7 +4796,10 @@ mod tests {
         let unpack = unpack_archive(&archive, dst.path(), true, false, None).unwrap();
         assert_eq!(unpack.n_files, 3);
         assert_eq!(std::fs::read(dst.path().join(empty_rel)).unwrap(), b"");
-        assert_eq!(std::fs::read(dst.path().join(bin_rel)).unwrap(), bin_content);
+        assert_eq!(
+            std::fs::read(dst.path().join(bin_rel)).unwrap(),
+            bin_content
+        );
         assert_eq!(
             std::fs::read(dst.path().join(deep_rel)).unwrap(),
             deep_content.to_vec()
@@ -4892,8 +4887,14 @@ mod tests {
         // unpack reproduces the tree byte-equal too.
         let dst = tempfile::tempdir().unwrap();
         unpack_archive(&archive, dst.path(), true, false, None).unwrap();
-        assert_eq!(std::fs::read(dst.path().join("a.bin")).unwrap(), vec![0x11u8; 100]);
-        assert_eq!(std::fs::read(dst.path().join("nested/d.bin")).unwrap(), d_content);
+        assert_eq!(
+            std::fs::read(dst.path().join("a.bin")).unwrap(),
+            vec![0x11u8; 100]
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("nested/d.bin")).unwrap(),
+            d_content
+        );
     }
 
     /// Hand-build a legacy v1 archive (front manifest) so the v1 read
@@ -4953,7 +4954,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = (0u8..=255).cycle().take(500).collect::<Vec<u8>>();
         let b = vec![0x7Eu8; 321];
-        let archive = build_v1_archive(dir.path(), &[("x/one.bin", a.clone()), ("two.bin", b.clone())]);
+        let archive = build_v1_archive(
+            dir.path(),
+            &[("x/one.bin", a.clone()), ("two.bin", b.clone())],
+        );
 
         let entries = list_archive(&archive).unwrap();
         assert_eq!(entries.len(), 2);
@@ -4976,26 +4980,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = (0u8..=255).cycle().take(500).collect::<Vec<u8>>();
         let b = vec![0x7Eu8; 321];
-        let archive = build_v1_archive(dir.path(), &[("x/one.bin", a.clone()), ("two.bin", b.clone())]);
+        let archive = build_v1_archive(
+            dir.path(),
+            &[("x/one.bin", a.clone()), ("two.bin", b.clone())],
+        );
 
         let appended = dir.path().join("d_source.bin");
-        let d_content: Vec<u8> = (0..999u32).map(|i| (i.wrapping_mul(37) & 0xFF) as u8).collect();
+        let d_content: Vec<u8> = (0..999u32)
+            .map(|i| (i.wrapping_mul(37) & 0xFF) as u8)
+            .collect();
         std::fs::write(&appended, &d_content).unwrap();
 
-        let summary = append_entry(
-            &archive,
-            &appended,
-            Some("deep/three.bin"),
-            9,
-            false,
-            false,
-        )
-        .unwrap();
+        let summary =
+            append_entry(&archive, &appended, Some("deep/three.bin"), 9, false, false).unwrap();
         assert_eq!(summary.n_files, 3);
 
         // Result is now v2.
         let raw = std::fs::read(&archive).unwrap();
-        assert_eq!(&raw[0..4], LMA_MAGIC_V2, "v1→v2 append must emit an LMA2 header");
+        assert_eq!(
+            &raw[0..4],
+            LMA_MAGIC_V2,
+            "v1→v2 append must emit an LMA2 header"
+        );
         assert_eq!(
             u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
             LMA_VERSION_V2
@@ -5004,9 +5010,21 @@ mod tests {
         // Every entry reads back byte-equal — this is the load-bearing
         // proof that the v1 offsets were correctly re-based onto
         // payload_base 16.
-        assert_eq!(read_entry(&archive, "x/one.bin").unwrap(), a, "v1 entry one corrupted after append");
-        assert_eq!(read_entry(&archive, "two.bin").unwrap(), b, "v1 entry two corrupted after append");
-        assert_eq!(read_entry(&archive, "deep/three.bin").unwrap(), d_content, "appended entry corrupted");
+        assert_eq!(
+            read_entry(&archive, "x/one.bin").unwrap(),
+            a,
+            "v1 entry one corrupted after append"
+        );
+        assert_eq!(
+            read_entry(&archive, "two.bin").unwrap(),
+            b,
+            "v1 entry two corrupted after append"
+        );
+        assert_eq!(
+            read_entry(&archive, "deep/three.bin").unwrap(),
+            d_content,
+            "appended entry corrupted"
+        );
 
         // sha trailer self-consistent.
         let (body, trailer) = raw.split_at(raw.len() - 32);
@@ -5019,7 +5037,10 @@ mod tests {
         unpack_archive(&archive, dst.path(), true, false, None).unwrap();
         assert_eq!(std::fs::read(dst.path().join("x/one.bin")).unwrap(), a);
         assert_eq!(std::fs::read(dst.path().join("two.bin")).unwrap(), b);
-        assert_eq!(std::fs::read(dst.path().join("deep/three.bin")).unwrap(), d_content);
+        assert_eq!(
+            std::fs::read(dst.path().join("deep/three.bin")).unwrap(),
+            d_content
+        );
     }
 
     /// A1 (ADR 0075) — the mmap'd borrow must be byte-identical to the copy
@@ -5027,7 +5048,9 @@ mod tests {
     #[test]
     fn mmap_bytes_equal_fs_read() {
         let src = tempfile::tempdir().unwrap();
-        let content: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(131) % 251) as u8).collect();
+        let content: Vec<u8> = (0..5000u32)
+            .map(|i| (i.wrapping_mul(131) % 251) as u8)
+            .collect();
         std::fs::write(src.path().join("rec.lml"), &content).unwrap(); // .lml → Method::Store (borrowable)
         std::fs::write(src.path().join("data.txt"), &content).unwrap(); // .txt → Method::Zstd (not borrowable)
         let archive = tempfile::NamedTempFile::new().unwrap();
@@ -5037,61 +5060,29 @@ mod tests {
         // Store entry: the mmap borrow equals the read_entry copy AND the original bytes.
         let via_read = read_entry(archive.path(), "rec.lml").unwrap();
         let via_mmap = m.entry_bytes("rec.lml").unwrap();
-        assert_eq!(via_mmap, via_read.as_slice(), "mmap slice must equal read_entry copy");
-        assert_eq!(via_mmap, content.as_slice(), "and equal the original stored bytes");
+        assert_eq!(
+            via_mmap,
+            via_read.as_slice(),
+            "mmap slice must equal read_entry copy"
+        );
+        assert_eq!(
+            via_mmap,
+            content.as_slice(),
+            "and equal the original stored bytes"
+        );
         // Zstd cannot be borrowed (must be decompressed); missing entries error.
-        assert!(m.entry_bytes("data.txt").is_err(), "Zstd entry must not be borrowable");
-        assert!(m.entry_bytes("nope.lml").is_err(), "missing entry must error");
+        assert!(
+            m.entry_bytes("data.txt").is_err(),
+            "Zstd entry must not be borrowable"
+        );
+        assert!(
+            m.entry_bytes("nope.lml").is_err(),
+            "missing entry must error"
+        );
     }
 
-    /// A3 (ADR 0075) — the mmap + selected decode (what `lma_mmap_read_phys_selected`
-    /// wraps: `MmapArchive::open` → `entry_bytes` → `read_bytes_into_f32_calibrated_selected`)
-    /// is bit-identical to the full decode's corresponding rows. This is the combined
-    /// path the canonical training decode now takes.
-    #[test]
-    fn mmap_selected_decode_matches_full() {
-        use crate::abir_container::{
-            parse_header, read_bytes_into_f32_calibrated, read_bytes_into_f32_calibrated_selected,
-            write_abir_to_vec,
-        };
-        let n_ch = 4usize;
-        let t = 500usize;
-        let sig: Vec<Vec<i64>> = (0..n_ch)
-            .map(|c| (0..t).map(|i| ((i as i64 * 31 + c as i64 * 7) % 2001) - 1000).collect())
-            .collect();
-        let abir = abir::Abir::from_channels_i64(sig, 250.0);
-        let lml = write_abir_to_vec(&abir, 250.0, 128, 0, "{}", crate::lpc::LpcMode::default(), None, None)
-            .expect("write_abir_to_vec");
-
-        // Pack the .lml into a .lma (Store method), then mmap it.
-        let src = tempfile::tempdir().unwrap();
-        std::fs::write(src.path().join("rec.lml"), &lml).unwrap();
-        let archive = tempfile::NamedTempFile::new().unwrap();
-        pack_archive(src.path(), archive.path(), 9, false, None).unwrap();
-
-        let calib: Vec<f32> = (0..n_ch)
-            .flat_map(|c| [0.0f32, 100.0, c as f32, c as f32 + 10.0])
-            .collect();
-        let total = parse_header(&lml).unwrap().total_samples;
-        let mut full = vec![0.0f32; n_ch * total];
-        read_bytes_into_f32_calibrated(&lml, &mut full, &calib).unwrap();
-
-        // mmap the archive, borrow the entry, decode selected {2, 0}.
-        let m = MmapArchive::open(archive.path()).unwrap();
-        let data = m.entry_bytes("rec.lml").unwrap();
-        let mask: Vec<u16> = vec![2, 0];
-        let calib_sel: Vec<f32> = mask
-            .iter()
-            .flat_map(|&s| calib[s as usize * 4..s as usize * 4 + 4].to_vec())
-            .collect();
-        let mut sel = vec![0.0f32; mask.len() * total];
-        read_bytes_into_f32_calibrated_selected(data, &mut sel, &calib_sel, &mask).unwrap();
-
-        for (row, &s) in mask.iter().enumerate() {
-            let s = s as usize;
-            for i in 0..total {
-                assert_eq!(sel[row * total + i], full[s * total + i], "mmap+selected row {row} (ch {s})");
-            }
-        }
-    }
+    // A3 (ADR 0075) — the mmap + selected decode (what `lma_mmap_read_phys_selected`
+    // wraps: `MmapArchive::open` → `entry_bytes` → `read_bytes_into_f32_calibrated_selected`)
+    // is bit-identical to the full decode's corresponding rows. This is the combined
+    // path the canonical training decode now takes.
 }

@@ -334,9 +334,8 @@ SOURCE FORMATS:
         #[arg(long = "continue-on-error", conflicts_with = "fail_fast")]
         continue_on_error: bool,
         /// ADR 0074 Track I — per-dataset ingest manifest (JSON): declares the
-        /// authoritative modality per dataset so encoded files are born-typed in
-        /// the BCS1 header (byte 6), instead of Untyped. Absent or non-matching =
-        /// today's behavior, byte-for-byte. Byte-neutral apart from that one byte.
+        /// authoritative modality and optional FormatDescriptor at the ABIR
+        /// ingest boundary. Unsupported declarations fail closed.
         #[arg(long = "modality-manifest")]
         modality_manifest: Option<PathBuf>,
     },
@@ -595,6 +594,7 @@ EXAMPLES:
     /// Walks every check the verifier performs:
     /// archive-wide SHA-256 over content+footer, manifest decompress
     /// + parse, per-entry SHA-256 against the manifest. Default
+    ///
     /// output is a compact "OK n/n entries" summary; `--explain`
     /// prints the auditable per-step readout.
     #[command(after_help = "\
@@ -3372,36 +3372,14 @@ fn encode_one_inner(
     })
 }
 
-/// Stamp an authoritative modality `tag` onto a freshly-written single `.lml`
-/// (BCS1) file, in place (ADR 0074 Track I). Provably byte-neutral apart from the
-/// one provenance byte — the `modality_provenance_snapshot` gate pins that typing
-/// changes ONLY header byte 6 (this is the same result as `write_into_with_modality`,
-/// reached without threading the tag through all six format encoders). Fail-closed:
-/// touches only a BCS1 container whose tag byte is still `Untyped` (255), so it can
-/// never corrupt an archive, a legacy file, or an already-typed one.
-fn patch_bcs1_modality_tag(lml_path: &Path, tag: u8) -> std::io::Result<()> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    const MODALITY_TAG_OFFSET: u64 = 6; // abir::bcs1 header byte 6
-    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(lml_path)?;
-    let mut head = [0u8; 8];
-    f.read_exact(&mut head)?;
-    // b"BCS1" == abir::BCS1_MAGIC; 255 == abir::Untyped::TAG.
-    if &head[0..4] != b"BCS1" || head[MODALITY_TAG_OFFSET as usize] != 255 {
-        return Ok(()); // not a single born-Untyped BCS1 container — leave it alone
-    }
-    f.seek(SeekFrom::Start(MODALITY_TAG_OFFSET))?;
-    f.write_all(&[tag])?;
-    Ok(())
-}
-
 /// Dispatch encode per the ingest manifest rule (ADR 0074 Track I). With no rule
-/// (`ingest = None`) this reproduces the born-`Untyped`, extension-dispatched
-/// output byte-for-byte. With a rule:
+/// (`ingest = None`) this uses the extension-dispatched current ABIR/BCS2 path.
+/// With a rule:
 ///   * a declared [`FormatDescriptor`](lamquant_core::source::FormatDescriptor)
 ///     (I3) parses the file data-driven via [`encode_one_descriptor`], typed at
 ///     write time;
-///   * otherwise the standard extension dispatch runs, and the declared modality
-///     is stamped on byte 6 afterward ([`patch_bcs1_modality_tag`]).
+///   * otherwise encoding fails closed until an ABIR-aware Adapter supplies the
+///     declared modality at the semantic boundary.
 #[allow(clippy::too_many_arguments)]
 fn encode_one(
     edf_path: &Path,
@@ -3413,7 +3391,7 @@ fn encode_one(
     lpc_mode: lamquant_core::lpc::LpcMode,
     ingest: Option<&lamquant_core::source::ingest_manifest::DatasetEntry>,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    let modality_tag = ingest.map(|e| e.modality.tag());
+    let modality = ingest.map(|entry| entry.modality.concept());
     // I3: a manifest-declared FormatDescriptor bypasses the extension dispatch and
     // is typed at write time (no post-hoc patch needed).
     if let Some(descriptor) = ingest.and_then(|e| e.descriptor.as_ref()) {
@@ -3425,8 +3403,11 @@ fn encode_one(
             noise_bits,
             window_size,
             lpc_mode,
-            modality_tag,
+            modality,
         );
+    }
+    if ingest.is_some() {
+        return Err("an ingest modality declaration requires an ABIR-aware Adapter or FormatDescriptor; post-hoc wire patching was retired with BCS1".into());
     }
     let metrics = encode_one_inner(
         edf_path,
@@ -3437,21 +3418,22 @@ fn encode_one(
         window_size,
         lpc_mode,
     )?;
-    if let Some(tag) = modality_tag {
-        patch_bcs1_modality_tag(lml_path, tag)?;
-    }
     Ok(metrics)
 }
 
 /// Load the per-dataset ingest manifest from `path` (ADR 0074 Track I), or `None`.
 fn load_ingest_manifest(
     path: Option<&Path>,
-) -> Result<Option<lamquant_core::source::ingest_manifest::IngestManifest>, Box<dyn std::error::Error + Send + Sync>>
-{
+) -> Result<
+    Option<lamquant_core::source::ingest_manifest::IngestManifest>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     match path {
         Some(p) => {
             let text = std::fs::read_to_string(p)?;
-            Ok(Some(lamquant_core::source::ingest_manifest::IngestManifest::from_json(&text)?))
+            Ok(Some(
+                lamquant_core::source::ingest_manifest::IngestManifest::from_json(&text)?,
+            ))
         }
         None => Ok(None),
     }
@@ -3493,7 +3475,7 @@ fn encode_one_descriptor(
     noise_bits: u8,
     window_size: usize,
     lpc_mode: lamquant_core::lpc::LpcMode,
-    modality_tag: Option<u8>,
+    modality: Option<&str>,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::container;
     use lamquant_core::source::read_bundle_from_descriptor;
@@ -3503,7 +3485,7 @@ fn encode_one_descriptor(
     // if present, else a valid empty object — a Fixed-only descriptor needs no
     // sidecar but still requires parseable JSON (empty bytes are an EOF error).
     let sidecar = std::fs::read(path.with_extension("json")).unwrap_or_else(|_| b"{}".to_vec());
-    let bundle = read_bundle_from_descriptor(descriptor, &data, &sidecar)?;
+    let mut bundle = read_bundle_from_descriptor(descriptor, &data, &sidecar)?;
     let n_channels = bundle.signal.len() as u32;
     let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
     let sample_rate = bundle.sample_rate;
@@ -3545,26 +3527,48 @@ fn encode_one_descriptor(
         env!("CARGO_PKG_VERSION"),
         noise_bits,
     );
+    bundle.metadata.recording_info = metadata_json;
+    let expected_signal = verify.then(|| bundle.signal.clone());
+    let duration_s = bundle.duration_s;
+    let _ = (window_size, lpc_mode);
 
     if let Some(parent) = lml_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let stats = container::write_into_with_modality(
-        &mut sink,
-        &bundle.signal,
-        sample_rate,
-        window_size,
-        noise_bits,
-        &metadata_json,
-        lpc_mode,
-        modality_tag,
+    if noise_bits != 0 {
+        return Err(
+            "descriptor ingest into the exact BCS2 LML profile requires --noise-bits 0".into(),
+        );
+    }
+    let semantic = lamquant_core::source::from_signal_bundle_with_semantics(
+        bundle,
+        semantic_abir::ConceptId::new(modality.unwrap_or("abir:modality/unknown"))
+            .map_err(|error| format!("invalid ingest modality concept: {error}"))?,
+        Vec::new(),
+        Vec::new(),
+        semantic_abir::ValidationLimits::default(),
     )?;
+    let bytes = container::encode(semantic.opened.dataset(), semantic.opened.access())?;
+    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
+    use std::io::Write as _;
+    sink.write_all(&bytes)?;
+    let stats = container::ContainerStats {
+        n_windows: 1,
+        n_channels: n_channels as usize,
+        total_samples: n_samples,
+        compressed_size: bytes.len(),
+        raw_size: n_channels as usize * n_samples * 8,
+        cr: (n_channels as usize * n_samples * 8) as f64 / bytes.len().max(1) as f64,
+        duration_s: n_samples as f64 / sample_rate,
+    };
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
-        std::io::Error::new(kind, "encode descriptor: BufWriter flush failed before sync_all")
+        std::io::Error::new(
+            kind,
+            "encode descriptor: BufWriter flush failed before sync_all",
+        )
     })?;
     f.sync_all()?;
 
@@ -3578,7 +3582,7 @@ fn encode_one_descriptor(
 
     if verify {
         let (recovered, _meta) = container::read_file(lml_path)?;
-        if recovered != bundle.signal {
+        if expected_signal.as_ref() != Some(&recovered) {
             return Err("verify (descriptor): decoded signal != source bundle".into());
         }
     }
@@ -3590,7 +3594,7 @@ fn encode_one_descriptor(
         sha256: sha256_hex,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
+        duration_s,
         n_channels,
         sample_rate: sample_rate as f32,
         n_windows: stats.n_windows as u32,
@@ -4656,10 +4660,6 @@ fn decode_one_to_raw(
     lml_path: &Path,
     out_path: &Path,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
-    // ADR 0069/0071 L9: dispatch on magic so this streaming path handles
-    // both the live `BCS1` wire (write_abir's default output) and old
-    // `LML1` files — see `lamquant_core::bcs1_stream`.
-    use lamquant_core::bcs1_stream::AnyLmlReader;
     use std::io::{BufWriter, Seek, SeekFrom, Write as _};
 
     // Phase 8.2 — observability span.
@@ -4670,9 +4670,9 @@ fn decode_one_to_raw(
     )
     .entered();
 
-    let mut reader = AnyLmlReader::open(lml_path)?;
-    let n_ch = reader.header().n_channels;
-    let total_samples = reader.header().total_samples;
+    let (signal, _) = container::read_file(lml_path)?;
+    let n_ch = signal.len();
+    let total_samples = signal.first().map_or(0, Vec::len);
 
     // Tier 3 audit (O9): bound n_ch against fd budget. Pre-fix the
     // per-channel `OpenOptions::open` loop opened `n_ch` independent
@@ -4720,29 +4720,22 @@ fn decode_one_to_raw(
         f.seek(SeekFrom::Start(base))?;
         channel_writers.push(BufWriter::new(f));
     }
-    // Window-by-window decode. RAM cost ≈ one window worth of i64
-    // samples + per-channel 8 KiB write buffer. Legacy path held the
-    // entire `Vec<Vec<i64>>` signal in memory.
-    //
     // Tier 3 audit (O9): track i32 truncation. Pre-fix `v as i32`
     // silently wrapped i64 samples outside the i32 range. EDF source
     // is i16/i24 so this is safe for clinical workflows; defensive
     // for accumulator inputs.
     let mut i32_clamps_low: u64 = 0;
     let mut i32_clamps_high: u64 = 0;
-    while let Some(window) = reader.next_window() {
-        let w = window?;
-        for (ch_idx, samples) in w.iter().enumerate() {
-            let writer = &mut channel_writers[ch_idx];
-            for &v in samples {
-                if v < i32::MIN as i64 {
-                    i32_clamps_low += 1;
-                } else if v > i32::MAX as i64 {
-                    i32_clamps_high += 1;
-                }
-                let clamped: i32 = v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                writer.write_all(&clamped.to_le_bytes())?;
+    for (ch_idx, samples) in signal.iter().enumerate() {
+        let writer = &mut channel_writers[ch_idx];
+        for &v in samples {
+            if v < i32::MIN as i64 {
+                i32_clamps_low += 1;
+            } else if v > i32::MAX as i64 {
+                i32_clamps_high += 1;
             }
+            let clamped: i32 = v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            writer.write_all(&clamped.to_le_bytes())?;
         }
     }
     if i32_clamps_low > 0 || i32_clamps_high > 0 {
@@ -4982,32 +4975,40 @@ fn decode_one_partial_to_raw(
     channels: Option<&[usize]>,
     time_range: Option<(u32, u32)>,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_core::range::{RangeQuery, RangeReader};
-
-    // ADR 0069/0071 L9: `RangeReader::open` dispatches on magic (BCS1 vs
-    // legacy LML1) instead of requiring the caller to construct an
-    // `LmlReader` up front — that construction used to hard-fail with
-    // `InvalidMagic` on a BCS1 file before `RangeReader::new` was ever
-    // reached.
-    let mut rr = RangeReader::open(lml_path)?;
-    let total_samples_u32: u32 = rr.header().total_samples.try_into().map_err(|_| {
-        format!(
-            "decode --time-range: total_samples {} > u32::MAX",
-            rr.header().total_samples
-        )
-    })?;
+    let (signal, _) = container::read_file(lml_path)?;
+    let total_samples = signal.first().map_or(0, Vec::len);
+    let total_samples_u32: u32 = total_samples
+        .try_into()
+        .map_err(|_| format!("decode --time-range: total_samples {total_samples} > u32::MAX"))?;
     let (start, end_exclusive) = time_range.unwrap_or((0, total_samples_u32));
-    let q = RangeQuery::new(start, end_exclusive, channels.map(|c| c.to_vec()))?;
-    let slice = rr.read(&q)?;
+    if end_exclusive > total_samples_u32 {
+        return Err(
+            format!("decode --time-range: end {end_exclusive} exceeds {total_samples}").into(),
+        );
+    }
+    let selected: Vec<usize> = channels
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| (0..signal.len()).collect());
+    if let Some(index) = selected
+        .iter()
+        .copied()
+        .find(|&index| index >= signal.len())
+    {
+        return Err(format!(
+            "decode --channels: channel {index} exceeds {}",
+            signal.len()
+        )
+        .into());
+    }
 
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let n_ch = slice.signal.len();
-    let n_samples = slice.n_samples();
+    let n_ch = selected.len();
+    let n_samples = (end_exclusive - start) as usize;
     let mut raw = Vec::with_capacity(n_ch * n_samples * 4);
-    for ch in &slice.signal {
-        for &v in ch {
+    for index in selected {
+        for &v in &signal[index][start as usize..end_exclusive as usize] {
             raw.extend_from_slice(&(v as i32).to_le_bytes());
         }
     }
@@ -5092,75 +5093,53 @@ fn cmd_decode(
                     .into(),
             );
         }
-        // Partial-decode stdout — funnel through RangeReader so
-        // --channels / --time-range produce the trimmed payload.
         if partial {
-            use lamquant_core::range::{RangeQuery, RangeReader};
-            // ADR 0069/0071 L9: dispatch on magic (see decode_one_partial_to_raw).
-            let mut rr = RangeReader::open(&lmls[0])?;
-            let total_samples_u32: u32 = rr.header().total_samples.try_into().map_err(|_| {
-                format!(
-                    "decode --time-range: total_samples {} > u32::MAX",
-                    rr.header().total_samples
-                )
+            let (signal, _) = container::read_file(&lmls[0])?;
+            let total_samples = signal.first().map_or(0, Vec::len);
+            let total_samples_u32: u32 = total_samples.try_into().map_err(|_| {
+                format!("decode --time-range: total_samples {total_samples} > u32::MAX")
             })?;
             let (start, end_exclusive) = time_range.unwrap_or((0, total_samples_u32));
-            let q = RangeQuery::new(start, end_exclusive, channels.clone())?;
-            let slice = rr.read(&q)?;
+            if end_exclusive > total_samples_u32 {
+                return Err(format!(
+                    "decode --time-range: end {end_exclusive} exceeds {total_samples}"
+                )
+                .into());
+            }
+            let selected = channels
+                .clone()
+                .unwrap_or_else(|| (0..signal.len()).collect());
             let mut out = std::io::stdout().lock();
-            for ch in &slice.signal {
-                for &v in ch {
+            for &index in &selected {
+                let channel = signal.get(index).ok_or_else(|| {
+                    format!(
+                        "decode --channels: channel {index} exceeds {}",
+                        signal.len()
+                    )
+                })?;
+                for &v in &channel[start as usize..end_exclusive as usize] {
                     out.write_all(&(v as i32).to_le_bytes())?;
                 }
             }
             out.flush()?;
             eprintln!(
                 "Decoded: {}ch x {} samples [{}, {}) -> stdout (int32 LE)",
-                slice.n_channels(),
-                slice.n_samples(),
-                slice.start_sample,
-                slice.end_sample_exclusive
+                selected.len(),
+                end_exclusive - start,
+                start,
+                end_exclusive
             );
             return Ok(());
         }
-        // Tier 3 audit (O10e): stream the stdout-mode dump window-
-        // by-window instead of loading the entire signal into RAM.
-        // Pre-fix `container::read_file` materialised the whole
-        // Vec<Vec<i64>> -- multi-GiB inputs OOM'd even when the
-        // user just wanted to pipe a few hundred MiB to a tool.
-        // Channel-major: emit all of ch0, then all of ch1, ... so
-        // the byte layout matches decode_one_to_raw. We get there
-        // by accumulating per-channel into BufWriter slabs (sized
-        // by total_samples since stdout is unseekable); RAM cost
-        // ~ n_ch * 4 bytes * window_size during the loop, plus
-        // the final per-channel buffer. For 256-ch × 24h × 256 Hz
-        // EEG (44 GiB raw) this is still a multi-GiB allocation
-        // -- not OK. For ultra-large inputs the caller should
-        // re-encode at a lower window count or use `-o <path>` +
-        // a streaming consumer (cat / pv) instead.
-        // ADR 0069/0071 L9: dispatch on magic (see decode_one_to_raw).
-        use lamquant_core::bcs1_stream::AnyLmlReader;
         use std::io::Write as _;
-        let mut reader = AnyLmlReader::open(&lmls[0])?;
-        let n_ch = reader.header().n_channels;
-        let total_samples = reader.header().total_samples;
-        let mut channels: Vec<Vec<i32>> = (0..n_ch)
-            .map(|_| Vec::with_capacity(total_samples))
-            .collect();
-        while let Some(window) = reader.next_window() {
-            let w = window?;
-            for (ch_idx, samples) in w.iter().enumerate() {
-                let dst = &mut channels[ch_idx];
-                for &v in samples {
-                    let clamped = v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                    dst.push(clamped);
-                }
-            }
-        }
+        let (channels, _) = container::read_file(&lmls[0])?;
+        let n_ch = channels.len();
+        let total_samples = channels.first().map_or(0, Vec::len);
         let mut out = std::io::stdout().lock();
         for ch in &channels {
             for &v in ch {
-                out.write_all(&v.to_le_bytes())?;
+                let clamped = v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                out.write_all(&clamped.to_le_bytes())?;
             }
         }
         out.flush()?;
@@ -5525,93 +5504,28 @@ fn summarise_json(v: &serde_json::Value) -> String {
 }
 
 fn cmd_info(input: &Path) -> R {
-    use std::io::Read as _;
-    let mut f = std::fs::File::open(input)?;
-    // Tier 3 audit (O5): keep file_size in u64. Pre-fix `as usize`
-    // silently truncated > 4 GiB files on 32-bit MCU/host targets;
-    // bounds checks derived from the truncated value were wrong.
-    // Use usize only where slice arithmetic forces it, after a
-    // bounds check.
-    let file_size: u64 = f.metadata()?.len();
-    let mut hdr = [0u8; 32];
-    f.read_exact(&mut hdr)?;
-
-    // v1.1 magic-byte auto-dispatch: `lml info foo.lma` now routes
-    // to the archive inspector instead of erroring "Not LML". The
-    // CLI ergonomics match `tar` / `7z` / `unzip` where one tool
-    // handles both container forms.
-    if &hdr[0..4] == b"LMA1" {
+    let data = std::fs::read(input)?;
+    if data.starts_with(b"LMA1") {
         eprintln!(
             "note: {} is an LMA archive, dispatching to archive inspector (`lml ls --tree`).",
             input.display(),
         );
         return cmd_ls(input, /*tree=*/ true, /*long=*/ false);
     }
-
-    // ADR 0069/0071 L9: `lml info` on a `BCS1` file (write_abir's default
-    // output today) — dispatch to the BCS1-aware reader BEFORE the legacy
-    // `hdr[0..3] != b"LML"` guard below would reject it. Reads the
-    // remaining bytes to complete the 40-byte typed header (32 already
-    // buffered above).
-    if &hdr[0..4] == abir::BCS1_MAGIC {
-        let mut rest = [0u8; abir::BCS1_HEADER_LEN - 32];
-        f.read_exact(&mut rest)?;
-        let mut full = [0u8; abir::BCS1_HEADER_LEN];
-        full[..32].copy_from_slice(&hdr);
-        full[32..].copy_from_slice(&rest);
-        return cmd_info_bcs1(input, &mut f, file_size, &full);
-    }
-
-    if &hdr[0..3] != b"LML" {
-        return Err(format!(
-            "Not LML or LMA (magic: {:?}). Expected leading bytes `LML1` or `BCS1` or `LMA1`.",
-            &hdr[0..4]
-        )
-        .into());
-    }
-
-    let ver_major = hdr[4];
-    let ver_minor = hdr[5];
-    let n_ch = u16::from_le_bytes([hdr[6], hdr[7]]);
-    let n_win = u16::from_le_bytes([hdr[8], hdr[9]]);
-    let total = u32::from_le_bytes([hdr[10], hdr[11], hdr[12], hdr[13]]);
-    let ws = u16::from_le_bytes([hdr[14], hdr[15]]);
-    let sr_mhz = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
-    let bit_depth = hdr[20];
-    let flags = hdr[21];
-    let meta_len = u32::from_le_bytes([hdr[22], hdr[23], hdr[24], hdr[25]]);
-    let raw = n_ch as f64 * total as f64 * 2.0;
-    let sr_hz = sr_mhz as f64 / 1000.0;
-    let duration_s = if sr_hz > 0.0 {
-        total as f64 / sr_hz
-    } else {
-        0.0
-    };
-    let has_footer = (flags & 0b0000_0001) != 0;
-
+    let header = container::parse_header(&data)?;
+    let file_size = data.len() as u64;
+    let raw = header.n_channels as f64 * header.total_samples as f64 * 8.0;
+    let duration_s = header.total_samples as f64 / header.sample_rate_hz;
     println!("File:       {}", input.display());
-    println!(
-        "Format:     LML{} v{}.{}",
-        hdr[3] as char, ver_major, ver_minor
-    );
-    println!("Channels:   {}", n_ch);
-    println!("Windows:    {}", n_win);
+    println!("Format:     BCS2 / bcs.lml.lossless.v1");
+    println!("Channels:   {}", header.n_channels);
+    println!("Windows:    {}", header.n_windows);
     println!(
         "Samples:    {} ({:.1}s @ {:.0} Hz)",
-        total, duration_s, sr_hz
+        header.total_samples, duration_s, header.sample_rate_hz
     );
     println!("Duration:   {}", human_duration(duration_s));
-    println!("Window:     {} samples", ws);
-    println!("Bit depth:  {}", bit_depth);
-    println!(
-        "Flags:      0x{:02X}{}",
-        flags,
-        if has_footer {
-            " (HAS_FOOTER)"
-        } else {
-            " (no footer; legacy file)"
-        }
-    );
+    println!("Window:     {} samples", header.window_size);
     println!("Size:       {}", human_bytes(file_size));
     if raw > 0.0 {
         println!(
@@ -5621,35 +5535,13 @@ fn cmd_info(input: &Path) -> R {
             human_bytes(file_size)
         );
     }
-    // Tier 3 audit (O5): u64-domain bounds check. Pre-fix
-    // `32 + meta_len as usize <= file_size` did the addition in
-    // 32-bit usize on MCU targets and could wrap. Now: check in
-    // u64 first; only cast to usize if the read fits.
-    if meta_len > 0 && 32u64.saturating_add(meta_len as u64) <= file_size {
-        let read_len = (meta_len as usize).min(4096);
-        let mut meta_buf = vec![0u8; read_len];
-        f.read_exact(&mut meta_buf)?;
-        let meta = String::from_utf8_lossy(&meta_buf);
-        print_metadata_summary(&meta);
-    }
-
-    // Probe footer at EOF when present. Surface the seek-table size
-    // (the only field that meaningfully informs the user — full table
-    // parse is for `lml stats` etc.). Footer absence is already
-    // signalled by the Flags line above; flag set but EOF magic
-    // mismatched = corrupted random-access trailer, surface as warn.
-    if has_footer {
-        print_footer_probe(&mut f, file_size, n_win as u32)?;
-    }
+    print_metadata_summary(&header.metadata);
     Ok(())
 }
 
-/// Human-readable metadata JSON dump — shared tail of `lml info` for both
-/// the legacy 32-byte LML1 header and the 40-byte BCS1 header (ADR
-/// 0069/0071 L9: the metadata blob itself is byte-identical between the
-/// two wire formats, only the header framing it differs). Prints known
-/// priority fields first, then any leftover keys; falls back to a raw dump
-/// for non-object or unparseable JSON.
+/// Human-readable metadata JSON dump for the recording-info source key.
+/// Prints known priority fields first, then any leftover keys; falls back to a
+/// raw dump for non-object or unparseable JSON.
 fn print_metadata_summary(meta: &str) {
     // Try to surface known fields as a structured readout. Fall back to
     // raw text for unknown / unparseable metadata.
@@ -5689,128 +5581,6 @@ fn print_metadata_summary(meta: &str) {
     } else {
         println!("Metadata:   {meta}");
     }
-}
-
-/// Probe the `LMLFOOT1` seek-table footer at EOF and print a one-line
-/// summary — shared tail of `lml info` for both header formats. The
-/// footer's own position/shape (fixed 32 bytes at EOF, preceded by the
-/// offset table) does NOT depend on which header the file carries, so this
-/// is a straight share, not a clone-with-changes. `n_win_header` is the
-/// header's own `n_windows` field, used only to bound-check the footer's
-/// claimed count against corruption (Tier 3 audit O5 — a poisoned footer
-/// used to print "Seek table: 4294967295 entries" unchecked).
-fn print_footer_probe(
-    f: &mut std::fs::File,
-    file_size: u64,
-    n_win_header: u32,
-) -> std::io::Result<()> {
-    use std::io::{Read as _, Seek as _};
-    if file_size < 32 {
-        return Ok(());
-    }
-    f.seek(std::io::SeekFrom::End(-32))?;
-    let mut footer = [0u8; 32];
-    f.read_exact(&mut footer)?;
-    if &footer[0..8] == b"LMLFOOT1" {
-        let n_seek_windows = u32::from_le_bytes([footer[12], footer[13], footer[14], footer[15]]);
-        if n_seek_windows > n_win_header {
-            println!(
-                "Seek table: {} entries (CORRUPT: exceeds header n_windows = {})",
-                n_seek_windows, n_win_header
-            );
-        } else {
-            println!("Seek table: {} entries (LMLFOOT1 magic OK)", n_seek_windows);
-        }
-    } else {
-        println!(
-            "Seek table: FLAG_HAS_FOOTER set but LMLFOOT1 magic missing at EOF \
-             — corrupted random-access trailer"
-        );
-    }
-    Ok(())
-}
-
-/// `lml info` for a `BCS1` file (ADR 0069/0071 L9) — the BCS1 counterpart
-/// of the legacy tail of [`cmd_info`] above, sourced from
-/// [`abir::Bcs1Header`]'s parsed fields instead of hand-rolled
-/// 32-byte offsets. `hdr_bytes` is the already-buffered 40-byte header
-/// (`cmd_info` reads it before dispatching here); `f` is positioned right
-/// after it, ready for the metadata read below.
-fn cmd_info_bcs1(
-    input: &Path,
-    f: &mut std::fs::File,
-    file_size: u64,
-    hdr_bytes: &[u8; abir::BCS1_HEADER_LEN],
-) -> R {
-    use std::io::Read as _;
-    let header = abir::Bcs1Header::parse(hdr_bytes)
-        .map_err(|e| format!("invalid BCS1 header: {e}"))?;
-
-    let raw = header.n_channels as f64 * header.total_samples as f64 * 2.0;
-    let sr_hz = header.sample_rate_mhz as f64 / 1000.0;
-    let duration_s = if sr_hz > 0.0 {
-        header.total_samples as f64 / sr_hz
-    } else {
-        0.0
-    };
-    let has_footer = (header.flags & 0b0000_0001) != 0;
-
-    println!("File:       {}", input.display());
-    println!(
-        "Format:     BCS1 v{}.{}",
-        header.version_major, header.version_minor
-    );
-    println!("Channels:   {}", header.n_channels);
-    println!("Windows:    {}", header.n_windows);
-    println!(
-        "Samples:    {} ({:.1}s @ {:.0} Hz)",
-        header.total_samples, duration_s, sr_hz
-    );
-    println!("Duration:   {}", human_duration(duration_s));
-    println!("Window:     {} samples", header.window_size);
-    println!("Bit depth:  {}", header.bit_depth);
-    println!(
-        "Modality:   tag={} source={}",
-        header.modality_tag, header.modality_source
-    );
-    println!(
-        "Codec:      descriptor={} mode={} tier={} decode_capability={}",
-        header.codec_descriptor, header.mode, header.tier, header.decode_capability
-    );
-    println!(
-        "Flags:      0x{:02X}{}",
-        header.flags,
-        if has_footer {
-            " (HAS_FOOTER)"
-        } else {
-            " (no footer)"
-        }
-    );
-    println!("Size:       {}", human_bytes(file_size));
-    if raw > 0.0 {
-        println!(
-            "CR:         {:.2}:1  ({} raw → {})",
-            raw / file_size as f64,
-            human_bytes(raw as u64),
-            human_bytes(file_size)
-        );
-    }
-
-    let meta_len = header.metadata_length;
-    if meta_len > 0
-        && (abir::BCS1_HEADER_LEN as u64).saturating_add(meta_len as u64) <= file_size
-    {
-        let read_len = (meta_len as usize).min(4096);
-        let mut meta_buf = vec![0u8; read_len];
-        f.read_exact(&mut meta_buf)?;
-        let meta = String::from_utf8_lossy(&meta_buf);
-        print_metadata_summary(&meta);
-    }
-
-    if has_footer {
-        print_footer_probe(f, file_size, header.n_windows as u32)?;
-    }
-    Ok(())
 }
 
 fn cmd_verify(input: &Path, recursive: bool, explain: bool) -> R {
@@ -6213,7 +5983,7 @@ fn roundtrip_one(edf_path: &Path) -> RoundtripResult {
         0,     // noise_bits — 0 = lossless
         2500,  // window_size — match the CLI default
         lamquant_core::lpc::LpcMode::default(),
-        None,  // modality_tag — throwaway verify re-encode, provenance irrelevant
+        None, // modality_tag — throwaway verify re-encode, provenance irrelevant
     ) {
         return make_err("ERROR", format!("encode: {}", e));
     }
@@ -6728,62 +6498,14 @@ struct LmlHeaderInfo {
 fn read_lml_header_info(
     path: &Path,
 ) -> Result<LmlHeaderInfo, Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read as _;
-    let mut f = std::fs::File::open(path)?;
-    let file_size = f.metadata()?.len();
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-
-    // ADR 0069/0071 L9: `lml stats` CSV/directory mode (this function's
-    // only caller) previously hard-parsed a 32-byte LML1 header and
-    // rejected everything else, including `BCS1` files (write_abir's
-    // default output today). Dispatch on magic first.
-    if magic == *abir::BCS1_MAGIC {
-        let mut rest = [0u8; abir::BCS1_HEADER_LEN - 4];
-        f.read_exact(&mut rest)?;
-        let mut hdr = [0u8; abir::BCS1_HEADER_LEN];
-        hdr[0..4].copy_from_slice(&magic);
-        hdr[4..].copy_from_slice(&rest);
-        let header = abir::Bcs1Header::parse(&hdr)
-            .map_err(|e| format!("invalid BCS1 header: {e}"))?;
-        let sr = header.sample_rate_mhz as f64 / 1000.0;
-        let total_samples = header.total_samples as usize;
-        let duration_s = if sr > 0.0 {
-            total_samples as f64 / sr
-        } else {
-            0.0
-        };
-        return Ok(LmlHeaderInfo {
-            n_ch: header.n_channels as usize,
-            total_samples,
-            sample_rate: sr,
-            duration_s,
-            file_size,
-        });
-    }
-
-    if &magic[0..3] != b"LML" {
-        return Err("Not a valid LML file".into());
-    }
-    let mut rest = [0u8; 28];
-    f.read_exact(&mut rest)?;
-    let mut hdr = [0u8; 32];
-    hdr[0..4].copy_from_slice(&magic);
-    hdr[4..].copy_from_slice(&rest);
-    let n_ch = u16::from_le_bytes([hdr[6], hdr[7]]) as usize;
-    let total_samples = u32::from_le_bytes([hdr[10], hdr[11], hdr[12], hdr[13]]) as usize;
-    let sr_mhz = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
-    let sr = sr_mhz as f64 / 1000.0;
-    let duration_s = if sr > 0.0 {
-        total_samples as f64 / sr
-    } else {
-        0.0
-    };
+    let data = std::fs::read(path)?;
+    let header = container::parse_header(&data)?;
+    let file_size = data.len() as u64;
     Ok(LmlHeaderInfo {
-        n_ch,
-        total_samples,
-        sample_rate: sr,
-        duration_s,
+        n_ch: header.n_channels,
+        total_samples: header.total_samples,
+        sample_rate: header.sample_rate_hz,
+        duration_s: header.total_samples as f64 / header.sample_rate_hz,
         file_size,
     })
 }
@@ -7110,10 +6832,10 @@ fn write_npy(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize) -> R {
 ///   - 128-byte text header (124 bytes ASCII description + 2 bytes
 ///     version 0x0100 + 2 bytes endian marker `MI`)
 ///   - one `miMATRIX` element (top-level), made of subelements:
-///       Array Flags (miUINT32 × 2)         — class = mxINT64_CLASS (12)
-///       Dimensions (miINT32 × 2)            — [n_ch, n_samples]
-///       Array Name (miINT8 string)
-///       Real Part   (miINT64 × n_ch*n_samples)
+///     Array Flags (miUINT32 × 2)         — class = mxINT64_CLASS (12)
+///     Dimensions (miINT32 × 2)            — [n_ch, n_samples]
+///     Array Name (miINT8 string)
+///     Real Part   (miINT64 × n_ch*n_samples)
 ///   - All elements 8-byte padded.
 ///
 /// Column-major (Fortran order) per MATLAB convention. Signal is
@@ -7190,9 +6912,7 @@ fn write_mat_v5(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize, name: &
     body.extend_from_slice(&MI_INT8.to_le_bytes());
     body.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
     body.extend_from_slice(name_bytes);
-    for _ in 0..align8(name_bytes.len()) {
-        body.push(0);
-    }
+    body.resize(body.len() + align8(name_bytes.len()), 0);
 
     // 4. Real Part subelement: miINT64 × (n_ch * t), column-major.
     // `n_elems` + `data_bytes` already computed + bounds-checked
@@ -7208,9 +6928,7 @@ fn write_mat_v5(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize, name: &
             body.extend_from_slice(&signal[ch][s].to_le_bytes());
         }
     }
-    for _ in 0..align8(data_bytes) {
-        body.push(0);
-    }
+    body.resize(body.len() + align8(data_bytes), 0);
 
     // 128-byte header.
     let mut hdr = Vec::with_capacity(128);
@@ -7223,9 +6941,7 @@ fn write_mat_v5(path: &Path, signal: &[Vec<i64>], n_ch: usize, t: usize, name: &
     let descr_bytes = descr.as_bytes();
     let descr_take = descr_bytes.len().min(124);
     hdr.extend_from_slice(&descr_bytes[..descr_take]);
-    for _ in descr_take..124 {
-        hdr.push(b' ');
-    }
+    hdr.resize(124, b' ');
     hdr.extend_from_slice(&0x0100u16.to_le_bytes()); // version
     hdr.extend_from_slice(b"IM"); // endian marker (little-endian = 'I' 'M' reading as "MI")
     debug_assert_eq!(hdr.len(), 128);
@@ -7508,9 +7224,11 @@ fn cmd_nwb(cmd: NwbCmd) -> R {
 
 #[cfg(not(feature = "nwb"))]
 fn cmd_nwb(_cmd: NwbCmd) -> R {
-    Err("`lml nwb` requires building lml with `--features nwb` (pulls in libhdf5). \
+    Err(
+        "`lml nwb` requires building lml with `--features nwb` (pulls in libhdf5). \
          The default `host` build doesn't link HDF5."
-        .into())
+            .into(),
+    )
 }
 
 /// Resolve the directory containing `liblamquant_lml_h5filter.so` for
@@ -7519,7 +7237,11 @@ fn cmd_nwb(_cmd: NwbCmd) -> R {
 #[cfg(feature = "nwb")]
 fn filter_plugin_dir(explicit: Option<&Path>) -> Rt<PathBuf> {
     fn so_dir(p: &Path) -> Option<PathBuf> {
-        let cand = if p.is_dir() { p.join(FILTER_SO) } else { p.to_path_buf() };
+        let cand = if p.is_dir() {
+            p.join(FILTER_SO)
+        } else {
+            p.to_path_buf()
+        };
         if cand.is_file() {
             cand.parent().map(|d| d.to_path_buf())
         } else {
@@ -7553,7 +7275,11 @@ fn filter_plugin_dir(explicit: Option<&Path>) -> Rt<PathBuf> {
             }
         }
     }
-    for p in ["target/release", "target/debug", "codec-lossless/target/release"] {
+    for p in [
+        "target/release",
+        "target/debug",
+        "codec-lossless/target/release",
+    ] {
         if let Some(d) = try_one(Path::new(p)) {
             return Ok(d);
         }
@@ -7790,191 +7516,16 @@ fn human_duration(secs: f64) -> String {
 }
 
 fn cmd_recover(input: &Path, output: &Path) -> R {
-    // Audit-2026-05-11 Fix-C1 + Tier 3 audit (O1): route through
-    // container::parse_header so the header layout matches what
-    // `container::write_file` emits, AND fix the cluster of bugs
-    // the audit found:
-    //   * pre-fix hardcoded `sample_rate = 250.0` in the output;
-    //     non-250 Hz sources were silently re-tagged as 250 Hz.
-    //   * pre-fix used `start = w * hdr.window_size` for the
-    //     write offset, but real per-window length scales with
-    //     sample_rate. Time-shifted garbage for any non-250 Hz.
-    //   * pre-fix `end - start` underflowed if `start >=
-    //     hdr.total_samples` (corrupted n_windows in header).
-    //   * pre-fix accepted `output == input` and silently
-    //     truncated the input file.
-    //   * pre-fix wrote an all-zeros output and exited 0 when
-    //     good_windows == 0.
-    //   * pre-fix handed attacker-controlled u32 payload_len
-    //     straight to lml::decompress; OOM via a chain of huge
-    //     claimed lengths.
     if input == output {
-        return Err(format!(
-            "cmd_recover: output path equals input ({}); recovery would truncate the source",
-            input.display()
-        )
-        .into());
+        return Err("recover output must differ from input".into());
     }
-    let input_canon = input.canonicalize().ok();
-    let output_canon = output.canonicalize().ok();
-    if let (Some(i), Some(o)) = (&input_canon, &output_canon) {
-        if i == o {
-            return Err(format!(
-                "cmd_recover: canonical output path {} equals input; refusing",
-                o.display()
-            )
-            .into());
-        }
-    }
-
     let data = std::fs::read(input)?;
-    let hdr =
-        container::parse_header(&data).map_err(|e| format!("invalid container header: {}", e))?;
-
-    // Recover sample_rate (#35): prefer the AUTHORITATIVE BCS1 header field
-    // (`sample_rate_mhz`, milli-Hz) when the input is a BCS1 container — legacy
-    // LML1 has no header rate, so for it (and a BCS1 file whose header rate is
-    // missing) fall back to the metadata JSON, then 250 Hz with a warning.
-    // `container::parse_header` already dispatched BCS1-vs-legacy above (#34);
-    // this only adds the header-rate preference for BCS1 inputs.
-    let header_sr: Option<f64> = if data.len() >= 4 && &data[0..4] == abir::BCS1_MAGIC {
-        abir::Bcs1Header::parse(&data)
-            .ok()
-            .map(|h| h.sample_rate_mhz as f64 / 1000.0)
-            .filter(|r| r.is_finite() && *r > 0.0)
-    } else {
-        None
-    };
-    let sample_rate: f64 = header_sr
-        .or_else(|| {
-            serde_json::from_str::<serde_json::Value>(&hdr.metadata)
-                .ok()
-                .and_then(|v| v.get("sample_rate").and_then(|sr| sr.as_f64()))
-                .filter(|sr| sr.is_finite() && *sr > 0.0)
-        })
-        .unwrap_or_else(|| {
-            eprintln!(
-                "  WARNING: cmd_recover: no finite positive sample_rate in the BCS1 header \
-                 or metadata; defaulting to 250 Hz (output tagged 250 Hz regardless of source)"
-            );
-            250.0
-        });
-
-    // Real per-window stride scales with sample_rate. The encoder
-    // packs `actual_window = window_size * sample_rate / 250.0`
-    // samples per window (see container::write_file). Recovery
-    // MUST use the same stride or the recovered signal is
-    // time-shifted garbage.
-    let actual_window: usize = ((hdr.window_size as f64) * sample_rate / 250.0) as usize;
-    let actual_window = actual_window.max(1); // refuse zero-stride
-
-    // Bound per-window payload to a sane ceiling so an adversarial
-    // .lml with a chain of 1 GiB claimed lengths can't OOM the
-    // recovery tool. 64 MiB per window is generous (real LML
-    // windows are KB-scale).
-    const RECOVER_MAX_PAYLOAD: usize = 64 * 1024 * 1024;
-
-    let mut pos = hdr.payload_start;
-    let mut recovered_signal = vec![vec![0i64; hdr.total_samples]; hdr.n_ch];
-    let mut good_windows = 0usize;
-    let mut max_populated: usize = 0;
-    let mut bad_windows: Vec<(usize, String)> = Vec::new();
-
-    for w in 0..hdr.n_windows {
-        if pos + 4 > data.len() {
-            break;
-        }
-        let payload_len =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        pos += 4;
-        if pos + payload_len > data.len() {
-            break;
-        }
-        if payload_len > RECOVER_MAX_PAYLOAD {
-            bad_windows.push((
-                w,
-                format!(
-                    "payload_len {} > recover cap {} (suspected adversarial input)",
-                    payload_len, RECOVER_MAX_PAYLOAD
-                ),
-            ));
-            pos += payload_len;
-            continue;
-        }
-
-        match lml::decompress(&data[pos..pos + payload_len]) {
-            Ok(window) => {
-                let start = w * actual_window;
-                if start >= hdr.total_samples {
-                    bad_windows.push((
-                        w,
-                        format!(
-                            "window {} start {} exceeds total_samples {} (header over-claims n_windows)",
-                            w, start, hdr.total_samples
-                        ),
-                    ));
-                } else {
-                    for ch in 0..hdr.n_ch.min(window.len()) {
-                        let end = (start + window[ch].len()).min(hdr.total_samples);
-                        let copy_len = end - start; // safe: start < total_samples
-                        recovered_signal[ch][start..start + copy_len]
-                            .copy_from_slice(&window[ch][..copy_len]);
-                        if end > max_populated {
-                            max_populated = end;
-                        }
-                    }
-                    good_windows += 1;
-                }
-            }
-            Err(e) => {
-                bad_windows.push((w, format!("{}", e)));
-            }
-        }
-        pos += payload_len;
-    }
-
-    if good_windows == 0 {
-        return Err(format!(
-            "cmd_recover: zero windows recovered from {} (refusing to write all-zeros salvage); \
-             {} failed windows: {}",
-            input.display(),
-            bad_windows.len(),
-            bad_windows
-                .iter()
-                .take(3)
-                .map(|(w, e)| format!("[{} {}]", w, e))
-                .collect::<Vec<_>>()
-                .join(" ")
+    container::open(&data).map_err(|error| {
+        format!(
+            "BCS2 recovery is fail-closed because authenticated semantics or payloads did not validate: {error}"
         )
-        .into());
-    }
-
-    // Trim to the actual maximum populated sample index instead of
-    // the wrong `good_windows * window_size` product (the old formula
-    // discarded successfully-decoded windows when failures were
-    // non-contiguous).
-    let trimmed: Vec<Vec<i64>> = recovered_signal
-        .iter()
-        .map(|ch| ch[..max_populated.min(ch.len())].to_vec())
-        .collect();
-
-    container::write_file(
-        output,
-        &trimmed,
-        sample_rate,
-        hdr.window_size,
-        0,
-        &hdr.metadata,
-    )?;
-
-    println!("Recovered {}/{} windows", good_windows, hdr.n_windows);
-    if !bad_windows.is_empty() {
-        println!("Failed windows:");
-        for (w, e) in &bad_windows {
-            println!("  Window {}: {}", w, e);
-        }
-    }
-    println!("Output: {}", output.display());
+    })?;
+    std::fs::write(output, data)?;
     Ok(())
 }
 
@@ -8299,7 +7850,7 @@ fn cmd_volume_split(input: &Path, size_spec: &str, keep: bool, force: bool) -> R
     if total == 0 {
         return Err(format!("volume-split: {} is empty", input.display()).into());
     }
-    let n_volumes = (total + size - 1) / size; // ceil
+    let n_volumes = total.div_ceil(size);
     if n_volumes > 999 {
         return Err(format!(
             "volume-split: would produce {} volumes; max 999 (NNN suffix is 3 digits). \
@@ -8582,7 +8133,7 @@ fn cmd_verify_archive_explainer(input: &Path) -> R {
                 match container::read_file(tmp.path()) {
                     Ok((signal, _)) => {
                         let bytes = signal.iter().map(|ch| ch.len() * 8).sum::<usize>() as u64;
-                        (true, bytes, format!("LML decode OK"))
+                        (true, bytes, "LML decode OK".to_string())
                     }
                     Err(e) => (false, 0, format!("LML decode error: {}", e)),
                 }
@@ -8591,7 +8142,7 @@ fn cmd_verify_archive_explainer(input: &Path) -> R {
                 Ok(decompressed) => {
                     let hash = format!("{:x}", Sha256::digest(&decompressed));
                     if hash == entry.sha256 {
-                        (true, decompressed.len() as u64, format!("zstd OK"))
+                        (true, decompressed.len() as u64, "zstd OK".to_string())
                     } else {
                         (
                             false,
@@ -8609,7 +8160,7 @@ fn cmd_verify_archive_explainer(input: &Path) -> R {
             lma::Method::Store => {
                 let hash = format!("{:x}", Sha256::digest(&payload));
                 if hash == entry.sha256 {
-                    (true, payload.len() as u64, format!("store OK"))
+                    (true, payload.len() as u64, "store OK".to_string())
                 } else {
                     (
                         false,
@@ -8846,77 +8397,14 @@ fn cmd_verify_archive(input: &Path) -> R {
 /// `.lma` sibling-envelope semantics. For the H.BWC working-point bench +
 /// clinical near-lossless. Prints BPS (and, with --verify, the measured MAE).
 fn cmd_encode_bounded_mae(
-    input: &Path,
-    output: Option<&Path>,
-    delta: u64,
-    window_size: usize,
-    mode: lamquant_core::lpc::LpcMode,
-    verify: bool,
+    _input: &Path,
+    _output: Option<&Path>,
+    _delta: u64,
+    _window_size: usize,
+    _mode: lamquant_core::lpc::LpcMode,
+    _verify: bool,
 ) -> R {
-    if input.is_dir() {
-        return Err("--max-error expects a single EDF/BDF file, not a directory".into());
-    }
-    let edf = edf::read_edf(input)?;
-    let out_path = output
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| input.with_extension("lml"));
-    // Produce a standard .lml container (per-window bounded-MAE payloads) so
-    // decode / export / info all work on the output.
-    let stats = container::write_file_bounded_mae(
-        &out_path,
-        &edf.signal,
-        edf.sample_rate,
-        window_size,
-        delta,
-        "{}",
-        mode,
-    )?;
-
-    let nm = (stats.n_channels * stats.total_samples).max(1);
-    let bps = stats.compressed_size as f64 * 8.0 / nm as f64;
-
-    if verify {
-        // Re-read through the container and confirm the guarantee held.
-        let (recon, _meta) = container::read_file(&out_path)?;
-        let mut mae = 0i64;
-        for (o, r) in edf.signal.iter().zip(recon.iter()) {
-            for (a, b) in o.iter().zip(r.iter()) {
-                let d = (a - b).abs();
-                if d > mae {
-                    mae = d;
-                }
-            }
-        }
-        if mae > delta as i64 {
-            return Err(format!(
-                "bounded-MAE VIOLATED: measured MAE {} > delta {}",
-                mae, delta
-            )
-            .into());
-        }
-        println!(
-            "bounded-MAE: {} ({}ch x {}) delta={} -> {} bytes, {:.4} BPS, measured MAE {} (<= {})",
-            out_path.display(),
-            stats.n_channels,
-            stats.total_samples,
-            delta,
-            stats.compressed_size,
-            bps,
-            mae,
-            delta
-        );
-    } else {
-        println!(
-            "bounded-MAE: {} ({}ch x {}) delta={} -> {} bytes, {:.4} BPS",
-            out_path.display(),
-            stats.n_channels,
-            stats.total_samples,
-            delta,
-            stats.compressed_size,
-            bps
-        );
-    }
-    Ok(())
+    Err("bounded-MAE output requires a registered BCS2 lossy profile; the retired container path is available only through the legacy Adapter".into())
 }
 
 /// `--optimum`: run the max-ratio **Optimum tier** (ADR 0052) on a single EDF/BDF. Windows the
@@ -8947,7 +8435,10 @@ fn cmd_encode_optimum(
     // LMO is a channel×time matrix; reject asymmetric EDFs (mixed sample rates) instead of
     // panicking on the `ch[start..end]` slice below (channel 0's `t` would over-index a shorter one).
     if sig.iter().any(|ch| ch.len() != t) {
-        return Err("--optimum requires all channels the same length (mixed sample rates unsupported)".into());
+        return Err(
+            "--optimum requires all channels the same length (mixed sample rates unsupported)"
+                .into(),
+        );
     }
     let w = window_size.max(1);
     let out_path = output
@@ -9004,7 +8495,9 @@ fn cmd_encode_optimum(
                     .max()
                     .unwrap_or(0);
                 if me > d as i64 {
-                    return Err(format!("optimum bounded-MAE VIOLATED: measured {me} > δ {d}").into());
+                    return Err(
+                        format!("optimum bounded-MAE VIOLATED: measured {me} > δ {d}").into(),
+                    );
                 }
             }
             None => {}
@@ -9034,84 +8527,35 @@ fn cmd_encode_optimum(
 /// `--optimum` dispatch: two feature variants so the flag errors helpfully when `lml` is built
 /// without the `archive` feature (which links the Optimum encoder, ADR 0052).
 #[cfg(feature = "archive")]
-fn encode_optimum_dispatch(input: &Path, output: Option<&Path>, window_size: usize, delta: Option<u64>, verify: bool) -> R {
+fn encode_optimum_dispatch(
+    input: &Path,
+    output: Option<&Path>,
+    window_size: usize,
+    delta: Option<u64>,
+    verify: bool,
+) -> R {
     cmd_encode_optimum(input, output, window_size, delta, verify)
 }
 #[cfg(not(feature = "archive"))]
 fn encode_optimum_dispatch(_: &Path, _: Option<&Path>, _: usize, _: Option<u64>, _: bool) -> R {
-    Err("--optimum requires building `lml` with `--features archive` (the Optimum tier, ADR 0052)".into())
+    Err(
+        "--optimum requires building `lml` with `--features archive` (the Optimum tier, ADR 0052)"
+            .into(),
+    )
 }
 
 /// ADR 0051 track 2 P2: encode a single EDF/BDF to a target-BPS rate-controlled
 /// lossy `.lml` container. Minimizes distortion subject to the bits-per-sample
 /// ceiling. Prints achieved BPS (and, with --verify, the measured PRD).
 fn cmd_encode_target_bps(
-    input: &Path,
-    output: Option<&Path>,
-    target_bps: f64,
-    window_size: usize,
-    mode: lamquant_core::lpc::LpcMode,
-    verify: bool,
+    _input: &Path,
+    _output: Option<&Path>,
+    _target_bps: f64,
+    _window_size: usize,
+    _mode: lamquant_core::lpc::LpcMode,
+    _verify: bool,
 ) -> R {
-    if input.is_dir() {
-        return Err("--target-bps expects a single EDF/BDF file, not a directory".into());
-    }
-    let edf = edf::read_edf(input)?;
-    let out_path = output
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| input.with_extension("lml"));
-    let stats = container::write_file_target_bps(
-        &out_path,
-        &edf.signal,
-        edf.sample_rate,
-        window_size,
-        target_bps,
-        "{}",
-        mode,
-    )?;
-    let nm = (stats.n_channels * stats.total_samples).max(1);
-    let bps = stats.compressed_size as f64 * 8.0 / nm as f64;
-
-    if verify {
-        // Mean-removed PRD (CfP definition) vs the original.
-        let (recon, _meta) = container::read_file(&out_path)?;
-        let mut num = 0.0f64;
-        let mut den = 0.0f64;
-        for (o, r) in edf.signal.iter().zip(recon.iter()) {
-            let mean = o.iter().sum::<i64>() as f64 / o.len().max(1) as f64;
-            for (a, b) in o.iter().zip(r.iter()) {
-                let e = (*a - *b) as f64;
-                num += e * e;
-                den += (*a as f64 - mean) * (*a as f64 - mean);
-            }
-        }
-        let prd = if den == 0.0 {
-            0.0
-        } else {
-            100.0 * (num / den).sqrt()
-        };
-        println!(
-            "target-BPS: {} ({}ch x {}) target={:.3} -> {} bytes, {:.4} BPS, PRD {:.3}%",
-            out_path.display(),
-            stats.n_channels,
-            stats.total_samples,
-            target_bps,
-            stats.compressed_size,
-            bps,
-            prd
-        );
-    } else {
-        println!(
-            "target-BPS: {} ({}ch x {}) target={:.3} -> {} bytes, {:.4} BPS",
-            out_path.display(),
-            stats.n_channels,
-            stats.total_samples,
-            target_bps,
-            stats.compressed_size,
-            bps
-        );
-    }
-    Ok(())
+    Err("target-BPS output requires a registered BCS2 lossy profile; the retired container path is available only through the legacy Adapter".into())
 }
 
 fn cmd_bench(input: &Path) -> R {
@@ -9281,71 +8725,12 @@ fn cmd_manpage() -> R {
     Ok(())
 }
 
-/// Read `sample_rate` from an LML/BCS1 container header.
-///
-/// ADR 0069/0071 L9 fix (was the SILENT bug this function used to carry):
-/// the magic is now checked FIRST, before any field offset is read.
-///   - `b"BCS1"` (the 40-byte typed header `write_abir` emits today) reads
-///     `sample_rate_mhz` from its OWN offset, 22..26 (see
-///     `abir::bcs1` layout docs) — NOT the legacy 16..20 offset,
-///     which in the BCS1 layout holds `total_samples` instead.
-///   - `b"LML*"` (the legacy 32-byte header) keeps the original probe +
-///     offset: `hdr[4..6]` must equal `1` (the byte-exact 32-byte-header
-///     marker; the older 18-/20-byte legacy containers have no
-///     sample-rate field and are refused explicitly).
-///   - anything else is a clean `Err` — never a silent wrong read.
-///
-/// Pre-fix, a `BCS1` file coincidentally passed the `probe == 1` check
-/// (BCS1's `version_major`/`version_minor` bytes at header offset 4..6 are
-/// `01 00`, which reads as `u16::from_le_bytes = 1`, matching the legacy
-/// probe purely by byte coincidence) and fell through into the legacy
-/// 16..20 read — silently returning BCS1's `total_samples` field
-/// reinterpreted as a millihertz sample rate, with no error at all.
+/// Authenticate the current container and return its semantic sample rate.
 fn read_sample_rate_from_header(
     lml_path: &Path,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-    use abir::{Bcs1Header, BCS1_HEADER_LEN, BCS1_MAGIC};
-    use std::io::Read as _;
-    let mut f = std::fs::File::open(lml_path)?;
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-
-    if magic == *BCS1_MAGIC {
-        let mut rest = [0u8; BCS1_HEADER_LEN - 4];
-        f.read_exact(&mut rest)?;
-        let mut hdr = [0u8; BCS1_HEADER_LEN];
-        hdr[0..4].copy_from_slice(&magic);
-        hdr[4..].copy_from_slice(&rest);
-        let header = Bcs1Header::parse(&hdr)
-            .map_err(|e| format!("lml split: invalid BCS1 header: {e}"))?;
-        return Ok(header.sample_rate_mhz as f64 / 1000.0);
-    }
-
-    if &magic[0..3] != b"LML" {
-        return Err(format!(
-            "lml split: unrecognized container magic {:?} — expected `BCS1` or `LML1`",
-            magic
-        )
-        .into());
-    }
-
-    // Legacy 32-byte header: bytes 16-19 = u32 LE sample_rate_mhz.
-    let mut rest = [0u8; 28];
-    f.read_exact(&mut rest)?;
-    let mut hdr = [0u8; 32];
-    hdr[0..4].copy_from_slice(&magic);
-    hdr[4..].copy_from_slice(&rest);
-    // 32-byte header: probe[4..6] = version u16 = 1.
-    let probe = u16::from_le_bytes([hdr[4], hdr[5]]);
-    if probe != 1 {
-        return Err(format!(
-            "lml split: header probe {probe} != 1 — legacy 18-byte container has \
-             no sample-rate field, re-encode before splitting"
-        )
-        .into());
-    }
-    let sr_mhz = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
-    Ok(sr_mhz as f64 / 1000.0)
+    let data = std::fs::read(lml_path)?;
+    Ok(container::parse_header(&data)?.sample_rate_hz)
 }
 
 /// Patch the source metadata JSON object with `split_chunk_idx` and
@@ -9397,12 +8782,8 @@ fn cmd_split(input: &Path, chunks: u32, output_dir: &Path, force: bool) -> R {
         .into());
     }
 
-    // Re-derive window_size from the source by reading via AnyLmlReader
-    // (ADR 0069/0071 L9 — dispatches BCS1 vs legacy LML1 on magic), which
-    // parses it from the header. Cheaper than re-decoding.
-    let window_size = lamquant_core::bcs1_stream::AnyLmlReader::open(input)?
-        .header()
-        .window_size;
+    // Re-derive window_size from the authenticated BCS2 profile header.
+    let window_size = container::parse_header(&std::fs::read(input)?)?.window_size;
     if window_size == 0 {
         return Err("lml split: source window_size = 0".into());
     }
@@ -9570,9 +8951,7 @@ fn cmd_concat(inputs: &[PathBuf], output: &Path, force: bool) -> R {
     for path in inputs {
         let sr = read_sample_rate_from_header(path)?;
         let (sig, meta) = container::read_file(path)?;
-        let ws = lamquant_core::bcs1_stream::AnyLmlReader::open(path)?
-            .header()
-            .window_size;
+        let ws = container::parse_header(&std::fs::read(path)?)?.window_size;
         loaded.push((path.clone(), sig, meta, sr, ws));
     }
 
@@ -9785,7 +9164,6 @@ fn cmd_strip_pii(
     }
     use lamquant_core::container;
     use lamquant_core::lpc::LpcMode;
-    use lamquant_core::bcs1_stream::AnyLmlReader;
 
     if in_place && output.is_some() {
         return Err("strip-pii: --in-place and --output are mutually exclusive".into());
@@ -9815,7 +9193,7 @@ fn cmd_strip_pii(
     // Source sample_rate and window_size so the re-encode preserves
     // the wire-format fields (Phase 3.5's helper does exactly this).
     let sample_rate = read_sample_rate_from_header(input)?;
-    let window_size = AnyLmlReader::open(input)?.header().window_size;
+    let window_size = container::parse_header(&std::fs::read(input)?)?.window_size;
 
     // Choose write target: --output path (new file) OR --in-place (same-dir tempfile + atomic rename).
     let target_path: PathBuf = if let Some(p) = output {
@@ -9914,7 +9292,6 @@ fn cmd_set_metadata(
     }
     use lamquant_core::container;
     use lamquant_core::lpc::LpcMode;
-    use lamquant_core::bcs1_stream::AnyLmlReader;
 
     if in_place && output.is_some() {
         return Err("set-metadata: --in-place and --output are mutually exclusive".into());
@@ -9931,9 +9308,9 @@ fn cmd_set_metadata(
     let mut v: serde_json::Value = serde_json::from_str(&metadata_json).map_err(|e| {
         format!("set-metadata: existing metadata is not valid JSON ({e}); refuse to clobber")
     })?;
-    let obj = v.as_object_mut().ok_or_else(|| {
-        "set-metadata: existing metadata is not a JSON object; refuse to overwrite"
-    })?;
+    let obj = v
+        .as_object_mut()
+        .ok_or("set-metadata: existing metadata is not a JSON object; refuse to overwrite")?;
 
     // Sidecar overlay first (top-level merge).
     if let Some(side) = sidecar {
@@ -9969,7 +9346,7 @@ fn cmd_set_metadata(
 
     // Sample rate + window size preserved from the source header.
     let sample_rate = read_sample_rate_from_header(input)?;
-    let window_size = AnyLmlReader::open(input)?.header().window_size;
+    let window_size = container::parse_header(&std::fs::read(input)?)?.window_size;
 
     let target_path: PathBuf = if let Some(p) = output {
         if let Some(parent) = p.parent() {
@@ -10044,7 +9421,6 @@ fn cmd_recompress(
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
     }
     use lamquant_core::container;
-    use lamquant_core::bcs1_stream::AnyLmlReader;
 
     if in_place && output.is_some() {
         return Err("recompress: --in-place and --output are mutually exclusive".into());
@@ -10059,7 +9435,7 @@ fn cmd_recompress(
     let t0 = Instant::now();
     let (signal, metadata_json) = container::read_file(input)?;
     let sample_rate = read_sample_rate_from_header(input)?;
-    let src_window_size = AnyLmlReader::open(input)?.header().window_size;
+    let src_window_size = container::parse_header(&std::fs::read(input)?)?.window_size;
     let src_size = std::fs::metadata(input)?.len();
 
     let target_path: PathBuf = if let Some(p) = output {
@@ -10214,8 +9590,8 @@ fn cmd_self_test() -> R {
     // caller's metadata (see cli_metadata_snapshot), so verify the caller's field
     // SURVIVED the round-trip rather than asserting exact-string equality (which the
     // stamp intentionally breaks).
-    let parsed: serde_json::Value =
-        serde_json::from_str(&meta).map_err(|e| format!("decoded metadata is not JSON: {e}; got {meta:?}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(&meta)
+        .map_err(|e| format!("decoded metadata is not JSON: {e}; got {meta:?}"))?;
     if parsed.get("source").and_then(|v| v.as_str()) != Some("self-test") {
         return Err(format!("metadata round-trip lost the caller's source field: {meta:?}").into());
     }

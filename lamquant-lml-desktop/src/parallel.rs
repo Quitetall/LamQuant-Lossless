@@ -11,8 +11,7 @@
 //! Exception: `LpcMode::Anytime{deadline: Some(_)}` (a live wall-clock
 //! deadline) is NOT covered by the "by construction" claim above — see the
 //! task #32 caveat on [`compress_with_mode_parallel_views`] for why, and
-//! `abir_container::write_abir` (in `lamquant-lossless`) for the caller-side
-//! routing that works around it today.
+//! host caller-side dispatch for the routing that works around it today.
 
 use rayon::prelude::*;
 
@@ -42,7 +41,9 @@ fn assemble_at_levels_parallel(
         .map(|&ch| encode_one_channel(ch, n_levels, mode, flags.0, flags.1, flags.2))
         .collect::<LmlResult<Vec<_>>>()?;
     let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
-    Ok(lml::assemble_lml_packet(n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload))
+    Ok(lml::assemble_lml_packet(
+        n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload,
+    ))
 }
 
 /// Adaptive transform-skip keep-best (parallel mirror of `lml::encode_maybe_skip`): encode at
@@ -60,7 +61,8 @@ fn keep_best_levels_parallel(
     flags: (bool, bool, bool),
     mode: LpcMode,
 ) -> LmlResult<Vec<u8>> {
-    let full = assemble_at_levels_parallel(channels, n_ch, t, full_levels, noise_bits, flags, mode)?;
+    let full =
+        assemble_at_levels_parallel(channels, n_ch, t, full_levels, noise_bits, flags, mode)?;
     if lml::transform_skip_enabled() && full_levels > 0 {
         let skip = assemble_at_levels_parallel(channels, n_ch, t, 0, noise_bits, flags, mode)?;
         if skip.len() < full.len() {
@@ -93,9 +95,7 @@ pub fn compress_with_mode_parallel(
 }
 
 /// Parallel zero-copy LML encode: `windows` are already-sliced `&[i64]`
-/// views (e.g. `abir::Abir::window_views` — this crate doesn't
-/// depend on `abir` directly, so that's plain text, not a doc
-/// link) — no per-window `Vec<Vec<i64>>` materialization (ADR 0069 L6.3). Mirrors
+/// views (no per-window `Vec<Vec<i64>>` materialization). Mirrors
 /// [`compress_with_mode_parallel`]'s rayon-per-channel split over the SAME
 /// primitives (`validate_and_levels`, `encode_one_channel`,
 /// `finalize_channels`, `assemble_lml_packet`), so it is byte-identical to
@@ -116,16 +116,16 @@ pub fn compress_with_mode_parallel(
 /// subband than the serial caller's monotonic single-thread read, and
 /// potentially different run-to-run on this SAME function. Callers with a
 /// live deadline must NOT rely on this function agreeing byte-for-byte
-/// with the serial path; `abir_container::write_abir`'s `ComputeBackend::
-/// Desktop` arm accounts for this by routing `Anytime{deadline: Some(_)}`
-/// to the serial `compress_with_mode_views` instead of calling this
-/// function at all. The full fix — thread an explicit per-channel
+/// with the serial path; host dispatch accounts for this by routing
+/// `Anytime{deadline: Some(_)}` to the serial
+/// `compress_with_mode_views` instead of calling this function at all. The full
+/// fix — thread an explicit per-channel
 /// `time_remaining` signal through this kernel so it matches serial even
 /// WITH a live deadline — is the tracked follow-up, deliberately not done
 /// here (minimal safe close, not the kernel refactor).
 ///
-/// `noise_bits == 0` (hot, lossless — the only mode `write_abir` dispatches
-/// today): the rayon closure borrows directly from `windows`, so this is
+/// `noise_bits == 0` (hot, lossless): the rayon closure borrows directly from
+/// `windows`, so this is
 /// TRUE zero-copy. `noise_bits > 0` (cold): pre-shift each channel into an
 /// owned `Vec<Vec<i64>>` (`v >> noise_bits`, an unavoidable copy — the shift
 /// produces new values) and rayon-map over THOSE borrows, still passing the

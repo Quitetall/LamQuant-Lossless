@@ -30,11 +30,6 @@ crate-type = ["rlib"]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
 lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops" }
-# ADR 0069 L6.3 bench: `benches/codec.rs`'s `write_abir` arm builds an
-# `Abir` directly (the zero-copy currency `abir_container::write_abir`
-# reads from) to measure the killed per-window materialize vs the legacy
-# `Vec<Vec<i64>>`-based `container::write_into` path.
-abir = { version = "0.1.0", path = "../crates/abir" }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.
@@ -124,23 +119,15 @@ archive = [
     # implies `std`.
     "dep:lamquant-lml-desktop",
     "lamquant-lml-desktop/fast",
-    # ADR 0069 L6.2: the ABIR container writer (`abir_container::write_abir`)
-    # is sourced from `abir::Abir` instead of `Vec<Vec<i64>>`.
-    "dep:abir",
-    "dep:lamquant-lml-legacy",
+    # ADR 0139/0143 cutover: host containers are canonical ABIR BCS2 codec
+    # bundles. Retired wires are available only through the independent,
+    # supervised legacy Adapter process.
+    "dep:semantic-abir",
+    "dep:semantic-abir-bcs",
+    "dep:lamquant-abir-codec",
     "dep:lamquant-lml-optimum-v2",
-    # ADR 0069 L8 (cutover): the live path only needs the FROZEN v1 reader —
-    # `container::{read_file,read_bytes,...}` + the shared `ContainerHeader`/
-    # `ContainerStats`/`OffsetEntry`/`OffsetTable` types the `abir_container`
-    # facade re-exports/reuses. The retiring `encode_into`/`write_into` v1
-    # WRITER (`legacy-encode`) is demoted OUT of `archive` — the live write
-    # path is `write_abir` now. `legacy-encode` lives under `oracle` only
-    # (below), which links it directly for the differential check.
-    "lamquant-lml-legacy/legacy-decode",
     # Desktop ships the LMO encoder as standard (ADR 0052).
     "lamquant-lml-optimum/encode",
-    "dep:lamquant-lmq",
-    "lamquant-lmq/std",
     "lamquant-common/host",
     "base64/std",
     "sha2/std",
@@ -154,17 +141,10 @@ archive = [
     "dep:filetime",
 ]
 
-# ── oracle: differential oracle test (ADR 0069 L1, L8 cutover) ───────────────
-# Pins the LML-v1 container byte-identity + round-trip + decode-old-files KAT +
-# hardening reference. Needs `archive` (container / lml / sha2 / tempfile) PLUS
-# the retiring `legacy-encode` writer (`lamquant_lml_legacy::container::write_into`
-# et al) — `archive` alone no longer links it post-cutover (see above). The
-# oracle test (`tests/oracle_diff.rs`) imports `lamquant_lml_legacy::container`
-# DIRECTLY (not via the `lamquant_core::container` alias, which now points at
-# `write_abir`) so it stays a real two-implementation differential, not
-# write_abir-vs-itself. Run:
-#   cargo test --features oracle --test oracle_diff
-oracle = ["archive", "lamquant-lml-legacy/legacy-encode"]
+# The retired differential oracle moved with LML1/BCS1 into the independent
+# legacy repository. The name remains an empty compatibility selector and must
+# never restore a main-graph legacy dependency.
+oracle = ["archive"]
 
 # ── Level 2: cli — archive + command-line interface ──────────────────────────
 # Enables: clap, shell completions, man pages, progress bars, structured
@@ -264,11 +244,9 @@ lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", defau
 # default-features = false so a no_std facade build stays no_std; the facade's
 # own `std`/`archive`/`experimental_*` features turn on the matching core ones.
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
-# ADR 0069 L6(a-b)/L6.2: the ABIR atoms (`Abir`/`Column`/`Channel`) — the typed
-# currency `abir_container::write_abir` reads windows from. Optional; enabled
-# by `archive` (the ABIR writer is host-only today, mirroring the legacy
-# writer it clones).
-abir = { version = "0.1.0", path = "../crates/abir", default-features = false, optional = true }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432", default-features = false, features = ["std"], optional = true }
+semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432", default-features = false, features = ["std"], optional = true }
+lamquant-abir-codec = { version = "0.1.0", path = "../crates/lamquant-abir-codec", default-features = false, features = ["std"], optional = true }
 # ADR 0052 Tier 3 / ADR 0054: the Optimum (LMO) codec. The facade IS the Desktop
 # profile, so it links the LMO DECODER always (no_std-capable, cheap) and turns
 # on the host LMO ENCODER under the facade's `archive` feature (which already
@@ -278,18 +256,12 @@ lamquant-lml-optimum = { version = "0.0.1", path = "../lamquant-lml-optimum", de
 # ADR 0116: host-only independent learned-lossless peer. Kept out of the
 # no-default-features firmware graph; `archive` enables its LMO1-v3/BGF1 API.
 lamquant-lml-optimum-v2 = { version = "0.1.0", path = "../lamquant-lml-optimum-v2", optional = true }
-# ADR 0074 Track N: the neural (lossy) codec shell — the NeuralEncodePass Lossy DAG
-# morphism in stage.rs delegates to it. Host-only (archive).
-lamquant-lmq = { version = "0.0.1", path = "../lamquant-lmq", default-features = false, optional = true }
 # ADR 0056: the Desktop tier (host fast path). Optional + enabled by `archive`
 # so the no_std facade build stays no_std (desktop is std/rayon). Re-exported as
 # `lamquant_core::desktop`. The facade already reaches the parallel path via
 # `lamquant-lml-mcu/archive`; this links the Desktop tier crate so the umbrella
 # assembles all three tiers (mcu + desktop + optimum).
 lamquant-lml-desktop = { version = "0.9.3", path = "../lamquant-lml-desktop", default-features = false, optional = true }
-# ADR 0069 L4: the sequestered LML-v1 wire (container/offset_table/stream). Optional;
-# enabled by `archive` and re-exported at the stable `lamquant_core::container` path.
-lamquant-lml-legacy = { version = "0.1.0", path = "../crates/lamquant-lml-legacy", optional = true }
 # Used by the facade's container/lma/security/config (SHA-256, base64).
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }

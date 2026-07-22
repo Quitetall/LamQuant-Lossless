@@ -2,8 +2,9 @@
 
 - Current semantic coverage is one acquisition TimeSeries containing
   little-endian integer data and a finite positive `starting_time.rate`.
-- Maps integer samples, regular timing, channel order, and payload identity;
-  preserves the complete HDF5/NWB file as an exact source capsule.
+- Maps integer samples at a zero `starting_time`, regular rate, channel order,
+  and payload identity. Nonzero time origins fail closed; calibration/conversion
+  fields remain capsule-only, so semantic coverage is projected.
 - Mixed-length or multiple acquisition series fail closed pending direct
   mixed-rate ABIR lowering.
 - Electrode tables, intervals, behavior, stimulus, namespaces, external assets,
@@ -15,3 +16,6 @@
   profile above.
 - The broad NWB 2.10.0 profile remains non-first-class until those mappings and
   independent NWB Inspector evidence pass.
+- The Adapter reads only `/acquisition/<single-series>/data`, verifies shape and
+  expanded `i64` bytes before allocation, and never recursively treats metadata
+  tables as signals.

@@ -272,6 +272,7 @@ def make_receipt(
     observed_outcome: str,
     error_count: int,
     warning_count: int,
+    semantic_profile: bool,
     fixture_hash: str | None = None,
     executable_hash: str | None = None,
     authority_hash: str | None = None,
@@ -328,7 +329,7 @@ def make_receipt(
             "observed_outcome": observed_outcome,
             "expected_outcome_observed": expected_observed,
         },
-        "semantic_profile_promoted": passed,
+        "semantic_profile_promoted": passed and semantic_profile,
         "pass": passed,
         "diagnostics": diagnostics,
     }
@@ -609,7 +610,6 @@ def _bind_validator(
     executable_hash = _hash_resolved_file(executed_program)
     authority_hash = authority_sha256(authority_path)
     expected = {
-        "profile": profile,
         "version": version,
         "executable_sha256": executable_hash,
         "authority_sha256": authority_hash,
@@ -619,6 +619,16 @@ def _bind_validator(
     }
     if interpreter is not None:
         expected["launcher_sha256"] = launcher_hash
+    pinned_profiles = pin.get("profiles")
+    if pinned_profiles is None:
+        pinned_profiles = [pin.get("profile")]
+    if (
+        not isinstance(pinned_profiles, list)
+        or not pinned_profiles
+        or any(not isinstance(item, str) or not item for item in pinned_profiles)
+        or profile not in pinned_profiles
+    ):
+        raise ValueError(f"{name} profile does not match the reviewed validator pin")
     for field, observed in expected.items():
         if pin.get(field) != observed:
             raise ValueError(
@@ -698,6 +708,7 @@ def _receipt_for(
     authority_hash: str,
     runtime_pin: dict[str, Any],
     timeout_seconds: float,
+    semantic_profile: bool,
 ) -> dict[str, object]:
     relative_fixture = _relative_fixture(fixture, REPO)
     fixture_hash = fixture_sha256(fixture, fixture_kind)
@@ -747,6 +758,7 @@ def _receipt_for(
         observed_outcome=observed,
         error_count=errors,
         warning_count=warnings,
+        semantic_profile=semantic_profile,
         fixture_hash=fixture_hash,
         executable_hash=executable_hash,
         authority_hash=authority_hash,
@@ -774,6 +786,7 @@ def _attempt_receipt(
     timeout_seconds: float,
 ) -> dict[str, object]:
     try:
+        semantic_profile = _profile_is_semantic(DEFAULT_ABIR, profile)
         (
             argv_prefix,
             executable,
@@ -824,6 +837,7 @@ def _attempt_receipt(
             authority_hash=authority_hash,
             runtime_pin=pins[validator_name],
             timeout_seconds=timeout_seconds,
+            semantic_profile=semantic_profile,
         )
     except OSError as error:
         return make_unavailable_receipt(
@@ -845,6 +859,18 @@ def _abir_contract(abir_root: Path) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _profile_is_semantic(abir_root: Path, profile_id: str) -> bool:
+    registry = json.loads(
+        (abir_root / "registries" / "adapter-profiles-v1.json").read_text()
+    )
+    matches = [
+        profile for profile in registry.get("profiles", []) if profile.get("id") == profile_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"profile is not uniquely registered: {profile_id}")
+    return matches[0].get("status") == "semantic"
 
 
 def _verify_receipts(receipts: list[dict[str, object]], abir_root: Path) -> None:
@@ -914,6 +940,9 @@ def main(argv: list[str] | None = None) -> int:
         abir_root, "bids.1.11.1.single-edf-eeg", "bids-validator"
     )
     _require_normative_validator(
+        abir_root, "bids.1.11.1.single-edf-eeg-events", "bids-validator"
+    )
+    _require_normative_validator(
         abir_root, "nwb.2.10.0.single-integer-timeseries", "pynwb.validate"
     )
 
@@ -937,6 +966,24 @@ def main(argv: list[str] | None = None) -> int:
     primary = [
         _attempt_receipt(
             profile="bids.1.11.1.single-edf-eeg",
+            edition="1.11.1",
+            revision=revision,
+            fixture=bids,
+            fixture_kind="tree",
+            validator_name="bids-validator",
+            validator_version=args.bids_validator_version,
+            executable_name=args.bids_validator,
+            authority_artifact=args.bids_authority,
+            argv_tail=[],
+            executed_at_utc=executed_at_utc,
+            evidence_authority="conformance",
+            classifier=classify_bids,
+            internal_valid=bids_internal,
+            pins=pins,
+            timeout_seconds=args.timeout_seconds,
+        ),
+        _attempt_receipt(
+            profile="bids.1.11.1.single-edf-eeg-events",
             edition="1.11.1",
             revision=revision,
             fixture=bids,

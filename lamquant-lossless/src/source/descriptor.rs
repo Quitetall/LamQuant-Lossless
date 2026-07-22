@@ -3,7 +3,7 @@
 //!
 //! Every reader under `source/` today (`RawReader`, `EdfReader`,
 //! `BrainVisionReader`, ...) is hand-written Rust: a struct that owns a
-//! byte source and a `read_bundle`/`lower_to_abir` pair of methods that
+//! byte source and a `read_bundle` method that
 //! walk the format's byte layout by hand. That's the right shape for a
 //! format with real structure (EDF's per-channel headers, BrainVision's
 //! three-file split, DICOM's nested TLV dataset — see "Limits" below).
@@ -16,13 +16,11 @@
 //! For that whole class, hand-writing a new Rust reader per acquisition
 //! rig is unnecessary ceremony. This module declares [`FormatDescriptor`]
 //! — a `serde`-derivable **struct** that describes the fixed layout as
-//! DATA — and an interpreter, [`read_bundle_from_descriptor`] /
-//! [`lower_to_abir_from_descriptor`], that walks that description exactly
-//! the way a hand-written reader's `read_bundle`/`lower_to_abir` would.
+//! DATA — and an interpreter, [`read_bundle_from_descriptor`], that walks that
+//! description exactly the way a hand-written reader's `read_bundle` would.
 //! The proof obligation for this increment is narrow and load-bearing:
 //! a `FormatDescriptor` built to describe the RAW format must produce
-//! **byte-identical** output to `RawReader` — see
-//! `raw_format_as_descriptor_matches_hand_written` below.
+//! semantically equivalent output to `RawReader`.
 //!
 //! Two design-pass gotchas (referred to as "G5" throughout this module,
 //! after the design review that flagged them) had to be closed before a
@@ -40,8 +38,7 @@
 //!     `f32 as i64` — meaningful only for integer-valued floats, lossy
 //!     (truncates toward zero) in general. A hand-written reader that
 //!     wants a float lane makes that an explicit, reviewed decision (see
-//!     `EeglabReader`'s float-bitcast lossless path, which deliberately
-//!     stays off the default `lower_to_abir`). A *data-driven* descriptor
+//!     `EeglabReader`'s float-bitcast lossless path). A *data-driven* descriptor
 //!     has no such review gate, so [`FormatDescriptor::validate`] refuses
 //!     `F32` unconditionally — see `validate_refuses_f32`.
 //!
@@ -89,9 +86,6 @@
 //! scalar/array sidecar fields. Formats outside that shape stay
 //! hand-written Rust readers.
 
-use std::sync::Arc;
-
-use abir::{Abir, Channel, Column};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LmlError, LmlResult};
@@ -170,21 +164,22 @@ pub enum SampleRateSpec {
     /// Derived: `Hz = numerator / sidecar[sidecar_field]`. BrainVision's
     /// `Hz = 1_000_000.0 / SamplingInterval` (interval in microseconds)
     /// is the motivating case (G5) — see `reciprocal_sample_rate_*`.
-    Reciprocal { sidecar_field: String, numerator: f64 },
+    Reciprocal {
+        sidecar_field: String,
+        numerator: f64,
+    },
 }
 
 /// One label-pattern → modality rule. `pattern` is matched
 /// case-insensitively as a substring against each channel label; the
 /// first rule (in list order) matched by ANY channel's label wins and
 /// its `modality` becomes the format-hint string passed to
-/// [`Abir::with_inferred_modality`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelModalityRule {
     pub pattern: String,
     pub modality: String,
 }
 
-/// Format-hint resolution for [`Abir::with_inferred_modality`]'s
 /// `format: Option<&str>` argument. An empty `rules` list and `default:
 /// None` (the [`Default`] impl) reproduces `RawReader`'s behavior exactly
 /// — pure per-channel-label inference, no format-declared override.
@@ -234,8 +229,8 @@ impl FormatDescriptor {
     /// sidecar is in hand): a `FromSidecarField` channel count that
     /// resolves to 0, or a `Reciprocal` transform whose sidecar-supplied
     /// divisor is 0. Both of those are checked at interpret time by
-    /// [`read_bundle_from_descriptor`] / [`lower_to_abir_from_descriptor`]
-    /// (via `resolve_channel_count` / `resolve_sample_rate`), which also
+    /// [`read_bundle_from_descriptor`] (via `resolve_channel_count` /
+    /// `resolve_sample_rate`), which also
     /// call this method first — so every entry point is fully fail-closed
     /// end to end, just not from a single static call.
     pub fn validate(&self) -> Result<(), DescriptorError> {
@@ -322,7 +317,11 @@ pub enum DescriptorError {
     /// unreachable, but the interpreter never trusts that arithmetic
     /// blindly (Bible R30) — an out-of-range read is always a typed
     /// error here, never a slice-index panic.
-    SampleOutOfBounds { offset: usize, width: usize, len: usize },
+    SampleOutOfBounds {
+        offset: usize,
+        width: usize,
+        len: usize,
+    },
     /// The sidecar bytes aren't valid UTF-8, aren't valid JSON, or the
     /// top-level JSON value isn't an object.
     BadSidecarJson(String),
@@ -384,9 +383,8 @@ impl core::fmt::Display for DescriptorError {
 impl std::error::Error for DescriptorError {}
 
 /// Convert an interpreter-internal `DescriptorError` into the crate's
-/// standard `LmlError` at the [`read_bundle_from_descriptor`] /
-/// [`lower_to_abir_from_descriptor`] boundary — mirrors every other
-/// reader's `LmlError::InvalidHeader(format!(...))` convention (see
+/// standard `LmlError` at the [`read_bundle_from_descriptor`] boundary — mirrors
+/// every other reader's `LmlError::InvalidHeader(format!(...))` convention (see
 /// `RawReader::read_bundle`).
 fn to_lml_err(e: DescriptorError) -> LmlError {
     LmlError::InvalidHeader(e.to_string())
@@ -396,10 +394,7 @@ fn to_lml_err(e: DescriptorError) -> LmlError {
 
 type JsonObject = serde_json::Map<String, serde_json::Value>;
 
-fn resolve_channel_count(
-    cc: &ChannelCount,
-    obj: &JsonObject,
-) -> Result<usize, DescriptorError> {
+fn resolve_channel_count(cc: &ChannelCount, obj: &JsonObject) -> Result<usize, DescriptorError> {
     let n = match cc {
         ChannelCount::Fixed(n) => *n,
         ChannelCount::FromSidecarField(field) => {
@@ -527,24 +522,6 @@ fn resolve_channel_arrays(
     Ok((channels, phys_min, phys_max, phys_dim))
 }
 
-/// First-match label-pattern → modality resolution feeding
-/// `Abir::with_inferred_modality`'s `format` hint. Empty rules + no
-/// default (the `ChannelModality::default()` used by every RAW-as-
-/// descriptor test) returns `None`, exactly matching `RawReader`'s own
-/// `with_inferred_modality(&labels, None)` call.
-fn resolve_format_hint(cm: &ChannelModality, labels: &[String]) -> Option<String> {
-    for rule in &cm.rules {
-        let pattern = rule.pattern.to_ascii_lowercase();
-        if labels
-            .iter()
-            .any(|l| l.to_ascii_lowercase().contains(&pattern))
-        {
-            return Some(rule.modality.clone());
-        }
-    }
-    cm.default.clone()
-}
-
 fn parse_sidecar_json(sidecar_bytes: &[u8]) -> Result<serde_json::Value, DescriptorError> {
     let text = std::str::from_utf8(sidecar_bytes)
         .map_err(|e| DescriptorError::BadSidecarJson(format!("invalid UTF-8 ({e})")))?;
@@ -666,76 +643,23 @@ fn decode_signal_i64(
 ) -> Result<(Vec<Vec<i64>>, usize), DescriptorError> {
     let endian = descriptor.endian;
     match descriptor.dtype {
-        DescriptorDtype::I16 => decode_grid(descriptor.orientation, n_channels, 2, data, move |b| {
-            read_i16(b, endian) as i64
-        }),
-        DescriptorDtype::I24 => decode_grid(descriptor.orientation, n_channels, 3, data, move |b| {
-            read_i24(b, endian) as i64
-        }),
-        DescriptorDtype::I32 => decode_grid(descriptor.orientation, n_channels, 4, data, move |b| {
-            read_i32(b, endian) as i64
-        }),
-        DescriptorDtype::F32 => Err(DescriptorError::FloatDtypeRefused),
-    }
-}
-
-/// Native-width columns for the Abir lowering path — the memory-win
-/// specialization every hand-written reader's `lower_to_abir` override
-/// does (see `RawReader::lower_to_abir`'s doc comment).
-enum NativeColumns {
-    I16(Vec<Vec<i16>>),
-    I24(Vec<Vec<i32>>),
-    I32(Vec<Vec<i32>>),
-}
-
-fn decode_native_columns(
-    descriptor: &FormatDescriptor,
-    n_channels: usize,
-    data: &[u8],
-) -> Result<(NativeColumns, usize), DescriptorError> {
-    let endian = descriptor.endian;
-    match descriptor.dtype {
         DescriptorDtype::I16 => {
-            let (cols, n) =
-                decode_grid(descriptor.orientation, n_channels, 2, data, move |b| {
-                    read_i16(b, endian)
-                })?;
-            Ok((NativeColumns::I16(cols), n))
+            decode_grid(descriptor.orientation, n_channels, 2, data, move |b| {
+                read_i16(b, endian) as i64
+            })
         }
         DescriptorDtype::I24 => {
-            let (cols, n) =
-                decode_grid(descriptor.orientation, n_channels, 3, data, move |b| {
-                    read_i24(b, endian)
-                })?;
-            Ok((NativeColumns::I24(cols), n))
+            decode_grid(descriptor.orientation, n_channels, 3, data, move |b| {
+                read_i24(b, endian) as i64
+            })
         }
         DescriptorDtype::I32 => {
-            let (cols, n) =
-                decode_grid(descriptor.orientation, n_channels, 4, data, move |b| {
-                    read_i32(b, endian)
-                })?;
-            Ok((NativeColumns::I32(cols), n))
+            decode_grid(descriptor.orientation, n_channels, 4, data, move |b| {
+                read_i32(b, endian) as i64
+            })
         }
         DescriptorDtype::F32 => Err(DescriptorError::FloatDtypeRefused),
     }
-}
-
-fn build_channels<T: Copy>(
-    cols: Vec<Vec<T>>,
-    labels: &[String],
-    phys_min: &[f64],
-    phys_max: &[f64],
-    wrap: impl Fn(Arc<[T]>) -> Column,
-) -> Vec<Channel> {
-    cols.into_iter()
-        .enumerate()
-        .map(|(j, col)| Channel {
-            label: Arc::from(labels[j].as_str()),
-            data: wrap(Arc::from(col)),
-            phys_min: phys_min[j],
-            phys_max: phys_max[j],
-        })
-        .collect()
 }
 
 // ─── Interpreter (public entry points) ──────────────────────────────────
@@ -813,51 +737,17 @@ pub fn read_bundle_from_descriptor(
     Ok(bundle)
 }
 
-/// The Abir lowering counterpart to [`read_bundle_from_descriptor`] —
-/// decodes straight into a native-width `Column` (`I16`/`I24`/`I32`)
-/// instead of always widening to `i64`, mirroring every hand-written
-/// reader's specialized `lower_to_abir` override (ADR 0069 L7). `F32` is
-/// unreachable here because `descriptor.validate()` (called first)
-/// refuses it.
-pub fn lower_to_abir_from_descriptor(
-    descriptor: &FormatDescriptor,
-    data: &[u8],
-    sidecar_bytes: &[u8],
-) -> LmlResult<Abir> {
-    descriptor.validate().map_err(to_lml_err)?;
-    let json = parse_sidecar_json(sidecar_bytes).map_err(to_lml_err)?;
-    let obj = sidecar_object(&json).map_err(to_lml_err)?;
-
-    let n_channels = resolve_channel_count(&descriptor.channel_count, obj).map_err(to_lml_err)?;
-    let sample_rate = resolve_sample_rate(&descriptor.sample_rate, obj).map_err(to_lml_err)?;
-    let (labels, phys_min, phys_max, _phys_dim) =
-        resolve_channel_arrays(obj, n_channels).map_err(to_lml_err)?;
-    let (native, n_samples) =
-        decode_native_columns(descriptor, n_channels, data).map_err(to_lml_err)?;
-
-    let channels: Vec<Channel> = match native {
-        NativeColumns::I16(cols) => build_channels(cols, &labels, &phys_min, &phys_max, Column::I16),
-        NativeColumns::I24(cols) => build_channels(cols, &labels, &phys_min, &phys_max, Column::I24),
-        NativeColumns::I32(cols) => build_channels(cols, &labels, &phys_min, &phys_max, Column::I32),
-    };
-
-    let format_hint = resolve_format_hint(&descriptor.channel_modality, &labels);
-    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    Ok(Abir::from_parts(channels, sample_rate, n_samples)
-        .with_inferred_modality(&label_refs, format_hint.as_deref()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::raw::RawReader;
-    use crate::source::reader::SignalSourceReader;
 
     // ─── Shared synthetic-input helpers ─────────────────────────────
 
     fn raw_sidecar_json(n_ch: usize, sample_rate: f64, dtype: &str, orient: &str) -> String {
         let chans: Vec<String> = (0..n_ch).map(|i| format!("\"ch{i}\"")).collect();
-        let pmin: Vec<String> = (0..n_ch).map(|i| format!("{}", -200.0 - i as f64)).collect();
+        let pmin: Vec<String> = (0..n_ch)
+            .map(|i| format!("{}", -200.0 - i as f64))
+            .collect();
         let pmax: Vec<String> = (0..n_ch).map(|i| format!("{}", 200.0 + i as f64)).collect();
         format!(
             "{{\"n_channels\":{n_ch},\"sample_rate\":{sample_rate},\"dtype\":\"{dtype}\",\
@@ -870,7 +760,11 @@ mod tests {
     }
 
     fn synth_value(s: usize, ch: usize) -> i32 {
-        (s as i32).wrapping_mul(37).wrapping_add((ch as i32).wrapping_mul(911)) % 60_000 - 30_000
+        (s as i32)
+            .wrapping_mul(37)
+            .wrapping_add((ch as i32).wrapping_mul(911))
+            % 60_000
+            - 30_000
     }
 
     fn raw_payload_int16(n_ch: usize, n_samples: usize, multiplexed: bool) -> Vec<u8> {
@@ -891,28 +785,10 @@ mod tests {
         bytes
     }
 
-    fn raw_payload_int32(n_ch: usize, n_samples: usize, multiplexed: bool) -> Vec<u8> {
-        let big = |s: usize, ch: usize| -> i32 {
-            (s as i32).wrapping_mul(70_000).wrapping_add(ch as i32) - 500_000
-        };
-        let mut bytes = Vec::with_capacity(n_ch * n_samples * 4);
-        if multiplexed {
-            for s in 0..n_samples {
-                for ch in 0..n_ch {
-                    bytes.extend_from_slice(&big(s, ch).to_le_bytes());
-                }
-            }
-        } else {
-            for ch in 0..n_ch {
-                for s in 0..n_samples {
-                    bytes.extend_from_slice(&big(s, ch).to_le_bytes());
-                }
-            }
-        }
-        bytes
-    }
-
-    fn descriptor_for(dtype: DescriptorDtype, orientation: DescriptorOrientation) -> FormatDescriptor {
+    fn descriptor_for(
+        dtype: DescriptorDtype,
+        orientation: DescriptorOrientation,
+    ) -> FormatDescriptor {
         FormatDescriptor {
             format_name: "RAW".to_string(),
             dtype,
@@ -923,117 +799,6 @@ mod tests {
             channel_modality: ChannelModality::default(),
             sidecar_keys: vec![],
         }
-    }
-
-    // ─── S5 Increment 3 gate 1 (load-bearing): raw-as-descriptor ────
-
-    /// Builds a `FormatDescriptor` equivalent to the RAW format and runs
-    /// it over the SAME synthetic inputs a `RawReader` would see (a real
-    /// `.raw` + sidecar JSON on disk), then asserts the descriptor path's
-    /// `SignalBundle` AND lowered `Abir` are byte-identical to
-    /// `RawReader`'s: sample_rate, channels, phys_min/phys_max, the full
-    /// `signal` matrix, the lowered `Column` variant, and its widened
-    /// `window_i64` — across both dtype arms RAW supports (int16, int32)
-    /// and both orientations (multiplexed, vectorized).
-    #[test]
-    fn raw_format_as_descriptor_matches_hand_written() {
-        fn check(
-            n_ch: usize,
-            _n_samples: usize,
-            dtype_str: &str,
-            orient_str: &str,
-            descriptor_dtype: DescriptorDtype,
-            descriptor_orient: DescriptorOrientation,
-            payload: Vec<u8>,
-        ) {
-            let tmp = tempfile::tempdir().unwrap();
-            let raw_path = tmp.path().join("data.raw");
-            let json_path = tmp.path().join("data.json");
-            let sidecar_text = raw_sidecar_json(n_ch, 273.5, dtype_str, orient_str);
-            std::fs::write(&raw_path, &payload).unwrap();
-            std::fs::write(&json_path, &sidecar_text).unwrap();
-
-            let hand_bundle = RawReader::new(&raw_path).read_bundle().unwrap();
-            let hand_abir = RawReader::new(&raw_path).lower_to_abir().unwrap();
-
-            let descriptor = descriptor_for(descriptor_dtype, descriptor_orient);
-            let desc_bundle =
-                read_bundle_from_descriptor(&descriptor, &payload, sidecar_text.as_bytes())
-                    .unwrap();
-            let desc_abir =
-                lower_to_abir_from_descriptor(&descriptor, &payload, sidecar_text.as_bytes())
-                    .unwrap();
-
-            // SignalBundle byte-identity.
-            assert_eq!(desc_bundle.sample_rate, hand_bundle.sample_rate);
-            assert_eq!(desc_bundle.channels, hand_bundle.channels);
-            assert_eq!(desc_bundle.phys_min, hand_bundle.phys_min);
-            assert_eq!(desc_bundle.phys_max, hand_bundle.phys_max);
-            assert_eq!(desc_bundle.signal, hand_bundle.signal);
-            assert_eq!(desc_bundle.duration_s, hand_bundle.duration_s);
-
-            // Lowered Abir byte-identity.
-            assert_eq!(desc_abir.n_channels(), hand_abir.n_channels());
-            assert_eq!(desc_abir.n_samples, hand_abir.n_samples);
-            assert_eq!(desc_abir.sample_rate, hand_abir.sample_rate);
-            for (d_ch, h_ch) in desc_abir.channels.iter().zip(hand_abir.channels.iter()) {
-                assert_eq!(d_ch.label, h_ch.label);
-                assert_eq!(d_ch.phys_min, h_ch.phys_min);
-                assert_eq!(d_ch.phys_max, h_ch.phys_max);
-                match (&d_ch.data, &h_ch.data) {
-                    (Column::I16(_), Column::I16(_)) => {}
-                    (Column::I32(_), Column::I32(_)) => {}
-                    (a, b) => panic!("Column variant diverged: {a:?} vs {b:?}"),
-                }
-                let d_w = d_ch.data.window_i64(0, desc_abir.n_samples);
-                let h_w = h_ch.data.window_i64(0, hand_abir.n_samples);
-                assert_eq!(d_w.as_ref(), h_w.as_ref());
-            }
-            assert_eq!(desc_abir.provenance().tag, hand_abir.provenance().tag);
-            assert_eq!(desc_abir.provenance().source, hand_abir.provenance().source);
-        }
-
-        let n_ch = 3usize;
-        let n_samples = 200usize;
-        check(
-            n_ch,
-            n_samples,
-            "int16",
-            "multiplexed",
-            DescriptorDtype::I16,
-            DescriptorOrientation::Multiplexed,
-            raw_payload_int16(n_ch, n_samples, true),
-        );
-        check(
-            n_ch,
-            n_samples,
-            "int16",
-            "vectorized",
-            DescriptorDtype::I16,
-            DescriptorOrientation::Vectorized,
-            raw_payload_int16(n_ch, n_samples, false),
-        );
-
-        let n_ch2 = 2usize;
-        let n_samples2 = 150usize;
-        check(
-            n_ch2,
-            n_samples2,
-            "int32",
-            "multiplexed",
-            DescriptorDtype::I32,
-            DescriptorOrientation::Multiplexed,
-            raw_payload_int32(n_ch2, n_samples2, true),
-        );
-        check(
-            n_ch2,
-            n_samples2,
-            "int32",
-            "vectorized",
-            DescriptorDtype::I32,
-            DescriptorOrientation::Vectorized,
-            raw_payload_int32(n_ch2, n_samples2, false),
-        );
     }
 
     // ─── Gate 2: G5 F32 refusal ──────────────────────────────────────
@@ -1052,11 +817,9 @@ mod tests {
         };
         assert_eq!(d.validate(), Err(DescriptorError::FloatDtypeRefused));
 
-        // Also refused at both interpreter entry points, not just
+        // Also refused at the current interpreter entry point, not just
         // validate() in isolation — defense in depth.
         let err = read_bundle_from_descriptor(&d, &[0u8; 8], b"{}").unwrap_err();
-        assert!(err.to_string().to_lowercase().contains("f32"), "got: {err}");
-        let err = lower_to_abir_from_descriptor(&d, &[0u8; 8], b"{}").unwrap_err();
         assert!(err.to_string().to_lowercase().contains("f32"), "got: {err}");
     }
 
@@ -1084,10 +847,22 @@ mod tests {
             le_bundle.signal, be_bundle.signal,
             "LE and BE descriptors must decode the same bytes differently"
         );
-        assert_eq!(le_bundle.signal[0][0], i16::from_le_bytes([0x01, 0x02]) as i64);
-        assert_eq!(be_bundle.signal[0][0], i16::from_be_bytes([0x01, 0x02]) as i64);
-        assert_eq!(le_bundle.signal[1][0], i16::from_le_bytes([0x03, 0x04]) as i64);
-        assert_eq!(be_bundle.signal[1][0], i16::from_be_bytes([0x03, 0x04]) as i64);
+        assert_eq!(
+            le_bundle.signal[0][0],
+            i16::from_le_bytes([0x01, 0x02]) as i64
+        );
+        assert_eq!(
+            be_bundle.signal[0][0],
+            i16::from_be_bytes([0x01, 0x02]) as i64
+        );
+        assert_eq!(
+            le_bundle.signal[1][0],
+            i16::from_le_bytes([0x03, 0x04]) as i64
+        );
+        assert_eq!(
+            be_bundle.signal[1][0],
+            i16::from_be_bytes([0x03, 0x04]) as i64
+        );
     }
 
     // ─── Gate 4: reciprocal sample-rate transform (G5) ──────────────
@@ -1138,12 +913,14 @@ mod tests {
 
         for k in 0..=payload.len() {
             let _ = read_bundle_from_descriptor(&descriptor, &payload[..k], sidecar.as_bytes());
-            let _ = lower_to_abir_from_descriptor(&descriptor, &payload[..k], sidecar.as_bytes());
         }
 
-        assert!(sidecar.is_ascii(), "sweep corpus must be ASCII-safe to slice");
+        assert!(
+            sidecar.is_ascii(),
+            "sweep corpus must be ASCII-safe to slice"
+        );
         for k in 0..sidecar.len() {
-            let _ = read_bundle_from_descriptor(&descriptor, &payload, sidecar[..k].as_bytes());
+            let _ = read_bundle_from_descriptor(&descriptor, &payload, &sidecar.as_bytes()[..k]);
         }
 
         // Also sweep a handful of adversarial channel-count magnitudes
@@ -1151,7 +928,6 @@ mod tests {
         let mut huge = descriptor.clone();
         huge.channel_count = ChannelCount::Fixed(usize::MAX / 2);
         let _ = read_bundle_from_descriptor(&huge, &payload, sidecar.as_bytes());
-        let _ = lower_to_abir_from_descriptor(&huge, &payload, sidecar.as_bytes());
     }
 
     // ─── Extra coverage (schema completeness, not gate-numbered) ────
@@ -1174,8 +950,7 @@ mod tests {
         d.sample_rate = SampleRateSpec::Fixed(100.0);
         d.sidecar_keys = vec!["sidecar_json".to_string(), "payload".to_string()];
         let payload = vec![1u8, 0, 2, 0];
-        let sidecar =
-            b"{\"channels\":[\"a\"],\"phys_min\":[-1.0],\"phys_max\":[1.0]}".to_vec();
+        let sidecar = b"{\"channels\":[\"a\"],\"phys_min\":[-1.0],\"phys_max\":[1.0]}".to_vec();
         let bundle = read_bundle_from_descriptor(&d, &payload, &sidecar).unwrap();
         assert_eq!(bundle.sidecar.len(), 2);
         assert_eq!(bundle.sidecar_first("sidecar_json").unwrap().bytes, sidecar);
@@ -1194,33 +969,5 @@ mod tests {
         let sidecar = b"{\"channels\":[\"a\"],\"phys_min\":[-1.0],\"phys_max\":[1.0]}";
         let bundle = read_bundle_from_descriptor(&d, &bytes, sidecar).unwrap();
         assert_eq!(bundle.signal[0], vec![0x7F_FFFF_i64, -1, -8_388_608]);
-
-        let abir = lower_to_abir_from_descriptor(&d, &bytes, sidecar).unwrap();
-        assert!(matches!(abir.channels[0].data, Column::I24(_)));
-        assert_eq!(
-            abir.channels[0].data.window_i64(0, 3).as_ref(),
-            &[0x7F_FFFF_i64, -1, -8_388_608]
-        );
-    }
-
-    #[test]
-    fn channel_modality_rule_selects_format_hint() {
-        use abir::{Ecg, Modality};
-
-        let mut d = descriptor_for(DescriptorDtype::I16, DescriptorOrientation::Multiplexed);
-        d.channel_count = ChannelCount::Fixed(3);
-        d.sample_rate = SampleRateSpec::Fixed(250.0);
-        d.channel_modality = ChannelModality {
-            rules: vec![ChannelModalityRule {
-                pattern: "lead".to_string(),
-                modality: "ECG".to_string(),
-            }],
-            default: None,
-        };
-        let bytes = raw_payload_int16(3, 10, true);
-        let sidecar = b"{\"channels\":[\"Lead I\",\"Lead II\",\"V1\"],\
-                          \"phys_min\":[-1.0,-1.0,-1.0],\"phys_max\":[1.0,1.0,1.0]}";
-        let abir = lower_to_abir_from_descriptor(&d, &bytes, sidecar).unwrap();
-        assert_eq!(abir.provenance().tag, Ecg::TAG);
     }
 }

@@ -25,28 +25,29 @@ pub mod cnt;
 // ADR 0069 Pillar 3 / S5 Increment 3 (task #20): the format-description
 // DSL — declares a fixed-layout reader as `serde`-derivable DATA
 // (`FormatDescriptor`) instead of hand-written Rust, interpreted by
-// `read_bundle_from_descriptor` / `lower_to_abir_from_descriptor`. Same
+// `read_bundle_from_descriptor`. Same
 // `archive`-feature gate as every other module here (inherited from
 // `pub mod source;` in lib.rs); no additional cfg needed.
 pub mod descriptor;
 // ADR 0074 Track I: the per-dataset ingest manifest (serde JSON → authoritative
 // modality). Host-only — `serde_json` is linked under `archive`.
-#[cfg(feature = "archive")]
-pub mod ingest_manifest;
 #[cfg(feature = "dicom")]
 pub mod dicom;
 pub mod edf_reader;
 pub mod eeglab;
+#[cfg(feature = "archive")]
+pub mod ingest_manifest;
 pub mod raw;
 pub mod reader;
+pub mod semantic;
 
 pub use brainvision::BrainVisionReader;
 pub use bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 pub use cnt::CntReader;
 pub use descriptor::{
-    ChannelCount, ChannelModality, ChannelModalityRule, DescriptorDtype, DescriptorError,
-    DescriptorOrientation, Endian, FormatDescriptor, SampleRateSpec, lower_to_abir_from_descriptor,
-    read_bundle_from_descriptor,
+    read_bundle_from_descriptor, ChannelCount, ChannelModality, ChannelModalityRule,
+    DescriptorDtype, DescriptorError, DescriptorOrientation, Endian, FormatDescriptor,
+    SampleRateSpec,
 };
 #[cfg(feature = "dicom")]
 pub use dicom::DicomWaveformReader;
@@ -54,3 +55,9 @@ pub use edf_reader::EdfReader;
 pub use eeglab::EeglabReader;
 pub use raw::RawReader;
 pub use reader::SignalSourceReader;
+pub use semantic::{
+    from_signal_bundle, from_signal_bundle_with_interchange_bound_sources,
+    from_signal_bundle_with_overlays, from_signal_bundle_with_semantics, from_uniform_signal_view,
+    SemanticChannelMapping, SemanticEventMapping, SemanticFidelityReport, SemanticMappingReport,
+    SemanticRead, SemanticSourceCapsule, SemanticSourceObject, SemanticTimedEvent,
+};

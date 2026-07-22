@@ -1,5 +1,5 @@
 //! ADR 0074 Track N — the FSQ→rANS neural **body** codec (the bytes past the
-//! BCS1-Lmq header).
+//! outer BCS2 LMQ packet).
 //!
 //! Backend-independent: it operates on already-produced FSQ tokens (unsigned
 //! symbols in `[0, alphabet)`) + the per-timestep schedule, entropy-codes the
@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use lamquant_lml_mcu::rans;
 
-/// Body-format version (the first byte of the BCS1-Lmq body).
+/// Body-format version (the first byte of the LMQ token body).
 pub const LMQ_BODY_VERSION: u8 = 1;
 
 /// Failure encoding/decoding a neural body.
@@ -92,8 +92,8 @@ pub fn decode_body(buf: &[u8]) -> Result<(Vec<i64>, Vec<u8>, u16), BodyError> {
 
     let (freq, start, m) = build_tables(&counts)?;
     let cum2sym = build_cum2sym(&freq, &start, m);
-    let tokens =
-        rans::decode(rans_data, &freq, &start, &cum2sym, m, n_symbols).map_err(|_| BodyError::Rans)?;
+    let tokens = rans::decode(rans_data, &freq, &start, &cum2sym, m, n_symbols)
+        .map_err(|_| BodyError::Rans)?;
     Ok((tokens, schedule, alphabet as u16))
 }
 
@@ -186,7 +186,10 @@ mod tests {
     #[test]
     fn decode_body_rejects_truncation_and_bad_version() {
         let body = encode_body(&[0, 1, 2], &[3, 3, 3], &[2, 2, 2]).unwrap();
-        assert_eq!(decode_body(&body[..body.len() - 2]), Err(BodyError::Truncated));
+        assert_eq!(
+            decode_body(&body[..body.len() - 2]),
+            Err(BodyError::Truncated)
+        );
         let mut bad = body.clone();
         bad[0] = 0xFF;
         assert_eq!(decode_body(&bad), Err(BodyError::BadVersion(0xFF)));

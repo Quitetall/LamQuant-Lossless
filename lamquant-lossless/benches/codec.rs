@@ -25,8 +25,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use std::time::Duration;
 
-use abir::Abir;
-use lamquant_core::abir_container::write_abir_to_vec;
 use lamquant_core::backend::{compress_with_backend, ComputeBackend};
 use lamquant_core::container;
 use lamquant_core::golomb;
@@ -172,8 +170,8 @@ fn bench_decompress_multi_channel(c: &mut Criterion) {
     let signal = synth_signal(32, 2500, 0xCAFE_BABE);
     let bytes = 32 * 2500 * SAMPLE_BYTES;
     // Pre-encode once outside the timed loop.
-    let encoded = lamquant_core::lml::compress(&signal, LOSSLESS_NOISE_BITS)
-        .expect("setup compress");
+    let encoded =
+        lamquant_core::lml::compress(&signal, LOSSLESS_NOISE_BITS).expect("setup compress");
 
     let mut group = c.benchmark_group("decompress_multi_channel_32ch");
     group.throughput(Throughput::Bytes(bytes as u64));
@@ -249,20 +247,7 @@ fn bench_container_roundtrip(c: &mut Criterion) {
     group.finish();
 }
 
-/// ADR 0069 L6.3 — the zero-copy view-kernel payoff bench. Multi-window
-/// multi-channel (32 ch × 100 000 samples, 2500-sample window ⇒ 40 windows)
-/// is where the killed per-window `Abir::window_views(...).iter().map(|c|
-/// c.to_vec()).collect()` allocation (the L6.2-era shape) would show up
-/// most: 40 windows × 32 channels = 1280 per-window-per-channel `Vec<i64>`
-/// allocations under the old materialize-then-encode path, all now avoided
-/// by `write_abir` dispatching through `compress_with_mode_views` /
-/// `compress_with_mode_parallel_views` directly off the `Abir`'s `Cow`
-/// borrows. `write_abir_to_vec` is the one path that exercises this — it's
-/// the only public entry point over an `Abir` (there is no "materializing"
-/// twin still in the tree to A/B directly; the before/after comparison is
-/// this bench's own before/after across the L6.2 → L6.3 commits, not two
-/// arms in one run).
-fn bench_write_abir(c: &mut Criterion) {
+fn bench_container_roundtrip_32ch_100k(c: &mut Criterion) {
     let n_ch = 32usize;
     let total = 100_000usize;
     let window = 2500usize;
@@ -270,9 +255,8 @@ fn bench_write_abir(c: &mut Criterion) {
     let signal = synth_signal(n_ch, total, 0xABAB_CDCD_EFEF_0101);
     let bytes = n_ch * total * SAMPLE_BYTES;
     let metadata = r#"{"format":"synthetic","bench":true}"#;
-    let abir = Abir::from_channels_i64(signal, sample_rate);
 
-    let mut group = c.benchmark_group("write_abir_32ch_100k");
+    let mut group = c.benchmark_group("container_roundtrip_32ch_100k");
     group.throughput(Throughput::Bytes(bytes as u64));
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(20);
@@ -280,33 +264,35 @@ fn bench_write_abir(c: &mut Criterion) {
     lamquant_core::backend::set_global_backend(ComputeBackend::Firmware);
     group.bench_function("firmware", |b| {
         b.iter(|| {
-            write_abir_to_vec(
-                black_box(&abir),
+            let mut sink = Vec::with_capacity(bytes / 2);
+            container::write_into(
+                black_box(&mut sink),
+                &signal,
                 sample_rate,
                 window,
                 LOSSLESS_NOISE_BITS,
                 metadata,
                 LpcMode::default(),
-                None,
-                None,
             )
-            .expect("write_abir_to_vec (firmware)")
+            .expect("write_into (firmware)");
+            sink
         });
     });
     lamquant_core::backend::set_global_backend(ComputeBackend::Desktop);
     group.bench_function("desktop_parallel", |b| {
         b.iter(|| {
-            write_abir_to_vec(
-                black_box(&abir),
+            let mut sink = Vec::with_capacity(bytes / 2);
+            container::write_into(
+                black_box(&mut sink),
+                &signal,
                 sample_rate,
                 window,
                 LOSSLESS_NOISE_BITS,
                 metadata,
                 LpcMode::default(),
-                None,
-                None,
             )
-            .expect("write_abir_to_vec (desktop)")
+            .expect("write_into (desktop)");
+            sink
         });
     });
 
@@ -434,8 +420,7 @@ fn bench_window_size_sweep(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(bytes as u64));
         group.bench_function(format!("n_{}", t), |b| {
             b.iter(|| {
-                let _ = lml::compress(black_box(&signal), LOSSLESS_NOISE_BITS)
-                    .expect("compress");
+                let _ = lml::compress(black_box(&signal), LOSSLESS_NOISE_BITS).expect("compress");
             });
         });
     }
@@ -464,7 +449,7 @@ criterion_group!(
     bench_compress_multi_channel,
     bench_decompress_multi_channel,
     bench_container_roundtrip,
-    bench_write_abir,
+    bench_container_roundtrip_32ch_100k,
     bench_stage_lifting_forward,
     bench_stage_lpc_analyze,
     bench_stage_golomb_encode,

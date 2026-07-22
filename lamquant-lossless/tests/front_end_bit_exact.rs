@@ -6,10 +6,10 @@
 //!     `lml::compress` → sha256. Locks the per-window LML1 payload — the backend
 //!     invariant that must NEVER change however the front-end is rewritten.
 //!   * **container** (`--features archive`): synthetic signals →
-//!     `container::write_into(.., "{}", LpcMode::default())` → sha256 of the FULL
-//!     `.lml` (32-byte header + stamped metadata + window index + payloads + footer).
+//!     `container::write_into(.., "{}", LpcMode::default())` → authenticated
+//!     ABIR/BCS2 bundle whose enclosed LML1 packets match the frozen kernel.
 //!   * **EDF→container** (`--features archive`): a synth EDF → `edf::read_edf` →
-//!     the same `.lml` sink → sha256. Locks that the EDF front-end serializes identically.
+//!     the same `.lml` sink. Locks that the EDF front-end serializes identically.
 //!   * **front-end (NWB)** (`--features nwb`): an h5py fixture → `nwb::read_bundle`
 //!     → sha256 of the parsed IR signal. Skips when python3+h5py absent.
 //!
@@ -20,20 +20,21 @@
 //!
 //! Regenerate goldens after an INTENTIONAL change (reference Linux x86_64 toolchain
 //! + pinned Cargo.lock; record the why in the commit message):
-//!   LAMQUANT_REGEN_FRONTEND=1 cargo test --features archive --test front_end_bit_exact -- --nocapture  # container/EDF
+//!   LAMQUANT_REGEN_FRONTEND=1 cargo test --features archive --test front_end_bit_exact -- --nocapture  # LML1 wire
 //!   LAMQUANT_REGEN_FRONTEND=1 cargo test --features nwb     --test front_end_bit_exact -- --nocapture  # + NWB
 //! then paste the printed shas into the GOLDEN_* tables below.
 
 use sha2::{Digest, Sha256};
 
 /// sha256 over channel-major signal: count, then per-channel (len + i64-LE samples).
+#[cfg(feature = "nwb")]
 fn sha_signal(signal: &[Vec<i64>]) -> String {
     let mut h = Sha256::new();
     h.update((signal.len() as u64).to_le_bytes());
     for ch in signal {
         h.update((ch.len() as u64).to_le_bytes());
-        for &s in ch {
-            h.update(s.to_le_bytes());
+        for &sample in ch {
+            h.update(sample.to_le_bytes());
         }
     }
     format!("{:x}", h.finalize())
@@ -56,16 +57,28 @@ fn fixtures() -> Vec<(&'static str, Vec<Vec<i64>>)> {
     let flat: Vec<i64> = vec![42; 2000];
     vec![
         ("single_ramp", vec![ramp.clone()]),
-        ("multi_4ch", vec![ramp.clone(), sine.clone(), flat.clone(), ramp.clone()]),
+        (
+            "multi_4ch",
+            vec![ramp.clone(), sine.clone(), flat.clone(), ramp.clone()],
+        ),
         ("flat_const", vec![flat]),
     ]
 }
 
 // Codec-wire goldens (lossless, noise_bits=0). Captured on main pre-IR-refactor.
 const GOLDEN_WIRE: &[(&str, &str)] = &[
-    ("single_ramp", "f3a890974f399ea71cde88ca7073c4bfa31765bd46d0c5d2e75170d75111d3d4"),
-    ("multi_4ch", "fb45d32714be7746c24be2d2c8cba83da7722f4cc69ea0848c7bf59a83cca64b"),
-    ("flat_const", "32faeba1ce70f364add756a863cad497da3ed48715fa12653832916b33226a3b"),
+    (
+        "single_ramp",
+        "f3a890974f399ea71cde88ca7073c4bfa31765bd46d0c5d2e75170d75111d3d4",
+    ),
+    (
+        "multi_4ch",
+        "fb45d32714be7746c24be2d2c8cba83da7722f4cc69ea0848c7bf59a83cca64b",
+    ),
+    (
+        "flat_const",
+        "32faeba1ce70f364add756a863cad497da3ed48715fa12653832916b33226a3b",
+    ),
 ];
 
 #[test]
@@ -132,12 +145,11 @@ sys.exit(0)
     }
 }
 
-/// Full-container `.lml` byte-sha goldens (S1, ADR 0069). Locks the IR→container
-/// framing under fixed `"{}"` metadata — 32-byte header + serde codec-stamp + u32
-/// window index + per-window `[u32 len][LML1 packet]` + `LMLFOOT1` footer. The sha is
-/// over the WHOLE buffer, so any header/metadata/payload/footer byte-flip or a
-/// truncation fails. This is the Step-A guard for the shared IR→container sink the
-/// ABIR refactor rewrites.
+/// Current-container gates (ADR 0139/0143). Locks the canonical ABIR/BCS2
+/// envelope, exact reopen, same-process determinism, and the frozen LML1 packet
+/// nested inside it. The full bundle intentionally includes an implementation
+/// build ID (target, profile, features, compiler), so a cross-build whole-file
+/// hash would reject valid provenance changes rather than wire-format drift.
 ///
 /// SCOPE: it does NOT hash the bin/lml.rs CLI metadata (encoder_version /
 /// source_file / zstd header) — that version-fragile path is out of Step-A scope and
@@ -152,22 +164,7 @@ mod container_full {
     use super::*;
     use lamquant_core::lpc::LpcMode;
 
-    // Full `.lml` of the three synthetic fixtures (lossless, `"{}"` metadata).
-    // Captured on main (Linux x86_64) pre-ABIR-refactor.
-    const GOLDEN_CONTAINER: &[(&str, &str)] = &[
-        ("single_ramp", "a00664d6a34bd203a7161b5a7db9b21c9c406bccfd49e6c4e33b2d22b499611d"),
-        ("multi_4ch", "faec6946dbbc40373908a55f6722b059ec8a3fc0ba2c73dfcca6e879a262ce3e"),
-        ("flat_const", "7fc7d5066e45aaf86b7838d2f6becdcc24a93f8942850a954ac82d079c82e0d9"),
-    ];
-
-    // Full `.lml` of the EDF reader's decoded signal (single channel, 250 Hz).
-    // EXPECTED to equal `single_ramp` above: `synth_single_channel_edf` encodes the
-    // same `(t%257)-128` ramp, so `read_edf` decodes back to the identical signal —
-    // the match is a correctness cross-check of the EDF reader, not a copy-paste.
-    const GOLDEN_EDF_CONTAINER: &str =
-        "a00664d6a34bd203a7161b5a7db9b21c9c406bccfd49e6c4e33b2d22b499611d";
-
-    /// Encode a signal to a full `.lml` in memory and sha it. Pins every
+    /// Encode a signal to a full `.lml` in memory. Pins every
     /// byte-determining input: 250 Hz (exactly representable → stable
     /// `sample_rate_mhz`), 256-sample windows, `noise_bits=0`, `"{}"` metadata
     /// (the only metadata in the bytes is the deterministic codec stamp serde
@@ -176,11 +173,19 @@ mod container_full {
     /// (Desktop/rayon); the bytes are backend-independent by the
     /// `byte_equal_backends` contract (Firmware == Desktop), and this file never
     /// sets a backend, so there is no process-wide-`AtomicU8` ordering hazard.
-    fn container_sha(signal: &[Vec<i64>]) -> String {
+    fn container_bytes(signal: &[Vec<i64>]) -> Vec<u8> {
         let mut buf = Vec::new();
-        lamquant_core::container::write_into(&mut buf, signal, 250.0, 256, 0, "{}", LpcMode::default())
-            .expect("write_into");
-        sha_bytes(&buf)
+        lamquant_core::container::write_into(
+            &mut buf,
+            signal,
+            250.0,
+            256,
+            0,
+            "{}",
+            LpcMode::default(),
+        )
+        .expect("write_into");
+        buf
     }
 
     /// Refuse to run with any byte-affecting encoder env override set. The first
@@ -208,21 +213,34 @@ mod container_full {
     fn container_bytes_locked() {
         assert_clean_env();
         for (name, signal) in fixtures() {
-            let got = container_sha(&signal);
-            // Same-process purity check: a second encode MUST be byte-identical.
-            // (This proves the encoder is deterministic WITHIN a process; it does NOT
-            // probe cross-process variance — Rust HashMap is seeded once per process,
-            // the lossless path reads no clock, and rayon collect is order-preserving.
-            // Cross-process/platform identity rests on explicit little-endian writes +
-            // BTreeMap metadata + deadline-free LPC, and is re-checked by CI re-running
-            // this test in a fresh process.)
-            assert_eq!(got, container_sha(&signal), "non-deterministic .lml encode for {name}");
-            if regen() {
-                println!("CONTAINER {name} = {got}");
-                continue;
+            let bytes = container_bytes(&signal);
+            assert_eq!(&bytes[..4], b"ABIR", "{name} did not use current BCS2 wire");
+            assert_eq!(
+                bytes,
+                container_bytes(&signal),
+                "non-deterministic encode for {name}"
+            );
+            let opened = lamquant_core::container::open(&bytes).expect("open current container");
+            assert_eq!(opened.signal(), signal, "semantic reopen changed {name}");
+            let mut start = 0_usize;
+            for (ordinal, (packet, &samples)) in opened
+                .packets()
+                .zip(opened.packet_sample_counts())
+                .enumerate()
+            {
+                let end = start + samples;
+                let window = signal
+                    .iter()
+                    .map(|channel| channel[start..end].to_vec())
+                    .collect::<Vec<_>>();
+                let expected = lamquant_core::lml::compress(&window, 0).unwrap();
+                assert_eq!(
+                    packet, expected,
+                    "nested LML1 packet {ordinal} changed for {name}"
+                );
+                start = end;
             }
-            let want = GOLDEN_CONTAINER.iter().find(|(n, _)| *n == name).unwrap().1;
-            assert_eq!(got, want, "full .lml container bytes changed for {name}");
+            assert_eq!(start, signal[0].len(), "incomplete packet sequence");
         }
     }
 
@@ -239,12 +257,17 @@ mod container_full {
         let path = dir.path().join("synth.edf");
         std::fs::write(&path, &edf_bytes).unwrap();
         let edf = lamquant_core::edf::read_edf(&path).expect("read_edf");
-        let got = container_sha(&edf.signal);
-        assert_eq!(got, container_sha(&edf.signal), "non-deterministic .lml encode for EDF signal");
-        if regen() {
-            println!("EDF_CONTAINER = {got}");
-            return;
-        }
-        assert_eq!(got, GOLDEN_EDF_CONTAINER, "full .lml container bytes changed for EDF reader signal");
+        let got = container_bytes(&edf.signal);
+        assert_eq!(
+            got,
+            container_bytes(&edf.signal),
+            "non-deterministic .lml encode for EDF signal"
+        );
+        let ramp = fixtures().remove(0).1;
+        assert_eq!(
+            got,
+            container_bytes(&ramp),
+            "EDF and direct signal paths emitted different current containers"
+        );
     }
 }

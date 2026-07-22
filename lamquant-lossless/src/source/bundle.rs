@@ -186,9 +186,15 @@ mod tests {
     #[test]
     fn source_basename_strips_the_directory() {
         use std::path::Path;
-        assert_eq!(source_basename(Path::new("/home/alice/data/patient001.edf")), "patient001.edf");
+        assert_eq!(
+            source_basename(Path::new("/home/alice/data/patient001.edf")),
+            "patient001.edf"
+        );
         assert_eq!(source_basename(Path::new("rec.vhdr")), "rec.vhdr");
-        assert_eq!(source_basename(Path::new("../scratch/sub 02.set")), "sub 02.set");
+        assert_eq!(
+            source_basename(Path::new("../scratch/sub 02.set")),
+            "sub 02.set"
+        );
         assert_eq!(source_basename(Path::new("/")), "");
     }
 

@@ -1,6 +1,6 @@
 //! CLI embedded-metadata snapshot — the **L5(a) safety net** for the ABIR
 //! migration (ADR 0069). Freezes the EXACT metadata JSON string the `lml`
-//! binary embeds in a `.lml` container, per input format.
+//! binary embeds in a current ABIR/BCS2 `.lml` bundle, per input format.
 //!
 //! `front_end_bit_exact.rs`'s container/EDF locks deliberately pin
 //! `metadata_json = "{}"` — they lock the shared IR→container byte path, NOT
@@ -19,18 +19,10 @@
 //! normalize the fields that are inherently run-to-run volatile (tempdir
 //! path, crate version), and pin `sha256(normalized)`.
 //!
-//! **Why the container round-trip re-serializes the JSON:** every
-//! `container::write_into*` call routes through
-//! `lamquant-lml-legacy::container::metadata_with_codec_mode`, which parses
-//! the hand-built `format!` JSON via `serde_json::Value`, inserts
-//! `codec_mode` / (`lossless_mode` | `max_error` | `target_bps`) / `lpc_mode`,
-//! and re-serializes. Since this crate's `serde_json` is NOT built with the
-//! `preserve_order` feature, `serde_json::Value::Object` is a `BTreeMap` —
-//! keys come back **alphabetically sorted**, not in the original `format!`
-//! order. That's fine: we hash whatever `lml encode` + `container::read_file`
-//! actually hand back (the CURRENT observable behavior), not the source
-//! `format!` template. A refactor that changes field order, field names, or
-//! field values will still flip this golden.
+//! The current profile stores the caller-provided metadata string as a
+//! semantic source key without routing it through the retired BCS1 metadata
+//! augmenter. We hash exactly what `lml encode` + `container::read_file`
+//! return, so field order, names, and values remain observable behavior.
 //!
 //! Volatile fields normalized before hashing (see `NORMALIZED FIELDS` note
 //! on each fixture fn below):
@@ -316,27 +308,27 @@ fn eeglab_fixture(dir: &Path) -> PathBuf {
 const FROZEN: &[(&str, &str)] = &[
     (
         "edf",
-        "e3c6d2d433ae3e38a6f529be65a1db37e93c9d697c975e54d91d76f93a53f9cd",
+        "6302641dafd8ce1c25ce6f796fa30c1dc9c56a502d01cd094faabbff6f898fce",
     ),
     (
         "brainvision",
-        "2a2fff6b159cd6a293fd722b2467e5eb5de6fd02c241dbbf568b64a2b791f6c2",
+        "f82285495af85b120cd36f728395546def520d00261d30ea638db3792deaa8f8",
     ),
     (
         "raw",
-        "f19772945101d06d8d605265cbfd5c4e5000ab0216dd0164a15523f2901d37f0",
+        "f88beda507ad61de1f127c87e9cb286e18ffa1d7b03dba7910a88c51f40812fe",
     ),
     (
         "cnt",
-        "78a8d7493c2c2a8e579fe5ebf0831a54f71a560c410e4b4a9302fbcc29b16680",
+        "0b953f37383aad5fa8dd03a45a4d3834c4fb5bae6dc9e22571af7dac8a8613f9",
     ),
     (
         "dicom",
-        "f282987e7ccf279d7e3aeb07cda5e76f9ab5e341e6025032f25314bd3fcbbcd7",
+        "ede6f12a370997145a602645198bb7286b28789a8e0720c7876c3885b15a614b",
     ),
     (
         "eeglab",
-        "6abe26ffe9badaa0380565668ef5720ad677d795b647252d7182cf8319147a64",
+        "5a8933b8bc4a24ce9e2b911d31e0ae44c8c1920cf057dcc86c19744153014811",
     ),
 ];
 

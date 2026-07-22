@@ -6,7 +6,10 @@
       "authority_sha256": "6fba22693b737742468963cfa79b677c178ee597ea5abc5d2394b2088b7c82cf",
       "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
       "launcher_sha256": "7c2b725f66973df30e3bc4e507182cfc6a70b13c1a4622818a1a46364a06cf3b",
-      "profile": "bids.1.11.1.single-edf-eeg",
+      "profiles": [
+        "bids.1.11.1.single-edf-eeg",
+        "bids.1.11.1.single-edf-eeg-events"
+      ],
       "python_runtime": {
         "distributions": {
           "bids_validator_deno": "7da43f0f0eae3e8e712eb57177ffc2b23ebf693bb5b53a0f896b5e45ef7b65f9"
