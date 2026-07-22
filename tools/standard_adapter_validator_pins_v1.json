@@ -1,0 +1,74 @@
+{
+  "manifest_version": 1,
+  "validators": {
+    "bids-validator": {
+      "authority": "conformance",
+      "authority_sha256": "6fba22693b737742468963cfa79b677c178ee597ea5abc5d2394b2088b7c82cf",
+      "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+      "launcher_sha256": "7c2b725f66973df30e3bc4e507182cfc6a70b13c1a4622818a1a46364a06cf3b",
+      "profile": "bids.1.11.1.single-edf-eeg",
+      "python_runtime": {
+        "distributions": {
+          "bids_validator_deno": "7da43f0f0eae3e8e712eb57177ffc2b23ebf693bb5b53a0f896b5e45ef7b65f9"
+        },
+        "interpreter_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+        "startup_files": {
+          "_virtualenv.pth": "69ac3d8f27e679c81b94ab30b3b56e9cd138219b1ba94a1fa3606d5a76a1433d",
+          "_virtualenv.py": "cfb3db86aaa53bb62b5ff764970bec2d71c9228590a0ebec57f6ec926cc0bf1a"
+        }
+      },
+      "version": "3.0.1"
+    },
+    "dciodvfy": {
+      "authority": "supporting-only",
+      "authority_sha256": "9fb2965975507fb89b35bc09e2cb5993c7cbaa8e6d7a046b9a9b40e96c452807",
+      "executable_sha256": "fe93a0f0d2694eee60ce774be35cb8070daeda219e6219e51ecf7e9d2058a818",
+      "limitation": "dicom3tools 20240118 predates the PS3 2026c profile edition",
+      "profile": "dicom.ps3.2026c.ecg-i16",
+      "version": "20240118"
+    },
+    "nwbinspector": {
+      "authority": "supporting-only",
+      "authority_sha256": "8e628d90c7205743d82fe56131804b9027fc701fa241f5c4b28410d9d86d6f26",
+      "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+      "launcher_sha256": "66f16b8c902de41e17169641d3b69c009fe34c97a81af5197c23fe56bb137565",
+      "profile": "nwb.2.10.0.single-integer-timeseries",
+      "python_runtime": {
+        "distributions": {
+          "h5py": "429a18b30ad5dc492dc1c0d8fe15d167951532f70bee005d753637f7d6ee406f",
+          "hdmf": "e453b74472e59e0bbc2ea9babda1a59b2521901ac84ce9fc7f66b7f239dbd695",
+          "numpy": "5f5e10c0e147d82b44354a3d02148e7793f0c6b2708cd4f87201e698b82d5471",
+          "nwbinspector": "8fbea5d218fb99864c688c9c778adc0e0fc51516f67d0180dda1ddf79c439618",
+          "pynwb": "c2d47afa00ee56fa2551b7915912d3a89b674acd926cff5571881a3efe49735f"
+        },
+        "interpreter_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+        "startup_files": {
+          "_virtualenv.pth": "69ac3d8f27e679c81b94ab30b3b56e9cd138219b1ba94a1fa3606d5a76a1433d",
+          "_virtualenv.py": "cfb3db86aaa53bb62b5ff764970bec2d71c9228590a0ebec57f6ec926cc0bf1a"
+        }
+      },
+      "version": "0.7.2"
+    },
+    "pynwb.validate": {
+      "authority": "conformance",
+      "authority_sha256": "2660fbe88cf78bd6a5b42de63a1c02478086e63475173acfbae0f98e7a9608f5",
+      "executable_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+      "launcher_sha256": "c5cca25b192b127e9bb885a8fe783851ac62088b643e832dbc981d582d6e6085",
+      "profile": "nwb.2.10.0.single-integer-timeseries",
+      "python_runtime": {
+        "distributions": {
+          "h5py": "429a18b30ad5dc492dc1c0d8fe15d167951532f70bee005d753637f7d6ee406f",
+          "hdmf": "e453b74472e59e0bbc2ea9babda1a59b2521901ac84ce9fc7f66b7f239dbd695",
+          "numpy": "5f5e10c0e147d82b44354a3d02148e7793f0c6b2708cd4f87201e698b82d5471",
+          "pynwb": "c2d47afa00ee56fa2551b7915912d3a89b674acd926cff5571881a3efe49735f"
+        },
+        "interpreter_sha256": "b200d6c7ae464af64f81808ba246a856b1a1cdf3b2ae7088d37d87d31aebe9ff",
+        "startup_files": {
+          "_virtualenv.pth": "69ac3d8f27e679c81b94ab30b3b56e9cd138219b1ba94a1fa3606d5a76a1433d",
+          "_virtualenv.py": "cfb3db86aaa53bb62b5ff764970bec2d71c9228590a0ebec57f6ec926cc0bf1a"
+        }
+      },
+      "version": "4.0.0"
+    }
+  }
+}

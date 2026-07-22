@@ -1,6 +1,7 @@
 # Pinned generator and NWB validator environment for the bounded ADR 0143
 # fixtures. The DICOM validator (dciodvfy from dicom3tools) is a native tool
 # and is bound separately by executable/package hash in the evidence manifest.
+bids-validator-deno==3.0.1
 h5py==3.16.0
 hdmf==6.1.0
 numpy==2.5.1
