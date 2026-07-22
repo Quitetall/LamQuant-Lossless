@@ -1,0 +1,20 @@
+[package]
+name = "lamquant-standard-adapters"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "8a83d70243d9c9c38edddb67ef57a13fb85efa2c" }
+blake3 = "=1.5.5"
+hdf5-metno = "0.12"
+lamquant-abir-bridge = { path = "../lamquant-abir-bridge" }
+lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom", "nwb"] }
+legacy-abir = { package = "abir", path = "../abir" }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "8a83d70243d9c9c38edddb67ef57a13fb85efa2c" }
+tempfile = "3"
+
+[dev-dependencies]
+lamquant-common = { path = "../lamquant-common" }

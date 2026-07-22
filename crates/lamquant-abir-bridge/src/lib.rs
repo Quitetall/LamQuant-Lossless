@@ -180,6 +180,19 @@ pub fn from_legacy_with_source_capsules<'a, M: legacy::Modality>(
     source: &'a legacy::Abir<M>,
     source_capsules: &[SourceCapsuleMapping],
 ) -> Result<LegacyMapped<'a, M>, BridgeError> {
+    from_legacy_with_source_capsules_and_limits(
+        source,
+        source_capsules,
+        semantic::ValidationLimits::default(),
+    )
+}
+
+/// Convert with caller-supplied structural limits for untrusted imports.
+pub fn from_legacy_with_source_capsules_and_limits<'a, M: legacy::Modality>(
+    source: &'a legacy::Abir<M>,
+    source_capsules: &[SourceCapsuleMapping],
+    limits: semantic::ValidationLimits,
+) -> Result<LegacyMapped<'a, M>, BridgeError> {
     require_little_endian()?;
     source
         .verify()
@@ -294,7 +307,7 @@ pub fn from_legacy_with_source_capsules<'a, M: legacy::Modality>(
         ));
     }
     let dataset = draft
-        .validate(semantic::ValidationLimits::default())
+        .validate(limits)
         .map_err(|report| BridgeError::InvalidSemantic(format!("{report:?}")))?;
 
     Ok(LegacyMapped {
@@ -869,5 +882,15 @@ mod tests {
         assert_eq!(actual.source().namespace(), "adapter.edfplus.1");
         assert_eq!(actual.source().value(), "recording.edf");
         assert_eq!(actual.media_type(), Some("application/edf"));
+    }
+
+    #[test]
+    fn caller_limits_fail_closed_before_dataset_exposure() {
+        let source = legacy_fixture();
+        let limits = semantic::ValidationLimits {
+            max_atoms: 0,
+            ..semantic::ValidationLimits::default()
+        };
+        assert!(from_legacy_with_source_capsules_and_limits(&source, &[], limits).is_err());
     }
 }

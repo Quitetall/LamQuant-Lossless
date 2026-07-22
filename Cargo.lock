@@ -16,6 +16,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "abir-adapter"
+version = "0.1.0"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c#8a83d70243d9c9c38edddb67ef57a13fb85efa2c"
+dependencies = [
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c)",
+ "blake3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3462,6 +3473,21 @@ dependencies = [
  "numpy",
  "pyo3",
  "serde_json",
+]
+
+[[package]]
+name = "lamquant-standard-adapters"
+version = "0.1.0"
+dependencies = [
+ "abir 0.1.0",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c)",
+ "abir-adapter",
+ "blake3",
+ "hdf5-metno",
+ "lamquant-abir-bridge",
+ "lamquant-common",
+ "lamquant-lml",
+ "tempfile",
 ]
 
 [[package]]
