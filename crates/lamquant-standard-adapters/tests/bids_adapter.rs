@@ -16,7 +16,7 @@ impl PayloadResolver for Payloads {
 
 fn bids_source() -> ForeignObject {
     ForeignObject {
-        profile: ProfileId("bids.1.11.1".to_owned()),
+        profile: ProfileId("bids.1.11.1.single-edf-eeg".to_owned()),
         entries: vec![
             ForeignEntry {
                 path: "dataset_description.json".to_owned(),

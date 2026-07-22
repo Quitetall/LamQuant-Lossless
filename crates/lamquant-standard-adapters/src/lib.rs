@@ -111,13 +111,13 @@ impl StandardFileAdapter {
     fn matching_capsules<'a>(
         &self,
         dataset: &'a AbirDataset,
-    ) -> Vec<&'a semantic_abir::SourceCapsule> {
-        let namespace = format!("adapter.{}", self.profile.id.0);
-        dataset
+    ) -> Result<Vec<&'a semantic_abir::SourceCapsule>, AdapterError> {
+        let namespace = binding_namespace(&self.profile.id, dataset)?;
+        Ok(dataset
             .source_capsules()
             .iter()
             .filter(|capsule| capsule.source().namespace() == namespace)
-            .collect()
+            .collect())
     }
 }
 
@@ -152,8 +152,10 @@ impl Adapter for StandardFileAdapter {
         let entry = self.check(source)?;
         let legacy = self.read_legacy(entry)?;
         let source_id = payload_content_id(&entry.bytes);
+        let unbound = from_legacy_with_source_capsules_and_limits(&legacy, &[], limits)
+            .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
         let capsule = SourceCapsuleMapping {
-            namespace: format!("adapter.{}", self.profile.id.0),
+            namespace: binding_namespace(&self.profile.id, &unbound.dataset)?,
             value: entry.path.clone(),
             content_id: source_id,
             media_type: entry.media_type.clone(),
@@ -207,7 +209,7 @@ impl Adapter for StandardFileAdapter {
     }
 
     fn plan_export(&self, dataset: &AbirDataset) -> Result<ExportPlan, AdapterError> {
-        let capsules = self.matching_capsules(dataset);
+        let capsules = self.matching_capsules(dataset)?;
         let unsupported = capsules.len() != 1;
         let mappings = capsules
             .iter()
@@ -245,7 +247,7 @@ impl Adapter for StandardFileAdapter {
                 "dataset lacks one exact EDF source capsule".to_owned(),
             ));
         }
-        let capsule = self.matching_capsules(dataset)[0];
+        let capsule = self.matching_capsules(dataset)?[0];
         let bytes = payloads.resolve(capsule.content_id())?;
         if payload_content_id(&bytes) != capsule.content_id() {
             return Err(AdapterError::MissingPayload(capsule.content_id()));
@@ -292,11 +294,11 @@ impl EdfAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self(StandardFileAdapter::new(
             profile(
-                "edfplus.1",
+                "edfplus.1.signal",
                 "EDF/EDF+/BDF",
-                "EDF+ 1",
+                "EDF+ 1 signal subset",
                 &["application/edf", "application/bdf"],
-                "EDFbrowser",
+                "pyedflib",
             ),
             ParserKind::Edf,
             max_source_bytes,
@@ -310,11 +312,11 @@ impl DicomAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self(StandardFileAdapter::new(
             profile(
-                "dicom.ps3.2026c",
+                "dicom.ps3.2026c.ecg-i16",
                 "DICOM",
-                "PS3 2026c",
+                "PS3 2026c signed 16-bit ECG Waveform subset",
                 &["application/dicom"],
-                "dciodvfy",
+                "pydicom",
             ),
             ParserKind::Dicom,
             max_source_bytes,
@@ -328,11 +330,11 @@ impl NwbAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self(StandardFileAdapter::new(
             profile(
-                "nwb.2.10.0",
+                "nwb.2.10.0.single-integer-timeseries",
                 "NWB",
-                "2.10.0",
+                "2.10.0 single integer acquisition TimeSeries",
                 &["application/x-nwb"],
-                "nwbinspector",
+                "pynwb.validate",
             ),
             ParserKind::Nwb,
             max_source_bytes,
@@ -349,9 +351,9 @@ impl BidsAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self {
             profile: profile(
-                "bids.1.11.1",
+                "bids.1.11.1.single-edf-eeg",
                 "BIDS",
-                "1.11.1",
+                "1.11.1 single EDF/BDF EEG recording",
                 &["application/vnd.bids.dataset"],
                 "bids-validator",
             ),
@@ -418,13 +420,16 @@ impl BidsAdapter {
         Ok(signal)
     }
 
-    fn capsules<'a>(&self, dataset: &'a AbirDataset) -> Vec<&'a semantic_abir::SourceCapsule> {
-        let namespace = format!("adapter.{}", self.profile.id.0);
-        dataset
+    fn capsules<'a>(
+        &self,
+        dataset: &'a AbirDataset,
+    ) -> Result<Vec<&'a semantic_abir::SourceCapsule>, AdapterError> {
+        let namespace = binding_namespace(&self.profile.id, dataset)?;
+        Ok(dataset
             .source_capsules()
             .iter()
             .filter(|capsule| capsule.source().namespace() == namespace)
-            .collect()
+            .collect())
     }
 }
 
@@ -510,7 +515,9 @@ impl Adapter for BidsAdapter {
         let parser =
             StandardFileAdapter::new(self.profile.clone(), ParserKind::Edf, self.max_source_bytes);
         let legacy = parser.read_legacy(signal)?;
-        let namespace = format!("adapter.{}", self.profile.id.0);
+        let unbound = from_legacy_with_source_capsules_and_limits(&legacy, &[], limits)
+            .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+        let namespace = binding_namespace(&self.profile.id, &unbound.dataset)?;
         let capsules = source
             .entries
             .iter()
@@ -581,7 +588,7 @@ impl Adapter for BidsAdapter {
     }
 
     fn plan_export(&self, dataset: &AbirDataset) -> Result<ExportPlan, AdapterError> {
-        let capsules = self.capsules(dataset);
+        let capsules = self.capsules(dataset)?;
         let unsupported = capsules.is_empty();
         let mappings = capsules
             .iter()
@@ -621,7 +628,7 @@ impl Adapter for BidsAdapter {
         }
         let mut entries = Vec::new();
         let mut output_content_ids = Vec::new();
-        for capsule in self.capsules(dataset) {
+        for capsule in self.capsules(dataset)? {
             let bytes = payloads.resolve(capsule.content_id())?;
             if payload_content_id(&bytes) != capsule.content_id() {
                 return Err(AdapterError::MissingPayload(capsule.content_id()));
@@ -692,6 +699,12 @@ fn profile(
             AdapterCapability::Validate,
         ]),
     }
+}
+
+fn binding_namespace(profile: &ProfileId, dataset: &AbirDataset) -> Result<String, AdapterError> {
+    let semantic = semantic_abir::interchange_content_id(dataset)
+        .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+    Ok(format!("adapter.{}.binding.{semantic}", profile.0))
 }
 
 fn valid_relative_path(path: &str) -> bool {

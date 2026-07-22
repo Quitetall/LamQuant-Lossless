@@ -9,7 +9,7 @@ version = "0.1.0"
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c#8a83d70243d9c9c38edddb67ef57a13fb85efa2c"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=7be40e21621121492a996be71d9f9f0490a6efec#7be40e21621121492a996be71d9f9f0490a6efec"
 dependencies = [
  "blake3",
  "serde_json",
@@ -18,9 +18,9 @@ dependencies = [
 [[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c#8a83d70243d9c9c38edddb67ef57a13fb85efa2c"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=7be40e21621121492a996be71d9f9f0490a6efec#7be40e21621121492a996be71d9f9f0490a6efec"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7be40e21621121492a996be71d9f9f0490a6efec)",
  "blake3",
  "serde",
  "serde_json",
@@ -3272,7 +3272,7 @@ name = "lamquant-abir-bridge"
 version = "0.1.0"
 dependencies = [
  "abir 0.1.0",
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7be40e21621121492a996be71d9f9f0490a6efec)",
  "blake3",
  "bytemuck",
 ]
@@ -3480,7 +3480,7 @@ name = "lamquant-standard-adapters"
 version = "0.1.0"
 dependencies = [
  "abir 0.1.0",
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=8a83d70243d9c9c38edddb67ef57a13fb85efa2c)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7be40e21621121492a996be71d9f9f0490a6efec)",
  "abir-adapter",
  "blake3",
  "hdf5-metno",

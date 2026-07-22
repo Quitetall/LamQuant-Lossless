@@ -1,4 +1,4 @@
-# NWB mapping profile `nwb.2.10.0`
+# NWB mapping profile `nwb.2.10.0.single-integer-timeseries`
 
 - Current semantic coverage is one acquisition TimeSeries containing
   little-endian integer data and a finite positive `starting_time.rate`.

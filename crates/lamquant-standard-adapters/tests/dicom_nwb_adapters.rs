@@ -42,7 +42,7 @@ fn dicom_waveform_maps_semantics_and_restores_exact_source() {
     assert_semantic_round_trip(
         &DicomAdapter::new(16 * 1024 * 1024),
         ForeignObject {
-            profile: ProfileId("dicom.ps3.2026c".to_owned()),
+            profile: ProfileId("dicom.ps3.2026c.ecg-i16".to_owned()),
             entries: vec![ForeignEntry {
                 path: "12lead_ecg.dcm".to_owned(),
                 media_type: Some("application/dicom".to_owned()),
@@ -73,7 +73,7 @@ fn nwb_integer_timeseries_maps_semantics_and_restores_exact_source() {
     assert_semantic_round_trip(
         &NwbAdapter::new(16 * 1024 * 1024),
         ForeignObject {
-            profile: ProfileId("nwb.2.10.0".to_owned()),
+            profile: ProfileId("nwb.2.10.0.single-integer-timeseries".to_owned()),
             entries: vec![ForeignEntry {
                 path: "fixture.nwb".to_owned(),
                 media_type: Some("application/x-nwb".to_owned()),

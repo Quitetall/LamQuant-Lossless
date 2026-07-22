@@ -1,7 +1,9 @@
 use abir_adapter::{Adapter, ForeignEntry, ForeignObject, PayloadResolver, ProfileId};
+use lamquant_abir_bridge::{from_legacy_with_source_capsules_and_limits, SourceCapsuleMapping};
 use lamquant_standard_adapters::{payload_content_id, EdfAdapter};
 use semantic_abir::{ContentId, ValidationLimits};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
 
@@ -18,7 +20,7 @@ impl PayloadResolver for Payloads {
 fn edf_import_maps_samples_and_restores_exact_source() {
     let bytes = lamquant_common::ingest::synth_single_channel_edf(&[1, -2, 3, -4], 250.0);
     let source = ForeignObject {
-        profile: ProfileId("edfplus.1".to_owned()),
+        profile: ProfileId("edfplus.1.signal".to_owned()),
         entries: vec![ForeignEntry {
             path: "recording.edf".to_owned(),
             media_type: Some("application/edf".to_owned()),
@@ -55,7 +57,7 @@ fn edf_import_maps_samples_and_restores_exact_source() {
 fn edf_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
     let adapter = EdfAdapter::new(1024);
     let wrong = ForeignObject {
-        profile: ProfileId("nwb.2.10.0".to_owned()),
+        profile: ProfileId("nwb.2.10.0.single-integer-timeseries".to_owned()),
         entries: vec![ForeignEntry {
             path: "bad.edf".to_owned(),
             media_type: None,
@@ -65,7 +67,7 @@ fn edf_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
     assert!(adapter.inspect(&wrong).is_err());
 
     let multiple = ForeignObject {
-        profile: ProfileId("edfplus.1".to_owned()),
+        profile: ProfileId("edfplus.1.signal".to_owned()),
         entries: vec![
             ForeignEntry {
                 path: "a.edf".to_owned(),
@@ -84,7 +86,7 @@ fn edf_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
         .is_err());
 
     let malformed = ForeignObject {
-        profile: ProfileId("edfplus.1".to_owned()),
+        profile: ProfileId("edfplus.1.signal".to_owned()),
         entries: vec![ForeignEntry {
             path: "bad.edf".to_owned(),
             media_type: None,
@@ -96,9 +98,9 @@ fn edf_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
 
 #[test]
 fn edf_import_honors_caller_validation_limits() {
-    let bytes = lamquant_common::ingest::synth_single_channel_edf(&[1, 2], 250.0);
+    let bytes = lamquant_common::ingest::synth_single_channel_edf(&[1, 2, 3, 4], 250.0);
     let source = ForeignObject {
-        profile: ProfileId("edfplus.1".to_owned()),
+        profile: ProfileId("edfplus.1.signal".to_owned()),
         entries: vec![ForeignEntry {
             path: "recording.edf".to_owned(),
             media_type: Some("application/edf".to_owned()),
@@ -112,4 +114,49 @@ fn edf_import_honors_caller_validation_limits() {
     assert!(EdfAdapter::new(1024 * 1024)
         .import(&source, limits)
         .is_err());
+}
+
+#[test]
+fn stale_source_capsule_cannot_authorize_semantic_equivalence() {
+    let bytes = lamquant_common::ingest::synth_single_channel_edf(&[1, 2, 3, 4], 250.0);
+    let source = ForeignObject {
+        profile: ProfileId("edfplus.1.signal".to_owned()),
+        entries: vec![ForeignEntry {
+            path: "recording.edf".to_owned(),
+            media_type: Some("application/edf".to_owned()),
+            bytes: bytes.clone(),
+        }],
+    };
+    let adapter = EdfAdapter::new(1024 * 1024);
+    let imported = adapter
+        .import(&source, ValidationLimits::default())
+        .expect("semantic EDF import");
+    let capsule = &imported.dataset.source_capsules()[0];
+
+    let changed = legacy_abir::Abir::from_parts(
+        vec![legacy_abir::Channel {
+            label: Arc::from("EEG"),
+            data: legacy_abir::Column::I64(Arc::from([99_i64, 100, 101, 102])),
+            phys_min: -1.0,
+            phys_max: 1.0,
+        }],
+        250.0,
+        4,
+    )
+    .into_modality::<legacy_abir::Eeg>(legacy_abir::ModalitySource::Manual);
+    let stale = SourceCapsuleMapping {
+        namespace: capsule.source().namespace().to_owned(),
+        value: capsule.source().value().to_owned(),
+        content_id: capsule.content_id(),
+        media_type: capsule.media_type().map(str::to_owned),
+    };
+    let remapped = from_legacy_with_source_capsules_and_limits(
+        &changed,
+        &[stale],
+        ValidationLimits::default(),
+    )
+    .expect("changed semantic dataset with retained stale capsule");
+    let plan = adapter.plan_export(&remapped.dataset).unwrap();
+    assert!(plan.unsupported);
+    assert!(!plan.accepts_without_loss());
 }

@@ -1,4 +1,4 @@
-# EDF/EDF+/BDF mapping profile `edfplus.1`
+# EDF/EDF+/BDF mapping profile `edfplus.1.signal`
 
 - Maps every decoded signal channel, channel order, sample value, regular sample
   rate, label, and physical min/max into semantic ABIR.

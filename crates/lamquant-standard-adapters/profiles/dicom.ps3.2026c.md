@@ -1,4 +1,4 @@
-# DICOM mapping profile `dicom.ps3.2026c`
+# DICOM mapping profile `dicom.ps3.2026c.ecg-i16`
 
 - Current semantic coverage is the validated 12-Lead ECG and General ECG
   Waveform Storage subset using signed 16-bit samples.
