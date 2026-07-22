@@ -49,15 +49,7 @@ impl StandardFileAdapter {
             )));
         }
         let entry = &source.entries[0];
-        if entry.path.is_empty()
-            || entry.path.starts_with('/')
-            || entry.path.contains('\\')
-            || entry.path.chars().any(char::is_control)
-            || entry
-                .path
-                .split('/')
-                .any(|part| part.is_empty() || part == "..")
-        {
+        if !valid_relative_path(&entry.path) {
             return Err(AdapterError::InvalidPath(entry.path.clone()));
         }
         if u64::try_from(entry.bytes.len()).map_err(|_| AdapterError::SourceTooLarge)?
@@ -348,6 +340,94 @@ impl NwbAdapter {
     }
 }
 
+pub struct BidsAdapter {
+    profile: AdapterProfile,
+    max_source_bytes: u64,
+}
+
+impl BidsAdapter {
+    pub fn new(max_source_bytes: u64) -> Self {
+        Self {
+            profile: profile(
+                "bids.1.11.1",
+                "BIDS",
+                "1.11.1",
+                &["application/vnd.bids.dataset"],
+                "bids-validator",
+            ),
+            max_source_bytes,
+        }
+    }
+
+    fn check<'a>(&self, source: &'a ForeignObject) -> Result<&'a ForeignEntry, AdapterError> {
+        if source.profile != self.profile.id {
+            return Err(AdapterError::ProfileMismatch {
+                expected: self.profile.id.clone(),
+                actual: source.profile.clone(),
+            });
+        }
+        if source.entries.is_empty() {
+            return Err(AdapterError::EmptySource);
+        }
+        let mut paths = BTreeSet::new();
+        let mut total = 0_u64;
+        for entry in &source.entries {
+            if !valid_relative_path(&entry.path) {
+                return Err(AdapterError::InvalidPath(entry.path.clone()));
+            }
+            if !paths.insert(&entry.path) {
+                return Err(AdapterError::DuplicatePath(entry.path.clone()));
+            }
+            let entry_len =
+                u64::try_from(entry.bytes.len()).map_err(|_| AdapterError::SourceTooLarge)?;
+            total = total
+                .checked_add(entry_len)
+                .ok_or(AdapterError::SourceTooLarge)?;
+        }
+        if total > self.max_source_bytes {
+            return Err(AdapterError::SourceTooLarge);
+        }
+        let description = source
+            .entries
+            .iter()
+            .find(|entry| entry.path == "dataset_description.json")
+            .ok_or_else(|| {
+                AdapterError::InvalidSource("BIDS dataset_description.json is required".to_owned())
+            })?;
+        let metadata: serde_json::Value = serde_json::from_slice(&description.bytes)
+            .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+        if metadata.get("BIDSVersion").and_then(|value| value.as_str()) != Some("1.11.1") {
+            return Err(AdapterError::InvalidSource(
+                "BIDSVersion must equal pinned profile 1.11.1".to_owned(),
+            ));
+        }
+        let mut signals = source.entries.iter().filter(|entry| {
+            let lower = entry.path.to_ascii_lowercase();
+            lower.ends_with(".edf") || lower.ends_with(".bdf")
+        });
+        let signal = signals.next().ok_or_else(|| {
+            AdapterError::UnsupportedMeaning(
+                "current BIDS semantic slice requires one EDF/BDF recording".to_owned(),
+            )
+        })?;
+        if signals.next().is_some() {
+            return Err(AdapterError::UnsupportedMeaning(
+                "multi-recording BIDS datasets require dataset-root composition".to_owned(),
+            ));
+        }
+        Ok(signal)
+    }
+
+    fn capsules<'a>(&self, dataset: &'a AbirDataset) -> Vec<&'a semantic_abir::SourceCapsule> {
+        let namespace = format!("adapter.{}", self.profile.id.0);
+        dataset
+            .source_capsules()
+            .iter()
+            .filter(|capsule| capsule.source().namespace() == namespace)
+            .collect()
+    }
+}
+
 macro_rules! delegate_adapter {
     ($adapter:ty) => {
         impl Adapter for $adapter {
@@ -391,6 +471,202 @@ delegate_adapter!(EdfAdapter);
 delegate_adapter!(DicomAdapter);
 delegate_adapter!(NwbAdapter);
 
+impl Adapter for BidsAdapter {
+    fn profile(&self) -> &AdapterProfile {
+        &self.profile
+    }
+
+    fn inspect(&self, source: &ForeignObject) -> Result<InspectReport, AdapterError> {
+        let signal = self.check(source)?;
+        let parser =
+            StandardFileAdapter::new(self.profile.clone(), ParserKind::Edf, self.max_source_bytes);
+        let legacy = parser.read_legacy(signal)?;
+        Ok(InspectReport {
+            profile: self.profile.id.clone(),
+            entry_count: source.entries.len(),
+            logical_bytes: source
+                .entries
+                .iter()
+                .map(|entry| entry.bytes.len() as u64)
+                .sum(),
+            risks: vec![
+                "BIDS sidecars are preserved but only signal semantics are promoted".to_owned(),
+                "independent bids-validator evidence is required for first-class status".to_owned(),
+            ],
+            required_resources: BTreeMap::from([
+                ("max-source-bytes".to_owned(), self.max_source_bytes),
+                ("channels".to_owned(), legacy.channels.len() as u64),
+                ("samples".to_owned(), legacy.n_samples as u64),
+            ]),
+        })
+    }
+
+    fn import(
+        &self,
+        source: &ForeignObject,
+        limits: ValidationLimits,
+    ) -> Result<ImportOutcome, AdapterError> {
+        let signal = self.check(source)?;
+        let parser =
+            StandardFileAdapter::new(self.profile.clone(), ParserKind::Edf, self.max_source_bytes);
+        let legacy = parser.read_legacy(signal)?;
+        let namespace = format!("adapter.{}", self.profile.id.0);
+        let capsules = source
+            .entries
+            .iter()
+            .map(|entry| SourceCapsuleMapping {
+                namespace: namespace.clone(),
+                value: entry.path.clone(),
+                content_id: payload_content_id(&entry.bytes),
+                media_type: entry.media_type.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mapped = from_legacy_with_source_capsules_and_limits(&legacy, &capsules, limits)
+            .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+        let mut payloads = BTreeMap::new();
+        for channel in &mapped.mapping.channels {
+            let descriptor = mapped
+                .dataset
+                .atoms()
+                .iter()
+                .find(|atom| atom.id() == channel.atom_id)
+                .and_then(|atom| atom.payload())
+                .ok_or(AdapterError::MissingPayload(channel.content_id))?;
+            let lease = mapped
+                .access
+                .lease(descriptor)
+                .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+            payloads.insert(channel.content_id, lease.bytes().to_vec());
+        }
+        for entry in &source.entries {
+            payloads.insert(payload_content_id(&entry.bytes), entry.bytes.clone());
+        }
+        let mut entries = source
+            .entries
+            .iter()
+            .map(|entry| MappingEntry {
+                source_path: entry.path.clone(),
+                target: format!("source-capsule:{}", payload_content_id(&entry.bytes)),
+                disposition: if entry.path == signal.path {
+                    MappingDisposition::Exact
+                } else {
+                    MappingDisposition::Quarantined
+                },
+                reason: (entry.path != signal.path)
+                    .then(|| "preserved sidecar; semantic promotion pending".to_owned()),
+            })
+            .collect::<Vec<_>>();
+        entries.extend(mapped.mapping.channels.iter().map(|channel| MappingEntry {
+            source_path: format!("{}/signal/{}", signal.path, channel.index),
+            target: format!("atom:{}", channel.atom_id),
+            disposition: MappingDisposition::Exact,
+            reason: None,
+        }));
+        Ok(ImportOutcome {
+            dataset: mapped.dataset,
+            report: MappingReport {
+                source_profile: self.profile.id.clone(),
+                target_profile: ProfileId("abir.semantic.v1".to_owned()),
+                semantic_coverage: SemanticCoverage::ExactSemantic,
+                entries,
+                preserved_unknowns: source.entries.len().saturating_sub(1) as u64,
+                sample_values_changed: false,
+                timing_changed: false,
+            },
+            payloads: payloads
+                .into_iter()
+                .map(|(content_id, bytes)| PayloadObject { content_id, bytes })
+                .collect(),
+        })
+    }
+
+    fn plan_export(&self, dataset: &AbirDataset) -> Result<ExportPlan, AdapterError> {
+        let capsules = self.capsules(dataset);
+        let unsupported = capsules.is_empty();
+        let mappings = capsules
+            .iter()
+            .map(|capsule| MappingEntry {
+                source_path: capsule.source().value().to_owned(),
+                target: capsule.source().value().to_owned(),
+                disposition: MappingDisposition::Exact,
+                reason: None,
+            })
+            .collect();
+        let mut plan = ExportPlan {
+            source_dataset: dataset.id().to_string(),
+            target_profile: self.profile.id.clone(),
+            mappings,
+            requires_user_acceptance: false,
+            unsupported,
+            plan_id: String::new(),
+        };
+        plan.plan_id = plan_id(&plan);
+        Ok(plan)
+    }
+
+    fn export(
+        &self,
+        dataset: &AbirDataset,
+        plan: &ExportPlan,
+        payloads: &dyn PayloadResolver,
+    ) -> Result<(ForeignObject, FidelityReceipt), AdapterError> {
+        let expected = self.plan_export(dataset)?;
+        if expected != *plan || plan_id(plan) != plan.plan_id {
+            return Err(AdapterError::ExportPlanMismatch);
+        }
+        if !plan.accepts_without_loss() {
+            return Err(AdapterError::UnsupportedMeaning(
+                "dataset lacks a BIDS source tree".to_owned(),
+            ));
+        }
+        let mut entries = Vec::new();
+        let mut output_content_ids = Vec::new();
+        for capsule in self.capsules(dataset) {
+            let bytes = payloads.resolve(capsule.content_id())?;
+            if payload_content_id(&bytes) != capsule.content_id() {
+                return Err(AdapterError::MissingPayload(capsule.content_id()));
+            }
+            output_content_ids.push(capsule.content_id().to_string());
+            entries.push(ForeignEntry {
+                path: capsule.source().value().to_owned(),
+                media_type: capsule.media_type().map(str::to_owned),
+                bytes,
+            });
+        }
+        Ok((
+            ForeignObject {
+                profile: self.profile.id.clone(),
+                entries,
+            },
+            FidelityReceipt {
+                plan_id: plan.plan_id.clone(),
+                exact_source_restoration: true,
+                semantic_equivalence: true,
+                output_content_ids,
+            },
+        ))
+    }
+
+    fn validate(&self, source: &ForeignObject) -> ValidationArtifact {
+        let result = self.check(source).and_then(|signal| {
+            StandardFileAdapter::new(self.profile.clone(), ParserKind::Edf, self.max_source_bytes)
+                .read_legacy(signal)
+                .map(|_| ())
+        });
+        ValidationArtifact {
+            profile: self.profile.id.clone(),
+            internal_valid: result.is_ok(),
+            independent_validator: self.profile.required_validator.clone(),
+            independent_valid: None,
+            diagnostics: result
+                .err()
+                .map(|error| error.to_string())
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
 fn profile(
     id: &str,
     standard: &str,
@@ -416,6 +692,24 @@ fn profile(
             AdapterCapability::Validate,
         ]),
     }
+}
+
+fn valid_relative_path(path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let mut parts = path.split('/');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if first.ends_with(':') || first.is_empty() || first == "." || first == ".." {
+        return false;
+    }
+    parts.all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 fn nwb_sample_rate(path: &std::path::Path) -> Result<f64, AdapterError> {

@@ -3487,6 +3487,7 @@ dependencies = [
  "lamquant-abir-bridge",
  "lamquant-common",
  "lamquant-lml",
+ "serde_json",
  "tempfile",
 ]
 
