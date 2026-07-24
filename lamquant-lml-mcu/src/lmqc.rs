@@ -66,13 +66,14 @@ pub struct LmqcContainer {
     pub sample_rate: u16,
     pub window_samples: u32,
     pub payload_kind: u8,
-    pub coords: Option<Vec<f32>>,    // flat, len = 3*N (row-major [N,3])
+    pub coords: Option<Vec<f32>>, // flat, len = 3*N (row-major [N,3])
     pub channels: Option<Vec<String>>,
     pub payload: Vec<u8>,
 }
 
 /// Frame an LMQC container. `coords` (if present) must have len `3*n_channels`;
 /// `names` (if present) must have len `n_channels`.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_lmqc(
     n_channels: u16,
     latent_c: u16,
@@ -257,8 +258,18 @@ mod tests {
         let coords: Vec<f32> = (0..63).map(|i| i as f32 * 0.01).collect();
         let names = names21();
         let payload: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
-        let buf = encode_lmqc(21, 32, 79, 250, 2500, PAYLOAD_FP16_LATENT,
-                              Some(&coords), Some(&names), &payload).unwrap();
+        let buf = encode_lmqc(
+            21,
+            32,
+            79,
+            250,
+            2500,
+            PAYLOAD_FP16_LATENT,
+            Some(&coords),
+            Some(&names),
+            &payload,
+        )
+        .unwrap();
         let d = decode_lmqc(&buf).unwrap();
         assert_eq!(d.n_channels, 21);
         assert_eq!((d.latent_c, d.latent_t), (32, 79));
@@ -353,7 +364,8 @@ mod tests {
     #[test]
     fn crafted_huge_len_does_not_panic() {
         // A names length near u32::MAX must be rejected, not wrap+OOB.
-        let mut buf = encode_lmqc(1, 32, 79, 250, 2500, 0, None, Some(&vec!["x".to_string()]), &[]).unwrap();
+        let mut buf =
+            encode_lmqc(1, 32, 79, 250, 2500, 0, None, Some(&["x".to_string()]), &[]).unwrap();
         // names-len prefix sits right after the 20-byte header → bytes [20..24].
         buf[20..24].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
         let crc = crc32(&buf[..buf.len() - 4]);

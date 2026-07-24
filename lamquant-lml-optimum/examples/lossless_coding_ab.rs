@@ -60,14 +60,21 @@ fn main() {
     let paths: Vec<String> = {
         let a: Vec<String> = std::env::args().skip(1).collect();
         if a.is_empty() {
-            vec!["/tmp/chb01_01_60s.bin".into(), "/tmp/chb01_01_mid.bin".into(), "/tmp/chb01_01_end.bin".into()]
+            vec![
+                "/tmp/chb01_01_60s.bin".into(),
+                "/tmp/chb01_01_mid.bin".into(),
+                "/tmp/chb01_01_end.bin".into(),
+            ]
         } else {
             a
         }
     };
 
     println!("# Lever-A probe: lossless 5/3 LPC residuals — Golomb floor vs keep-smallest(+arith)");
-    println!("# {:<28} {:>12} {:>12} {:>9} {:>10}", "window", "floor B", "A B", "dCR%", "arith%sb");
+    println!(
+        "# {:<28} {:>12} {:>12} {:>9} {:>10}",
+        "window", "floor B", "A B", "dCR%", "arith%sb"
+    );
 
     let (mut tot_floor, mut tot_a) = (0usize, 0usize);
     for path in &paths {
@@ -90,9 +97,15 @@ fn main() {
                 floor_b += g;
 
                 // Lever-A keep-smallest over the available lossless coders.
-                let z = zrle::encode_dense(&residual).map(|v| v.len()).unwrap_or(usize::MAX);
-                let a0 = arith_int::encode_dense(&residual).map(|v| v.len()).unwrap_or(usize::MAX);
-                let a1 = arith_int::encode_dense_ctx(&residual).map(|v| v.len()).unwrap_or(usize::MAX);
+                let z = zrle::encode_dense(&residual)
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX);
+                let a0 = arith_int::encode_dense(&residual)
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX);
+                let a1 = arith_int::encode_dense_ctx(&residual)
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX);
                 let best = g.min(z).min(a0).min(a1);
                 a_b += best;
                 total_sb += 1;
@@ -120,6 +133,8 @@ fn main() {
         tot_a,
         -100.0 * (tot_floor as f64 - tot_a as f64) / tot_floor as f64
     );
-    println!("\n# dCR% = size reduction of Lever-A vs the Golomb floor (negative = smaller = better).");
+    println!(
+        "\n# dCR% = size reduction of Lever-A vs the Golomb floor (negative = smaller = better)."
+    );
     println!("# arith%sb = fraction of subbands where an arithmetic coder won keep-smallest.");
 }

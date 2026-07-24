@@ -214,6 +214,7 @@ fn experimental_extended_lpc_enabled() -> bool {
 /// `lpc_meta` (~4 bytes each), which AIC must justify against the
 /// residual-byte savings before picking. Wire format already
 /// stores `chosen_order: u8`, so 32 fits without a schema change.
+#[cfg(feature = "std")]
 pub(crate) const EXTENDED_LPC_ORDER_HARD_CAP: usize = 32;
 
 /// Compute per-subband sample counts for a packet with window length
@@ -236,7 +237,7 @@ fn subband_lengths(t: usize, n_levels: u8) -> Vec<usize> {
     let mut details = Vec::with_capacity(n_levels as usize);
     let mut approx = t;
     for _ in 0..n_levels {
-        let next_approx = (approx + 1) / 2;
+        let next_approx = approx.div_ceil(2);
         let detail = approx / 2;
         details.push(detail);
         approx = next_approx;
@@ -303,11 +304,7 @@ pub enum CrcScope {
 /// (== `lpc_meta || payload`, contiguous). The encoder is unchanged: new
 /// files keep the stronger modern scope. This is decode-side only.
 #[inline]
-fn verify_packet_crc(
-    header_var: &[u8],
-    payload_data: &[u8],
-    crc_exp: u32,
-) -> LmlResult<CrcScope> {
+fn verify_packet_crc(header_var: &[u8], payload_data: &[u8], crc_exp: u32) -> LmlResult<CrcScope> {
     // (1) Modern scope — the fast path. Identical cost to the old code.
     let mut crc_state = CRC32_INIT;
     crc_state = crc32_update(crc_state, header_var);
@@ -840,13 +837,12 @@ pub fn compress_with_mode(
     )
 }
 
-/// Zero-copy compress: `windows` are already-sliced `&[i64]` views (e.g.
-/// [`abir::Abir::window_views`]) — no per-window `Vec<Vec<i64>>`
+/// Zero-copy compress: `windows` are already-sliced `&[i64]` views — no per-window
+/// `Vec<Vec<i64>>`
 /// materialization (ADR 0069 L6.3, the negative-cost payoff over
 /// [`compress_with_mode`]).
 ///
-/// `noise_bits == 0` (the lossless hot path — the only mode `write_abir`
-/// dispatches today) walks `windows` directly through
+/// `noise_bits == 0` (the lossless hot path) walks `windows` directly through
 /// [`encode_channels_core`]: TRUE zero-copy, no allocation beyond the
 /// output packet + per-subband encode scratch that every path pays.
 ///
@@ -946,8 +942,7 @@ pub fn compress_bounded_mae(
         // Predictor coeffs from open-loop analysis of the raw channel — these
         // are just predictor taps; the bound holds for any of them. sb_idx=0
         // only matters for Fixed mode (gives a small order).
-        let (coeffs, _residual, order) =
-            lpc::analyze_with_mode(ch, 0, scoped, BIAS_CTX, None);
+        let (coeffs, _residual, order) = lpc::analyze_with_mode(ch, 0, scoped, BIAS_CTX, None);
         let indices = lpc::analyze_closed_loop_bounded(ch, &coeffs, order, q);
 
         // order must fit u8 (scope_lpc_mode caps at lpc_max_order ≤ 16).
@@ -961,7 +956,14 @@ pub fn compress_bounded_mae(
     }
 
     // n_levels = 0 (unused in track-2 bounded mode).
-    Ok(assemble_track2_packet(n_ch, t, 0, "near-lossless", &lpc_meta, &payload))
+    Ok(assemble_track2_packet(
+        n_ch,
+        t,
+        0,
+        "near-lossless",
+        &lpc_meta,
+        &payload,
+    ))
 }
 
 /// Forward lifting of one channel into its ordered subbands for the given
@@ -1012,7 +1014,10 @@ pub fn compress_target_bps(
     // replace the global-scale rate search with per-subband Lagrangian rate-
     // distortion allocation. Same wire format (per-subband q_s), decoder
     // unchanged — a pure encoder-side win.
-    if std::env::var("LAMQUANT_PCRD").map(|v| v == "1" || v == "true").unwrap_or(false) {
+    if std::env::var("LAMQUANT_PCRD")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+    {
         return compress_target_bps_pcrd(signal, target_bps, mode);
     }
 
@@ -1032,8 +1037,10 @@ pub fn compress_target_bps(
     let gains = quant::synthesis_gains(n_levels, &sub_lens);
 
     // Transform every channel ONCE; the rate search re-quantizes these.
-    let chan_subs: Vec<Vec<Vec<i64>>> =
-        signal.iter().map(|ch| forward_subbands(ch, n_levels)).collect();
+    let chan_subs: Vec<Vec<Vec<i64>>> = signal
+        .iter()
+        .map(|ch| forward_subbands(ch, n_levels))
+        .collect();
 
     let nm = (n_ch * t) as f64;
     // Fixed wire overhead outside meta_body+payload: 22-byte header + mode_id
@@ -1107,7 +1114,14 @@ pub fn compress_target_bps(
     }
     lpc_meta.extend_from_slice(&meta_body);
 
-    Ok(assemble_track2_packet(n_ch, t, n_levels, "lossy-bps", &lpc_meta, &payload))
+    Ok(assemble_track2_packet(
+        n_ch,
+        t,
+        n_levels,
+        "lossy-bps",
+        &lpc_meta,
+        &payload,
+    ))
 }
 
 /// ADR 0054 Phase 3 — per-subband **Lagrangian PCRD** rate allocation.
@@ -1129,28 +1143,43 @@ pub fn compress_target_bps_pcrd(
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(format!("n_ch={} out of range 1..=1024", n_ch)));
+        return Err(LmlError::InvalidHeader(format!(
+            "n_ch={} out of range 1..=1024",
+            n_ch
+        )));
     }
     if t == 0 || t > u16::MAX as usize {
-        return Err(LmlError::InvalidHeader(format!("T={} out of range 1..={}", t, u16::MAX)));
+        return Err(LmlError::InvalidHeader(format!(
+            "T={} out of range 1..={}",
+            t,
+            u16::MAX
+        )));
     }
     for (c, ch) in signal.iter().enumerate() {
         if ch.len() != t {
             return Err(LmlError::InvalidHeader(format!(
-                "ragged channels: ch {} has {} samples, expected {}", c, ch.len(), t
+                "ragged channels: ch {} has {} samples, expected {}",
+                c,
+                ch.len(),
+                t
             )));
         }
     }
     if !(target_bps.is_finite() && target_bps > 0.0) {
-        return Err(LmlError::InvalidHeader(format!("target_bps must be finite > 0, got {}", target_bps)));
+        return Err(LmlError::InvalidHeader(format!(
+            "target_bps must be finite > 0, got {}",
+            target_bps
+        )));
     }
 
     let n_levels = compute_n_levels(t);
     let sub_lens = subband_lengths(t, n_levels);
     let n_sub = sub_lens.len();
     let gains = quant::synthesis_gains(n_levels, &sub_lens);
-    let chan_subs: Vec<Vec<Vec<i64>>> =
-        signal.iter().map(|ch| forward_subbands(ch, n_levels)).collect();
+    let chan_subs: Vec<Vec<Vec<i64>>> = signal
+        .iter()
+        .map(|ch| forward_subbands(ch, n_levels))
+        .collect();
 
     let nm = (n_ch * t) as f64;
     let fixed_overhead = HEADER_SIZE + 1 + 1 + 4 * n_sub;
@@ -1245,9 +1274,15 @@ pub fn compress_target_bps_pcrd(
     }
     lpc_meta.extend_from_slice(&meta_body);
 
-    Ok(assemble_track2_packet(n_ch, t, n_levels, "lossy-bps", &lpc_meta, &payload))
+    Ok(assemble_track2_packet(
+        n_ch,
+        t,
+        n_levels,
+        "lossy-bps",
+        &lpc_meta,
+        &payload,
+    ))
 }
-
 
 /// Decode a track-2 packet (lpc_meta begins with a `mode_id`). Shared by the
 /// serial and parallel decoders. `lpc_data` and `payload` are the already
@@ -1277,8 +1312,14 @@ fn decode_track2(
                 });
             }
             let delta = u64::from_le_bytes([
-                lpc_data[1], lpc_data[2], lpc_data[3], lpc_data[4], lpc_data[5], lpc_data[6],
-                lpc_data[7], lpc_data[8],
+                lpc_data[1],
+                lpc_data[2],
+                lpc_data[3],
+                lpc_data[4],
+                lpc_data[5],
+                lpc_data[6],
+                lpc_data[7],
+                lpc_data[8],
             ]);
             if delta > (i64::MAX as u64 - 1) / 2 {
                 return Err(LmlError::InvalidHeader(format!(
@@ -1348,7 +1389,11 @@ fn decode_track2(
                 });
             }
             let n_sub = lpc_data[1] as usize;
-            let expected_sub = if n_levels == 0 { 1 } else { n_levels as usize + 1 };
+            let expected_sub = if n_levels == 0 {
+                1
+            } else {
+                n_levels as usize + 1
+            };
             if n_sub != expected_sub {
                 return Err(LmlError::InvalidHeader(format!(
                     "track-2 target-BPS n_sub={} != expected {} for n_levels={}",
@@ -1445,6 +1490,7 @@ fn decode_track2(
 /// Convenience wrapper: panics on invalid input. Use only in tests where
 /// invalid input is intentional, never in production code.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn compress_or_panic(signal: &[Vec<i64>], noise_bits: u8) -> Vec<u8> {
     compress(signal, noise_bits).expect("compress: invalid input")
 }
@@ -1625,20 +1671,14 @@ pub fn encode_one_channel(
         // flat per-channel payload — same hot-path memory layout as
         // the pre-B1 codec; no SubbandResult struct, no per-subband
         // Vec, no max_abs scan.
-        #[cfg(not(any(
-            feature = "experimental_bit_pack",
-            feature = "experimental_arithmetic"
-        )))]
+        #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
         {
             let _ = try_arithmetic;
             let _ = try_bit_pack;
             local_payload.extend_from_slice(&golomb_bytes);
             continue;
         }
-        #[cfg(any(
-            feature = "experimental_bit_pack",
-            feature = "experimental_arithmetic"
-        ))]
+        #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
         let (winner_tag, winner_bytes, savings): (u8, Option<Vec<u8>>, usize) =
             if try_arithmetic || try_bit_pack {
                 // Cheap pre-check before the full bit-pack sizing
@@ -1663,12 +1703,11 @@ pub fn encode_one_channel(
                 let bp_size = usize::MAX;
 
                 #[cfg(feature = "experimental_arithmetic")]
-                let ac_bytes_opt: Option<Vec<u8>> =
-                    if try_arithmetic && max_abs <= (1i64 << 12) {
-                        Some(crate::arithmetic::encode_dense(&residual))
-                    } else {
-                        None
-                    };
+                let ac_bytes_opt: Option<Vec<u8>> = if try_arithmetic && max_abs <= (1i64 << 12) {
+                    Some(crate::arithmetic::encode_dense(&residual))
+                } else {
+                    None
+                };
                 #[cfg(not(feature = "experimental_arithmetic"))]
                 let ac_bytes_opt: Option<Vec<u8>> = None;
                 let ac_size = ac_bytes_opt.as_ref().map(|b| b.len()).unwrap_or(usize::MAX);
@@ -1677,9 +1716,12 @@ pub fn encode_one_channel(
                 if ac_size < golomb_size && ac_size < bp_size {
                     #[cfg(feature = "experimental_arithmetic")]
                     {
-                        let ac_bytes = ac_bytes_opt
-                            .expect("ac_bytes present when ac_size < ∞");
-                        (SUBBAND_TAG_ARITHMETIC, Some(ac_bytes), golomb_size - ac_size)
+                        let ac_bytes = ac_bytes_opt.expect("ac_bytes present when ac_size < ∞");
+                        (
+                            SUBBAND_TAG_ARITHMETIC,
+                            Some(ac_bytes),
+                            golomb_size - ac_size,
+                        )
                     }
                     #[cfg(not(feature = "experimental_arithmetic"))]
                     {
@@ -1990,13 +2032,15 @@ pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
                     SUBBAND_TAG_BIT_PACK => {
                         let n_samples = sub_lens.get(sb_idx).copied().ok_or_else(|| {
                             LmlError::InvalidHeader(format!(
-                                "no subband length for index {} (n_sub={})", sb_idx, n_sub
+                                "no subband length for index {} (n_sub={})",
+                                sb_idx, n_sub
                             ))
                         })?;
                         let (d, consumed) =
                             bit_pack::decode_dense(sub_slice, n_samples).map_err(|e| {
                                 LmlError::InvalidHeader(format!(
-                                    "bit_pack::decode_dense failed: {}", e
+                                    "bit_pack::decode_dense failed: {}",
+                                    e
                                 ))
                             })?;
                         sub_pos += consumed;
@@ -2011,15 +2055,17 @@ pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
                     SUBBAND_TAG_ARITHMETIC => {
                         let n_samples = sub_lens.get(sb_idx).copied().ok_or_else(|| {
                             LmlError::InvalidHeader(format!(
-                                "no subband length for index {} (n_sub={})", sb_idx, n_sub
+                                "no subband length for index {} (n_sub={})",
+                                sb_idx, n_sub
                             ))
                         })?;
-                        let (d, consumed) =
-                            crate::arithmetic::decode_dense(sub_slice, n_samples).map_err(|e| {
-                                LmlError::InvalidHeader(format!(
-                                    "arithmetic::decode_dense failed: {}", e
-                                ))
-                            })?;
+                        let (d, consumed) = crate::arithmetic::decode_dense(sub_slice, n_samples)
+                            .map_err(|e| {
+                            LmlError::InvalidHeader(format!(
+                                "arithmetic::decode_dense failed: {}",
+                                e
+                            ))
+                        })?;
                         sub_pos += consumed;
                         if sub_pos > payload_end {
                             return Err(LmlError::InvalidHeader(format!(
@@ -2030,7 +2076,8 @@ pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
                     }
                     _ => {
                         return Err(LmlError::InvalidHeader(format!(
-                            "unknown per-subband codec tag 0x{:02X}", tag
+                            "unknown per-subband codec tag 0x{:02X}",
+                            tag
                         )));
                     }
                 }
@@ -2123,9 +2170,9 @@ pub fn synthesize_channel_signal(
 ///
 ///   1. **Serial parse** -- walk the input cursor through `lpc_data`
 ///      + golomb-encoded payload, decoding coeffs + residuals per
-///      `(channel, subband)`. Has to be sequential because each
-///      subband's byte length is determined by golomb decode (no
-///      upfront index).
+///        `(channel, subband)`. Has to be sequential because each
+///        subband's byte length is determined by golomb decode (no
+///        upfront index).
 ///   2. **Parallel synth + lift** -- for each channel, dispatch
 ///      `synthesize_channel_signal(subs, n_levels)` across rayon
 ///      workers. Output order preserved by
@@ -2190,7 +2237,11 @@ mod tests {
     #[test]
     fn roundtrip_transform_skip_nlevels0() {
         let signal: Vec<Vec<i64>> = (0..8)
-            .map(|ch| (0..2500).map(|i| ((i * (ch + 3) * 31) % 8000 - 4000) as i64).collect())
+            .map(|ch| {
+                (0..2500)
+                    .map(|i| ((i * (ch + 3) * 31) % 8000 - 4000) as i64)
+                    .collect()
+            })
             .collect();
         let (n_ch, t) = (signal.len(), signal[0].len());
         let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
@@ -2201,9 +2252,16 @@ mod tests {
         assert_eq!(decompress(&skip_pkt).unwrap(), signal);
         // Sanity: the full-transform packet also round-trips (the other keep-best candidate).
         let full_levels = compute_n_levels(t);
-        let full_pkt =
-            encode_channels_core(&views, n_ch, t, full_levels, 0, flags, lpc::LpcMode::default())
-                .unwrap();
+        let full_pkt = encode_channels_core(
+            &views,
+            n_ch,
+            t,
+            full_levels,
+            0,
+            flags,
+            lpc::LpcMode::default(),
+        )
+        .unwrap();
         assert_eq!(decompress(&full_pkt).unwrap(), signal);
     }
 
@@ -2213,19 +2271,37 @@ mod tests {
     #[test]
     fn transform_skip_default_off_is_byte_identical() {
         let signal: Vec<Vec<i64>> = (0..6)
-            .map(|ch| (0..2000).map(|i| ((i * (ch + 1) * 53) % 9000 - 4500) as i64).collect())
+            .map(|ch| {
+                (0..2000)
+                    .map(|i| ((i * (ch + 1) * 53) % 9000 - 4500) as i64)
+                    .collect()
+            })
             .collect();
         let (n_ch, t) = (signal.len(), signal[0].len());
         let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
         let flags = (false, false, false);
         let full_levels = compute_n_levels(t);
-        let baseline =
-            encode_channels_core(&views, n_ch, t, full_levels, 0, flags, lpc::LpcMode::default())
-                .unwrap();
+        let baseline = encode_channels_core(
+            &views,
+            n_ch,
+            t,
+            full_levels,
+            0,
+            flags,
+            lpc::LpcMode::default(),
+        )
+        .unwrap();
         // With the flag unset in the test environment, encode_maybe_skip == encode_channels_core(full).
-        let via_wrapper =
-            encode_maybe_skip(&views, n_ch, t, full_levels, 0, flags, lpc::LpcMode::default())
-                .unwrap();
+        let via_wrapper = encode_maybe_skip(
+            &views,
+            n_ch,
+            t,
+            full_levels,
+            0,
+            flags,
+            lpc::LpcMode::default(),
+        )
+        .unwrap();
         assert_eq!(baseline, via_wrapper);
     }
 
@@ -2446,7 +2522,10 @@ mod tests {
         // is rejected regardless of the now-stale CRC.
         let signal: Vec<Vec<i64>> = vec![vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]; 2];
         let mut packet = compress(&signal, 0).expect("compress");
-        assert!(decompress(&packet).is_ok(), "unmutated packet should decode");
+        assert!(
+            decompress(&packet).is_ok(),
+            "unmutated packet should decode"
+        );
         // The packet may carry a prefix before MAGIC (decompress locates it
         // via find_magic_offset), so n_levels is at magic_pos + 8, not byte 8.
         let magic_pos = packet
@@ -2455,7 +2534,10 @@ mod tests {
             .expect("packet contains MAGIC");
         packet[magic_pos + 8] = 4; // n_levels = 4, outside the defined 0..=3 range
         let r = decompress(&packet);
-        assert!(matches!(r, Err(LmlError::InvalidHeader(_))), "serial: {r:?}");
+        assert!(
+            matches!(r, Err(LmlError::InvalidHeader(_))),
+            "serial: {r:?}"
+        );
         // (The parallel-decode equivalent of this guard is tested in the Desktop
         // tier `lamquant-lml-desktop`, which now owns `decompress_parallel`.)
     }
@@ -2465,7 +2547,7 @@ mod tests {
 fn roundtrip_small_windows() {
     // Test various small window sizes that can occur as the last window
     for n in [3, 5, 7, 8, 10, 15, 20, 24, 30, 50, 100] {
-        let signal: Vec<Vec<i64>> = vec![(0..n).map(|i| ((i as i64 * 137) % 100 - 50)).collect()];
+        let signal: Vec<Vec<i64>> = vec![(0..n).map(|i| (i as i64 * 137) % 100 - 50).collect()];
         let compressed = compress(&signal, 0).unwrap();
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(
@@ -2525,7 +2607,7 @@ fn stress_tiny_windows() {
             let signal: Vec<Vec<i64>> = (0..n_ch)
                 .map(|ch| {
                     (0..n)
-                        .map(|i| ((i as i64 * (ch + 1) as i64 * 37) % 1000 - 500))
+                        .map(|i| (i as i64 * (ch + 1) as i64 * 37) % 1000 - 500)
                         .collect()
                 })
                 .collect();
@@ -2544,10 +2626,7 @@ fn stress_tiny_windows() {
 fn stress_large_values_lpc() {
     // Large values that could cause LPC overflow
     let signal = vec![(0..2500)
-        .map(|i| {
-            let v = ((i as f64 * 0.01).sin() * 2_000_000_000.0) as i64;
-            v
-        })
+        .map(|i| ((i as f64 * 0.01).sin() * 2_000_000_000.0) as i64)
         .collect::<Vec<i64>>()];
     let compressed = compress(&signal, 0).unwrap();
     let decompressed = decompress(&compressed).unwrap();
@@ -2593,7 +2672,7 @@ fn stress_adversarial_patterns() {
         (
             "white_noise_sim",
             (0..2500)
-                .map(|i| ((i as i64 * 48271) % 65536 - 32768))
+                .map(|i| (i as i64 * 48271) % 65536 - 32768)
                 .collect(),
         ),
         (

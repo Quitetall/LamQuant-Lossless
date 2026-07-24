@@ -6,7 +6,6 @@
 //! All functions return 0 on success, negative on error.
 
 use crate::{error::LmlError, lml};
-use std::ffi::CStr;
 use std::os::raw::c_char;
 
 /// Error codes returned by all FFI functions.
@@ -20,7 +19,7 @@ pub const LML_ERROR_IO: i32 = -5;
 /// Version string.
 #[no_mangle]
 pub extern "C" fn lml_version() -> *const c_char {
-    b"0.2.0\0".as_ptr() as *const c_char
+    c"0.2.0".as_ptr()
 }
 
 /// Compress interleaved i64 signal → LML packet bytes.
@@ -30,6 +29,11 @@ pub extern "C" fn lml_version() -> *const c_char {
 /// out_len: on success, receives actual bytes written
 ///
 /// Returns LML_OK or negative error code.
+///
+/// # Safety
+///
+/// All pointers must be valid for their declared lengths. `out_buf` must be
+/// writable for `out_cap` bytes and `out_len` must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn lml_compress(
     signal: *const i64,
@@ -76,6 +80,11 @@ pub unsafe extern "C" fn lml_compress(
 /// n_channels_out, n_samples_out: receive actual dimensions
 ///
 /// Returns LML_OK or negative error code.
+///
+/// # Safety
+///
+/// `data` must be readable for `data_len` bytes. `signal_out` must be writable
+/// for `signal_cap` samples. Non-null dimension outputs must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn lml_decompress(
     data: *const u8,
@@ -128,14 +137,12 @@ pub unsafe extern "C" fn lml_decompress(
 #[no_mangle]
 pub extern "C" fn lml_error_string(code: i32) -> *const c_char {
     match code {
-        LML_OK => b"Success\0".as_ptr() as *const c_char,
-        LML_ERROR_INVALID_INPUT => b"Invalid input\0".as_ptr() as *const c_char,
-        LML_ERROR_CORRUPT_DATA => {
-            b"Corrupt data (CRC mismatch or truncated)\0".as_ptr() as *const c_char
-        }
-        LML_ERROR_BUFFER_TOO_SMALL => b"Output buffer too small\0".as_ptr() as *const c_char,
-        LML_ERROR_UNSUPPORTED_VERSION => b"Unsupported LML version\0".as_ptr() as *const c_char,
-        LML_ERROR_IO => b"I/O error\0".as_ptr() as *const c_char,
-        _ => b"Unknown error\0".as_ptr() as *const c_char,
+        LML_OK => c"Success".as_ptr(),
+        LML_ERROR_INVALID_INPUT => c"Invalid input".as_ptr(),
+        LML_ERROR_CORRUPT_DATA => c"Corrupt data (CRC mismatch or truncated)".as_ptr(),
+        LML_ERROR_BUFFER_TOO_SMALL => c"Output buffer too small".as_ptr(),
+        LML_ERROR_UNSUPPORTED_VERSION => c"Unsupported LML version".as_ptr(),
+        LML_ERROR_IO => c"I/O error".as_ptr(),
+        _ => c"Unknown error".as_ptr(),
     }
 }

@@ -54,12 +54,14 @@ fn codelen_bits(res: &[Vec<i64>]) -> f64 {
     let mut bits = 0usize;
     for r in res {
         for chunk in r.chunks(W) {
-            bits += entropy::encode(chunk).map(|v| 8 * v.len()).unwrap_or_else(|_| {
-                chunk
-                    .iter()
-                    .map(|&v| (64 - (2 * v.unsigned_abs() + 1).leading_zeros()) as usize)
-                    .sum()
-            });
+            bits += entropy::encode(chunk)
+                .map(|v| 8 * v.len())
+                .unwrap_or_else(|_| {
+                    chunk
+                        .iter()
+                        .map(|&v| (64 - (2 * v.unsigned_abs() + 1).leading_zeros()) as usize)
+                        .sum()
+                });
         }
     }
     bits as f64
@@ -70,7 +72,10 @@ fn codelen_bits(res: &[Vec<i64>]) -> f64 {
 struct Lcg(u64);
 impl Lcg {
     fn u01(&mut self) -> f64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
     }
     fn gauss(&mut self) -> f64 {
@@ -95,7 +100,14 @@ fn krls_whiten(signal: &[Vec<i64>], r: &[Vec<i64>]) -> Vec<Vec<i64>> {
     for c in 0..n_ch {
         // normalize the feature by the channel RMS so Ω·u is O(1) (cos not saturated)
         let sigma = {
-            let m2 = signal[c].iter().map(|&v| { let f = v as f64; f * f }).sum::<f64>() / t as f64;
+            let m2 = signal[c]
+                .iter()
+                .map(|&v| {
+                    let f = v as f64;
+                    f * f
+                })
+                .sum::<f64>()
+                / t as f64;
             m2.sqrt().max(1.0)
         };
         let refs: Vec<usize> = (0..NREF.min(c)).map(|i| c - 1 - i).collect();
@@ -106,10 +118,17 @@ fn krls_whiten(signal: &[Vec<i64>], r: &[Vec<i64>]) -> Vec<Vec<i64>> {
         for n in 0..t {
             for j in 0..K {
                 let idx = n as isize - 1 - j as isize;
-                u[j] = if idx >= 0 { signal[c][idx as usize] as f64 / sigma } else { 0.0 };
+                u[j] = if idx >= 0 {
+                    signal[c][idx as usize] as f64 / sigma
+                } else {
+                    0.0
+                };
             }
             for i in 0..NREF {
-                u[K + i] = refs.get(i).map(|&rf| signal[rf][n] as f64 / sigma).unwrap_or(0.0);
+                u[K + i] = refs
+                    .get(i)
+                    .map(|&rf| signal[rf][n] as f64 / sigma)
+                    .unwrap_or(0.0);
             }
             let mut pn2 = 0.0f64;
             let mut pred = 0.0f64;
@@ -147,7 +166,14 @@ fn linear_whiten(signal: &[Vec<i64>], r: &[Vec<i64>]) -> Vec<Vec<i64>> {
     let mut out = Vec::with_capacity(n_ch);
     for c in 0..n_ch {
         let sigma = {
-            let m2 = signal[c].iter().map(|&v| { let f = v as f64; f * f }).sum::<f64>() / t as f64;
+            let m2 = signal[c]
+                .iter()
+                .map(|&v| {
+                    let f = v as f64;
+                    f * f
+                })
+                .sum::<f64>()
+                / t as f64;
             m2.sqrt().max(1.0)
         };
         let refs: Vec<usize> = (0..NREF.min(c)).map(|i| c - 1 - i).collect();
@@ -158,10 +184,17 @@ fn linear_whiten(signal: &[Vec<i64>], r: &[Vec<i64>]) -> Vec<Vec<i64>> {
         for n in 0..t {
             for j in 0..K {
                 let idx = n as isize - 1 - j as isize;
-                u[j] = if idx >= 0 { signal[c][idx as usize] as f64 / sigma } else { 0.0 };
+                u[j] = if idx >= 0 {
+                    signal[c][idx as usize] as f64 / sigma
+                } else {
+                    0.0
+                };
             }
             for i in 0..NREF {
-                u[K + i] = refs.get(i).map(|&rf| signal[rf][n] as f64 / sigma).unwrap_or(0.0);
+                u[K + i] = refs
+                    .get(i)
+                    .map(|&rf| signal[rf][n] as f64 / sigma)
+                    .unwrap_or(0.0);
             }
             let un2: f64 = u.iter().map(|&x| x * x).sum();
             let pred: f64 = (0..p).map(|j| w[j] * u[j]).sum();
@@ -177,8 +210,13 @@ fn linear_whiten(signal: &[Vec<i64>], r: &[Vec<i64>]) -> Vec<Vec<i64>> {
 }
 
 fn main() {
-    let bins: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect();
-    println!("E-A2 online 2nd-stage whitening of the shipped mv_rls residual (cfg 1)  [D={D}, μ={MU}]");
+    let bins: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
+    println!(
+        "E-A2 online 2nd-stage whitening of the shipped mv_rls residual (cfg 1)  [D={D}, μ={MU}]"
+    );
     println!(
         "{:>14}  {:>9}  {:>9}  {}",
         "recording", "linearΔ%", "RFFΔ%", "read"

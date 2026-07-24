@@ -42,7 +42,11 @@ impl Rls {
         for i in 0..ORDER {
             p[i][i] = 1.0;
         }
-        Self { w: [0.0; ORDER], p, hist: [0.0; ORDER] }
+        Self {
+            w: [0.0; ORDER],
+            p,
+            hist: [0.0; ORDER],
+        }
     }
     fn step(&mut self, x: i64) -> i64 {
         let mut pred = 0.0;
@@ -129,7 +133,11 @@ fn block_golomb_bytes(res: &[i64], block: usize) -> usize {
         let end = (off + block).min(res.len());
         let b = &res[off..end];
         let best = (0..24)
-            .map(|k| b.iter().map(|&v| (zigzag(v) >> k) + 1 + k as u64).sum::<u64>())
+            .map(|k| {
+                b.iter()
+                    .map(|&v| (zigzag(v) >> k) + 1 + k as u64)
+                    .sum::<u64>()
+            })
             .min()
             .unwrap_or(0);
         bits += 5 + best;
@@ -139,25 +147,63 @@ fn block_golomb_bytes(res: &[i64], block: usize) -> usize {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ma_full.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30000);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ma_full.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30000);
     let sig = read_window(&path);
     let t = sig[0].len().min(w);
 
     let resids: Vec<Vec<i64>> = sig.iter().map(|c| rls_residual(&c[..t])).collect();
-    let base: usize = resids.iter().map(|r| golomb::encode_dense(r).unwrap().len()).sum();
-    println!("# cascade probe: {} ({}ch, {}). RLS+golomb baseline = {} B", path, sig.len(), t, base);
+    let base: usize = resids
+        .iter()
+        .map(|r| golomb::encode_dense(r).unwrap().len())
+        .sum();
+    println!(
+        "# cascade probe: {} ({}ch, {}). RLS+golomb baseline = {} B",
+        path,
+        sig.len(),
+        t,
+        base
+    );
 
     let pct = |b: usize| -100.0 * (base as f64 - b as f64) / base as f64;
     // RLS → sign-LMS cascade
-    for &(o, mu, leak) in &[(16usize, 2i64, 12u32), (32, 2, 12), (256, 1, 14), (32, 4, 10)] {
-        let tot: usize = resids.iter().map(|r| golomb::encode_dense(&signlms(r, o, mu, leak)).unwrap().len()).sum();
-        println!("  RLS→signLMS o={:<3} mu={} leak={:<2}   {:>9} {:>+7.2}%", o, mu, leak, tot, pct(tot));
+    for &(o, mu, leak) in &[
+        (16usize, 2i64, 12u32),
+        (32, 2, 12),
+        (256, 1, 14),
+        (32, 4, 10),
+    ] {
+        let tot: usize = resids
+            .iter()
+            .map(|r| {
+                golomb::encode_dense(&signlms(r, o, mu, leak))
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        println!(
+            "  RLS→signLMS o={:<3} mu={} leak={:<2}   {:>9} {:>+7.2}%",
+            o,
+            mu,
+            leak,
+            tot,
+            pct(tot)
+        );
     }
     // RLS → block-adaptive Golomb
     for &blk in &[64usize, 128, 256] {
         let tot: usize = resids.iter().map(|r| block_golomb_bytes(r, blk)).sum();
-        println!("  RLS→block-golomb blk={:<4}        {:>9} {:>+7.2}%", blk, tot, pct(tot));
+        println!(
+            "  RLS→block-golomb blk={:<4}        {:>9} {:>+7.2}%",
+            blk,
+            tot,
+            pct(tot)
+        );
     }
     println!("# negative = beats RLS+single-k-golomb (the current ship).");
 }

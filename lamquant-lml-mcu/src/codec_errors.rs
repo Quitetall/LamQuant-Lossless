@@ -44,7 +44,10 @@ pub enum GolombError {
     OversizeK { k: u32 },
     /// `n_total` from the header exceeds `u16::MAX` or the
     /// payload byte count × 8. Refuses pre-allocation.
-    HeaderOverflow { n_total: usize, payload_bytes: usize },
+    HeaderOverflow {
+        n_total: usize,
+        payload_bytes: usize,
+    },
     /// Decoder ran out of bits during the unary prefix scan.
     /// Distinct from a clean stream end after a complete value.
     TruncatedUnary { at_byte: usize, partial_q: u64 },
@@ -80,11 +83,9 @@ impl fmt::Display for GolombError {
                  would desync the bitstream",
                 q_estimate, index
             ),
-            Self::OversizeK { k } => write!(
-                f,
-                "golomb: decoder header declares k = {} (MAX_K = 31)",
-                k
-            ),
+            Self::OversizeK { k } => {
+                write!(f, "golomb: decoder header declares k = {} (MAX_K = 31)", k)
+            }
             Self::HeaderOverflow {
                 n_total,
                 payload_bytes,
@@ -144,18 +145,12 @@ pub enum RansError {
     /// (`MAX_RANS_SYMBOLS`). Refuses to allocate the requested
     /// `Vec<...>` capacity. Was the OOM-abort risk at
     /// `rans.rs:104`.
-    HeaderOverflow {
-        claimed: usize,
-        max_allowed: usize,
-    },
+    HeaderOverflow { claimed: usize, max_allowed: usize },
     /// Decoder state would underflow during the `state - s_val`
     /// subtraction; bitstream is corrupt.
     StateUnderflow { state: u32, s_val: u32 },
     /// Decoder ran out of bytes mid-state-renormalization.
-    TruncatedStream {
-        at_byte: usize,
-        bytes_needed: usize,
-    },
+    TruncatedStream { at_byte: usize, bytes_needed: usize },
     /// Encoder symbol-count overflowed u16 max (the rANS wire
     /// format encodes the symbol count as u16).
     SymbolCountOverflow { count: usize },
@@ -228,10 +223,7 @@ pub enum EdfError {
     /// `phys_min` / `phys_max` parsed as NaN or Inf. Non-finite
     /// scale factors propagate through LML metadata and break
     /// downstream consumers.
-    NonFiniteScale {
-        field: &'static str,
-        value: String,
-    },
+    NonFiniteScale { field: &'static str, value: String },
     /// `mode_ns * usable_records` (or any analogous product)
     /// overflowed `usize`. On 32-bit MCU targets a malicious
     /// header can wrap this and force an undersized allocation.
@@ -272,11 +264,9 @@ impl fmt::Display for EdfError {
                 "edf: {} parsed as non-finite value {:?}; NaN/Inf scale factors are rejected",
                 field, value
             ),
-            Self::HeaderOverflow { reason } => write!(
-                f,
-                "edf: header field arithmetic overflowed ({})",
-                reason
-            ),
+            Self::HeaderOverflow { reason } => {
+                write!(f, "edf: header field arithmetic overflowed ({})", reason)
+            }
             Self::TooManySignals {
                 claimed,
                 max_allowed,

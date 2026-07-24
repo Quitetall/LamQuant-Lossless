@@ -71,19 +71,36 @@ fn signlms_residual(x: &[i64], order: usize, mu: i64) -> Vec<i64> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30000);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30000);
     let sig = read_window(&path);
     let t = sig[0].len().min(w);
     let nm = (sig.len() * t) as f64;
-    println!("# adaptive-LMS probe: {} ({}ch, {}). bytes; A=current 5/3+LPC.", path, sig.len(), t);
+    println!(
+        "# adaptive-LMS probe: {} ({}ch, {}). bytes; A=current 5/3+LPC.",
+        path,
+        sig.len(),
+        t
+    );
 
     let mut ta = 0usize;
     let mut best: Vec<(String, usize)> = Vec::new();
     for full in &sig {
         ta += wavelet_lpc_golomb(&full[..t]);
     }
-    for &(order, mu) in &[(16usize, 8i64), (16, 32), (32, 8), (32, 32), (32, 128), (16, 128)] {
+    for &(order, mu) in &[
+        (16usize, 8i64),
+        (16, 32),
+        (32, 8),
+        (32, 32),
+        (32, 128),
+        (16, 128),
+    ] {
         let mut tot = 0usize;
         for full in &sig {
             let e = signlms_residual(&full[..t], order, mu);
@@ -91,11 +108,26 @@ fn main() {
         }
         best.push((format!("LMS o={order} mu={mu}"), tot));
     }
-    println!("  {:<18} {:>9} {:>8} {:>9}", "config", "bytes", "Δvs A", "bps");
-    println!("  {:<18} {:>9} {:>8} {:>9.3}", "A (5/3+LPC)", ta, "—", ta as f64 * 8.0 / nm);
+    println!(
+        "  {:<18} {:>9} {:>8} {:>9}",
+        "config", "bytes", "Δvs A", "bps"
+    );
+    println!(
+        "  {:<18} {:>9} {:>8} {:>9.3}",
+        "A (5/3+LPC)",
+        ta,
+        "—",
+        ta as f64 * 8.0 / nm
+    );
     for (name, b) in &best {
         let dpct = -100.0 * (ta as f64 - *b as f64) / ta as f64;
-        println!("  {:<18} {:>9} {:>+7.1}% {:>9.3}", name, b, dpct, *b as f64 * 8.0 / nm);
+        println!(
+            "  {:<18} {:>9} {:>+7.1}% {:>9.3}",
+            name,
+            b,
+            dpct,
+            *b as f64 * 8.0 / nm
+        );
     }
     println!("# HHI ECG ≈ 3.31 bps. (LMS golomb only — no wavelet, no LPC header.)");
 }

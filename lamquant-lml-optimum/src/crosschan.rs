@@ -67,6 +67,7 @@ impl CrossChanPredictor {
     pub fn predict_channel(&self, i: usize, recon_prior: &[Vec<i64>], t: usize) -> Vec<i64> {
         let row = &self.coeffs[i];
         let mut out = Vec::with_capacity(t);
+        #[allow(clippy::needless_range_loop)] // k indexes each prior channel at one time sample
         for k in 0..t {
             let mut acc = 0.0f64;
             for (j, &q) in row.iter().enumerate() {
@@ -138,7 +139,9 @@ pub fn fit_predictor(signal: &[Vec<i64>]) -> CrossChanPredictor {
 #[cfg(feature = "encode")]
 pub fn fit_predictor_ridged(signal: &[Vec<i64>], ridge_frac: f64) -> CrossChanPredictor {
     let n = signal.len();
-    let empty = CrossChanPredictor { coeffs: (0..n).map(|_| Vec::new()).collect() };
+    let empty = CrossChanPredictor {
+        coeffs: (0..n).map(|_| Vec::new()).collect(),
+    };
     if n == 0 || n > MAX_FIT_CHANNELS {
         return empty;
     }
@@ -148,14 +151,16 @@ pub fn fit_predictor_ridged(signal: &[Vec<i64>], ridge_frac: f64) -> CrossChanPr
     }
 
     // Mean-removed channel covariance (population).
-    let mus: Vec<f64> =
-        signal.iter().map(|c| c.iter().map(|&v| v as f64).sum::<f64>() / t as f64).collect();
+    let mus: Vec<f64> = signal
+        .iter()
+        .map(|c| c.iter().map(|&v| v as f64).sum::<f64>() / t as f64)
+        .collect();
     let mut cov = alloc::vec![alloc::vec![0.0f64; n]; n];
     for i in 0..n {
         for j in i..n {
             let mut s = 0.0;
-            for k in 0..t {
-                s += (signal[i][k] as f64 - mus[i]) * (signal[j][k] as f64 - mus[j]);
+            for (&left, &right) in signal[i].iter().zip(&signal[j]).take(t) {
+                s += (left as f64 - mus[i]) * (right as f64 - mus[j]);
             }
             let c = s / t as f64;
             cov[i][j] = c;
@@ -179,7 +184,11 @@ pub fn fit_predictor_ridged(signal: &[Vec<i64>], ridge_frac: f64) -> CrossChanPr
         // Quantize to Q16 i32 (clamped — montage coeffs are O(1)).
         let row: Vec<i32> = row_f
             .iter()
-            .map(|&v| (v * COEFF_Q).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32)
+            .map(|&v| {
+                (v * COEFF_Q)
+                    .round()
+                    .clamp(i32::MIN as f64, i32::MAX as f64) as i32
+            })
             .collect();
         coeffs.push(row);
     }
@@ -195,8 +204,8 @@ pub(crate) fn solve_spd_cholesky(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> 
     for i in 0..n {
         for j in 0..=i {
             let mut s = a[i][j];
-            for k in 0..j {
-                s -= l[i][k] * l[j][k];
+            for (&left, &right) in l[i][..j].iter().zip(&l[j][..j]) {
+                s -= left * right;
             }
             if i == j {
                 if s <= 0.0 {
@@ -255,8 +264,16 @@ mod tests {
         let sig = alloc::vec![ch0.clone(), ch1.clone(), ch2.clone()];
         let p = fit_predictor(&sig);
         let pred2 = p.predict_channel(2, &[ch0, ch1], t);
-        let max_err = pred2.iter().zip(&ch2).map(|(a, b)| (a - b).abs()).max().unwrap();
-        assert!(max_err <= 1, "linear-combo channel should predict within 1 LSB, got {max_err}");
+        let max_err = pred2
+            .iter()
+            .zip(&ch2)
+            .map(|(a, b)| (a - b).abs())
+            .max()
+            .unwrap();
+        assert!(
+            max_err <= 1,
+            "linear-combo channel should predict within 1 LSB, got {max_err}"
+        );
     }
 
     #[test]
@@ -264,7 +281,9 @@ mod tests {
         // Uncorrelated channels ⇒ predictor coefficients near zero.
         let t = 2000;
         let ch0: Vec<i64> = (0..t).map(|i| ((i * 31) % 97) as i64 - 48).collect();
-        let ch1: Vec<i64> = (0..t).map(|i| (((i * 17 + 5) % 89) as i64 - 44) * 3).collect();
+        let ch1: Vec<i64> = (0..t)
+            .map(|i| (((i * 17 + 5) % 89) as i64 - 44) * 3)
+            .collect();
         let sig = alloc::vec![ch0, ch1];
         let p = fit_predictor(&sig);
         // coeff is Q16; "near zero" = well under 0.25·Q.
@@ -273,7 +292,9 @@ mod tests {
 
     #[test]
     fn over_cap_returns_empty() {
-        let sig: Vec<Vec<i64>> = (0..(MAX_FIT_CHANNELS + 1)).map(|_| alloc::vec![1i64; 8]).collect();
+        let sig: Vec<Vec<i64>> = (0..(MAX_FIT_CHANNELS + 1))
+            .map(|_| alloc::vec![1i64; 8])
+            .collect();
         let p = fit_predictor(&sig);
         assert!(p.coeffs.iter().all(|r| r.is_empty()));
     }

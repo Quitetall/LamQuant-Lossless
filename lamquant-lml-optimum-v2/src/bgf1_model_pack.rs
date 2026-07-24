@@ -1,6 +1,6 @@
 //! Strict BGF1 v1 profile over the generic canonical LQW1 container.
 
-use crate::model_pack::{ModelPack, Tensor, TensorDtype};
+use crate::model_pack::{ModelPack, ModelTensor, TensorDtype};
 use crate::OptimumV2Error;
 
 pub const BGF1_MODEL_ID: i32 = 239;
@@ -86,7 +86,7 @@ const PROFILE: [TensorSpec; 10] = [
 pub struct Bgf1ModelPack {
     pub model_id: i32,
     pub learned_parameter_count: usize,
-    pub tensors: Vec<Tensor>,
+    pub tensors: Vec<ModelTensor>,
     pub lqw1_sha256: [u8; 32],
 }
 

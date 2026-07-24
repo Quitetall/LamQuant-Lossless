@@ -180,15 +180,6 @@ mod tests {
                 Err(crate::error::LmlError::InvalidHeader("nope".into()))
             }
         }
-        struct CountCalls(std::cell::Cell<u32>);
-        impl Stage for CountCalls {
-            type Input = u32;
-            type Output = u32;
-            fn process(&mut self, input: u32) -> LmlResult<u32> {
-                self.0.set(self.0.get() + 1);
-                Ok(input)
-            }
-        }
         let counter = std::rc::Rc::new(std::cell::Cell::new(0u32));
         struct Counted(std::rc::Rc<std::cell::Cell<u32>>);
         impl Stage for Counted {

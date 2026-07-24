@@ -7,11 +7,11 @@
 //!
 //!   * `scalar`        — the firmware/no_std reference.
 //!   * `avx2_current`  — the in-tree kernel: 4 lags per vector, `_mm256_set_pd`
-//!                       (4 scalar i64 loads + `as f64` convert per i), mul+add.
+//!     (4 scalar i64 loads + `as f64` convert per i), mul+add.
 //!   * `avx2_hoisted`  — the only bit-exact win available: convert i64→f64 ONCE
-//!                       up front (each sample converted once, not ~order times)
-//!                       and use a real `_mm256_loadu_pd` instead of `set_pd`.
-//!                       Same per-lag accumulation order ⇒ bit-identical.
+//!     up front (each sample converted once, not ~order times)
+//!     and use a real `_mm256_loadu_pd` instead of `set_pd`.
+//!     Same per-lag accumulation order ⇒ bit-identical.
 //!
 //! Bit-exactness is asserted (all three must produce identical f64 bits).
 //! Reassociating the per-lag sum (the textbook 8-wide dot product) or using FMA
@@ -23,6 +23,9 @@
 //! ```
 
 use std::time::Instant;
+
+#[cfg(target_arch = "x86_64")]
+type AutocorrKernel = unsafe fn(&[i64], usize, usize) -> Vec<f64>;
 
 fn autocorr_scalar(subband: &[i64], order: usize, seg_len: usize) -> Vec<f64> {
     let mut r = vec![0.0f64; order + 1];
@@ -156,7 +159,10 @@ fn main() {
     #[cfg(target_arch = "x86_64")]
     {
         assert_eq!(r_sc, r_cur, "avx2_current must be bit-identical to scalar");
-        assert_eq!(r_sc, r_hoist, "avx2_hoisted must be bit-identical to scalar");
+        assert_eq!(
+            r_sc, r_hoist,
+            "avx2_hoisted must be bit-identical to scalar"
+        );
         println!("# bit-exactness: scalar == avx2_current == avx2_hoisted  ✓");
     }
 
@@ -172,12 +178,21 @@ fn main() {
     std::hint::black_box(acc);
 
     println!("# seg_len={seg_len} order={order}  ({iters} iters)");
-    println!("# {:<16} {:>10} {:>12} {:>9}", "kernel", "ns/call", "GiB/s", "speedup");
-    println!("  {:<16} {:>10.1} {:>12.2} {:>9}", "scalar", sc_ns, bytes_per / sc_ns, "1.00x");
+    println!(
+        "# {:<16} {:>10} {:>12} {:>9}",
+        "kernel", "ns/call", "GiB/s", "speedup"
+    );
+    println!(
+        "  {:<16} {:>10.1} {:>12.2} {:>9}",
+        "scalar",
+        sc_ns,
+        bytes_per / sc_ns,
+        "1.00x"
+    );
 
     #[cfg(target_arch = "x86_64")]
     {
-        let kernels: [(&str, unsafe fn(&[i64], usize, usize) -> Vec<f64>); 2] = [
+        let kernels: [(&str, AutocorrKernel); 2] = [
             ("avx2_current", autocorr_avx2_current),
             ("avx2_hoisted", autocorr_avx2_hoisted),
         ];
@@ -191,7 +206,10 @@ fn main() {
             std::hint::black_box(acc);
             println!(
                 "  {:<16} {:>10.1} {:>12.2} {:>8.2}x",
-                name, ns, bytes_per / ns, sc_ns / ns
+                name,
+                ns,
+                bytes_per / ns,
+                sc_ns / ns
             );
         }
     }

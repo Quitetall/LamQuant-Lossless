@@ -14,8 +14,8 @@
 //!
 //! cargo run -p lamquant-lml-optimum --features encode --release --example mcu_transform_decomp_probe -- <bin>...
 
-use std::fs;
 use lamquant_lml_mcu::{golomb, lml, lpc};
+use std::fs;
 
 const W: usize = 32768;
 const LVL: u8 = 3;

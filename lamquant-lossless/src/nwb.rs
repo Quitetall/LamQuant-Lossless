@@ -119,7 +119,7 @@ fn read_int_dataset(ds: &Dataset) -> LmlResult<Option<H5IntSignal>> {
     };
 
     let shape = ds.shape();
-    if shape.is_empty() || shape.len() > 2 || shape.iter().any(|&d| d == 0) {
+    if shape.is_empty() || shape.len() > 2 || shape.contains(&0) {
         return Ok(None);
     }
 
@@ -222,7 +222,11 @@ fn write_flat_i64(ds: &Dataset, int_bytes: u8, signed: bool, flat: &[i64]) -> Lm
         (2, false) => w!(u16),
         (4, false) => w!(u32),
         (8, false) => w!(u64),
-        _ => return Err(LmlError::InvalidHeader(format!("unsupported int width {int_bytes}"))),
+        _ => {
+            return Err(LmlError::InvalidHeader(format!(
+                "unsupported int width {int_bytes}"
+            )))
+        }
     }
     Ok(())
 }
@@ -318,8 +322,16 @@ pub fn read_bundle(path: &Path) -> LmlResult<SignalBundle> {
             phys_dim: String::new(),
         },
         sidecar: vec![
-            SidecarBlob { key: SKEL_KEY.into(), bytes: skel_bytes, aux: None },
-            SidecarBlob { key: SLOTS_KEY.into(), bytes: slots_json, aux: None },
+            SidecarBlob {
+                key: SKEL_KEY.into(),
+                bytes: skel_bytes,
+                aux: None,
+            },
+            SidecarBlob {
+                key: SLOTS_KEY.into(),
+                bytes: slots_json,
+                aux: None,
+            },
         ],
     })
 }

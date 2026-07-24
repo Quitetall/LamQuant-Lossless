@@ -65,7 +65,10 @@ fn main() {
     let t = sig[0].len();
     let nm = (n_ch * t) as f64;
     println!("# window: {n_ch} ch x {t} samples  ({path})");
-    println!("# {:>4} | {:>10} {:>9} | {:>10} {:>9} | {:>8}", "BPS", "5/3 bps", "5/3 PRD", "9/7 bps", "9/7 PRD", "dPRD%");
+    println!(
+        "# {:>4} | {:>10} {:>9} | {:>10} {:>9} | {:>8}",
+        "BPS", "5/3 bps", "5/3 PRD", "9/7 bps", "9/7 PRD", "dPRD%"
+    );
 
     for &target in &[3.5f64, 3.0, 2.5, 2.0, 1.5, 1.0] {
         let b53 = lml::compress_target_bps_pcrd(&sig, target, LpcMode::default()).expect("5/3");

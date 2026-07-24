@@ -121,7 +121,13 @@ pub fn quantize_window(x: &[f32], n_ch: usize, t: usize, dtype: PackDtype) -> (V
 
 /// Inverse of [`quantize_window`]: dequantize BFP mantissas + scales back to `[n_ch, t]`
 /// f32 (`mantissa * scale`, or the raw f32 for `F32`).
-pub fn dequantize_window(scales: &[f32], mant: &[u8], n_ch: usize, t: usize, dtype: PackDtype) -> Vec<f32> {
+pub fn dequantize_window(
+    scales: &[f32],
+    mant: &[u8],
+    n_ch: usize,
+    t: usize,
+    dtype: PackDtype,
+) -> Vec<f32> {
     debug_assert_eq!(scales.len(), n_ch);
     debug_assert_eq!(mant.len(), n_ch * t * dtype.mant_size());
     let mut out = vec![0.0f32; n_ch * t];
@@ -164,10 +170,16 @@ impl fmt::Display for PackError {
             PackError::BadVersion(v) => write!(f, "unsupported LQTP version {v}"),
             PackError::BadDtype(v) => write!(f, "unknown pack dtype tag {v}"),
             PackError::Truncated { expected, actual } => {
-                write!(f, "pack truncated: expected >= {expected} bytes, got {actual}")
+                write!(
+                    f,
+                    "pack truncated: expected >= {expected} bytes, got {actual}"
+                )
             }
             PackError::ManifestMismatch => {
-                write!(f, "pack manifest hash != loaded manifest (rebuild the pack)")
+                write!(
+                    f,
+                    "pack manifest hash != loaded manifest (rebuild the pack)"
+                )
             }
             PackError::ShapeMismatch(s) => write!(f, "pack shape mismatch: {s}"),
             PackError::Io(e) => write!(f, "pack I/O error: {e}"),
@@ -221,14 +233,18 @@ impl PackHeader {
     pub fn to_bytes(&self) -> Result<[u8; LQTP_HEADER_LEN], PackError> {
         // try_from (not `as`): a shape that overflows its wire width must ERROR, never
         // wrap silently — a truncated n_windows would slip past the stride cross-check.
-        let n_ch = u16::try_from(self.n_channels)
-            .map_err(|_| PackError::ShapeMismatch(format!("n_channels {} > u16::MAX", self.n_channels)))?;
-        let win_len = u32::try_from(self.window_len)
-            .map_err(|_| PackError::ShapeMismatch(format!("window_len {} > u32::MAX", self.window_len)))?;
-        let n_win = u32::try_from(self.n_windows)
-            .map_err(|_| PackError::ShapeMismatch(format!("n_windows {} > u32::MAX", self.n_windows)))?;
-        let stride = u64::try_from(self.record_stride)
-            .map_err(|_| PackError::ShapeMismatch(format!("record_stride {} > u64::MAX", self.record_stride)))?;
+        let n_ch = u16::try_from(self.n_channels).map_err(|_| {
+            PackError::ShapeMismatch(format!("n_channels {} > u16::MAX", self.n_channels))
+        })?;
+        let win_len = u32::try_from(self.window_len).map_err(|_| {
+            PackError::ShapeMismatch(format!("window_len {} > u32::MAX", self.window_len))
+        })?;
+        let n_win = u32::try_from(self.n_windows).map_err(|_| {
+            PackError::ShapeMismatch(format!("n_windows {} > u32::MAX", self.n_windows))
+        })?;
+        let stride = u64::try_from(self.record_stride).map_err(|_| {
+            PackError::ShapeMismatch(format!("record_stride {} > u64::MAX", self.record_stride))
+        })?;
         let mut h = [0u8; LQTP_HEADER_LEN];
         h[0..4].copy_from_slice(LQTP_MAGIC);
         h[4] = LQTP_VERSION;
@@ -244,7 +260,10 @@ impl PackHeader {
 
     pub fn parse(data: &[u8]) -> Result<PackHeader, PackError> {
         if data.len() < LQTP_HEADER_LEN {
-            return Err(PackError::Truncated { expected: LQTP_HEADER_LEN, actual: data.len() });
+            return Err(PackError::Truncated {
+                expected: LQTP_HEADER_LEN,
+                actual: data.len(),
+            });
         }
         if &data[0..4] != LQTP_MAGIC {
             return Err(PackError::BadMagic);
@@ -270,7 +289,14 @@ impl PackHeader {
                 dtype.mant_size()
             )));
         }
-        Ok(PackHeader { dtype, n_channels, window_len, n_windows, record_stride, manifest_sha256 })
+        Ok(PackHeader {
+            dtype,
+            n_channels,
+            window_len,
+            n_windows,
+            record_stride,
+            manifest_sha256,
+        })
     }
 }
 
@@ -335,8 +361,12 @@ impl PackWriter {
                 self.header.n_channels * self.header.window_len
             )));
         }
-        let (scales, mant) =
-            quantize_window(x, self.header.n_channels, self.header.window_len, self.header.dtype);
+        let (scales, mant) = quantize_window(
+            x,
+            self.header.n_channels,
+            self.header.window_len,
+            self.header.dtype,
+        );
         let file = self
             .file
             .as_mut()
@@ -364,7 +394,9 @@ impl PackWriter {
             .take()
             .ok_or_else(|| PackError::ShapeMismatch("writer already finished".into()))?;
         file.flush()?;
-        let f = file.into_inner().map_err(|e| PackError::Io(e.into_error()))?;
+        let f = file
+            .into_inner()
+            .map_err(|e| PackError::Io(e.into_error()))?;
         f.sync_all()?;
         drop(f);
         std::fs::rename(&self.partial_path, &self.final_path)?;
@@ -393,7 +425,10 @@ pub struct PackReader {
 }
 
 impl PackReader {
-    pub fn open(path: &Path, expected_manifest_sha256: Option<[u8; 32]>) -> Result<Self, PackError> {
+    pub fn open(
+        path: &Path,
+        expected_manifest_sha256: Option<[u8; 32]>,
+    ) -> Result<Self, PackError> {
         let file = File::open(path)?;
         // SAFETY: read-only mapping of a file treated as immutable for this handle.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
@@ -403,7 +438,10 @@ impl PackReader {
         // valid LQTP1 pack is exactly header + records, so reject the surplus too.
         if mmap.len() != total {
             return Err(if mmap.len() < total {
-                PackError::Truncated { expected: total, actual: mmap.len() }
+                PackError::Truncated {
+                    expected: total,
+                    actual: mmap.len(),
+                }
             } else {
                 PackError::ShapeMismatch(format!(
                     "pack has {} trailing bytes past the {total} declared",
@@ -579,7 +617,11 @@ mod tests {
                 let deq = r.dequantize_window(row).unwrap();
                 let (scales, _) = quantize_window(win, n_ch, t, dtype);
                 for c in 0..n_ch {
-                    let bound = if dtype == PackDtype::F32 { 0.0 } else { scales[c] * 0.5 + 1e-6 };
+                    let bound = if dtype == PackDtype::F32 {
+                        0.0
+                    } else {
+                        scales[c] * 0.5 + 1e-6
+                    };
                     for i in 0..t {
                         assert!(
                             (win[c * t + i] - deq[c * t + i]).abs() <= bound,
@@ -598,7 +640,8 @@ mod tests {
         let hash = [0x11u8; 32];
         let tmp = tempfile::NamedTempFile::new().unwrap();
         {
-            let mut w = PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, n_win, hash).unwrap();
+            let mut w =
+                PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, n_win, hash).unwrap();
             for win in &windows {
                 w.write_window(win).unwrap();
             }
@@ -612,8 +655,7 @@ mod tests {
         ));
         assert!(PackReader::open(tmp.path(), None).is_ok());
         // A short build must refuse to finish (never ship a truncated pack).
-        let mut w2 =
-            PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, 3, hash).unwrap();
+        let mut w2 = PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, 3, hash).unwrap();
         w2.write_window(&windows[0]).unwrap();
         assert!(w2.finish().is_err(), "short pack must not finish");
     }
@@ -630,14 +672,18 @@ mod tests {
         let hash = [0u8; 32];
         let tmp = tempfile::NamedTempFile::new().unwrap();
         {
-            let mut w = PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, n_win, hash).unwrap();
+            let mut w =
+                PackWriter::create(tmp.path(), PackDtype::Int16, n_ch, t, n_win, hash).unwrap();
             for win in &windows {
                 w.write_window(win).unwrap();
             }
             w.finish().unwrap();
         }
         let bytes = std::fs::read(tmp.path()).unwrap();
-        assert_eq!(bytes.len(), LQTP_HEADER_LEN + n_win * (n_ch * 4 + n_ch * t * 2));
+        assert_eq!(
+            bytes.len(),
+            LQTP_HEADER_LEN + n_win * (n_ch * 4 + n_ch * t * 2)
+        );
         assert_eq!(
             sha_hex(&bytes),
             "cb35ecf71056e2440236dcdd46358492a467dac3a9d1adb621de519fb87394b5",
@@ -658,7 +704,10 @@ mod tests {
             let mut w = PackWriter::create(&path, PackDtype::Int16, n_ch, t, 3, hash).unwrap();
             w.write_window(&vec![1.0f32; n_ch * t]).unwrap();
         }
-        assert!(!partial.exists(), ".partial must be removed on drop-without-finish");
+        assert!(
+            !partial.exists(),
+            ".partial must be removed on drop-without-finish"
+        );
         assert!(!path.exists(), "final pack must never appear on abort");
         // A successful build renames the partial away — no leftover either.
         {
@@ -667,6 +716,9 @@ mod tests {
             w.finish().unwrap();
         }
         assert!(path.exists(), "finish must create the final pack");
-        assert!(!partial.exists(), "finish renames partial → final, no leftover");
+        assert!(
+            !partial.exists(),
+            "finish renames partial → final, no leftover"
+        );
     }
 }

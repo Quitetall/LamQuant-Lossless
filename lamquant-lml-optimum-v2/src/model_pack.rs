@@ -43,7 +43,7 @@ impl TensorDtype {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tensor {
+pub struct ModelTensor {
     pub name: String,
     pub dtype: TensorDtype,
     pub shape: Vec<u32>,
@@ -54,12 +54,12 @@ pub struct Tensor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPack {
-    pub tensors: Vec<Tensor>,
+    pub tensors: Vec<ModelTensor>,
     pub sha256: [u8; 32],
 }
 
 impl ModelPack {
-    pub fn encode(tensors: &[Tensor]) -> Result<Vec<u8>, OptimumV2Error> {
+    pub fn encode(tensors: &[ModelTensor]) -> Result<Vec<u8>, OptimumV2Error> {
         if tensors.is_empty() || tensors.len() > MAX_TENSORS {
             return Err(OptimumV2Error::InvalidInput(
                 "LQW1 tensor count is outside bounds".into(),
@@ -258,7 +258,7 @@ impl ModelPack {
             let payload_absolute_end = payload_start
                 .checked_add(length)
                 .ok_or_else(|| OptimumV2Error::InvalidPacket("LQW1 payload end overflow".into()))?;
-            let tensor = Tensor {
+            let tensor = ModelTensor {
                 name,
                 dtype,
                 shape,
@@ -286,7 +286,7 @@ impl ModelPack {
 }
 
 fn validate_tensor(
-    tensor: &Tensor,
+    tensor: &ModelTensor,
     error: fn(String) -> OptimumV2Error,
 ) -> Result<(), OptimumV2Error> {
     if tensor.name.is_empty()

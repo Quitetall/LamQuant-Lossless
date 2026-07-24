@@ -35,9 +35,9 @@
 use std::collections::HashMap;
 use std::fs;
 
+use lamquant_lml_mcu::codec::Codec;
 use lamquant_lml_mcu::codec::Mode;
 use lamquant_lml_optimum::{entropy, mv_rls, LmoCodec};
-use lamquant_lml_mcu::codec::Codec;
 
 const WIN: usize = 32768;
 
@@ -66,7 +66,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -154,7 +157,10 @@ fn crosschan_mi_bits_per_sample(res: &[Vec<i64>]) -> f64 {
         return 0.0;
     }
     const FLOOR: f64 = 1.0 / 12.0; // uniform ±0.5 LSB variance
-    let means: Vec<f64> = res.iter().map(|ch| ch.iter().sum::<i64>() as f64 / t as f64).collect();
+    let means: Vec<f64> = res
+        .iter()
+        .map(|ch| ch.iter().sum::<i64>() as f64 / t as f64)
+        .collect();
     let mut cov = vec![vec![0.0f64; c]; c];
     for i in 0..c {
         for j in i..c {
@@ -177,17 +183,35 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // known measured H.BWC referential gap (% we are LARGER), for the two lose-set recordings.
     let known_gap = |name: &str| -> Option<f64> {
-        if name.contains("siena") { Some(4.16) } else if name.contains("eegmmidb") { Some(2.3) } else { None }
+        if name.contains("siena") {
+            Some(4.16)
+        } else if name.contains("eegmmidb") {
+            Some(2.3)
+        } else {
+            None
+        }
     };
 
-    println!("# Gap-attribution ledger — bits/sample on the SAME stream (plain mv_rls residual), except");
+    println!(
+        "# Gap-attribution ledger — bits/sample on the SAME stream (plain mv_rls residual), except"
+    );
     println!("# our_bps = shipped container (better predictor + cross-channel + scale_cond), for reference.");
     println!("# resid_bps = our coder on the plain residual; H0=memoryless, H2=order-2 magnitude-context —");
     println!("# all three on that ONE stream, so coderGap=resid_bps−H2 is apples-to-apples (coder vs context).");
     println!("# crossMI = Gaussian latent cross-channel redundancy: a CONTINUOUS-model CEILING, NOT integer-");
     println!("# realizable and separable-linear-UNREACHABLE (ricct/crosschan coded it → ~0 net, cascade).\n");
-    println!("{:>12} {:>8} {:>9} {:>7} {:>7} | {:>8} {:>8} | {:>9} {:>8}",
-             "recording", "our bps", "resid bps", "H0", "H2", "coderGap", "ctxHead", "crossMI*", "hbwc gap");
+    println!(
+        "{:>12} {:>8} {:>9} {:>7} {:>7} | {:>8} {:>8} | {:>9} {:>8}",
+        "recording",
+        "our bps",
+        "resid bps",
+        "H0",
+        "H2",
+        "coderGap",
+        "ctxHead",
+        "crossMI*",
+        "hbwc gap"
+    );
 
     for path in &args {
         let sig = read_bin(path);
@@ -221,14 +245,18 @@ fn main() {
         let (h0, h2) = (h0 / nm, h2 / nm);
         let crossmi = crosschan_mi_bits_per_sample(&res);
 
-        let coder_gap = resid_bps - h2;   // >0 ⇒ a context coder could still save this on the residual
-        let ctx_head = h0 - h2;           // memoryless→order-2 context ceiling
+        let coder_gap = resid_bps - h2; // >0 ⇒ a context coder could still save this on the residual
+        let ctx_head = h0 - h2; // memoryless→order-2 context ceiling
         let name = path.rsplit('/').next().unwrap_or(path);
-        let gapstr = known_gap(name).map(|g| format!("{:+.2}%", g)).unwrap_or_else(|| "  n/a".into());
+        let gapstr = known_gap(name)
+            .map(|g| format!("{:+.2}%", g))
+            .unwrap_or_else(|| "  n/a".into());
         println!("{name:>12} {our_bps:>8.4} {resid_bps:>9.4} {h0:>7.4} {h2:>7.4} | {coder_gap:>+8.4} {ctx_head:>8.4} | {crossmi:>9.2} {gapstr:>8}");
     }
     println!("\n# coderGap = resid_bps − H2: how much a full order-2 context arithmetic coder could still");
-    println!("#   save on the plain residual. ~0 or <0 ⇒ our scale_cond coder already captures within-");
+    println!(
+        "#   save on the plain residual. ~0 or <0 ⇒ our scale_cond coder already captures within-"
+    );
     println!("#   channel context ⇒ the gap is NOT in the entropy coder and NOT within-channel.");
     println!("# ctxHead = H0 − H2: the size of the within-channel context structure (already banked above).");
     println!("# crossMI* = Gaussian ceiling only. The REALIZABLE linear cross-channel gain is ~0 (ricct):");

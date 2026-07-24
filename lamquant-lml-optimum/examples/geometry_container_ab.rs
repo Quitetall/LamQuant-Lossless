@@ -35,7 +35,10 @@ fn read_coords(path: &str) -> Vec<Option<[f64; 3]>> {
         .unwrap_or_default()
         .lines()
         .map(|l| {
-            let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let v: Vec<f64> = l
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
             if v.len() == 3 && v.iter().all(|x| x.is_finite()) {
                 Some([v[0], v[1], v[2]])
             } else {
@@ -47,7 +50,10 @@ fn read_coords(path: &str) -> Vec<Option<[f64; 3]>> {
 
 fn main() {
     let paths: Vec<String> = std::env::args().skip(1).collect();
-    println!("  {:>36} | {:>4} | {:>11} {:>11} | {:>7}", "window", "nch", "encode", "+geometry", "gain%");
+    println!(
+        "  {:>36} | {:>4} | {:>11} {:>11} | {:>7}",
+        "window", "nch", "encode", "+geometry", "gain%"
+    );
     let (mut tb, mut tg) = (0usize, 0usize);
     for path in &paths {
         let sig = read_bin(path);
@@ -55,16 +61,41 @@ fn main() {
         let base = lmo_lossless::encode(&sig).unwrap();
         let geom = MontageGeometry::new(coords);
         let g = lmo_lossless::encode_with_geometry(&sig, Some(&geom)).unwrap();
-        assert_eq!(lmo_lossless::decode(&g).unwrap(), sig, "geometry body must roundtrip");
+        assert_eq!(
+            lmo_lossless::decode(&g).unwrap(),
+            sig,
+            "geometry body must roundtrip"
+        );
         let gain = 100.0 * (base.len() as f64 - g.len() as f64) / base.len() as f64;
-        let short: String = std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
-        let short = short.chars().rev().take(36).collect::<String>().chars().rev().collect::<String>();
-        println!("  {:>36} | {:>4} | {:>11} {:>11} | {:>6.2}%", short, sig.len(), base.len(), g.len(), gain);
+        let short: String = std::path::Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let short = short
+            .chars()
+            .rev()
+            .take(36)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        println!(
+            "  {:>36} | {:>4} | {:>11} {:>11} | {:>6.2}%",
+            short,
+            sig.len(),
+            base.len(),
+            g.len(),
+            gain
+        );
         tb += base.len();
         tg += g.len();
     }
     let gain = 100.0 * (tb as f64 - tg as f64) / tb as f64;
-    println!("  {:>36} | {:>4} | {:>11} {:>11} | {:>6.2}%", "TOTAL", "", tb, tg, gain);
+    println!(
+        "  {:>36} | {:>4} | {:>11} {:>11} | {:>6.2}%",
+        "TOTAL", "", tb, tg, gain
+    );
     println!("\n# id=2 body bytes. The full container keep-bests this vs the 5/3 floor; on");
     println!("# correlated multichannel EEG the id=2 body is the winner, so this ~ container.");
 }

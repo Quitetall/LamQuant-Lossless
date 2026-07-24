@@ -51,7 +51,11 @@ impl Rls {
         for (i, row) in p.iter_mut().enumerate() {
             row[i] = 1.0 / DELTA;
         }
-        Self { w: [0.0; ORDER], p, hist: [0.0; ORDER] }
+        Self {
+            w: [0.0; ORDER],
+            p,
+            hist: [0.0; ORDER],
+        }
     }
 
     #[inline]
@@ -184,7 +188,11 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
 /// Decode an RLS body. `no_std`-capable (f64 +−×÷ only).
 pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if body.len() < 6 {
-        return Err(LmlError::Truncated { expected: 6, actual: body.len(), context: "rls header" });
+        return Err(LmlError::Truncated {
+            expected: 6,
+            actual: body.len(),
+            context: "rls header",
+        });
     }
     let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
     let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
@@ -192,17 +200,29 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let mut out = Vec::with_capacity(n_ch);
     for _ in 0..n_ch {
         if pos + 4 > body.len() {
-            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "rls ch len" });
+            return Err(LmlError::Truncated {
+                expected: pos + 4,
+                actual: body.len(),
+                context: "rls ch len",
+            });
         }
-        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        let glen =
+            u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
         if pos + glen > body.len() {
-            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "rls ch data" });
+            return Err(LmlError::Truncated {
+                expected: pos + glen,
+                actual: body.len(),
+                context: "rls ch data",
+            });
         }
         let res = crate::entropy::decode(&body[pos..pos + glen])?;
         pos += glen;
         if res.len() != t {
-            return Err(LmlError::InvalidHeader(alloc::format!("rls ch t={} != {t}", res.len())));
+            return Err(LmlError::InvalidHeader(alloc::format!(
+                "rls ch t={} != {t}",
+                res.len()
+            )));
         }
         let mut rls = Rls::new();
         let ch: Vec<i64> = res
@@ -235,7 +255,9 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
 pub fn encode_seg(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     if n_ch == 0 || n_ch > u16::MAX as usize {
-        return Err(LmlError::InvalidHeader(alloc::format!("rls_seg n_ch={n_ch}")));
+        return Err(LmlError::InvalidHeader(alloc::format!(
+            "rls_seg n_ch={n_ch}"
+        )));
     }
     let t = signal[0].len();
     let mut out = Vec::new();
@@ -266,7 +288,11 @@ pub fn encode_seg(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
 /// Decode an [`encode_seg`] body. `no_std`-capable (f64 +−×÷ only).
 pub fn decode_seg(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if body.len() < 6 {
-        return Err(LmlError::Truncated { expected: 6, actual: body.len(), context: "rls_seg header" });
+        return Err(LmlError::Truncated {
+            expected: 6,
+            actual: body.len(),
+            context: "rls_seg header",
+        });
     }
     let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
     let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
@@ -274,17 +300,29 @@ pub fn decode_seg(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let mut out = Vec::with_capacity(n_ch);
     for _ in 0..n_ch {
         if pos + 4 > body.len() {
-            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "rls_seg ch len" });
+            return Err(LmlError::Truncated {
+                expected: pos + 4,
+                actual: body.len(),
+                context: "rls_seg ch len",
+            });
         }
-        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        let glen =
+            u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
         if pos + glen > body.len() {
-            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "rls_seg ch data" });
+            return Err(LmlError::Truncated {
+                expected: pos + glen,
+                actual: body.len(),
+                context: "rls_seg ch data",
+            });
         }
         let res = crate::entropy::decode(&body[pos..pos + glen])?;
         pos += glen;
         if res.len() != t {
-            return Err(LmlError::InvalidHeader(alloc::format!("rls_seg ch t={} != {t}", res.len())));
+            return Err(LmlError::InvalidHeader(alloc::format!(
+                "rls_seg ch t={} != {t}",
+                res.len()
+            )));
         }
         let mut rls = Rls::new();
         let mut det = crate::segmentation::ChangePoint::new();
@@ -316,7 +354,8 @@ mod tests {
                         // non-stationary: amplitude + frequency drift (the regime RLS wins)
                         let amp = 2000.0 + 1500.0 * ((i as f64 * 0.001).sin());
                         let f = 0.05 + 0.04 * ((i as f64 * 0.0007).cos());
-                        (amp * ((i + c * 13) as f64 * f).sin()) as i64 + ((i * 7 + c) % 11) as i64 - 5
+                        (amp * ((i + c * 13) as f64 * f).sin()) as i64 + ((i * 7 + c) % 11) as i64
+                            - 5
                     })
                     .collect()
             })
@@ -328,13 +367,21 @@ mod tests {
         for (n_ch, t) in [(1usize, 500usize), (3, 2000), (8, 777), (21, 1500)] {
             let sig = make_sig(n_ch, t);
             let body = encode(&sig).unwrap();
-            assert_eq!(decode(&body).unwrap(), sig, "rls must be bit-exact ({n_ch}x{t})");
+            assert_eq!(
+                decode(&body).unwrap(),
+                sig,
+                "rls must be bit-exact ({n_ch}x{t})"
+            );
         }
     }
 
     #[test]
     fn constant_and_tiny() {
-        for sig in [vec![vec![0i64; 100]], vec![vec![42i64; 50]], vec![vec![-7i64, 7, -7, 7]]] {
+        for sig in [
+            vec![vec![0i64; 100]],
+            vec![vec![42i64; 50]],
+            vec![vec![-7i64, 7, -7, 7]],
+        ] {
             let body = encode(&sig).unwrap();
             assert_eq!(decode(&body).unwrap(), sig);
         }
@@ -346,7 +393,9 @@ mod tests {
     #[test]
     fn seg_roundtrip_bit_exact() {
         // smooth prefix then a high-amplitude burst ⇒ a real change-point.
-        let mut ch: Vec<i64> = (0..3000).map(|i| ((i as f64 * 0.05).sin() * 30.0) as i64).collect();
+        let mut ch: Vec<i64> = (0..3000)
+            .map(|i| ((i as f64 * 0.05).sin() * 30.0) as i64)
+            .collect();
         ch.extend((0..3000).map(|i| ((i as f64 * 0.05).sin() * 8000.0) as i64));
         let sig = vec![ch.clone(), ch.iter().map(|&v| v / 2 + 3).collect()];
         let body = encode_seg(&sig).unwrap();

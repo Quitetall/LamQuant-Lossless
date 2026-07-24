@@ -38,7 +38,11 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
 }
 
 fn bit_len(m: u64) -> i32 {
-    if m == 0 { 0 } else { 64 - m.leading_zeros() as i32 }
+    if m == 0 {
+        0
+    } else {
+        64 - m.leading_zeros() as i32
+    }
 }
 fn mag(x: i64) -> i32 {
     bit_len(x.unsigned_abs()).min(15)
@@ -46,9 +50,16 @@ fn mag(x: i64) -> i32 {
 
 fn entropy(h: &HashMap<i64, u64>) -> f64 {
     let n: u64 = h.values().sum();
-    if n == 0 { return 0.0; }
+    if n == 0 {
+        return 0.0;
+    }
     let nf = n as f64;
-    -h.values().map(|&c| { let p = c as f64 / nf; p * p.log2() }).sum::<f64>()
+    -h.values()
+        .map(|&c| {
+            let p = c as f64 / nf;
+            p * p.log2()
+        })
+        .sum::<f64>()
 }
 
 /// Average conditional entropy H(x | ctx) over all (ctx, x), weighted by freq.
@@ -64,12 +75,19 @@ fn cond_entropy(pairs: &[(u64, i64)]) -> f64 {
         bits += entropy(h) * cn as f64;
         n += cn;
     }
-    if n > 0 { bits / n as f64 } else { 0.0 }
+    if n > 0 {
+        bits / n as f64
+    } else {
+        0.0
+    }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    println!("  {:>14} | {:>6} | {:>7} {:>7} {:>7} {:>7} {:>7}", "rec", "H0", "ord1", "sign2", "magX", "ccMag", "best%");
+    println!(
+        "  {:>14} | {:>6} | {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "rec", "H0", "ord1", "sign2", "magX", "ccMag", "best%"
+    );
     let mut i = 0;
     while i + 1 < args.len() {
         let label = args[i].clone();
@@ -82,7 +100,11 @@ fn main() {
 
         // order-0
         let mut h0m: HashMap<i64, u64> = HashMap::new();
-        for ch in &res { for &x in ch { *h0m.entry(x).or_insert(0) += 1; } }
+        for ch in &res {
+            for &x in ch {
+                *h0m.entry(x).or_insert(0) += 1;
+            }
+        }
         let h0 = entropy(&h0m);
 
         // order-1 linear: ctx = signed prev bucket
@@ -114,12 +136,23 @@ fn main() {
             }
         }
 
-        let (e1, es, em, ec) = (cond_entropy(&p_ord1), cond_entropy(&p_sign2), cond_entropy(&p_magx), cond_entropy(&p_ccmag));
+        let (e1, es, em, ec) = (
+            cond_entropy(&p_ord1),
+            cond_entropy(&p_sign2),
+            cond_entropy(&p_magx),
+            cond_entropy(&p_ccmag),
+        );
         let red = |h: f64| 100.0 * (h0 - h) / h0;
         let best = red(e1).max(red(es)).max(red(em)).max(red(ec));
         println!(
             "  {:>14} | {:>6.3} | {:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}%",
-            label, h0, red(e1), red(es), red(em), red(ec), best
+            label,
+            h0,
+            red(e1),
+            red(es),
+            red(em),
+            red(ec),
+            best
         );
     }
     println!("\n# Reductions vs order-0 H0 on the SHIPPED MV-RLS residual. ord1=linear order-1;");

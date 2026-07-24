@@ -38,8 +38,8 @@ fn no_regression_on_reference_edfs() {
         .join("cr_baselines.json");
     let raw = std::fs::read_to_string(&json_path)
         .unwrap_or_else(|e| panic!("read {}: {}", json_path.display(), e));
-    let baselines: Baselines = serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse cr_baselines.json: {}", e));
+    let baselines: Baselines =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse cr_baselines.json: {}", e));
 
     // Locate the lml binary. Prefer the installed CLI for parity with how
     // baselines were measured. Fall back to skipping the test if absent.
@@ -79,12 +79,7 @@ fn no_regression_on_reference_edfs() {
         }
         let out = tmp.path().join(format!("{}.lml", entry.name));
         let status = Command::new(&lml)
-            .args([
-                "encode",
-                "--bare-lml",
-                "--i-understand-data-loss",
-                "-o",
-            ])
+            .args(["encode", "--bare-lml", "--i-understand-data-loss", "-o"])
             .arg(&out)
             .arg(src)
             .output()

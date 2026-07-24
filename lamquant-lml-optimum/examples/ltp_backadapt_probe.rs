@@ -25,8 +25,8 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example ltp_backadapt_probe -- [BLK] <bin>...
 
-use std::fs;
 use lamquant_lml_optimum::{entropy, mv_rls};
+use std::fs;
 
 const W: usize = 32768; // entropy window (u16 cap on entropy::encode)
 const TMIN: usize = 16;
@@ -54,7 +54,10 @@ fn entropy_bytes(q: &[i64]) -> usize {
     let mut s = 0;
     while s < q.len() {
         let e = (s + W).min(q.len());
-        tot += entropy::encode(&q[s..e]).map(|g| g.len()).unwrap_or(1 << 30) + 4;
+        tot += entropy::encode(&q[s..e])
+            .map(|g| g.len())
+            .unwrap_or(1 << 30)
+            + 4;
         s = e;
     }
     tot
@@ -123,12 +126,22 @@ fn ltp_backadapt(r: &[i64], blk: usize) -> (Vec<i64>, f64) {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // optional first arg = block size
-    let blk = args.first().and_then(|a| a.parse::<usize>().ok()).unwrap_or(4096);
-    if args.first().map(|a| a.parse::<usize>().is_ok()).unwrap_or(false) {
+    let blk = args
+        .first()
+        .and_then(|a| a.parse::<usize>().ok())
+        .unwrap_or(4096);
+    if args
+        .first()
+        .map(|a| a.parse::<usize>().is_ok())
+        .unwrap_or(false)
+    {
         args.remove(0);
     }
     println!("# Backward-adaptive LTP (zero side-info) on the mv_rls residual — BLK={blk}\n");
-    println!("{:>12}  {:>10}  {:>10}  {:>9}  {:>8}", "recording", "base B", "+LTP B", "Δ%", "applied");
+    println!(
+        "{:>12}  {:>10}  {:>10}  {:>9}  {:>8}",
+        "recording", "base B", "+LTP B", "Δ%", "applied"
+    );
     for path in &args {
         let sig = read_bin(path);
         let (nch, t) = (sig.len(), sig[0].len());

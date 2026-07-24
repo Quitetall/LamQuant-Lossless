@@ -15,6 +15,8 @@
 //!   --example rls_probe -- /tmp/ma_full.bin 30000
 //! ```
 
+#![allow(clippy::needless_range_loop)] // explicit matrix updates mirror the RLS equations
+
 use std::fs;
 
 use lamquant_lml_mcu::lpc::LpcMode;
@@ -53,7 +55,12 @@ impl Rls {
         for (i, row) in p.iter_mut().enumerate() {
             row[i] = 1.0 / delta; // large initial inverse-correlation
         }
-        Self { order, lambda, w: vec![0.0; order], p }
+        Self {
+            order,
+            lambda,
+            w: vec![0.0; order],
+            p,
+        }
     }
 
     fn predict(&self, hist: &[f64]) -> f64 {
@@ -140,15 +147,37 @@ fn current_bytes(x: &[i64]) -> usize {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ma_full.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30000);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ma_full.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30000);
     let sig = read_window(&path);
     let t = sig[0].len().min(w);
     let nm = (sig.len() * t) as f64;
     let cur: usize = sig.iter().map(|f| current_bytes(&f[..t])).sum();
-    println!("# RLS probe: {} ({}ch, {}). current 5/3+LPC = {} ({:.3} bps)", path, sig.len(), t, cur, cur as f64 * 8.0 / nm);
-    println!("  {:<22} {:>9} {:>8} {:>9} {:>5}", "config", "bytes", "Δvs cur", "bps", "rt");
-    for &(order, lambda) in &[(8usize, 0.999f64), (16, 0.999), (16, 0.995), (16, 0.99), (32, 0.999), (32, 0.995)] {
+    println!(
+        "# RLS probe: {} ({}ch, {}). current 5/3+LPC = {} ({:.3} bps)",
+        path,
+        sig.len(),
+        t,
+        cur,
+        cur as f64 * 8.0 / nm
+    );
+    println!(
+        "  {:<22} {:>9} {:>8} {:>9} {:>5}",
+        "config", "bytes", "Δvs cur", "bps", "rt"
+    );
+    for &(order, lambda) in &[
+        (8usize, 0.999f64),
+        (16, 0.999),
+        (16, 0.995),
+        (16, 0.99),
+        (32, 0.999),
+        (32, 0.995),
+    ] {
         let mut tot = 0usize;
         let mut allrt = true;
         for f in &sig {
@@ -157,7 +186,15 @@ fn main() {
             tot += golomb::encode_dense(&res).expect("g").len();
         }
         let d = -100.0 * (cur as f64 - tot as f64) / cur as f64;
-        println!("  RLS o={:<2} λ={:<5}        {:>9} {:>+7.1}% {:>9.3} {:>5}", order, lambda, tot, d, tot as f64 * 8.0 / nm, if allrt { "ok" } else { "FAIL" });
+        println!(
+            "  RLS o={:<2} λ={:<5}        {:>9} {:>+7.1}% {:>9.3} {:>5}",
+            order,
+            lambda,
+            tot,
+            d,
+            tot as f64 * 8.0 / nm,
+            if allrt { "ok" } else { "FAIL" }
+        );
     }
     println!("# negative Δ = RLS beats current 5/3+LPC. (golomb on RLS residual, no wavelet.)");
 }

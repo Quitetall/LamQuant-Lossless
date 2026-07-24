@@ -18,9 +18,9 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example affine_xchan_probe -- [BLK] <bin>...
 
-use std::fs;
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_optimum::{entropy, mv_rls, LmoCodec};
+use std::fs;
 
 const WIN: usize = 32768;
 const N_CFG: usize = 7;
@@ -65,7 +65,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -86,7 +89,10 @@ fn best_config_residual(sig: &[Vec<i64>]) -> (Vec<Vec<i64>>, usize) {
 
 fn abscorr(a: &[i64], b: &[i64]) -> f64 {
     let n = a.len() as f64;
-    let (ma, mb) = (a.iter().sum::<i64>() as f64 / n, b.iter().sum::<i64>() as f64 / n);
+    let (ma, mb) = (
+        a.iter().sum::<i64>() as f64 / n,
+        b.iter().sum::<i64>() as f64 / n,
+    );
     let (mut sab, mut saa, mut sbb) = (0.0f64, 0.0f64, 0.0f64);
     for i in 0..a.len() {
         let (da, db) = (a[i] as f64 - ma, b[i] as f64 - mb);
@@ -94,7 +100,11 @@ fn abscorr(a: &[i64], b: &[i64]) -> f64 {
         saa += da * da;
         sbb += db * db;
     }
-    if saa <= 0.0 || sbb <= 0.0 { 0.0 } else { (sab / (saa * sbb).sqrt()).abs() }
+    if saa <= 0.0 || sbb <= 0.0 {
+        0.0
+    } else {
+        (sab / (saa * sbb).sqrt()).abs()
+    }
 }
 
 /// Per-block backward-adaptive cross-channel prediction: fit (g[,off]) on the PREVIOUS block, apply to
@@ -117,7 +127,11 @@ fn xchan_residual(rc: &[i64], rj: &[i64], blk: usize, use_offset: bool) -> Vec<i
         }
         let (mc, mj) = (sc / cnt, sj / cnt);
         let varj = sjj / cnt - mj * mj;
-        let g = if varj > 1e-9 { (scj / cnt - mc * mj) / varj } else { 0.0 };
+        let g = if varj > 1e-9 {
+            (scj / cnt - mc * mj) / varj
+        } else {
+            0.0
+        };
         let off = if use_offset { mc - g * mj } else { 0.0 };
         for i in cs..ce {
             let pred = (g * rj[i] as f64 + off).round() as i64;
@@ -134,14 +148,20 @@ fn main() {
     if cli_b.is_some() {
         args.remove(0);
     }
-    let blocks: Vec<usize> = cli_b.map(|b| vec![b]).unwrap_or_else(|| vec![16, 32, 64, 128]);
+    let blocks: Vec<usize> = cli_b
+        .map(|b| vec![b])
+        .unwrap_or_else(|| vec![16, 32, 64, 128]);
 
-    println!("# Peer-stack step 1: affine cross-channel LM (mine H.BWC's +3.45% referential lever).");
+    println!(
+        "# Peer-stack step 1: affine cross-channel LM (mine H.BWC's +3.45% referential lever)."
+    );
     println!("# 2nd stage on best-config mv_rls residual, per-block backward-adaptive, keep-best/channel");
     println!("# over {{raw, gain-only, affine(+offset)}}. CONT=shipped container; B0=raw mv_rls residual.");
     println!("# GAIN = keep-best raw-vs-gain (≈M1); AFFINE = keep-best raw-vs-affine; ORA = raw/gain/affine.\n");
-    println!("{:>12} {:>4} {:>8} {:>8} | {:>9} {:>9} {:>9} | {:>9}",
-             "recording", "BLK", "CONT bps", "B0 bps", "GAIN/CONT", "AFFN/CONT", "ORA/CONT", "AFFN/B0");
+    println!(
+        "{:>12} {:>4} {:>8} {:>8} | {:>9} {:>9} {:>9} | {:>9}",
+        "recording", "BLK", "CONT bps", "B0 bps", "GAIN/CONT", "AFFN/CONT", "ORA/CONT", "AFFN/B0"
+    );
 
     for path in &args {
         let sig = read_bin(path);
@@ -166,8 +186,12 @@ fn main() {
                 let base = enc_windowed(&res[ci]);
                 let (mut cg, mut ca) = (base, base);
                 if let Some(j) = bestref[ci] {
-                    cg = base.min(enc_windowed(&xchan_residual(&res[ci], &res[j], blk, false)) + REF_SIDEINFO);
-                    ca = base.min(enc_windowed(&xchan_residual(&res[ci], &res[j], blk, true)) + REF_SIDEINFO);
+                    cg = base.min(
+                        enc_windowed(&xchan_residual(&res[ci], &res[j], blk, false)) + REF_SIDEINFO,
+                    );
+                    ca = base.min(
+                        enc_windowed(&xchan_residual(&res[ci], &res[j], blk, true)) + REF_SIDEINFO,
+                    );
                 }
                 gain += cg;
                 affine += ca;
@@ -176,8 +200,15 @@ fn main() {
             let pct = |x: usize| 100.0 * (x as f64 - cont as f64) / cont as f64;
             let affn_vs_b0 = 100.0 * (affine as f64 - b0 as f64) / b0 as f64;
             let name = path.rsplit('/').next().unwrap_or(path);
-            println!("{name:>12} {blk:>4} {:>8.4} {:>8.4} | {:>+8.3}% {:>+8.3}% {:>+8.3}% | {:>+8.3}%",
-                     cont as f64 * 8.0 / nm, b0 as f64 * 8.0 / nm, pct(gain), pct(affine), pct(ora), affn_vs_b0);
+            println!(
+                "{name:>12} {blk:>4} {:>8.4} {:>8.4} | {:>+8.3}% {:>+8.3}% {:>+8.3}% | {:>+8.3}%",
+                cont as f64 * 8.0 / nm,
+                b0 as f64 * 8.0 / nm,
+                pct(gain),
+                pct(affine),
+                pct(ora),
+                affn_vs_b0
+            );
         }
     }
     println!("\n# AFFN/CONT ≤ 0 on referential (siena/eegmmidb/tuar) ⇒ the affine-offset cross-channel LM is");

@@ -41,16 +41,24 @@ fn prd(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
             den += (*a as f64 - m) * (*a as f64 - m);
         }
     }
-    if den == 0.0 { 0.0 } else { 100.0 * (num / den).sqrt() }
+    if den == 0.0 {
+        0.0
+    } else {
+        100.0 * (num / den).sqrt()
+    }
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
     let sig = read_window(&path);
     let nm = (sig.len() * sig[0].len()) as f64;
     let offsets = [0.5f64, 0.45, 0.40, 0.375, 0.35, 0.30, 0.25];
 
-    println!("# RDOQ-lite deadzone sweep ({path}); PRD at each target BPS per offset δ (0.5=round)");
+    println!(
+        "# RDOQ-lite deadzone sweep ({path}); PRD at each target BPS per offset δ (0.5=round)"
+    );
     print!("# {:>4} |", "BPS");
     for d in offsets {
         print!(" {:>13}", format!("δ={d:.3}"));
@@ -61,7 +69,8 @@ fn main() {
         print!("  {target:>4.2} |");
         let mut base_prd = 0.0;
         for (i, &d) in offsets.iter().enumerate() {
-            let body = lmo_pcrd97::encode_target_bps_97_dz(&sig, target, LpcMode::default(), d).unwrap();
+            let body =
+                lmo_pcrd97::encode_target_bps_97_dz(&sig, target, LpcMode::default(), d).unwrap();
             let recon = lmo_pcrd97::decode_97(&body).unwrap();
             let bps = body.len() as f64 * 8.0 / nm;
             let p = prd(&sig, &recon);
@@ -72,7 +81,10 @@ fn main() {
             if i == 0 {
                 print!(" {bps:>5.2}/{p:>6.2} ");
             } else {
-                print!(" {bps:>5.2}/{p:>5.2}{:+>+.0} ", -100.0 * (base_prd - p) / base_prd);
+                print!(
+                    " {bps:>5.2}/{p:>5.2}{:+>+.0} ",
+                    -100.0 * (base_prd - p) / base_prd
+                );
             }
         }
         println!();

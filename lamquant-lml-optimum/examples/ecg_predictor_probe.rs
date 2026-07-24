@@ -32,7 +32,11 @@ fn read_window(path: &str) -> Vec<Vec<i64>> {
 
 #[inline]
 fn round_i64(v: f64) -> i64 {
-    if v >= 0.0 { (v + 0.5) as i64 } else { (v - 0.5) as i64 }
+    if v >= 0.0 {
+        (v + 0.5) as i64
+    } else {
+        (v - 0.5) as i64
+    }
 }
 
 /// Variable-order RLS (same recursion as `rls.rs`, order parameterized).
@@ -50,7 +54,13 @@ impl Rls {
         for i in 0..n {
             p[i * n + i] = 1.0 / delta;
         }
-        Self { n, lambda, w: vec![0.0; n], p, hist: vec![0.0; n] }
+        Self {
+            n,
+            lambda,
+            w: vec![0.0; n],
+            p,
+            hist: vec![0.0; n],
+        }
     }
     fn predict(&self) -> f64 {
         (0..self.n).map(|k| self.w[k] * self.hist[k]).sum()
@@ -121,7 +131,9 @@ fn bps_of(resids: &[Vec<i64>], n_samples: f64) -> f64 {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
     let sig = read_window(&path);
     let n_ch = sig.len();
     let t = sig[0].len();
@@ -132,16 +144,25 @@ fn main() {
     let base: Vec<Vec<i64>> = sig.iter().map(|ch| rls::residual(ch)).collect();
     let base_bps = bps_of(&base, nm);
 
-    println!("# ECG predictor probe: {name} ({n_ch}ch × {t}). HHI=3.313 bps, prod RLS-8={base_bps:.4}");
+    println!(
+        "# ECG predictor probe: {name} ({n_ch}ch × {t}). HHI=3.313 bps, prod RLS-8={base_bps:.4}"
+    );
     println!("  {:>20} | {:>8} | {:>8}", "predictor", "bps", "vs prod");
     let report = |label: String, resids: &[Vec<i64>]| {
         let bps = bps_of(resids, nm);
-        println!("  {:>20} | {:>8.4} | {:>+7.1}%", label, bps, 100.0 * (bps - base_bps) / base_bps);
+        println!(
+            "  {:>20} | {:>8.4} | {:>+7.1}%",
+            label,
+            bps,
+            100.0 * (bps - base_bps) / base_bps
+        );
     };
 
     for &order in &[8usize, 16, 32] {
-        let resids: Vec<Vec<i64>> =
-            sig.iter().map(|ch| rls_residual(ch, order, 0.999, 16384)).collect();
+        let resids: Vec<Vec<i64>> = sig
+            .iter()
+            .map(|ch| rls_residual(ch, order, 0.999, 16384))
+            .collect();
         report(format!("RLS-{order}"), &resids);
     }
 
@@ -156,7 +177,9 @@ fn main() {
             .collect();
         report(format!("RLS-8 + LTP/{win}"), &cascaded);
     }
-    println!("# negative vs-prod = beats production RLS-8. Gap to HHI (3.313) is -17.4% from here.");
+    println!(
+        "# negative vs-prod = beats production RLS-8. Gap to HHI (3.313) is -17.4% from here."
+    );
 }
 
 /// Long-term predictor on a residual: per `win`-sample window, find the lag in

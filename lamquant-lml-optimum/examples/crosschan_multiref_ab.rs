@@ -47,7 +47,8 @@ fn pipeline_bytes(ch: &[i64], n_levels: u8) -> usize {
     let mut bytes = 0usize;
     for (sb_idx, sub) in subs.iter().enumerate() {
         let scoped = lml::scope_lpc_mode(LpcMode::default(), lml::lpc_max_order(sub.len()));
-        let (coeffs, residual, _o) = lpc::analyze_with_mode(sub, sb_idx, scoped, lml::BIAS_CTX, None);
+        let (coeffs, residual, _o) =
+            lpc::analyze_with_mode(sub, sb_idx, scoped, lml::BIAS_CTX, None);
         bytes += 1 + 4 * coeffs.len() + golomb::encode_dense(&residual).expect("golomb").len();
     }
     bytes
@@ -137,12 +138,21 @@ fn joint_ls(target: &[i64], refs: &[usize], priors: &[Vec<i64>]) -> Vec<f64> {
         for c in (r + 1)..k {
             s -= a[r][c] * g[c];
         }
-        g[r] = if a[r][r].abs() < 1e-12 { 0.0 } else { s / a[r][r] };
+        g[r] = if a[r][r].abs() < 1e-12 {
+            0.0
+        } else {
+            s / a[r][r]
+        };
     }
     g
 }
 
-fn multiref_residual(target: &[i64], refs: &[usize], gains: &[f64], priors: &[Vec<i64>]) -> Vec<i64> {
+fn multiref_residual(
+    target: &[i64],
+    refs: &[usize],
+    gains: &[f64],
+    priors: &[Vec<i64>],
+) -> Vec<i64> {
     (0..target.len())
         .map(|k| {
             let mut p = 0.0;
@@ -163,8 +173,13 @@ fn main() {
     } else {
         paths
     };
-    println!("# Multi-reference cross-channel probe (end-to-end Golomb bytes, keep-smaller per channel)");
-    println!("# {:<24} {:>10} {:>10} {:>10} {:>10}", "window", "floor B", "K=1", "K=2", "K=3");
+    println!(
+        "# Multi-reference cross-channel probe (end-to-end Golomb bytes, keep-smaller per channel)"
+    );
+    println!(
+        "# {:<24} {:>10} {:>10} {:>10} {:>10}",
+        "window", "floor B", "K=1", "K=2", "K=3"
+    );
 
     for path in &paths {
         let sig = read_window(path);
@@ -199,5 +214,7 @@ fn main() {
             pct(tot[2])
         );
     }
-    println!("\n# K=1 = shipped single-best codec; K=2/3 = multi-reference follow-up. % = vs floor.");
+    println!(
+        "\n# K=1 = shipped single-best codec; K=2/3 = multi-reference follow-up. % = vs floor."
+    );
 }

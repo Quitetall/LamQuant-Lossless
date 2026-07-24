@@ -56,8 +56,7 @@ fn xorshift64(state: &mut u64) -> u64 {
 fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
     (0..n_ch)
         .map(|c| {
-            let mut state =
-                seed.wrapping_add((c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut state = seed.wrapping_add((c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut ch = Vec::with_capacity(t);
             let mut prev: i64 = 0;
             for _ in 0..t {
@@ -179,13 +178,9 @@ fn firmware_backend_matches_golden_shas() {
     }
     for v in GOLDEN_VECTORS {
         let signal = synth_signal(v.n_ch, v.t, v.seed);
-        let encoded = compress_with_backend(
-            &signal,
-            v.noise_bits,
-            v.lpc_mode,
-            ComputeBackend::Firmware,
-        )
-        .expect("firmware compress");
+        let encoded =
+            compress_with_backend(&signal, v.noise_bits, v.lpc_mode, ComputeBackend::Firmware)
+                .expect("firmware compress");
         let actual = sha256_hex(&encoded);
         if regen {
             println!(
@@ -218,20 +213,12 @@ fn desktop_backend_matches_firmware_bytes() {
     let mut failures = Vec::new();
     for v in GOLDEN_VECTORS {
         let signal = synth_signal(v.n_ch, v.t, v.seed);
-        let firmware = compress_with_backend(
-            &signal,
-            v.noise_bits,
-            v.lpc_mode,
-            ComputeBackend::Firmware,
-        )
-        .expect("firmware compress");
-        let desktop = compress_with_backend(
-            &signal,
-            v.noise_bits,
-            v.lpc_mode,
-            ComputeBackend::Desktop,
-        )
-        .expect("desktop compress");
+        let firmware =
+            compress_with_backend(&signal, v.noise_bits, v.lpc_mode, ComputeBackend::Firmware)
+                .expect("firmware compress");
+        let desktop =
+            compress_with_backend(&signal, v.noise_bits, v.lpc_mode, ComputeBackend::Desktop)
+                .expect("desktop compress");
         if firmware != desktop {
             failures.push(format!(
                 "vector `{}` diverged ({} bytes firmware vs {} bytes desktop; sha {} vs {})",
@@ -258,28 +245,20 @@ fn desktop_backend_matches_firmware_bytes() {
 fn desktop_backend_decode_matches_firmware() {
     for v in GOLDEN_VECTORS {
         let signal = synth_signal(v.n_ch, v.t, v.seed);
-        let bytes = compress_with_backend(
-            &signal,
-            v.noise_bits,
-            v.lpc_mode,
-            ComputeBackend::Firmware,
-        )
-        .expect("compress");
-        let dec_firmware = decompress_with_backend(&bytes, ComputeBackend::Firmware)
-            .expect("firmware decompress");
-        let dec_desktop = decompress_with_backend(&bytes, ComputeBackend::Desktop)
-            .expect("desktop decompress");
+        let bytes =
+            compress_with_backend(&signal, v.noise_bits, v.lpc_mode, ComputeBackend::Firmware)
+                .expect("compress");
+        let dec_firmware =
+            decompress_with_backend(&bytes, ComputeBackend::Firmware).expect("firmware decompress");
+        let dec_desktop =
+            decompress_with_backend(&bytes, ComputeBackend::Desktop).expect("desktop decompress");
         assert_eq!(
             dec_firmware, dec_desktop,
             "vector `{}` decode diverged across backends",
             v.name
         );
         // Sanity: decode must roundtrip the input.
-        assert_eq!(
-            dec_firmware, signal,
-            "vector `{}` roundtrip failed",
-            v.name
-        );
+        assert_eq!(dec_firmware, signal, "vector `{}` roundtrip failed", v.name);
     }
 }
 

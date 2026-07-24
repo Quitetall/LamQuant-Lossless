@@ -94,7 +94,11 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         return decode_lsb_split(body);
     }
     if body.len() < 4 {
-        return Err(LmlError::Truncated { expected: 4, actual: body.len(), context: "lmo_lossless header" });
+        return Err(LmlError::Truncated {
+            expected: 4,
+            actual: body.len(),
+            context: "lmo_lossless header",
+        });
     }
     let version = body[0];
     if version != KERNEL_VERSION {
@@ -108,7 +112,11 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let mut metas: Vec<(Vec<usize>, Vec<i32>)> = Vec::with_capacity(n_ch);
     for _ in 0..n_ch {
         if pos >= body.len() {
-            return Err(LmlError::Truncated { expected: pos + 1, actual: body.len(), context: "lmo_lossless meta n_refs" });
+            return Err(LmlError::Truncated {
+                expected: pos + 1,
+                actual: body.len(),
+                context: "lmo_lossless meta n_refs",
+            });
         }
         let n_refs = body[pos] as usize;
         pos += 1;
@@ -116,17 +124,30 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         let mut gains = Vec::with_capacity(n_refs);
         for _ in 0..n_refs {
             if pos + 6 > body.len() {
-                return Err(LmlError::Truncated { expected: pos + 6, actual: body.len(), context: "lmo_lossless meta ref" });
+                return Err(LmlError::Truncated {
+                    expected: pos + 6,
+                    actual: body.len(),
+                    context: "lmo_lossless meta ref",
+                });
             }
             refs.push(u16::from_le_bytes([body[pos], body[pos + 1]]) as usize);
-            gains.push(i32::from_le_bytes([body[pos + 2], body[pos + 3], body[pos + 4], body[pos + 5]]));
+            gains.push(i32::from_le_bytes([
+                body[pos + 2],
+                body[pos + 3],
+                body[pos + 4],
+                body[pos + 5],
+            ]));
             pos += 6;
         }
         metas.push((refs, gains));
     }
 
     if pos >= body.len() {
-        return Err(LmlError::Truncated { expected: pos + 1, actual: body.len(), context: "lmo_lossless coder_mode" });
+        return Err(LmlError::Truncated {
+            expected: pos + 1,
+            actual: body.len(),
+            context: "lmo_lossless coder_mode",
+        });
     }
     let coder_mode = body[pos];
     pos += 1;
@@ -170,7 +191,9 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
                 )));
             }
         }
-        let ch: Vec<i64> = (0..r.len()).map(|k| r[k] + predict_multi(refs, gains, &recon, k)).collect();
+        let ch: Vec<i64> = (0..r.len())
+            .map(|k| r[k] + predict_multi(refs, gains, &recon, k))
+            .collect();
         recon.push(ch);
     }
     Ok(recon)
@@ -182,37 +205,69 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
 /// normal body, so no nesting).
 fn decode_lsb_split(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if body.len() < 12 {
-        return Err(LmlError::Truncated { expected: 12, actual: body.len(), context: "lmo_lossless lsb-split header" });
+        return Err(LmlError::Truncated {
+            expected: 12,
+            actual: body.len(),
+            context: "lmo_lossless lsb-split header",
+        });
     }
     let s = body[1] as usize;
     if s > 16 {
-        return Err(LmlError::InvalidHeader(alloc::format!("lsb-split shift {s} out of range")));
+        return Err(LmlError::InvalidHeader(alloc::format!(
+            "lsb-split shift {s} out of range"
+        )));
     }
     let n_ch = u16::from_le_bytes([body[2], body[3]]) as usize;
     let t = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
     let upper_len = u32::from_le_bytes([body[8], body[9], body[10], body[11]]) as usize;
-    let upend = 12usize.checked_add(upper_len).filter(|&e| e <= body.len())
-        .ok_or(LmlError::Truncated { expected: 12 + upper_len, actual: body.len(), context: "lsb-split upper body" })?;
+    let upend = 12usize
+        .checked_add(upper_len)
+        .filter(|&e| e <= body.len())
+        .ok_or(LmlError::Truncated {
+            expected: 12 + upper_len,
+            actual: body.len(),
+            context: "lsb-split upper body",
+        })?;
     let upper = decode(&body[12..upend])?;
     if upper.len() != n_ch {
-        return Err(LmlError::InvalidHeader(alloc::format!("lsb-split n_ch {n_ch} != upper {}", upper.len())));
+        return Err(LmlError::InvalidHeader(alloc::format!(
+            "lsb-split n_ch {n_ch} != upper {}",
+            upper.len()
+        )));
     }
     let mut pos = upend;
     let mut recon: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
-    for c in 0..n_ch {
+    for (c, upper_channel) in upper.iter().enumerate().take(n_ch) {
         if pos + 4 > body.len() {
-            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "lsb-split lsb len" });
+            return Err(LmlError::Truncated {
+                expected: pos + 4,
+                actual: body.len(),
+                context: "lsb-split lsb len",
+            });
         }
-        let lsb_len = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        let lsb_len =
+            u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
-        let end = pos.checked_add(lsb_len).filter(|&e| e <= body.len())
-            .ok_or(LmlError::Truncated { expected: pos + lsb_len, actual: body.len(), context: "lsb-split lsb body" })?;
+        let end = pos
+            .checked_add(lsb_len)
+            .filter(|&e| e <= body.len())
+            .ok_or(LmlError::Truncated {
+                expected: pos + lsb_len,
+                actual: body.len(),
+                context: "lsb-split lsb body",
+            })?;
         let lsb = crate::entropy::decode(&body[pos..end])?;
         pos = end;
-        if lsb.len() != t || upper[c].len() != t {
-            return Err(LmlError::InvalidHeader(alloc::format!("lsb-split ch {c} length mismatch")));
+        if lsb.len() != t || upper_channel.len() != t {
+            return Err(LmlError::InvalidHeader(alloc::format!(
+                "lsb-split ch {c} length mismatch"
+            )));
         }
-        let ch: Vec<i64> = (0..t).map(|n| (upper[c][n] << s) | lsb[n]).collect();
+        let ch: Vec<i64> = upper_channel
+            .iter()
+            .zip(&lsb)
+            .map(|(&upper_sample, &low_bits)| (upper_sample << s) | low_bits)
+            .collect();
         recon.push(ch);
     }
     Ok(recon)
@@ -266,7 +321,11 @@ fn joint_ls(target: &[i64], refs: &[usize], chans: &[Vec<i64>]) -> Vec<f64> {
         for c in (r + 1)..k {
             s -= a[r][c] * g[c];
         }
-        g[r] = if a[r][r].abs() < 1e-12 { 0.0 } else { s / a[r][r] };
+        g[r] = if a[r][r].abs() < 1e-12 {
+            0.0
+        } else {
+            s / a[r][r]
+        };
     }
     g
 }
@@ -277,7 +336,11 @@ fn joint_ls(target: &[i64], refs: &[usize], chans: &[Vec<i64>]) -> Vec<f64> {
 fn quantize_gains(g: &[f64]) -> Option<Vec<i32>> {
     let q: Vec<i32> = g
         .iter()
-        .map(|&v| (v * 65536.0).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32)
+        .map(|&v| {
+            (v * 65536.0)
+                .round()
+                .clamp(i32::MIN as f64, i32::MAX as f64) as i32
+        })
         .collect();
     if q.iter().all(|&x| x == 0) {
         None
@@ -290,13 +353,17 @@ fn quantize_gains(g: &[f64]) -> Option<Vec<i32>> {
 /// decode (same `predict_multi`) reconstructs exactly.
 #[cfg(feature = "encode")]
 fn residual_multi(target: &[i64], refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>]) -> Vec<i64> {
-    (0..target.len()).map(|k| target[k] - predict_multi(refs, gains_q, chans, k)).collect()
+    (0..target.len())
+        .map(|k| target[k] - predict_multi(refs, gains_q, chans, k))
+        .collect()
 }
 
 /// Single-channel floor cost (the per-channel keep-smaller decision metric).
 #[cfg(feature = "encode")]
 fn channel_cost(ch: &[i64]) -> usize {
-    lml::compress(core::slice::from_ref(&ch.to_vec()), 0).map(|v| v.len()).unwrap_or(usize::MAX)
+    lml::compress(core::slice::from_ref(&ch.to_vec()), 0)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX)
 }
 
 /// Per-ref overhead: ref_idx(2) + gain(4). Plus 1 n_refs byte per channel.
@@ -307,7 +374,12 @@ const PER_REF_OVERHEAD: usize = 6;
 /// energy reduction `<resid,ch_j>²/<ch_j,ch_j>`).
 #[cfg(feature = "encode")]
 #[allow(clippy::needless_range_loop)] // j indexes chans and is matched against `chosen`
-fn best_energy_ref(residual: &[i64], chans: &[Vec<i64>], n_prior: usize, chosen: &[usize]) -> Option<usize> {
+fn best_energy_ref(
+    residual: &[i64],
+    chans: &[Vec<i64>],
+    n_prior: usize,
+    chosen: &[usize],
+) -> Option<usize> {
     let mut best = (usize::MAX, 0.0f64);
     for j in 0..n_prior {
         if chosen.contains(&j) {
@@ -357,14 +429,26 @@ fn lsb_bias_count(signal: &[Vec<i64>]) -> usize {
         let (mut n0, mut n1) = (0u64, 0u64);
         for ch in signal {
             for &x in ch {
-                if (x >> s) & 1 == 0 { n0 += 1; } else { n1 += 1; }
+                if (x >> s) & 1 == 0 {
+                    n0 += 1;
+                } else {
+                    n1 += 1;
+                }
             }
         }
         let n = n0 + n1;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         let p1 = n1 as f64 / n as f64;
-        let h = if p1 <= 0.0 || p1 >= 1.0 { 0.0 } else { -(p1 * p1.log2() + (1.0 - p1) * (1.0 - p1).log2()) };
-        if h > 0.92 { break; }
+        let h = if p1 <= 0.0 || p1 >= 1.0 {
+            0.0
+        } else {
+            -(p1 * p1.log2() + (1.0 - p1) * (1.0 - p1).log2())
+        };
+        if h > 0.92 {
+            break;
+        }
         s += 1;
     }
     s
@@ -379,7 +463,10 @@ fn encode_lsb_split(signal: &[Vec<i64>], s: usize) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     let t = signal[0].len();
     let mask = (1i64 << s) - 1;
-    let upper: Vec<Vec<i64>> = signal.iter().map(|ch| ch.iter().map(|&x| x >> s).collect()).collect();
+    let upper: Vec<Vec<i64>> = signal
+        .iter()
+        .map(|ch| ch.iter().map(|&x| x >> s).collect())
+        .collect();
     let upper_body = encode_with_geometry(&upper, None)?;
     let mut out = Vec::with_capacity(12 + upper_body.len());
     out.push(SPLIT_MAGIC);
@@ -410,7 +497,9 @@ pub fn encode_with_geometry(
 ) -> LmlResult<Vec<u8>> {
     let n_ch = signal.len();
     if n_ch == 0 || n_ch > 1024 {
-        return Err(LmlError::InvalidHeader(alloc::format!("n_ch={n_ch} out of range 1..=1024")));
+        return Err(LmlError::InvalidHeader(alloc::format!(
+            "n_ch={n_ch} out of range 1..=1024"
+        )));
     }
     let t = signal[0].len();
     for (c, ch) in signal.iter().enumerate() {
@@ -434,7 +523,9 @@ pub fn encode_with_geometry(
         // (1) byte-greedy SINGLE reference (never regresses the single-best codec).
         for j in 0..i {
             let g = joint_ls(&signal[i], &[j], signal);
-            let Some(gq) = quantize_gains(&g) else { continue };
+            let Some(gq) = quantize_gains(&g) else {
+                continue;
+            };
             let r = residual_multi(&signal[i], &[j], &gq, signal);
             let cost = channel_cost(&r).saturating_add(PER_REF_OVERHEAD + 1);
             if cost < best_cost {
@@ -447,7 +538,9 @@ pub fn encode_with_geometry(
 
         // (2) energy-greedy ADD references while they shrink the channel.
         while best_refs.len() < MAX_REFS.min(i) && !best_refs.is_empty() {
-            let Some(j) = best_energy_ref(&best_resid, signal, i, &best_refs) else { break };
+            let Some(j) = best_energy_ref(&best_resid, signal, i, &best_refs) else {
+                break;
+            };
             let mut refs = best_refs.clone();
             refs.push(j);
             let g = joint_ls(&signal[i], &refs, signal);
@@ -474,7 +567,8 @@ pub fn encode_with_geometry(
                 let gv = joint_ls(&signal[i], &geo_refs, signal);
                 if let Some(gq) = quantize_gains(&gv) {
                     let r = residual_multi(&signal[i], &geo_refs, &gq, signal);
-                    let cost = channel_cost(&r).saturating_add(geo_refs.len() * PER_REF_OVERHEAD + 1);
+                    let cost =
+                        channel_cost(&r).saturating_add(geo_refs.len() * PER_REF_OVERHEAD + 1);
                     if cost < best_cost {
                         best_refs = geo_refs;
                         best_gains = gq;
@@ -519,7 +613,8 @@ pub fn encode_with_geometry(
     // (old CODER_RLS candidate) and RLS+change-point-segmentation (CODER_RLS_SEG) NEVER win
     // — they are dominated subsets of cross-channel (above) or MV-RLS (here). Dropped from
     // the encode search (decode still accepts their wire modes for old streams).
-    let raw_metas: Vec<(Vec<usize>, Vec<i32>)> = (0..n_ch).map(|_| (Vec::new(), Vec::new())).collect();
+    let raw_metas: Vec<(Vec<usize>, Vec<i32>)> =
+        (0..n_ch).map(|_| (Vec::new(), Vec::new())).collect();
     let mut body = body_cc;
     if let Ok(mv) = crate::mv_rls::encode(signal) {
         let cand = assemble(&raw_metas, CODER_MV_RLS, &mv);
@@ -549,17 +644,26 @@ mod tests {
         // bit0 always 0 (all even) + structured upper ⇒ scale_cond would code the
         // dead LSB raw; the split must strip it, shrink, and round-trip bit-exact.
         let mut signal = vec![vec![0i64; 3000]; 5];
-        for c in 0..5 {
-            for n in 0..3000 {
-                signal[c][n] = (((n as i64 * 37 + c as i64 * 401) % 400) - 200) * 2;
+        for (c, channel) in signal.iter_mut().enumerate().take(5) {
+            for (n, sample) in channel.iter_mut().enumerate().take(3000) {
+                *sample = (((n as i64 * 37 + c as i64 * 401) % 400) - 200) * 2;
             }
         }
         assert_eq!(lsb_bias_count(&signal), 1, "all-even ⇒ 1 biased low bit");
         let base = encode_with_geometry(&signal, None).unwrap();
         let best = encode(&signal).unwrap();
         assert_eq!(best[0], SPLIT_MAGIC, "split should be selected");
-        assert!(best.len() < base.len(), "split {} must beat base {}", best.len(), base.len());
-        assert_eq!(decode(&best).unwrap(), signal, "split must round-trip bit-exact");
+        assert!(
+            best.len() < base.len(),
+            "split {} must beat base {}",
+            best.len(),
+            base.len()
+        );
+        assert_eq!(
+            decode(&best).unwrap(),
+            signal,
+            "split must round-trip bit-exact"
+        );
     }
 
     #[test]
@@ -569,19 +673,28 @@ mod tests {
         let mut st = 0x1234_5678u64;
         for ch in signal.iter_mut() {
             for x in ch.iter_mut() {
-                st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+                st ^= st << 13;
+                st ^= st >> 7;
+                st ^= st << 17;
                 *x = (st as i64 % 4000) - 2000;
             }
         }
         assert_eq!(lsb_bias_count(&signal), 0, "random low bits ⇒ no split");
-        assert_eq!(encode(&signal).unwrap(), encode_with_geometry(&signal, None).unwrap());
+        assert_eq!(
+            encode(&signal).unwrap(),
+            encode_with_geometry(&signal, None).unwrap()
+        );
     }
 
     /// Correlated multichannel signal: each channel is a gain·(shared base) +
     /// per-channel detail, so cross-channel prediction has real redundancy.
     fn make_corr_signal(n_ch: usize, t: usize) -> Vec<Vec<i64>> {
-        let base: Vec<i64> = (0..t).map(|i| ((i as f64 * 0.05).sin() * 3000.0) as i64).collect();
-        let base2: Vec<i64> = (0..t).map(|i| ((i as f64 * 0.013).cos() * 1500.0) as i64).collect();
+        let base: Vec<i64> = (0..t)
+            .map(|i| ((i as f64 * 0.05).sin() * 3000.0) as i64)
+            .collect();
+        let base2: Vec<i64> = (0..t)
+            .map(|i| ((i as f64 * 0.013).cos() * 1500.0) as i64)
+            .collect();
         (0..n_ch)
             .map(|c| {
                 let g = 0.6 + 0.1 * c as f64;
@@ -622,8 +735,16 @@ mod tests {
         let sig = make_corr_signal(10, 3000);
         let body = encode(&sig).unwrap();
         let floor = lml::compress(&sig, 0).unwrap().len();
-        assert!(body.len() < floor, "should beat lml floor {floor}, got {}", body.len());
-        assert_eq!(decode(&body).unwrap(), sig, "encode/decode must be bit-exact");
+        assert!(
+            body.len() < floor,
+            "should beat lml floor {floor}, got {}",
+            body.len()
+        );
+        assert_eq!(
+            decode(&body).unwrap(),
+            sig,
+            "encode/decode must be bit-exact"
+        );
     }
 
     #[test]
@@ -631,12 +752,17 @@ mod tests {
         let sig = make_corr_signal(8, 4096);
         let id2 = encode(&sig).unwrap().len();
         let floor = lml::compress(&sig, 0).unwrap().len();
-        assert!(id2 < floor, "id=2 {id2} should beat floor {floor} on correlated channels");
+        assert!(
+            id2 < floor,
+            "id=2 {id2} should beat floor {floor} on correlated channels"
+        );
     }
 
     #[test]
     fn raw_channel_zero_overhead_path() {
-        let sig = vec![(0..600).map(|i| ((i * 13) % 91) as i64 - 45).collect::<Vec<i64>>()];
+        let sig = vec![(0..600)
+            .map(|i| ((i * 13) % 91) as i64 - 45)
+            .collect::<Vec<i64>>()];
         let body = encode(&sig).unwrap();
         assert_eq!(decode(&body).unwrap(), sig);
     }
@@ -655,10 +781,15 @@ mod tests {
                 "geometry-free encode must be byte-identical to encode()"
             );
             // a synthetic line montage (channel c at x=c) ⇒ nearest = adjacent channels
-            let coords: Vec<Option<[f64; 3]>> = (0..n_ch).map(|c| Some([c as f64, 0.0, 0.0])).collect();
+            let coords: Vec<Option<[f64; 3]>> =
+                (0..n_ch).map(|c| Some([c as f64, 0.0, 0.0])).collect();
             let geom = MontageGeometry::new(coords);
             let body = encode_with_geometry(&sig, Some(&geom)).unwrap();
-            assert_eq!(decode(&body).unwrap(), sig, "geometry body must roundtrip bit-exact");
+            assert_eq!(
+                decode(&body).unwrap(),
+                sig,
+                "geometry body must roundtrip bit-exact"
+            );
         }
     }
 }

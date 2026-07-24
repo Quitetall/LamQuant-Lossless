@@ -34,7 +34,9 @@ fn read_window(path: &str) -> Vec<Vec<i64>> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
     let sig = read_window(&path);
     let n_ch = sig.len();
     let t = sig[0].len();
@@ -98,16 +100,37 @@ fn main() {
     let wall_ms = wall as f64 / iters as f64 / 1e6;
 
     println!("# window: {n_ch} ch x {t} samples ({path}), {n_levels}-level, {iters} iters");
-    println!("# encoded ~{total_bytes} bytes/window ({:.3} bps)", total_bytes as f64 * 8.0 / (n_ch * t) as f64);
+    println!(
+        "# encoded ~{total_bytes} bytes/window ({:.3} bps)",
+        total_bytes as f64 * 8.0 / (n_ch * t) as f64
+    );
     println!("# {:<14} {:>10} {:>8}", "stage", "ms/window", "% sum");
-    println!("  {:<14} {:>10.3} {:>7.1}%", "lifting", lift, 100.0 * lift / sum);
+    println!(
+        "  {:<14} {:>10.3} {:>7.1}%",
+        "lifting",
+        lift,
+        100.0 * lift / sum
+    );
     let lpc_fixed = per(t_lpc_fixed);
-    println!("  {:<14} {:>10.3} {:>7.1}%", "lpc_analyze", lpc_ms, 100.0 * lpc_ms / sum);
+    println!(
+        "  {:<14} {:>10.3} {:>7.1}%",
+        "lpc_analyze",
+        lpc_ms,
+        100.0 * lpc_ms / sum
+    );
     println!(
         "  {:<14} {:>10.3}          (Fixed mode; adaptive order search ≈ {:.3} ms = {:.0}% of lpc)",
-        "  └ lpc_fixed", lpc_fixed, lpc_ms - lpc_fixed, 100.0 * (lpc_ms - lpc_fixed) / lpc_ms
+        "  └ lpc_fixed",
+        lpc_fixed,
+        lpc_ms - lpc_fixed,
+        100.0 * (lpc_ms - lpc_fixed) / lpc_ms
     );
-    println!("  {:<14} {:>10.3} {:>7.1}%", "golomb", ent, 100.0 * ent / sum);
+    println!(
+        "  {:<14} {:>10.3} {:>7.1}%",
+        "golomb",
+        ent,
+        100.0 * ent / sum
+    );
     println!("  {:<14} {:>10.3}", "stage sum", sum);
     println!("  {:<14} {:>10.3}", "wall total", wall_ms);
 

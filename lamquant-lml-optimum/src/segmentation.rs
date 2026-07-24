@@ -56,7 +56,12 @@ pub struct ChangePoint {
 impl ChangePoint {
     /// Fresh detector (mirrors [`crate::rls::Rls::new`] — same state both sides).
     pub fn new() -> Self {
-        Self { fast: 0.0, slow: 0.0, seen: 0, since: 0 }
+        Self {
+            fast: 0.0,
+            slow: 0.0,
+            seen: 0,
+            since: 0,
+        }
     }
 
     /// Feed the next integer sample. Returns `true` iff a regime boundary is
@@ -107,7 +112,9 @@ mod tests {
     /// + dwell), and encode/decode replaying the SAME samples agree bit-for-bit.
     #[test]
     fn fires_on_regime_change_and_is_deterministic() {
-        let mut seq: Vec<i64> = (0..2000).map(|i| ((i as f64 * 0.1).sin() * 5.0) as i64).collect();
+        let mut seq: Vec<i64> = (0..2000)
+            .map(|i| ((i as f64 * 0.1).sin() * 5.0) as i64)
+            .collect();
         seq.extend((0..2000).map(|i| ((i as f64 * 0.1).sin() * 5000.0) as i64));
 
         let mut det_a = ChangePoint::new();
@@ -123,7 +130,10 @@ mod tests {
             }
         }
         assert_eq!(bounds_a, bounds_b, "detector must be deterministic");
-        assert!(!bounds_a.is_empty(), "a 1000x energy jump must trip a boundary");
+        assert!(
+            !bounds_a.is_empty(),
+            "a 1000x energy jump must trip a boundary"
+        );
         // every boundary respects the dwell + warm-up
         assert!(bounds_a[0] >= WARMUP);
         for w in bounds_a.windows(2) {

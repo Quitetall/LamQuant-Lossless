@@ -143,7 +143,11 @@ struct RangeEncoder {
 
 impl RangeEncoder {
     fn new() -> Self {
-        Self { low: 0, range: 0xFFFF_FFFF, out: Vec::new() }
+        Self {
+            low: 0,
+            range: 0xFFFF_FFFF,
+            out: Vec::new(),
+        }
     }
 
     #[inline]
@@ -187,7 +191,13 @@ struct RangeDecoder<'a> {
 
 impl<'a> RangeDecoder<'a> {
     fn new(data: &'a [u8]) -> Self {
-        let mut d = Self { low: 0, range: 0xFFFF_FFFF, code: 0, data, pos: 0 };
+        let mut d = Self {
+            low: 0,
+            range: 0xFFFF_FFFF,
+            code: 0,
+            data,
+            pos: 0,
+        };
         for _ in 0..4 {
             d.code = (d.code << 8) | d.next_byte() as u32;
         }
@@ -243,14 +253,27 @@ fn write_trivial_header(mn: i64, k: u32, n: u32) -> Vec<u8> {
 
 fn rd_u32(data: &[u8], pos: usize) -> LmlResult<u32> {
     if pos + 4 > data.len() {
-        return Err(LmlError::Truncated { expected: pos + 4, actual: data.len(), context: "arith_int header" });
+        return Err(LmlError::Truncated {
+            expected: pos + 4,
+            actual: data.len(),
+            context: "arith_int header",
+        });
     }
-    Ok(u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]))
+    Ok(u32::from_le_bytes([
+        data[pos],
+        data[pos + 1],
+        data[pos + 2],
+        data[pos + 3],
+    ]))
 }
 
 fn rd_u16(data: &[u8], pos: usize) -> LmlResult<u16> {
     if pos + 2 > data.len() {
-        return Err(LmlError::Truncated { expected: pos + 2, actual: data.len(), context: "arith_int freq" });
+        return Err(LmlError::Truncated {
+            expected: pos + 2,
+            actual: data.len(),
+            context: "arith_int freq",
+        });
     }
     Ok(u16::from_le_bytes([data[pos], data[pos + 1]]))
 }
@@ -267,7 +290,9 @@ pub fn encode_dense(values: &[i64]) -> LmlResult<Vec<u8>> {
     let mx = *values.iter().max().unwrap();
     let k_u128 = (mx as i128 - mn as i128 + 1) as u128;
     if k_u128 > MAX_ALPHABET as u128 {
-        return Err(LmlError::InvalidHeader(alloc::format!("arith_int alphabet too wide ({k_u128})")));
+        return Err(LmlError::InvalidHeader(alloc::format!(
+            "arith_int alphabet too wide ({k_u128})"
+        )));
     }
     let k = k_u128 as usize;
     if k == 1 {
@@ -320,7 +345,11 @@ pub fn decode_dense(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> 
     let body_len = rd_u32(data, pos)? as usize;
     pos += 4;
     if pos + body_len > data.len() {
-        return Err(LmlError::Truncated { expected: pos + body_len, actual: data.len(), context: "arith_int body" });
+        return Err(LmlError::Truncated {
+            expected: pos + body_len,
+            actual: data.len(),
+            context: "arith_int body",
+        });
     }
     let cum = cumulative(&freqs);
     let mut dec = RangeDecoder::new(&data[pos..pos + body_len]);
@@ -346,7 +375,9 @@ pub fn encode_dense_ctx(values: &[i64]) -> LmlResult<Vec<u8>> {
     let mx = *values.iter().max().unwrap();
     let k_u128 = (mx as i128 - mn as i128 + 1) as u128;
     if k_u128 > MAX_ALPHABET_CTX as u128 {
-        return Err(LmlError::InvalidHeader(alloc::format!("arith_int_ctx alphabet too wide ({k_u128})")));
+        return Err(LmlError::InvalidHeader(alloc::format!(
+            "arith_int_ctx alphabet too wide ({k_u128})"
+        )));
     }
     let k = k_u128 as usize;
     if k == 1 {
@@ -408,7 +439,11 @@ pub fn decode_dense_ctx(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usiz
     let body_len = rd_u32(data, pos)? as usize;
     pos += 4;
     if pos + body_len > data.len() {
-        return Err(LmlError::Truncated { expected: pos + body_len, actual: data.len(), context: "arith_int_ctx body" });
+        return Err(LmlError::Truncated {
+            expected: pos + body_len,
+            actual: data.len(),
+            context: "arith_int_ctx body",
+        });
     }
     let cums: Vec<Vec<u32>> = freqs.iter().map(|f| cumulative(f)).collect();
     let mut dec = RangeDecoder::new(&data[pos..pos + body_len]);
@@ -466,7 +501,13 @@ mod tests {
         rt1(&[5, 5, 5]);
         rt1(&[0, 0, 9, 0, 0, -4, 0, 0, 0, 1]);
         let clustered: Vec<i64> = (0..4000)
-            .map(|i| if (i / 50) % 2 == 0 { 0 } else { ((i % 7) - 3) as i64 })
+            .map(|i| {
+                if (i / 50) % 2 == 0 {
+                    0
+                } else {
+                    ((i % 7) - 3) as i64
+                }
+            })
             .collect();
         rt1(&clustered);
     }
@@ -519,6 +560,9 @@ mod tests {
         }
         let a = encode_dense(&v).unwrap().len();
         let g = lamquant_lml_mcu::golomb::encode_dense(&v).unwrap().len();
-        assert!(a < g, "arith_int {a} should beat golomb {g} on skewed zero-spike");
+        assert!(
+            a < g,
+            "arith_int {a} should beat golomb {g} on skewed zero-spike"
+        );
     }
 }

@@ -127,7 +127,9 @@ impl ScaleCtx {
     #[inline]
     fn new() -> Self {
         // Seed ema = 1.0 (probe seeded ema=1.0) in fixed point.
-        Self { ema: 1u64 << EMA_SHIFT }
+        Self {
+            ema: 1u64 << EMA_SHIFT,
+        }
     }
 
     /// Current scale context: log2-bucket of the integer EMA estimate, capped.
@@ -160,8 +162,8 @@ impl ScaleCtx {
 /// below [`MAX_TOTAL`] by halving on overflow (which re-floors every count to 1).
 struct FenwickModel {
     size: usize,
-    tree: Vec<u32>,    // 1-indexed BIT over per-symbol counts
-    counts: Vec<u32>,  // explicit per-symbol counts (for halving + freq lookup)
+    tree: Vec<u32>,   // 1-indexed BIT over per-symbol counts
+    counts: Vec<u32>, // explicit per-symbol counts (for halving + freq lookup)
     total: u32,
 }
 
@@ -274,7 +276,11 @@ struct RangeEncoder {
 #[cfg(feature = "encode")]
 impl RangeEncoder {
     fn new() -> Self {
-        Self { low: 0, range: 0xFFFF_FFFF, out: Vec::new() }
+        Self {
+            low: 0,
+            range: 0xFFFF_FFFF,
+            out: Vec::new(),
+        }
     }
 
     /// Encode a symbol occupying `[cum, cum+freq)` of a `tot`-sized alphabet.
@@ -319,7 +325,13 @@ struct RangeDecoder<'a> {
 
 impl<'a> RangeDecoder<'a> {
     fn new(data: &'a [u8]) -> Self {
-        let mut d = Self { low: 0, range: 0xFFFF_FFFF, code: 0, data, pos: 0 };
+        let mut d = Self {
+            low: 0,
+            range: 0xFFFF_FFFF,
+            code: 0,
+            data,
+            pos: 0,
+        };
         for _ in 0..4 {
             d.code = (d.code << 8) | d.next_byte() as u32;
         }
@@ -432,8 +444,9 @@ pub fn encode(res: &[i64]) -> LmlResult<Vec<u8>> {
 
     // bucket model per scale context; top-mantissa-bits model per (ctx, bucket).
     let mut bkt: Vec<FenwickModel> = (0..N_CTX).map(|_| FenwickModel::new(N_BUCKETS)).collect();
-    let mut mant: Vec<FenwickModel> =
-        (0..N_CTX * (FINE_MAX + 1)).map(|_| FenwickModel::new(MANT_SYMS)).collect();
+    let mut mant: Vec<FenwickModel> = (0..N_CTX * (FINE_MAX + 1))
+        .map(|_| FenwickModel::new(MANT_SYMS))
+        .collect();
     let mut scale = ScaleCtx::new();
     let mut enc = RangeEncoder::new();
 
@@ -478,7 +491,11 @@ pub fn encode(res: &[i64]) -> LmlResult<Vec<u8>> {
 /// Decode a slice produced by [`encode`].
 pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
     if data.len() < 4 {
-        return Err(LmlError::Truncated { expected: 4, actual: data.len(), context: "scale_cond n" });
+        return Err(LmlError::Truncated {
+            expected: 4,
+            actual: data.len(),
+            context: "scale_cond n",
+        });
     }
     let n = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     if n == 0 {
@@ -487,8 +504,9 @@ pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
     let body = &data[4..];
 
     let mut bkt: Vec<FenwickModel> = (0..N_CTX).map(|_| FenwickModel::new(N_BUCKETS)).collect();
-    let mut mant: Vec<FenwickModel> =
-        (0..N_CTX * (FINE_MAX + 1)).map(|_| FenwickModel::new(MANT_SYMS)).collect();
+    let mut mant: Vec<FenwickModel> = (0..N_CTX * (FINE_MAX + 1))
+        .map(|_| FenwickModel::new(MANT_SYMS))
+        .collect();
     let mut scale = ScaleCtx::new();
     let mut dec = RangeDecoder::new(body);
     let mut out = Vec::with_capacity(n);
@@ -555,7 +573,7 @@ mod tests {
         rt(&[-9, -9, -9, -9]); // all same negative
         rt(&[5, -5, 5, -5, 5, -5, 5, -5]); // alternating
         rt(&[0, 1, 0, -1, 0, 2, 0, -2]); // small around zero
-        // large positive AND negative outliers (escape path, big buckets)
+                                         // large positive AND negative outliers (escape path, big buckets)
         rt(&[2_000_000, -2_000_000, 0, 1, -1, 2_000_000, -2_000_000]);
         rt(&[i32::MAX as i64, i32::MIN as i64, 0, 5, -5]);
         // CAP boundary values (direct/escape transition)

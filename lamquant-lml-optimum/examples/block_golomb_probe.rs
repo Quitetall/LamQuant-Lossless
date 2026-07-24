@@ -65,7 +65,9 @@ fn lpc_residual(x: &[i64], sb: usize) -> Vec<i64> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
     let kind = std::env::args().nth(2).unwrap_or_else(|| "ecg".to_string());
     let sig = read_window(&path);
     let t = sig[0].len().min(30000);
@@ -84,12 +86,26 @@ fn main() {
         }
     }
 
-    println!("# block-Golomb probe: {} ({}), {} residual blocks", path, kind, residuals.len());
-    println!("# {:>8} | {:>12} {:>12} {:>8}", "block", "single-k", "block-k", "Δ");
+    println!(
+        "# block-Golomb probe: {} ({}), {} residual blocks",
+        path,
+        kind,
+        residuals.len()
+    );
+    println!(
+        "# {:>8} | {:>12} {:>12} {:>8}",
+        "block", "single-k", "block-k", "Δ"
+    );
     let single: u64 = residuals.iter().map(|r| single_k_bits(r)).sum();
     for &b in &[64usize, 128, 256, 512] {
         let blk: u64 = residuals.iter().map(|r| block_k_bits(r, b)).sum();
-        println!("  {:>8} | {:>12} {:>12} {:>+7.2}%", b, single, blk, -100.0 * (single as f64 - blk as f64) / single as f64);
+        println!(
+            "  {:>8} | {:>12} {:>12} {:>+7.2}%",
+            b,
+            single,
+            blk,
+            -100.0 * (single as f64 - blk as f64) / single as f64
+        );
     }
     println!("# Δ = block-adaptive-k vs single-k Rice on the LPC residual. negative = smaller.");
 }

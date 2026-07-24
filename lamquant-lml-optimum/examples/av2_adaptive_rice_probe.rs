@@ -11,8 +11,8 @@
 //!
 //! cargo run -p lamquant-lml-optimum --features encode --release --example av2_adaptive_rice_probe -- <bin>...
 
-use std::fs;
 use lamquant_lml_optimum::{entropy, mv_rls};
+use std::fs;
 
 const W: usize = 32768;
 const RB: usize = 256; // Rice-param re-selection block (fine, generous to the adaptive coder)
@@ -25,14 +25,19 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let mut s = Vec::with_capacity(nch);
     for _ in 0..nch {
         let mut ch = Vec::with_capacity(t);
-        for _ in 0..t { ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64); off += 4; }
+        for _ in 0..t {
+            ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64);
+            off += 4;
+        }
         s.push(ch);
     }
     s
 }
 
 #[inline]
-fn zz(x: i64) -> u64 { ((x << 1) ^ (x >> 63)) as u64 }
+fn zz(x: i64) -> u64 {
+    ((x << 1) ^ (x >> 63)) as u64
+}
 
 /// Ideal per-block-adaptive Rice bits for one channel (best k per RB-block, no model cost).
 fn ideal_adaptive_rice_bits(ch: &[i64]) -> u64 {
@@ -47,7 +52,9 @@ fn ideal_adaptive_rice_bits(ch: &[i64]) -> u64 {
                 let v = zz(x);
                 b += (v >> k) + 1 + k as u64; // unary quotient + stop + k remainder
             }
-            if b < best { best = b; }
+            if b < best {
+                best = b;
+            }
         }
         bits += best;
         s = e;
@@ -56,17 +63,22 @@ fn ideal_adaptive_rice_bits(ch: &[i64]) -> u64 {
 }
 
 fn scale_cond_bytes(ch: &[i64]) -> usize {
-    let mut tot = 0; let mut s = 0;
+    let mut tot = 0;
+    let mut s = 0;
     while s < ch.len() {
         let e = (s + W).min(ch.len());
-        tot += entropy::encode(&ch[s..e]).map(|g| g.len()).unwrap_or(1 << 30);
+        tot += entropy::encode(&ch[s..e])
+            .map(|g| g.len())
+            .unwrap_or(1 << 30);
         s = e;
     }
     tot
 }
 
 fn main() {
-    println!("# AV2 LML #2 — IDEAL per-block adaptive Rice vs shipped scale_cond (mv_rls residual)\n");
+    println!(
+        "# AV2 LML #2 — IDEAL per-block adaptive Rice vs shipped scale_cond (mv_rls residual)\n"
+    );
     for path in std::env::args().skip(1) {
         let sig = read_bin(&path);
         let (nch, t) = (sig.len(), sig[0].len());
@@ -74,11 +86,23 @@ fn main() {
         let res = mv_rls::residuals(&sig, 0, 0);
         let name = path.rsplit('/').next().unwrap_or(&path);
         let sc: usize = res.iter().map(|c| scale_cond_bytes(c)).sum();
-        let rice: usize = res.iter().map(|c| (ideal_adaptive_rice_bits(c) as usize + 7) / 8).sum();
+        let rice: usize = res
+            .iter()
+            .map(|c| (ideal_adaptive_rice_bits(c) as usize).div_ceil(8))
+            .sum();
         let d = 100.0 * (rice as f64 - sc as f64) / sc as f64;
         println!("## {} ({}ch x {})", name, nch, t);
-        println!("   scale_cond (shipped)        = {:>10} ({:.4} bps)", sc, sc as f64 * 8.0 / nm);
-        println!("   IDEAL adaptive-Rice (no cost)= {:>10} ({:.4} bps)  ({:+.2}% vs scale_cond)", rice, rice as f64 * 8.0 / nm, d);
+        println!(
+            "   scale_cond (shipped)        = {:>10} ({:.4} bps)",
+            sc,
+            sc as f64 * 8.0 / nm
+        );
+        println!(
+            "   IDEAL adaptive-Rice (no cost)= {:>10} ({:.4} bps)  ({:+.2}% vs scale_cond)",
+            rice,
+            rice as f64 * 8.0 / nm,
+            d
+        );
         println!();
     }
     println!("# IDEAL adaptive-Rice has ZERO model cost; if it is still ≥ scale_cond, a real adaptive-Rice");

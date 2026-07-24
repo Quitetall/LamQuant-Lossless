@@ -55,7 +55,8 @@ fn pipeline_bytes(ch: &[i64], n_levels: u8) -> usize {
     let mut bytes = 0usize;
     for (sb_idx, sub) in forward_subbands(ch, n_levels).iter().enumerate() {
         let scoped = lml::scope_lpc_mode(LpcMode::default(), lml::lpc_max_order(sub.len()));
-        let (coeffs, residual, _o) = lpc::analyze_with_mode(sub, sb_idx, scoped, lml::BIAS_CTX, None);
+        let (coeffs, residual, _o) =
+            lpc::analyze_with_mode(sub, sb_idx, scoped, lml::BIAS_CTX, None);
         bytes += 1 + 4 * coeffs.len() + golomb::encode_dense(&residual).expect("golomb").len();
     }
     bytes
@@ -69,11 +70,19 @@ fn ls_gain(target: &[i64], refc: &[i64]) -> f64 {
         num += a as f64 * b as f64;
         den += b as f64 * b as f64;
     }
-    if den == 0.0 { 0.0 } else { num / den }
+    if den == 0.0 {
+        0.0
+    } else {
+        num / den
+    }
 }
 
 fn spatial_residual(target: &[i64], refc: &[i64], g: f64) -> Vec<i64> {
-    target.iter().zip(refc).map(|(&a, &b)| a - (g * b as f64).round() as i64).collect()
+    target
+        .iter()
+        .zip(refc)
+        .map(|(&a, &b)| a - (g * b as f64).round() as i64)
+        .collect()
 }
 
 const GAIN_OVERHEAD: usize = 5; // 1 flag byte + 4-byte Q-format gain per predicted channel
@@ -82,11 +91,22 @@ fn main() {
     let paths: Vec<String> = {
         let a: Vec<String> = std::env::args().skip(1).collect();
         if a.is_empty() {
-            vec!["/tmp/chb01_01_60s.bin".into(), "/tmp/chb01_01_mid.bin".into(), "/tmp/chb01_01_end.bin".into()]
-        } else { a }
+            vec![
+                "/tmp/chb01_01_60s.bin".into(),
+                "/tmp/chb01_01_mid.bin".into(),
+                "/tmp/chb01_01_end.bin".into(),
+            ]
+        } else {
+            a
+        }
     };
-    println!("# Lever-C probe: cross-channel LOSSLESS spatial prediction (end-to-end Golomb bytes)");
-    println!("# {:<26} {:>10} {:>10} {:>8} {:>10} {:>8}", "window", "base B", "prev B", "prevΔ", "best B", "bestΔ");
+    println!(
+        "# Lever-C probe: cross-channel LOSSLESS spatial prediction (end-to-end Golomb bytes)"
+    );
+    println!(
+        "# {:<26} {:>10} {:>10} {:>8} {:>10} {:>8}",
+        "window", "base B", "prev B", "prevΔ", "best B", "bestΔ"
+    );
 
     let (mut tb, mut tprev, mut tbest) = (0usize, 0usize, 0usize);
     let (mut sel_prev, mut sel_best, mut npred) = (0usize, 0usize, 0usize);
@@ -107,7 +127,9 @@ fn main() {
             let prev_b = pipeline_bytes(&r, n_levels) + GAIN_OVERHEAD;
             let chosen_prev = prev_b.min(base[i]);
             prev_sum += chosen_prev;
-            if prev_b < base[i] { sel_prev += 1; }
+            if prev_b < base[i] {
+                sel_prev += 1;
+            }
 
             // Policy 2: best-of-all-prior channels as reference.
             let mut best_b = base[i];
@@ -115,26 +137,38 @@ fn main() {
                 let g = ls_gain(&sig[i], &sig[j]);
                 let r = spatial_residual(&sig[i], &sig[j], g);
                 let cand = pipeline_bytes(&r, n_levels) + GAIN_OVERHEAD;
-                if cand < best_b { best_b = cand; }
+                if cand < best_b {
+                    best_b = cand;
+                }
             }
             best_sum += best_b;
-            if best_b < base[i] { sel_best += 1; }
+            if best_b < base[i] {
+                sel_best += 1;
+            }
             npred += 1;
         }
-        tb += base_sum; tprev += prev_sum; tbest += best_sum;
+        tb += base_sum;
+        tprev += prev_sum;
+        tbest += best_sum;
         let name = path.rsplit('/').next().unwrap_or(path);
         println!(
             "  {:<26} {:>10} {:>10} {:>+7.2}% {:>10} {:>+7.2}%",
-            format!("{name} ({n_ch}x{t})"), base_sum,
-            prev_sum, -100.0 * (base_sum - prev_sum) as f64 / base_sum as f64,
-            best_sum, -100.0 * (base_sum - best_sum) as f64 / base_sum as f64
+            format!("{name} ({n_ch}x{t})"),
+            base_sum,
+            prev_sum,
+            -100.0 * (base_sum - prev_sum) as f64 / base_sum as f64,
+            best_sum,
+            -100.0 * (base_sum - best_sum) as f64 / base_sum as f64
         );
     }
     println!(
         "  {:<26} {:>10} {:>10} {:>+7.2}% {:>10} {:>+7.2}%",
-        "TOTAL", tb,
-        tprev, -100.0 * (tb - tprev) as f64 / tb as f64,
-        tbest, -100.0 * (tb - tbest) as f64 / tb as f64
+        "TOTAL",
+        tb,
+        tprev,
+        -100.0 * (tb - tprev) as f64 / tb as f64,
+        tbest,
+        -100.0 * (tb - tbest) as f64 / tb as f64
     );
     println!(
         "\n# prev policy selected {}/{} predicted channels; best-ref policy {}/{}.",

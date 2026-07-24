@@ -7,7 +7,8 @@
 //! lives in prose and reviewer vigilance (the LML/LMQ product split, the
 //! "generative is never evidence" rule of ADR 0068). Here it becomes a **type**.
 //!
-//! This mirrors ABIR's [`Modality`](../../abir/src/modality.rs) exactly, one
+//! This mirrors the retired codec IR's modality tags
+//! ([`Modality`](../../lamquant-legacy-ir/src/modality.rs)) exactly, one
 //! axis over: `Node<Measured>` and `Node<Generated>` are DIFFERENT types, so a
 //! consumer that requires measured evidence (`fn diagnose(&Node<Measured>)`)
 //! simply cannot be handed a generated sample — the mismatch is a compile error,
@@ -167,13 +168,15 @@ mod tests {
     #[test]
     fn evidence_flags_encode_the_invariant() {
         // Invariant #2: estimated and generated are NEVER evidence.
-        assert!(Measured::IS_EVIDENCE);
-        assert!(Derived::IS_EVIDENCE);
-        assert!(Outcome::IS_EVIDENCE);
-        assert!(!Estimated::IS_EVIDENCE);
-        assert!(!Generated::IS_EVIDENCE);
-        assert!(!Hypothesis::IS_EVIDENCE);
-        assert!(!Action::IS_EVIDENCE);
+        const {
+            assert!(Measured::IS_EVIDENCE);
+            assert!(Derived::IS_EVIDENCE);
+            assert!(Outcome::IS_EVIDENCE);
+            assert!(!Estimated::IS_EVIDENCE);
+            assert!(!Generated::IS_EVIDENCE);
+            assert!(!Hypothesis::IS_EVIDENCE);
+            assert!(!Action::IS_EVIDENCE);
+        }
     }
 
     #[test]

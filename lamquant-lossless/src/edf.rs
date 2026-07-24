@@ -89,15 +89,13 @@ pub fn read_edf(path: &Path) -> LmlResult<EdfFile> {
     // files and arbitrary corrupt input. Fix: require bytes 1-7
     // to spell "BIOSEMI" per the BDF spec.
     let is_bdf = data[0] == 0xFF;
-    if is_bdf {
-        if data.len() < 8 || &data[1..8] != b"BIOSEMI" {
-            let preview = &data[..data.len().min(8)];
-            return Err(LmlError::InvalidHeader(format!(
-                "File starts with 0xFF but bytes 1-7 are not 'BIOSEMI' (got {:02X?}); \
-                 not a valid BDF",
-                preview
-            )));
-        }
+    if is_bdf && (data.len() < 8 || &data[1..8] != b"BIOSEMI") {
+        let preview = &data[..data.len().min(8)];
+        return Err(LmlError::InvalidHeader(format!(
+            "File starts with 0xFF but bytes 1-7 are not 'BIOSEMI' (got {:02X?}); \
+             not a valid BDF",
+            preview
+        )));
     }
     let bytes_per_sample: usize = if is_bdf { 3 } else { 2 };
 
@@ -283,14 +281,12 @@ pub fn read_edf(path: &Path) -> LmlResult<EdfFile> {
     // ADR 0021: checked_mul on usable_records * bytes_per_rec so
     // a hostile header (huge usable_records × bytes_per_rec) can't
     // wrap usize on 32-bit MCU targets.
-    let usable_data_bytes = usable_records
-        .checked_mul(bytes_per_rec)
-        .ok_or_else(|| {
-            LmlError::InvalidHeader(format!(
-                "EDF header arithmetic overflow: usable_records ({}) * bytes_per_rec ({})",
-                usable_records, bytes_per_rec
-            ))
-        })?;
+    let usable_data_bytes = usable_records.checked_mul(bytes_per_rec).ok_or_else(|| {
+        LmlError::InvalidHeader(format!(
+            "EDF header arithmetic overflow: usable_records ({}) * bytes_per_rec ({})",
+            usable_records, bytes_per_rec
+        ))
+    })?;
     let trailing_data: Vec<u8> = if available_bytes > usable_data_bytes {
         data[data_start + usable_data_bytes..].to_vec()
     } else {
@@ -572,7 +568,11 @@ mod tests {
             let mut w = HashMap::new();
             w.insert(500usize, 2000usize);
             w.insert(250usize, 2000usize);
-            assert_eq!(pick_mode_ns(&w), Some(500), "tie must always resolve to the larger rate");
+            assert_eq!(
+                pick_mode_ns(&w),
+                Some(500),
+                "tie must always resolve to the larger rate"
+            );
         }
         // A clear winner is unaffected by the tie-break.
         let mut clear = HashMap::new();

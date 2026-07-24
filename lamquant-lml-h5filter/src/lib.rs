@@ -20,9 +20,9 @@
 
 mod hdf5_abi;
 use hdf5_abi::{
-    hid_t, H5Tget_class, H5Tget_order, H5Tget_sign, H5Tget_size, H5Zregister, H5Z_class2_t,
-    H5Z_filter_t, H5allocate_memory, H5free_memory, H5Pget_chunk, H5Pmodify_filter,
-    H5PL_TYPE_FILTER, H5T_INTEGER, H5T_ORDER_LE, H5T_SGN_2, H5Z_CLASS_T_VERS, H5Z_FLAG_REVERSE,
+    hid_t, H5Pget_chunk, H5Pmodify_filter, H5Tget_class, H5Tget_order, H5Tget_sign, H5Tget_size,
+    H5Z_class2_t, H5Z_filter_t, H5Zregister, H5allocate_memory, H5free_memory, H5PL_TYPE_FILTER,
+    H5T_INTEGER, H5T_ORDER_LE, H5T_SGN_2, H5Z_CLASS_T_VERS, H5Z_FLAG_REVERSE,
 };
 use std::os::raw::{c_int, c_uint, c_void};
 use std::panic::catch_unwind;
@@ -66,6 +66,7 @@ fn write_int_le(v: i64, elem: usize, out: &mut Vec<u8>) {
 }
 
 /// Compress: raw interleaved chunk bytes → header + LML body.
+#[allow(clippy::manual_is_multiple_of)] // keep compatibility with the pinned MSRV
 fn forward(input: &[u8], elem: usize, signed: bool, n_ch: usize) -> Option<Vec<u8>> {
     if elem == 0 || n_ch == 0 || input.len() % elem != 0 {
         return None;
@@ -105,6 +106,7 @@ fn forward(input: &[u8], elem: usize, signed: bool, n_ch: usize) -> Option<Vec<u
 }
 
 /// Decompress: header + body → raw interleaved chunk bytes.
+#[allow(clippy::manual_is_multiple_of)] // keep compatibility with the pinned MSRV
 fn reverse(input: &[u8]) -> Option<Vec<u8>> {
     if input.len() < HDR_LEN || input[0..4] != MAGIC {
         return None;

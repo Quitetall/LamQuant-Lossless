@@ -391,7 +391,6 @@ mod tests {
                 NodePayload {
                     content_ref: Some("sha256:bb".into()),
                     summary: Some("R=0.24".into()),
-                    ..Default::default()
                 },
                 Provenance::root("lqs@openecs"),
                 Some(Uncertainty {

@@ -91,7 +91,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -118,14 +121,18 @@ fn main() {
     if cli_n.is_some() {
         args.remove(0);
     }
-    let blocks: Vec<usize> = cli_n.map(|n| vec![n]).unwrap_or_else(|| vec![256, 512, 1024]);
+    let blocks: Vec<usize> = cli_n
+        .map(|n| vec![n])
+        .unwrap_or_else(|| vec![256, 512, 1024]);
 
     println!("# Phase-1b: OVERLAPPED-MDCT (H.BWC's actual transform) + DCT-domain prediction vs container.");
     println!("# N = MDCT coeffs/frame (2N-sample frame, N hop, 50% overlap). CONT = shipped container bps;");
     println!("# B0 = best-config TIME-domain mv_rls. MDCTpred = real coder; MDCTctx = ideal pooled coarse-");
     println!("# context ceiling. Δ vs CONT, per-sample; negative = beats production. Proxy is OPTIMISTIC.\n");
-    println!("{:>12} {:>5} {:>8} {:>8} | {:>9} {:>9} | {:>9} {:>9}",
-             "recording", "N", "CONT bps", "B0 bps", "MDCTpred", "Δ/CONT", "MDCTctx", "Δ/CONT");
+    println!(
+        "{:>12} {:>5} {:>8} {:>8} | {:>9} {:>9} | {:>9} {:>9}",
+        "recording", "N", "CONT bps", "B0 bps", "MDCTpred", "Δ/CONT", "MDCTctx", "Δ/CONT"
+    );
 
     for path in &args {
         let sig = read_bin(path);
@@ -162,8 +169,9 @@ fn main() {
             // inter), gather frequency-major per channel.
             let mut resid: Vec<Vec<i64>> = vec![Vec::with_capacity(n * frames); c];
             for k in 0..n {
-                let coefk: Vec<Vec<i64>> =
-                    (0..c).map(|ci| (0..frames).map(|f| coef[ci][f][k]).collect()).collect();
+                let coefk: Vec<Vec<i64>> = (0..c)
+                    .map(|ci| (0..frames).map(|f| coef[ci][f][k]).collect())
+                    .collect();
                 let resk = mv_rls::residuals(&coefk, 0, 0);
                 for ci in 0..c {
                     resid[ci].extend_from_slice(&resk[ci]);
@@ -180,7 +188,11 @@ fn main() {
                 for i in 0..r.len() {
                     let k = (i / fr) as u32;
                     let band = 32 - (k + 1).leading_zeros();
-                    let prevmag = if i % fr == 0 { 0 } else { magbucket(r[i - 1]) as u32 };
+                    let prevmag = if i % fr == 0 {
+                        0
+                    } else {
+                        magbucket(r[i - 1]) as u32
+                    };
                     let ctx = band * 16 + prevmag;
                     *pooled.entry(ctx).or_default().entry(r[i]).or_insert(0) += 1;
                     *pcnt.entry(ctx).or_insert(0) += 1;

@@ -32,9 +32,9 @@ use std::fs;
 
 use lamquant_lml_optimum::mv_rls;
 
-const ALPHA: usize = 34;         // bucket alphabet size (bit_len of zigzag fits under this)
-const LAP: f64 = 0.5;            // Laplace smoothing
-const MIN_CTX: u64 = 48;         // contexts with fewer train counts back off to the scale model
+const ALPHA: usize = 34; // bucket alphabet size (bit_len of zigzag fits under this)
+const LAP: f64 = 0.5; // Laplace smoothing
+const MIN_CTX: u64 = 48; // contexts with fewer train counts back off to the scale model
 
 fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let bytes = fs::read(path).expect("read");
@@ -53,15 +53,33 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
     sig
 }
 
-fn bit_len(m: u64) -> u32 { if m == 0 { 0 } else { 64 - m.leading_zeros() } }
-fn zigzag(x: i64) -> u64 { ((x << 1) ^ (x >> 63)) as u64 }
-fn bucket(x: i64) -> u32 { bit_len(zigzag(x)).min(ALPHA as u32 - 1) }
+fn bit_len(m: u64) -> u32 {
+    if m == 0 {
+        0
+    } else {
+        64 - m.leading_zeros()
+    }
+}
+fn zigzag(x: i64) -> u64 {
+    ((x << 1) ^ (x >> 63)) as u64
+}
+fn bucket(x: i64) -> u32 {
+    bit_len(zigzag(x)).min(ALPHA as u32 - 1)
+}
 const ALPHA_F: f64 = ALPHA as f64;
-fn magc(x: i64) -> u64 { bit_len(x.unsigned_abs()).min(15) as u64 }
+fn magc(x: i64) -> u64 {
+    bit_len(x.unsigned_abs()).min(15) as u64
+}
 
 /// One sample: the four context keys + the target bucket.
 #[derive(Clone, Copy)]
-struct Sample { scaleb: u64, m1: u64, m2: u64, ccm: u64, bkt: u32 }
+struct Sample {
+    scaleb: u64,
+    m1: u64,
+    m2: u64,
+    ccm: u64,
+    bkt: u32,
+}
 
 /// Extract per-file MV-RLS residual samples (scale = EMA of |residual|, bit-len bucket).
 fn samples(path: &str) -> Vec<Sample> {
@@ -76,7 +94,13 @@ fn samples(path: &str) -> Vec<Sample> {
             let m1 = if n >= 1 { magc(res[c][n - 1]) } else { 0 };
             let m2 = if n >= 2 { magc(res[c][n - 2]) } else { 0 };
             let ccm = if c >= 1 { magc(res[c - 1][n]) } else { 0 };
-            out.push(Sample { scaleb, m1, m2, ccm, bkt: bucket(res[c][n]) });
+            out.push(Sample {
+                scaleb,
+                m1,
+                m2,
+                ccm,
+                bkt: bucket(res[c][n]),
+            });
             let a = res[c][n].unsigned_abs() as f64;
             ema += (a - ema) / 16.0;
         }
@@ -85,7 +109,11 @@ fn samples(path: &str) -> Vec<Sample> {
 }
 
 /// A context→bucket-histogram model with backoff to a context-less global histogram.
-struct Model { ctx: HashMap<u64, [u64; ALPHA]>, global: [u64; ALPHA], gtot: u64 }
+struct Model {
+    ctx: HashMap<u64, [u64; ALPHA]>,
+    global: [u64; ALPHA],
+    gtot: u64,
+}
 impl Model {
     fn train<F: Fn(&Sample) -> u64>(data: &[Sample], key: F) -> Model {
         let mut ctx: HashMap<u64, [u64; ALPHA]> = HashMap::new();
@@ -103,7 +131,14 @@ impl Model {
         let mut bits = 0.0;
         for s in data {
             let (hist, tot) = match self.ctx.get(&key(s)) {
-                Some(h) => { let t: u64 = h.iter().sum(); if t >= MIN_CTX { (h, t) } else { (&self.global, self.gtot) } }
+                Some(h) => {
+                    let t: u64 = h.iter().sum();
+                    if t >= MIN_CTX {
+                        (h, t)
+                    } else {
+                        (&self.global, self.gtot)
+                    }
+                }
                 None => (&self.global, self.gtot),
             };
             let p = (hist[s.bkt as usize] as f64 + LAP) / (tot as f64 + LAP * ALPHA_F);
@@ -125,14 +160,23 @@ fn evaluate(tag: &str, train: &[Sample], test: &[Sample]) {
     let red = |x: f64| 100.0 * (b - x) / b;
     println!(
         "  {:>22} | scale {:>5.3} | +prev1 {:>+5.2}% | +prev2 {:>+5.2}% | +crossch {:>+5.2}%",
-        tag, b, red(e1), red(e2), red(ec)
+        tag,
+        b,
+        red(e1),
+        red(e2),
+        red(ec)
     );
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() { eprintln!("need cmd"); return; }
-    println!("# cross-entropy bits/sample on the residual BUCKET under each context, on HELD-OUT data.");
+    if args.is_empty() {
+        eprintln!("need cmd");
+        return;
+    }
+    println!(
+        "# cross-entropy bits/sample on the residual BUCKET under each context, on HELD-OUT data."
+    );
     println!("# +prevN/+crossch reductions are vs the scale-conditioned baseline (= what scale_cond ships).");
     println!();
     match args[0].as_str() {
@@ -150,15 +194,24 @@ fn main() {
         }
         "cross" => {
             // regime 2: cross-corpus. args: cross <Atag> <Abin>... -- <Btag> <Bbin>...
-            let sep = args.iter().position(|a| a == "--").expect("need -- between corpora");
+            let sep = args
+                .iter()
+                .position(|a| a == "--")
+                .expect("need -- between corpora");
             let atag = &args[1];
             let mut a = Vec::new();
             let mut j = 2; // A bins: args[2..sep]
-            while j < sep { a.extend(samples(&args[j])); j += 1; }
+            while j < sep {
+                a.extend(samples(&args[j]));
+                j += 1;
+            }
             let btag = &args[sep + 1];
             let mut b = Vec::new();
             let mut k = sep + 2; // B bins: args[sep+2..]
-            while k < args.len() { b.extend(samples(&args[k])); k += 1; }
+            while k < args.len() {
+                b.extend(samples(&args[k]));
+                k += 1;
+            }
             println!("## Regime 2 — cross-corpus generalization (the killer test)");
             evaluate(&format!("{}→{}", atag, btag), &a, &b);
             evaluate(&format!("{}→{}", btag, atag), &b, &a);
@@ -167,6 +220,8 @@ fn main() {
     }
     println!();
     println!("# GATE: a clear (+>~3%) reduction on BOTH held-out AND cross-corpus ⇒ Front A lives (build");
-    println!("# a generalizing nonlinear residual coder). Gain ≈0 or inverting cross-corpus ⇒ already");
+    println!(
+        "# a generalizing nonlinear residual coder). Gain ≈0 or inverting cross-corpus ⇒ already"
+    );
     println!("# captured by scale_cond / non-generalizing ⇒ Front A dead ⇒ pivot to Front B (neural decoder).");
 }

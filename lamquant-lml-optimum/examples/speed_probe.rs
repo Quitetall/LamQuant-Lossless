@@ -65,19 +65,26 @@ fn run(
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/eeg64.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(32768);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/eeg64.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32768);
     let sig = read_window(&path);
     let (n_ch, t) = (sig.len(), sig[0].len());
     let nm = (n_ch * t) as f64;
 
     let opt = run(
-        &sig, w,
+        &sig,
+        w,
         &|c| LmoCodec.encode(c, Mode::Lossless).expect("opt enc"),
         &|b| decode_any(b).expect("opt dec"),
     );
     let mcu = run(
-        &sig, w,
+        &sig,
+        w,
         &|c| LmlCodec.encode(c, Mode::Lossless).expect("mcu enc"),
         &|b| LmlCodec.decode(b).expect("mcu dec"),
     );
@@ -88,17 +95,30 @@ fn main() {
     let name = path.rsplit('/').next().unwrap_or(&path);
 
     println!("# speed+CR: {name}  {n_ch}ch × {t}  (W={w}, 16-bit input)");
-    println!("  {:>10} | {:>8} | {:>9} {:>8} | {:>9} {:>8} | {}",
-        "codec", "bps", "enc Msa/s", "enc MiB/s", "dec Msa/s", "dec MiB/s", "rt");
+    println!(
+        "  {:>10} | {:>8} | {:>9} {:>8} | {:>9} {:>8} | {}",
+        "codec", "bps", "enc Msa/s", "enc MiB/s", "dec Msa/s", "dec MiB/s", "rt"
+    );
     let row = |label: &str, r: &(usize, f64, f64, bool)| {
-        println!("  {:>10} | {:>8.4} | {:>9.2} {:>8.1} | {:>9.2} {:>8.1} | {}",
-            label, r.0 as f64 * 8.0 / nm, msa(r.1), mibs(r.1), msa(r.2), mibs(r.2),
-            if r.3 { "ok" } else { "FAIL" });
+        println!(
+            "  {:>10} | {:>8.4} | {:>9.2} {:>8.1} | {:>9.2} {:>8.1} | {}",
+            label,
+            r.0 as f64 * 8.0 / nm,
+            msa(r.1),
+            mibs(r.1),
+            msa(r.2),
+            mibs(r.2),
+            if r.3 { "ok" } else { "FAIL" }
+        );
     };
     row("Optimum", &opt);
     row("MCU floor", &mcu);
-    println!("  Optimum vs MCU: CR {:+.1}%   enc {:.2}× {}   dec {:.2}× {}",
+    println!(
+        "  Optimum vs MCU: CR {:+.1}%   enc {:.2}× {}   dec {:.2}× {}",
         100.0 * (opt.0 as f64 - mcu.0 as f64) / mcu.0 as f64,
-        opt.1 / mcu.1, if opt.1 > mcu.1 { "slower" } else { "faster" },
-        opt.2 / mcu.2, if opt.2 > mcu.2 { "slower" } else { "faster" });
+        opt.1 / mcu.1,
+        if opt.1 > mcu.1 { "slower" } else { "faster" },
+        opt.2 / mcu.2,
+        if opt.2 > mcu.2 { "slower" } else { "faster" }
+    );
 }

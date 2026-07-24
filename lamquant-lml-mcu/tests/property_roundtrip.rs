@@ -26,10 +26,7 @@ fn quantize(sample: i64, bits: u8) -> i64 {
 /// per-sample value within ±32767 (post-quantization fits 16 bits).
 fn signal_strategy() -> impl Strategy<Value = Vec<Vec<i64>>> {
     (1usize..=8, 32usize..=512).prop_flat_map(|(n_ch, t)| {
-        prop::collection::vec(
-            prop::collection::vec(-32768i64..32768, t),
-            n_ch,
-        )
+        prop::collection::vec(prop::collection::vec(-32768i64..32768, t), n_ch)
     })
 }
 
@@ -40,8 +37,14 @@ fn assert_roundtrip(signal: &[Vec<i64>]) {
     let recovered = lml::decompress_from(&mut cursor).expect("decompress");
     assert_eq!(recovered.len(), signal.len(), "channel count mismatch");
     for (i, (orig, rec)) in signal.iter().zip(recovered.iter()).enumerate() {
-        assert_eq!(orig, rec, "channel {} mismatch (len orig={} rec={})",
-                   i, orig.len(), rec.len());
+        assert_eq!(
+            orig,
+            rec,
+            "channel {} mismatch (len orig={} rec={})",
+            i,
+            orig.len(),
+            rec.len()
+        );
     }
 }
 
@@ -71,9 +74,7 @@ fn roundtrip_zero_variance() {
 /// DC offset (constant non-zero) across many channels.
 #[test]
 fn roundtrip_dc_offset() {
-    let signal: Vec<Vec<i64>> = (0..8)
-        .map(|ch| vec![(ch as i64 - 4) * 1000; 256])
-        .collect();
+    let signal: Vec<Vec<i64>> = (0..8).map(|ch| vec![(ch as i64 - 4) * 1000; 256]).collect();
     assert_roundtrip(&signal);
 }
 
@@ -81,7 +82,11 @@ fn roundtrip_dc_offset() {
 #[test]
 fn roundtrip_saturated_amplitude() {
     let signal: Vec<Vec<i64>> = (0..2)
-        .map(|_| (0..256).map(|i| if i % 2 == 0 { 32767 } else { -32768 }).collect())
+        .map(|_| {
+            (0..256)
+                .map(|i| if i % 2 == 0 { 32767 } else { -32768 })
+                .collect()
+        })
         .collect();
     assert_roundtrip(&signal);
 }
@@ -100,11 +105,15 @@ fn roundtrip_single_spike() {
 #[test]
 fn roundtrip_mixed_pattern() {
     let n = 384usize;
-    let ch0: Vec<i64> = (0..n).map(|i| {
-        let phase = (i as f64) * 0.1;
-        quantize((phase.sin() * 8000.0) as i64, 16)
-    }).collect();
-    let ch1: Vec<i64> = (0..n).map(|i| if i == n / 2 { 25000 } else { 100 }).collect();
+    let ch0: Vec<i64> = (0..n)
+        .map(|i| {
+            let phase = (i as f64) * 0.1;
+            quantize((phase.sin() * 8000.0) as i64, 16)
+        })
+        .collect();
+    let ch1: Vec<i64> = (0..n)
+        .map(|i| if i == n / 2 { 25000 } else { 100 })
+        .collect();
     let ch2: Vec<i64> = vec![-500; n];
     assert_roundtrip(&[ch0, ch1, ch2]);
 }

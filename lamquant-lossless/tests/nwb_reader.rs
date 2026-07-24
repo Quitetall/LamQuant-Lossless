@@ -66,8 +66,12 @@ fn reads_h5py_authored_nwb_int_datasets() {
     let sigs = lamquant_core::nwb::read_int_signals(&h5).expect("read_int_signals");
 
     // Two integer datasets (data, pulse); the float64 `volts` must be skipped.
-    assert_eq!(sigs.len(), 2, "expected exactly the two integer datasets, got {:?}",
-        sigs.iter().map(|s| &s.h5_path).collect::<Vec<_>>());
+    assert_eq!(
+        sigs.len(),
+        2,
+        "expected exactly the two integer datasets, got {:?}",
+        sigs.iter().map(|s| &s.h5_path).collect::<Vec<_>>()
+    );
 
     let data = sigs
         .iter()
@@ -75,7 +79,10 @@ fn reads_h5py_authored_nwb_int_datasets() {
         .expect("ElectricalSeries/data present");
     assert_eq!(data.int_bytes, 2);
     assert!(data.signed);
-    assert!(data.time_major, "NWB (T,C) layout must be reported time-major");
+    assert!(
+        data.time_major,
+        "NWB (T,C) layout must be reported time-major"
+    );
     assert_eq!(data.orig_shape, vec![1000, 4]);
     // channel-major: 4 channels, each 1000 samples; sig[c][t] = t*10 + c.
     assert_eq!(data.signal.len(), 4);
@@ -96,7 +103,10 @@ fn reads_h5py_authored_nwb_int_datasets() {
         .expect("pulse present");
     assert_eq!(pulse.int_bytes, 1);
     assert!(!pulse.signed);
-    assert!(!pulse.time_major, "1-D dataset is a single channel, no transpose");
+    assert!(
+        !pulse.time_major,
+        "1-D dataset is a single channel, no transpose"
+    );
     assert_eq!(pulse.orig_shape, vec![256]);
     assert_eq!(pulse.signal.len(), 1);
     for i in 0..256 {

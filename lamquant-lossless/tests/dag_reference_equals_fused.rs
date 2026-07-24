@@ -58,8 +58,9 @@ fn ref_channel(sig: &[i64], n_levels: u8, mode: LpcMode) -> (Vec<u8>, Vec<u8>) {
     let mut payload = Vec::new();
     for (sb_idx, sub) in subbands.iter().enumerate() {
         let scoped = scope_lpc_mode(mode, lpc_max_order(sub.len()));
-        let (coeffs, residual, order) =
-            lpc::analyze_with_mode(sub, sb_idx, scoped, BIAS_CTX, /* time_remaining = */ None);
+        let (coeffs, residual, order) = lpc::analyze_with_mode(
+            sub, sb_idx, scoped, BIAS_CTX, /* time_remaining = */ None,
+        );
         meta.push(order as u8);
         for &c in &coeffs {
             meta.extend_from_slice(&c.to_le_bytes());
@@ -73,7 +74,10 @@ fn ref_channel(sig: &[i64], n_levels: u8, mode: LpcMode) -> (Vec<u8>, Vec<u8>) {
 /// then all payloads) >> assemble_lml_packet`. Mirrors `encode_channels_core`
 /// (lml.rs:739-755) + `finalize_channels` (lml.rs:576, default branch: wins=false).
 fn ref_packet(signal: &[Vec<i64>], mode: LpcMode) -> Vec<u8> {
-    assert!(!signal.is_empty(), "ref_packet needs ≥1 channel (the codec rejects n_ch=0)");
+    assert!(
+        !signal.is_empty(),
+        "ref_packet needs ≥1 channel (the codec rejects n_ch=0)"
+    );
     let n_ch = signal.len();
     let t = signal[0].len();
     let n_levels = compute_n_levels(t);
@@ -84,7 +88,9 @@ fn ref_packet(signal: &[Vec<i64>], mode: LpcMode) -> Vec<u8> {
         lpc_meta.extend_from_slice(&m);
         payload.extend_from_slice(&p);
     }
-    assemble_lml_packet(n_ch, t, n_levels, /* noise_bits = */ 0, /* wins = */ false, &lpc_meta, &payload)
+    assemble_lml_packet(
+        n_ch, t, n_levels, /* noise_bits = */ 0, /* wins = */ false, &lpc_meta, &payload,
+    )
 }
 
 /// Deterministic multi-channel signal (smooth ramp + bounded wobble so lifting,
@@ -106,11 +112,25 @@ fn synth(n_ch: usize, t: usize) -> Vec<Vec<i64>> {
 #[test]
 fn dag_reference_is_byte_identical_to_fused_and_decodes() {
     // Shapes span every n_levels the encoder picks: t=4→0, t=8→1, t=20→2, t≥32→3.
-    let shapes = [(1usize, 4usize), (1, 8), (1, 20), (1, 100), (4, 2500), (8, 313), (32, 2500)];
+    let shapes = [
+        (1usize, 4usize),
+        (1, 8),
+        (1, 20),
+        (1, 100),
+        (4, 2500),
+        (8, 313),
+        (32, 2500),
+    ];
     let modes: [(&str, LpcMode); 3] = [
         ("fixed", LpcMode::Fixed),
         ("adaptive", LpcMode::Adaptive { max_order: 16 }),
-        ("anytime_none", LpcMode::Anytime { max_order: 16, deadline: None }),
+        (
+            "anytime_none",
+            LpcMode::Anytime {
+                max_order: 16,
+                deadline: None,
+            },
+        ),
     ];
     for &(n_ch, t) in &shapes {
         let signal = synth(n_ch, t);
@@ -125,7 +145,10 @@ fn dag_reference_is_byte_identical_to_fused_and_decodes() {
                  longer reproduces encode_one_channel byte-for-byte"
             );
             let decoded = decompress(&fused).expect("decode");
-            assert_eq!(decoded, signal, "roundtrip failed (mode={name}, {n_ch}ch × {t})");
+            assert_eq!(
+                decoded, signal,
+                "roundtrip failed (mode={name}, {n_ch}ch × {t})"
+            );
         }
     }
 }

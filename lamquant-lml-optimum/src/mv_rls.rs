@@ -83,7 +83,12 @@ impl Rls {
         for i in 0..n {
             p[i][i] = p0;
         }
-        Self { n, w: alloc::vec![0.0; n], p, lambda }
+        Self {
+            n,
+            w: alloc::vec![0.0; n],
+            p,
+            lambda,
+        }
     }
 
     fn predict(&self, reg: &[f64]) -> f64 {
@@ -350,7 +355,10 @@ pub fn residuals_hindsight(signal: &[Vec<i64>], m: usize, ridge: f64) -> Vec<Vec
 /// (`residuals_growing_ls` is a block-refit heuristic that is NOT VAW-tight.) NOT a wire path.
 #[cfg(feature = "encode")]
 pub fn residuals_vaw(signal: &[Vec<i64>], m: usize, ridge: f64) -> Vec<Vec<i64>> {
-    assert!(ridge > 0.0, "residuals_vaw needs ridge > 0 (P₀ = 1/ridge; ridge=0 ⇒ +inf ⇒ NaN)");
+    assert!(
+        ridge > 0.0,
+        "residuals_vaw needs ridge > 0 (P₀ = 1/ridge; ridge=0 ⇒ +inf ⇒ NaN)"
+    );
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     let mut out = Vec::with_capacity(n_ch);
@@ -384,8 +392,16 @@ pub fn residuals_vaw(signal: &[Vec<i64>], m: usize, ridge: f64) -> Vec<Vec<i64>>
 /// `residuals_hindsight` (same ridge) is the online-vs-batch redundancy Theorem A1 bounds by
 /// `(d/2)log T`. NOT a wire path.
 #[cfg(feature = "encode")]
-pub fn residuals_growing_ls(signal: &[Vec<i64>], m: usize, block: usize, ridge: f64) -> Vec<Vec<i64>> {
-    assert!(block > 0, "residuals_growing_ls needs block > 0 (n % block)");
+pub fn residuals_growing_ls(
+    signal: &[Vec<i64>],
+    m: usize,
+    block: usize,
+    ridge: f64,
+) -> Vec<Vec<i64>> {
+    assert!(
+        block > 0,
+        "residuals_growing_ls needs block > 0 (n % block)"
+    );
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     let mut out = Vec::with_capacity(n_ch);
@@ -461,7 +477,11 @@ pub fn coeff_drift(signal: &[Vec<i64>], m: usize, window: usize, ridge: f64) -> 
             let mut own = alloc::vec![0.0f64; K];
             for j in 0..K {
                 let idx = lo as isize - 1 - j as isize;
-                own[j] = if idx >= 0 { signal[c][idx as usize] as f64 } else { 0.0 };
+                own[j] = if idx >= 0 {
+                    signal[c][idx as usize] as f64
+                } else {
+                    0.0
+                };
             }
             for n in lo..hi {
                 let reg = regressor(&own, signal, &refs, n);
@@ -496,7 +516,11 @@ pub fn coeff_drift(signal: &[Vec<i64>], m: usize, window: usize, ridge: f64) -> 
             prev = Some(w);
         }
     }
-    if cnt > 0 { acc / cnt as f64 } else { 0.0 }
+    if cnt > 0 {
+        acc / cnt as f64
+    } else {
+        0.0
+    }
 }
 
 /// RESEARCH (TUH tuning): the exact encoded BYTE LENGTH under ARBITRARY
@@ -505,7 +529,13 @@ pub fn coeff_drift(signal: &[Vec<i64>], m: usize, window: usize, ridge: f64) -> 
 /// count exactly (9-byte header + per-channel `4 + entropy(res).len()`), so a param
 /// tuple that wins here is a real container candidate once added to the grid.
 #[cfg(feature = "encode")]
-pub fn encode_len_params(signal: &[Vec<i64>], lambda: f64, reset: usize, m: usize, seg: usize) -> usize {
+pub fn encode_len_params(
+    signal: &[Vec<i64>],
+    lambda: f64,
+    reset: usize,
+    m: usize,
+    seg: usize,
+) -> usize {
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     let mut total = 9; // [n_ch u16][t u32][k u8][m u8][packed u8]
@@ -581,7 +611,11 @@ pub fn encode(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
 /// Decode. `no_std`-capable.
 pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if body.len() < 9 {
-        return Err(LmlError::Truncated { expected: 9, actual: body.len(), context: "mv_rls header" });
+        return Err(LmlError::Truncated {
+            expected: 9,
+            actual: body.len(),
+            context: "mv_rls header",
+        });
     }
     let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
     let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
@@ -600,12 +634,21 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let mut out: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for c in 0..n_ch {
         if pos + 4 > body.len() {
-            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "mv_rls ch len" });
+            return Err(LmlError::Truncated {
+                expected: pos + 4,
+                actual: body.len(),
+                context: "mv_rls ch len",
+            });
         }
-        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        let glen =
+            u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
         if pos + glen > body.len() {
-            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "mv_rls ch data" });
+            return Err(LmlError::Truncated {
+                expected: pos + glen,
+                actual: body.len(),
+                context: "mv_rls ch data",
+            });
         }
         let res = crate::entropy::decode(&body[pos..pos + glen])?;
         pos += glen;
@@ -705,14 +748,20 @@ pub fn encode_bc(signal: &[Vec<i64>]) -> LmlResult<Vec<u8>> {
             best = Some(b);
         }
     }
-    best.ok_or(LmlError::InvalidHeader("mv_rls_bc: no config encoded".into()))
+    best.ok_or(LmlError::InvalidHeader(
+        "mv_rls_bc: no config encoded".into(),
+    ))
 }
 
 /// `CODER_MV_RLS_BC` decode. Reads the per-channel `[bc u8]`, `bias_restore`s the residual, then
 /// runs the identical RLS synthesis as [`decode`]. `no_std`-capable.
 pub fn decode_bc(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if body.len() < 9 {
-        return Err(LmlError::Truncated { expected: 9, actual: body.len(), context: "mv_rls_bc header" });
+        return Err(LmlError::Truncated {
+            expected: 9,
+            actual: body.len(),
+            context: "mv_rls_bc header",
+        });
     }
     let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
     let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
@@ -729,14 +778,23 @@ pub fn decode_bc(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let mut out: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for c in 0..n_ch {
         if pos + 5 > body.len() {
-            return Err(LmlError::Truncated { expected: pos + 5, actual: body.len(), context: "mv_rls_bc ch hdr" });
+            return Err(LmlError::Truncated {
+                expected: pos + 5,
+                actual: body.len(),
+                context: "mv_rls_bc ch hdr",
+            });
         }
         let bc = body[pos];
         pos += 1;
-        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        let glen =
+            u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
         if pos + glen > body.len() {
-            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "mv_rls_bc ch data" });
+            return Err(LmlError::Truncated {
+                expected: pos + glen,
+                actual: body.len(),
+                context: "mv_rls_bc ch data",
+            });
         }
         let mut res = crate::entropy::decode(&body[pos..pos + glen])?;
         pos += glen;
@@ -804,7 +862,9 @@ pub fn encode_bounded_mae(signal: &[Vec<i64>], delta: i64) -> LmlResult<Vec<u8>>
         return Err(LmlError::InvalidHeader("mv_rls_nl delta < 0".into()));
     }
     if delta > u32::MAX as i64 {
-        return Err(LmlError::InvalidHeader("mv_rls_nl delta exceeds u32".into()));
+        return Err(LmlError::InvalidHeader(
+            "mv_rls_nl delta exceeds u32".into(),
+        ));
     }
     let t = signal[0].len();
     let grid = 2 * delta + 1;
@@ -836,7 +896,11 @@ pub fn encode_bounded_mae(signal: &[Vec<i64>], delta: i64) -> LmlResult<Vec<u8>>
             let r = signal[c][n] - pr;
             // integer round-half-away-from-zero (grid=2δ+1 is odd ⇒ ⌊grid/2⌋=δ): makes the
             // guarantee |r − grid·q| ≤ δ EXACT for every i64 r, with no f64-precision dependency.
-            let q = if r >= 0 { (r + delta) / grid } else { -((-r + delta) / grid) };
+            let q = if r >= 0 {
+                (r + delta) / grid
+            } else {
+                -((-r + delta) / grid)
+            };
             let xh = pr + grid * q;
             q_res.push(q);
             rec.push(xh);
@@ -858,7 +922,11 @@ pub fn encode_bounded_mae(signal: &[Vec<i64>], delta: i64) -> LmlResult<Vec<u8>>
 /// + (2δ+1)·q`, RLS adapts on `x̂`. `no_std`-capable. Header is 12 bytes.
 pub fn decode_bounded_mae(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     if body.len() < 12 {
-        return Err(LmlError::Truncated { expected: 12, actual: body.len(), context: "mv_rls_nl header" });
+        return Err(LmlError::Truncated {
+            expected: 12,
+            actual: body.len(),
+            context: "mv_rls_nl header",
+        });
     }
     let n_ch = u16::from_le_bytes([body[0], body[1]]) as usize;
     let t = u32::from_le_bytes([body[2], body[3], body[4], body[5]]) as usize;
@@ -873,12 +941,21 @@ pub fn decode_bounded_mae(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let mut xhat: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for c in 0..n_ch {
         if pos + 4 > body.len() {
-            return Err(LmlError::Truncated { expected: pos + 4, actual: body.len(), context: "mv_rls_nl ch len" });
+            return Err(LmlError::Truncated {
+                expected: pos + 4,
+                actual: body.len(),
+                context: "mv_rls_nl ch len",
+            });
         }
-        let glen = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
+        let glen =
+            u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
         if pos + glen > body.len() {
-            return Err(LmlError::Truncated { expected: pos + glen, actual: body.len(), context: "mv_rls_nl ch data" });
+            return Err(LmlError::Truncated {
+                expected: pos + glen,
+                actual: body.len(),
+                context: "mv_rls_nl ch data",
+            });
         }
         let q_res = crate::entropy::decode(&body[pos..pos + glen])?;
         pos += glen;
@@ -917,13 +994,18 @@ mod tests {
 
     fn make_sig(n_ch: usize, t: usize) -> Vec<Vec<i64>> {
         // shared base + per-channel detail ⇒ cross-channel + temporal structure
-        let base: Vec<i64> = (0..t).map(|i| ((i as f64 * 0.03).sin() * 2500.0) as i64).collect();
+        let base: Vec<i64> = (0..t)
+            .map(|i| ((i as f64 * 0.03).sin() * 2500.0) as i64)
+            .collect();
         (0..n_ch)
             .map(|c| {
                 (0..t)
                     .map(|i| {
                         let g = 0.5 + 0.07 * c as f64;
-                        (g * base[i] as f64) as i64 + ((i + c * 5) as f64 * 0.7).sin() as i64 * 90 + ((i * 3 + c) % 9) as i64 - 4
+                        (g * base[i] as f64) as i64
+                            + ((i + c * 5) as f64 * 0.7).sin() as i64 * 90
+                            + ((i * 3 + c) % 9) as i64
+                            - 4
                     })
                     .collect()
             })
@@ -945,7 +1027,11 @@ mod tests {
         for (n_ch, t) in [(1usize, 400usize), (4, 2000), (21, 1500), (8, 17000)] {
             let sig = make_sig(n_ch, t);
             let body = encode_bc(&sig).unwrap();
-            assert_eq!(decode_bc(&body).unwrap(), sig, "mv_rls_bc bit-exact ({n_ch}x{t})");
+            assert_eq!(
+                decode_bc(&body).unwrap(),
+                sig,
+                "mv_rls_bc bit-exact ({n_ch}x{t})"
+            );
         }
     }
 

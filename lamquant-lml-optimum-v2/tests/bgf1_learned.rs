@@ -1,7 +1,7 @@
 use lamquant_lml_optimum_v2::bgf1_learned::{
     Bgf1ChannelIdentity, Bgf1LearnedCodec, Bgf1LearnedMode,
 };
-use lamquant_lml_optimum_v2::model_pack::{ModelPack, Tensor, TensorDtype};
+use lamquant_lml_optimum_v2::model_pack::{ModelPack, ModelTensor, TensorDtype};
 use sha2::{Digest, Sha256};
 use std::fs;
 #[cfg(target_os = "linux")]
@@ -23,7 +23,7 @@ fn learned_model_pack() -> Vec<u8> {
         row[0] = 32;
     }
     let tensors = vec![
-        Tensor {
+        ModelTensor {
             name: "bgf1.descriptor".into(),
             dtype: TensorDtype::I32,
             shape: vec![4],
@@ -31,7 +31,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 0,
             data: descriptor,
         },
-        Tensor {
+        ModelTensor {
             name: "coupling.predict_second".into(),
             dtype: TensorDtype::I8,
             shape: vec![2, 256],
@@ -39,7 +39,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 6,
             data: predict_second,
         },
-        Tensor {
+        ModelTensor {
             name: "coupling.update_first".into(),
             dtype: TensorDtype::I8,
             shape: vec![2, 256],
@@ -47,7 +47,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 6,
             data: update_first,
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.exponent_logits".into(),
             dtype: TensorDtype::I8,
             shape: vec![16, 16],
@@ -55,7 +55,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.mantissa_logits".into(),
             dtype: TensorDtype::I8,
             shape: vec![16, 16],
@@ -63,7 +63,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.sign_logits".into(),
             dtype: TensorDtype::I8,
             shape: vec![256],
@@ -71,7 +71,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.token_magnitude_bias".into(),
             dtype: TensorDtype::I8,
             shape: vec![256],
@@ -79,7 +79,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "prior.graph".into(),
             dtype: TensorDtype::I8,
             shape: vec![256, 4],
@@ -87,7 +87,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 6,
             data: vec![0; 1_024],
         },
-        Tensor {
+        ModelTensor {
             name: "prior.scale_bias".into(),
             dtype: TensorDtype::I8,
             shape: vec![256],
@@ -95,7 +95,7 @@ fn learned_model_pack() -> Vec<u8> {
             scale_shift: 4,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "prior.temporal".into(),
             dtype: TensorDtype::I8,
             shape: vec![256, 16],

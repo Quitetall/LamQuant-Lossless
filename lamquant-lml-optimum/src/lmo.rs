@@ -116,6 +116,7 @@ fn prd(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
 ///   9/7 stream is never worse than the 5/3 floor.
 /// - **`Lossless` / `BoundedMae`:** the LML integer floor (WP0 bit-exact / δ-bound
 ///   inherited; 9/7 is float ⇒ not bit-exact, so it never applies here).
+///
 /// Map any backend error into the format-agnostic `CodecError` (ADR 0069 L2: the
 /// codec contract no longer wraps `LmlError`; the typed error stays on the LML path).
 fn to_backend<E: core::fmt::Display>(e: E) -> CodecError {
@@ -129,7 +130,8 @@ pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
     let (transform_id, inner) = match mode {
         Mode::TargetBps(bps) => {
             // Candidate 1: the integer 5/3 floor (always valid).
-            let i53 = lml::compress_target_bps_pcrd(signal, bps, LpcMode::default()).map_err(to_backend)?;
+            let i53 = lml::compress_target_bps_pcrd(signal, bps, LpcMode::default())
+                .map_err(to_backend)?;
             // Candidate 2: the float 9/7 ratio attack (lossy-only). Auto-pick the
             // lower-PRD reconstruction at the matched rate ceiling.
             match crate::lmo_pcrd97::encode_target_bps_97(signal, bps, LpcMode::default()) {
@@ -161,16 +163,13 @@ pub fn encode(signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError> {
         Mode::BoundedMae(delta) => {
             // Floor bounded-MAE vs the closed-loop mv_rls near-lossless (hard |x−x̂| ≤ δ — the
             // regime H.BWC structurally can't match). Keep the smaller ⇒ never-worse.
-            let floor = lamquant_lml_mcu::codec::LmlCodec.encode(signal, Mode::BoundedMae(delta))?;
+            let floor =
+                lamquant_lml_mcu::codec::LmlCodec.encode(signal, Mode::BoundedMae(delta))?;
             match crate::mv_rls::encode_bounded_mae(signal, delta as i64) {
                 Ok(mv) if mv.len() < floor.len() => (TRANSFORM_MVRLS_BOUNDED, mv),
                 _ => (TRANSFORM_LML_53, floor),
             }
         }
-        other => (
-            TRANSFORM_LML_53,
-            lamquant_lml_mcu::codec::LmlCodec.encode(signal, other)?,
-        ),
     };
 
     let mut out = Vec::with_capacity(LMO_HEADER_LEN + inner.len());

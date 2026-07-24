@@ -15,6 +15,8 @@
 //!   --example scale_cond_entropy_probe -- <window>.bin [...]
 //! ```
 
+#![allow(clippy::explicit_counter_loop)] // total is a u64 population count
+
 use std::collections::HashMap;
 use std::fs;
 
@@ -84,7 +86,11 @@ fn scale_cond_adaptive_bytes(res: &[i64], alpha: f64) -> usize {
 fn scale_cond_bucketed_bytes(res: &[i64], alpha: f64) -> usize {
     // bucket(m): 0 for m==0, else floor(log2(m))+1  (m in [2^(b-1), 2^b-1] ⇒ bucket b)
     fn bucket(m: u64) -> usize {
-        if m == 0 { 0 } else { 64 - m.leading_zeros() as usize }
+        if m == 0 {
+            0
+        } else {
+            64 - m.leading_zeros() as usize
+        }
     }
     let mut models: HashMap<i32, (HashMap<usize, u64>, u64)> = HashMap::new();
     let mut ema: f64 = 1.0;
@@ -118,7 +124,11 @@ fn scale_cond_capped_bytes(res: &[i64], alpha: f64, cap: usize) -> usize {
         ((x << 1) ^ (x >> 63)) as u64
     }
     fn bucket(m: u64) -> usize {
-        if m == 0 { 0 } else { 64 - m.leading_zeros() as usize }
+        if m == 0 {
+            0
+        } else {
+            64 - m.leading_zeros() as usize
+        }
     }
     // alphabet: symbols 0..cap = direct zigzag; symbol `cap` = escape.
     let esc = cap;
@@ -128,7 +138,11 @@ fn scale_cond_capped_bytes(res: &[i64], alpha: f64, cap: usize) -> usize {
     for &x in res {
         let ctx = ema.max(1.0).log2().floor() as i32;
         let zz = zigzag(x);
-        let sym = if (zz as usize) < cap { zz as usize } else { esc };
+        let sym = if (zz as usize) < cap {
+            zz as usize
+        } else {
+            esc
+        };
         let (counts, total) = models.entry(ctx).or_insert_with(|| (HashMap::new(), 0));
         let d = counts.len() as u64;
         let c = *counts.get(&sym).unwrap_or(&0);
@@ -156,7 +170,8 @@ fn learned_conditional_ceiling(res: &[i64]) -> usize {
     const BLK: usize = 256;
     let mut buckets: HashMap<i32, Vec<i64>> = HashMap::new();
     for block in res.chunks(BLK) {
-        let mean = block.iter().map(|&x| x.unsigned_abs() as f64).sum::<f64>() / block.len().max(1) as f64;
+        let mean =
+            block.iter().map(|&x| x.unsigned_abs() as f64).sum::<f64>() / block.len().max(1) as f64;
         let ctx = mean.max(1.0).log2().floor() as i32;
         buckets.entry(ctx).or_default().extend_from_slice(block);
     }
@@ -168,7 +183,13 @@ fn learned_conditional_ceiling(res: &[i64]) -> usize {
                 *h.entry(x).or_insert(0) += 1;
             }
             let n = v.len() as f64;
-            let bits: f64 = -h.values().map(|&c| { let p = c as f64 / n; p * p.log2() }).sum::<f64>();
+            let bits: f64 = -h
+                .values()
+                .map(|&c| {
+                    let p = c as f64 / n;
+                    p * p.log2()
+                })
+                .sum::<f64>();
             ((v.len() as f64 * bits) / 8.0).ceil() as usize
         })
         .sum()
@@ -188,27 +209,59 @@ fn main() {
         let (mut g, mut a, mut s, mut c, mut k) = (0usize, 0usize, 0usize, 0usize, 0usize);
         for r in &resids {
             for win in r.chunks(W) {
-                g += entropy::encode(win).map(|v| v.len()).unwrap_or_else(|_| golomb::encode_dense(win).unwrap().len());
+                g += entropy::encode(win)
+                    .map(|v| v.len())
+                    .unwrap_or_else(|_| golomb::encode_dense(win).unwrap().len());
                 a += adaptive_order0_bytes(win);
                 s += scale_cond_adaptive_bytes(win, 0.95);
                 c += learned_conditional_ceiling(win);
-                k += scale_cond_capped_bytes(win, 0.95, 512).min(scale_cond_bucketed_bytes(win, 0.95));
+                k += scale_cond_capped_bytes(win, 0.95, 512)
+                    .min(scale_cond_bucketed_bytes(win, 0.95));
             }
         }
         let vs = 100.0 * (k as f64 - g as f64) / g as f64;
         let win_lt_g = if k < g { "YES" } else { "no" };
-        let short: String = std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
-        let short = short.chars().rev().take(30).collect::<String>().chars().rev().collect::<String>();
-        println!("  {:>30} | {:>9} {:>9} {:>9} {:>9} | {:>7.2}% {:>8}", short, g, a, s, k, vs, win_lt_g);
-        tg += g; ta += a; ts += s; tc += c; tk += k;
+        let short: String = std::path::Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let short = short
+            .chars()
+            .rev()
+            .take(30)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        println!(
+            "  {:>30} | {:>9} {:>9} {:>9} {:>9} | {:>7.2}% {:>8}",
+            short, g, a, s, k, vs, win_lt_g
+        );
+        tg += g;
+        ta += a;
+        ts += s;
+        tc += c;
+        tk += k;
     }
-    let row = |lbl: &str, b: usize| println!("  {:>30} | {:>9} {:+.2}% vs block-Golomb", lbl, b, 100.0 * (b as f64 - tg as f64) / tg as f64);
+    let row = |lbl: &str, b: usize| {
+        println!(
+            "  {:>30} | {:>9} {:+.2}% vs block-Golomb",
+            lbl,
+            b,
+            100.0 * (b as f64 - tg as f64) / tg as f64
+        )
+    };
     println!("  {:->30}-+-{:->39}", "", "");
     row("block-Golomb (PROD)", tg);
     row("adaptive order-0", ta);
     row("scale-cond adaptive (raw)", ts);
     row("scale-cond BUCKETED (ship)", tk);
     row("learned-cond CEILING", tc);
-    println!("\n# scale-cond adaptive must beat block-Golomb on BOTH corpora (esp. ma, where plain");
-    println!("# adaptive order-0 LOST +5.8%) to be a real generalizing never-worse keep-best lever.");
+    println!(
+        "\n# scale-cond adaptive must beat block-Golomb on BOTH corpora (esp. ma, where plain"
+    );
+    println!(
+        "# adaptive order-0 LOST +5.8%) to be a real generalizing never-worse keep-best lever."
+    );
 }

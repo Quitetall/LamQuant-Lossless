@@ -13,10 +13,10 @@
 //!
 //! cargo run -p lamquant-lml-optimum --features encode --release --example rls_spectral_probe -- <bin>...
 
-use std::collections::HashMap;
-use std::fs;
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_optimum::{entropy, LmoCodec};
+use std::collections::HashMap;
+use std::fs;
 
 const W: usize = 32768; // production window
 
@@ -28,19 +28,34 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let mut s = Vec::with_capacity(nch);
     for _ in 0..nch {
         let mut ch = Vec::with_capacity(t);
-        for _ in 0..t { ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64); off += 4; }
+        for _ in 0..t {
+            ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64);
+            off += 4;
+        }
         s.push(ch);
     }
     s
 }
 
 /// True RLS (order, λ) — inverse-correlation P + Kalman gain (transcribed from rls_probe.rs).
-struct Rls { order: usize, lambda: f64, w: Vec<f64>, p: Vec<Vec<f64>> }
+struct Rls {
+    order: usize,
+    lambda: f64,
+    w: Vec<f64>,
+    p: Vec<Vec<f64>>,
+}
 impl Rls {
     fn new(order: usize, lambda: f64) -> Self {
         let mut p = vec![vec![0.0f64; order]; order];
-        for (i, row) in p.iter_mut().enumerate() { row[i] = 1.0; } // δ=1 → P=I
-        Self { order, lambda, w: vec![0.0; order], p }
+        for (i, row) in p.iter_mut().enumerate() {
+            row[i] = 1.0;
+        } // δ=1 → P=I
+        Self {
+            order,
+            lambda,
+            w: vec![0.0; order],
+            p,
+        }
     }
     fn predict(&self, hist: &[f64]) -> f64 {
         (0..self.order).map(|k| self.w[k] * hist[k]).sum()
@@ -48,15 +63,21 @@ impl Rls {
     fn adapt(&mut self, hist: &[f64], x: f64, pred: f64) {
         let n = self.order;
         let mut px = vec![0.0f64; n];
-        for i in 0..n { px[i] = (0..n).map(|j| self.p[i][j] * hist[j]).sum(); }
+        for i in 0..n {
+            px[i] = (0..n).map(|j| self.p[i][j] * hist[j]).sum();
+        }
         let denom = self.lambda + (0..n).map(|j| hist[j] * px[j]).sum::<f64>();
         let inv = 1.0 / denom;
         let e = x - pred;
-        for i in 0..n { self.w[i] += px[i] * inv * e; }
+        for i in 0..n {
+            self.w[i] += px[i] * inv * e;
+        }
         let ilam = 1.0 / self.lambda;
         for i in 0..n {
             let ki = px[i] * inv;
-            for j in 0..n { self.p[i][j] = (self.p[i][j] - ki * px[j]) * ilam; }
+            for j in 0..n {
+                self.p[i][j] = (self.p[i][j] - ki * px[j]) * ilam;
+            }
         }
     }
 }
@@ -81,11 +102,17 @@ fn rls_residual(x: &[i64], order: usize, lambda: f64, reset: usize) -> Option<(V
             hist.iter_mut().for_each(|h| *h = 0.0);
         }
         let pred = enc.predict(&hist);
-        if !pred.is_finite() || pred.abs() > DIVERGE { return None; } // diverged
+        if !pred.is_finite() || pred.abs() > DIVERGE {
+            return None;
+        } // diverged
         res.push(xi - pred.round() as i64);
         enc.adapt(&hist, xi as f64, pred);
-        for k in (1..order).rev() { hist[k] = hist[k - 1]; }
-        if order > 0 { hist[0] = xi as f64; }
+        for k in (1..order).rev() {
+            hist[k] = hist[k - 1];
+        }
+        if order > 0 {
+            hist[0] = xi as f64;
+        }
     }
     // decode-side reconstruction from the residual (bit-exact gate)
     let mut dec = Rls::new(order, lambda);
@@ -98,21 +125,32 @@ fn rls_residual(x: &[i64], order: usize, lambda: f64, reset: usize) -> Option<(V
         }
         let pred = dec.predict(&dh);
         let xr = e + pred.round() as i64;
-        if xr != x[i] { ok = false; break; }
+        if xr != x[i] {
+            ok = false;
+            break;
+        }
         dec.adapt(&dh, xr as f64, pred);
-        for k in (1..order).rev() { dh[k] = dh[k - 1]; }
-        if order > 0 { dh[0] = xr as f64; }
+        for k in (1..order).rev() {
+            dh[k] = dh[k - 1];
+        }
+        if order > 0 {
+            dh[0] = xr as f64;
+        }
     }
     Some((res, ok))
 }
 
 fn container_bytes(sig: &[Vec<i64>]) -> usize {
     let t = sig[0].len();
-    let mut tot = 0; let mut s = 0;
+    let mut tot = 0;
+    let mut s = 0;
     while s < t {
         let e = (s + W).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|ch| ch[s..e].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         s = e;
     }
     tot
@@ -121,9 +159,15 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
 // (order, λ, reset) — faster forgetting (lower λ) is paired with a SHORTER reset so the
 // 1/λ growth of P can't inflate between resets (matches production mv_rls CONFIGS).
 const CONFIGS: &[(usize, f64, usize)] = &[
-    (8, 0.999, 8192), (16, 0.999, 8192), (16, 0.99, 1024),
-    (32, 0.999, 8192), (32, 0.99, 1024), (32, 0.98, 512),
-    (64, 0.999, 8192), (64, 0.99, 1024), (64, 0.98, 512),
+    (8, 0.999, 8192),
+    (16, 0.999, 8192),
+    (16, 0.99, 1024),
+    (32, 0.999, 8192),
+    (32, 0.99, 1024),
+    (32, 0.98, 512),
+    (64, 0.999, 8192),
+    (64, 0.99, 1024),
+    (64, 0.98, 512),
 ];
 
 fn main() {
@@ -133,8 +177,18 @@ fn main() {
         let nm = (c * t) as f64;
         let cont = container_bytes(&sig);
         let name = path.rsplit('/').next().unwrap_or(&path);
-        println!("\n# {} ({}ch x {})  container = {} ({:.3} bps)", name, c, t, cont, cont as f64 * 8.0 / nm);
-        println!("  {:<16} {:>10} {:>8} {:>6}", "RLS(order,λ)", "bytes", "bps", "rt");
+        println!(
+            "\n# {} ({}ch x {})  container = {} ({:.3} bps)",
+            name,
+            c,
+            t,
+            cont,
+            cont as f64 * 8.0 / nm
+        );
+        println!(
+            "  {:<16} {:>10} {:>8} {:>6}",
+            "RLS(order,λ)", "bytes", "bps", "rt"
+        );
         for &(order, lambda, reset) in CONFIGS {
             let mut tot = 0usize;
             let mut allrt = true;
@@ -148,22 +202,37 @@ fn main() {
                             allrt &= rt;
                             tot += entropy::encode(&res).map(|g| g.len()).unwrap_or(1 << 30) + 4;
                         }
-                        None => { diverged = true; break 'cfg; }
+                        None => {
+                            diverged = true;
+                            break 'cfg;
+                        }
                     }
                     s = e;
                 }
             }
             if diverged {
-                println!("  o={:<3} λ={:<5}    {:>10} {:>8} {:>6}", order, lambda, "—", "—", "DIVERGED");
+                println!(
+                    "  o={:<3} λ={:<5}    {:>10} {:>8} {:>6}",
+                    order, lambda, "—", "—", "DIVERGED"
+                );
                 continue;
             }
             let d = 100.0 * (tot as f64 - cont as f64) / cont as f64;
-            println!("  o={:<3} λ={:<5}    {:>10} {:>8.3} {:>+6.1}%{}", order, lambda, tot,
-                     tot as f64 * 8.0 / nm, d, if allrt { "  ok" } else { "  FAIL" });
+            println!(
+                "  o={:<3} λ={:<5}    {:>10} {:>8.3} {:>+6.1}%{}",
+                order,
+                lambda,
+                tot,
+                tot as f64 * 8.0 / nm,
+                d,
+                if allrt { "  ok" } else { "  FAIL" }
+            );
         }
         stage0b(&sig);
     }
-    println!("\n# bps below container ⇒ higher order helps; compare to HHI (tusz 5.04, tuar ~5.51 bps).");
+    println!(
+        "\n# bps below container ⇒ higher order helps; compare to HHI (tusz 5.04, tuar ~5.51 bps)."
+    );
     println!("# GATE: high-order RLS closes the tusz gap toward HHI without regressing the win-set ⇒ build Stage 1.");
 }
 
@@ -173,28 +242,40 @@ fn main() {
 /// (non-causal local-scale context — the best a perfect scale predictor could do).
 fn h(counts: &HashMap<i64, u64>) -> f64 {
     let n: f64 = counts.values().map(|&c| c as f64).sum();
-    if n == 0.0 { return 0.0; }
-    -counts.values().map(|&c| { let p = c as f64 / n; p * p.log2() }).sum::<f64>()
+    if n == 0.0 {
+        return 0.0;
+    }
+    -counts
+        .values()
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * p.log2()
+        })
+        .sum::<f64>()
 }
 fn stage0b(sig: &[Vec<i64>]) {
     let (order, lambda, reset) = (32usize, 0.999f64, 8192usize);
     let t = sig[0].len();
-    let mut sc_bytes = 0usize;            // scale_cond/golomb keep-best (entropy::encode)
-    let mut h0 = HashMap::new();          // order-0 residual histogram
+    let mut sc_bytes = 0usize; // scale_cond/golomb keep-best (entropy::encode)
+    let mut h0 = HashMap::new(); // order-0 residual histogram
     let mut hcond: HashMap<u32, HashMap<i64, u64>> = HashMap::new(); // residual | oracle scale
     let mut nsym = 0u64;
     for ch in sig {
         let mut s = 0;
         while s < t {
             let e = (s + W).min(t);
-            let Some((res, _)) = rls_residual(&ch[s..e], order, lambda, reset) else { return; };
+            let Some((res, _)) = rls_residual(&ch[s..e], order, lambda, reset) else {
+                return;
+            };
             sc_bytes += entropy::encode(&res).map(|g| g.len()).unwrap_or(1 << 30) + 4;
             // oracle non-causal local scale = bit_len of centered RMS over ±16 samples
             for i in 0..res.len() {
                 let lo = i.saturating_sub(16);
                 let hi = (i + 16).min(res.len());
                 let mut acc = 0u64;
-                for &v in &res[lo..hi] { acc += (v * v) as u64; }
+                for &v in &res[lo..hi] {
+                    acc += (v * v) as u64;
+                }
                 let rms = ((acc / (hi - lo) as u64) as f64).sqrt() as u64;
                 let scale = 64 - rms.max(1).leading_zeros();
                 *h0.entry(res[i]).or_insert(0) += 1;
@@ -206,13 +287,25 @@ fn stage0b(sig: &[Vec<i64>]) {
     }
     let nm = (sig.len() * t) as f64;
     let h0_bps = h(&h0);
-    let cond_bits: f64 = hcond.values().map(|m| { let n: f64 = m.values().map(|&c| c as f64).sum(); h(m) * n }).sum();
+    let cond_bits: f64 = hcond
+        .values()
+        .map(|m| {
+            let n: f64 = m.values().map(|&c| c as f64).sum();
+            h(m) * n
+        })
+        .sum();
     let cond_bps = cond_bits / nsym as f64;
     let sc_bps = sc_bytes as f64 * 8.0 / nm;
     println!("\n## Stage 0B — entropy back-end headroom on the order-32 whitened residual (tusz)");
     println!("  scale_cond (shipped)        : {:.3} bps", sc_bps);
     println!("  order-0 entropy (rANS limit): {:.3} bps", h0_bps);
-    println!("  oracle-scale cond. entropy  : {:.3} bps  (the ceiling a perfect scale ctx reaches)", cond_bps);
-    println!("  → scale_cond within {:+.1}% of the oracle-scale bound; HHI = 5.04 bps.", 100.0 * (sc_bps - cond_bps) / cond_bps);
+    println!(
+        "  oracle-scale cond. entropy  : {:.3} bps  (the ceiling a perfect scale ctx reaches)",
+        cond_bps
+    );
+    println!(
+        "  → scale_cond within {:+.1}% of the oracle-scale bound; HHI = 5.04 bps.",
+        100.0 * (sc_bps - cond_bps) / cond_bps
+    );
     println!("  GATE: small gap ⇒ entropy back-end is a wash (the residual itself is the floor, far above HHI).");
 }

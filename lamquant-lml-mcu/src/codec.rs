@@ -19,7 +19,7 @@
 //!     the typed "LMO decoder not installed" story of ADR 0052 — a Firmware
 //!     stream is never mis-parsed.
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::error::{LmlError, LmlResult};
@@ -39,14 +39,65 @@ pub const LML_MAGIC: &[u8; 4] = lml::MAGIC;
 /// registry has exactly one source of truth.
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";
 
-// The codec seam — `Format`, `Mode`, the `Codec` trait, and the format-agnostic
-// `CodecError` — lives in the foundational `abir` crate (ADR 0069 S2a/L2).
-// Re-exported here so `lamquant_lml_mcu::codec::{Format, Mode, Codec, CodecError}` —
-// and every downstream path (`lamquant_core::codec::*`, `lamquant_lml_optimum::*`,
-// firmware) — keeps resolving with zero consumer edits. L2 decoupled `CodecError`
-// from `LmlError`: the LML/LMO impls map their kernel error into
-// `CodecError::Backend(_)` at the boundary via [`lml_err`].
-pub use abir::{Codec, CodecError, Format, Mode};
+/// Which deterministic wire format a stream is, decided by its leading magic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// LML — the cheap-decode integer floor / interchange standard.
+    Lml,
+    /// LMO — the Optimum max-compression-ratio ceiling.
+    Lmo,
+}
+
+/// The functional surface shared by both deterministic formats.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    /// Bit-exact integer coding.
+    Lossless,
+    /// Every reconstructed sample remains within `delta` of its source value.
+    BoundedMae(u64),
+    /// Rate-targeted coding using the host RD search.
+    TargetBps(f64),
+}
+
+/// Format-agnostic failures at the codec kernel seam.
+#[derive(Debug)]
+pub enum CodecError {
+    /// A backend-specific codec failure.
+    Backend(String),
+    /// The stream needs an LMO decoder that is not linked into this build.
+    OptimumNotInstalled,
+    /// The leading bytes match no supported wire magic.
+    UnknownFormat,
+    /// The requested mode is not compiled into this build.
+    ModeUnsupported,
+}
+
+impl core::fmt::Display for CodecError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Backend(message) => write!(formatter, "backend codec error: {message}"),
+            Self::OptimumNotInstalled => {
+                formatter.write_str("LMO decoder not installed in this build")
+            }
+            Self::UnknownFormat => formatter.write_str("unknown stream format (no magic match)"),
+            Self::ModeUnsupported => {
+                formatter.write_str("requested codec mode not available in this build")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for CodecError {}
+
+/// Shared encode/decode contract implemented by the LML and LMO kernels.
+pub trait Codec {
+    fn format(&self) -> Format;
+
+    fn encode(&self, signal: &[Vec<i64>], mode: Mode) -> Result<Vec<u8>, CodecError>;
+
+    fn decode(&self, bytes: &[u8]) -> Result<Vec<Vec<i64>>, CodecError>;
+}
 
 /// Map a kernel [`LmlError`] into the format-agnostic [`CodecError`] at the seam
 /// boundary (ADR 0069 L2: the contract no longer wraps `LmlError`). Uses the
@@ -73,8 +124,7 @@ impl Codec for LmlCodec {
             Mode::TargetBps(bps) => {
                 #[cfg(feature = "std")]
                 {
-                    lml::compress_target_bps(signal, bps, lpc::LpcMode::default())
-                        .map_err(lml_err)
+                    lml::compress_target_bps(signal, bps, lpc::LpcMode::default()).map_err(lml_err)
                 }
                 #[cfg(not(feature = "std"))]
                 {
@@ -161,7 +211,11 @@ mod tests {
 
     fn ramp(n_ch: usize, t: usize) -> Vec<Vec<i64>> {
         (0..n_ch)
-            .map(|c| (0..t).map(|i| ((i * 7 + c * 13) % 101) as i64 - 50).collect())
+            .map(|c| {
+                (0..t)
+                    .map(|i| ((i * 7 + c * 13) % 101) as i64 - 50)
+                    .collect()
+            })
             .collect()
     }
 
@@ -207,9 +261,13 @@ mod tests {
 
     #[test]
     fn bounded_mae_respects_delta() {
-        let sig = vec![(0..512).map(|i| (i as i64 * 37) % 9001 - 4500).collect::<Vec<_>>()];
+        let sig = vec![(0..512)
+            .map(|i| (i as i64 * 37) % 9001 - 4500)
+            .collect::<Vec<_>>()];
         let delta = 8u64;
-        let stream = LmlCodec.encode(&sig, Mode::BoundedMae(delta)).expect("encode");
+        let stream = LmlCodec
+            .encode(&sig, Mode::BoundedMae(delta))
+            .expect("encode");
         let back = LmlCodec.decode(&stream).expect("decode");
         for (o, r) in sig[0].iter().zip(back[0].iter()) {
             assert!((o - r).unsigned_abs() <= delta, "|{o}-{r}| exceeds {delta}");

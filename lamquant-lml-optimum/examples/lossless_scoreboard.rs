@@ -33,11 +33,20 @@ fn main() {
     let paths: Vec<String> = {
         let a: Vec<String> = std::env::args().skip(1).collect();
         if a.is_empty() {
-            vec!["/tmp/chb01_01_60s.bin".into(), "/tmp/chb01_01_mid.bin".into(), "/tmp/chb01_01_end.bin".into()]
-        } else { a }
+            vec![
+                "/tmp/chb01_01_60s.bin".into(),
+                "/tmp/chb01_01_mid.bin".into(),
+                "/tmp/chb01_01_end.bin".into(),
+            ]
+        } else {
+            a
+        }
     };
     println!("# Optimum-lossless scoreboard: LMO Lossless (auto-pick id=2 vs id=0) vs 5/3 floor");
-    println!("# {:<26} {:>11} {:>11} {:>8} {:>8} {:>6}", "window", "floor B", "LMO B", "dCR%", "floor bps", "rt");
+    println!(
+        "# {:<26} {:>11} {:>11} {:>8} {:>8} {:>6}",
+        "window", "floor B", "LMO B", "dCR%", "floor bps", "rt"
+    );
 
     let (mut tf, mut tl) = (0usize, 0usize);
     for path in &paths {
@@ -57,7 +66,8 @@ fn main() {
         println!(
             "  {:<26} {:>11} {:>11} {:>+7.2}% {:>8.3} {:>6}",
             format!("{name} ({n_ch}x{t})"),
-            floor.len(), lmo.len(),
+            floor.len(),
+            lmo.len(),
             -100.0 * (floor.len() as f64 - lmo.len() as f64) / floor.len() as f64,
             floor.len() as f64 * 8.0 / nm,
             if rt { "ok" } else { "FAIL" }
@@ -66,7 +76,12 @@ fn main() {
     }
     println!(
         "  {:<26} {:>11} {:>11} {:>+7.2}%",
-        "TOTAL", tf, tl, -100.0 * (tf as f64 - tl as f64) / tf as f64
+        "TOTAL",
+        tf,
+        tl,
+        -100.0 * (tf as f64 - tl as f64) / tf as f64
     );
-    println!("\n# dCR% = LMO lossless vs the 5/3 floor (negative = smaller). rt = bit-exact round-trip.");
+    println!(
+        "\n# dCR% = LMO lossless vs the 5/3 floor (negative = smaller). rt = bit-exact round-trip."
+    );
 }

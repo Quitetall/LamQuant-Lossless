@@ -20,12 +20,12 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example decoupled_lambda_probe -- <bin>...
 
-use std::fs;
 use lamquant_lml_optimum::entropy;
+use std::fs;
 
-const K: usize = 8;          // temporal taps (mv_rls K)
-const M: usize = 32;         // cross-channel cap (cfg-0)
-const RESET: usize = 8192;   // periodic reset (cfg-0)
+const K: usize = 8; // temporal taps (mv_rls K)
+const M: usize = 32; // cross-channel cap (cfg-0)
+const RESET: usize = 8192; // periodic reset (cfg-0)
 
 fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let b = fs::read(path).expect("read");
@@ -35,24 +35,43 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let mut s = Vec::with_capacity(nch);
     for _ in 0..nch {
         let mut ch = Vec::with_capacity(t);
-        for _ in 0..t { ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64); off += 4; }
+        for _ in 0..t {
+            ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64);
+            off += 4;
+        }
         s.push(ch);
     }
     s
 }
 
 #[inline]
-fn rnd(x: f64) -> i64 { x.round() as i64 }
+fn rnd(x: f64) -> i64 {
+    x.round() as i64
+}
 
 /// Block-forgetting RLS: coords 0..K forget at λ_t, coords K..n at λ_s.
 /// `d[i] = 1/√λ_coord[i]`; inflate P←D·P·D then measurement-update with λ=1.
-struct BRls { n: usize, w: Vec<f64>, p: Vec<Vec<f64>>, d: Vec<f64> }
+struct BRls {
+    n: usize,
+    w: Vec<f64>,
+    p: Vec<Vec<f64>>,
+    d: Vec<f64>,
+}
 impl BRls {
     fn new(n: usize, lt: f64, ls: f64) -> Self {
         let mut p = vec![vec![0.0f64; n]; n];
-        for i in 0..n { p[i][i] = 1.0; }
-        let d: Vec<f64> = (0..n).map(|i| 1.0 / (if i < K { lt } else { ls }).sqrt()).collect();
-        Self { n, w: vec![0.0; n], p, d }
+        for i in 0..n {
+            p[i][i] = 1.0;
+        }
+        let d: Vec<f64> = (0..n)
+            .map(|i| 1.0 / (if i < K { lt } else { ls }).sqrt())
+            .collect();
+        Self {
+            n,
+            w: vec![0.0; n],
+            p,
+            d,
+        }
     }
     fn predict(&self, reg: &[f64]) -> f64 {
         (0..self.n).map(|k| self.w[k] * reg[k]).sum()
@@ -60,18 +79,30 @@ impl BRls {
     fn adapt(&mut self, reg: &[f64], x: f64, pred: f64) {
         let n = self.n;
         // inflate: P[i][j] *= d[i]*d[j]
-        for i in 0..n { for j in 0..n { self.p[i][j] *= self.d[i] * self.d[j]; } }
+        for i in 0..n {
+            for j in 0..n {
+                self.p[i][j] *= self.d[i] * self.d[j];
+            }
+        }
         // measurement update with λ=1
         let mut px = vec![0.0f64; n];
-        for i in 0..n { px[i] = (0..n).map(|j| self.p[i][j] * reg[j]).sum(); }
+        for i in 0..n {
+            px[i] = (0..n).map(|j| self.p[i][j] * reg[j]).sum();
+        }
         let mut denom = 1.0;
-        for j in 0..n { denom += reg[j] * px[j]; }
+        for j in 0..n {
+            denom += reg[j] * px[j];
+        }
         let inv = 1.0 / denom;
         let e = x - pred;
-        for i in 0..n { self.w[i] += px[i] * inv * e; }
+        for i in 0..n {
+            self.w[i] += px[i] * inv * e;
+        }
         for i in 0..n {
             let ki = px[i] * inv;
-            for j in 0..n { self.p[i][j] -= ki * px[j]; }
+            for j in 0..n {
+                self.p[i][j] -= ki * px[j];
+            }
         }
     }
 }
@@ -79,7 +110,9 @@ impl BRls {
 fn regressor(own: &[f64], prior: &[Vec<i64>], refs: &[usize], n: usize) -> Vec<f64> {
     let mut reg = vec![0.0f64; own.len() + refs.len()];
     reg[..own.len()].copy_from_slice(own);
-    for (i, &j) in refs.iter().enumerate() { reg[own.len() + i] = prior[j][n] as f64; }
+    for (i, &j) in refs.iter().enumerate() {
+        reg[own.len() + i] = prior[j][n] as f64;
+    }
     reg
 }
 
@@ -98,12 +131,16 @@ fn encode_bytes(signal: &[Vec<i64>], lt: f64, ls: f64) -> (usize, bool) {
         let mut own = vec![0.0f64; K];
         let mut res = Vec::with_capacity(t);
         for n in 0..t {
-            if n != 0 && n % RESET == 0 { rls = BRls::new(order, lt, ls); }
+            if n != 0 && n % RESET == 0 {
+                rls = BRls::new(order, lt, ls);
+            }
             let reg = regressor(&own, signal, &refs, n);
             let pred = rls.predict(&reg);
             res.push(signal[c][n] - rnd(pred));
             rls.adapt(&reg, signal[c][n] as f64, pred);
-            for q in (1..K).rev() { own[q] = own[q - 1]; }
+            for q in (1..K).rev() {
+                own[q] = own[q - 1];
+            }
             own[0] = signal[c][n] as f64;
         }
         // round-trip (decoder re-runs identical recursion on reconstructed history)
@@ -111,20 +148,29 @@ fn encode_bytes(signal: &[Vec<i64>], lt: f64, ls: f64) -> (usize, bool) {
         let mut downn = vec![0.0f64; K];
         let mut rec = vec![0i64; t];
         for n in 0..t {
-            if n != 0 && n % RESET == 0 { dec = BRls::new(order, lt, ls); }
+            if n != 0 && n % RESET == 0 {
+                dec = BRls::new(order, lt, ls);
+            }
             let reg = regressor(&downn, signal, &refs, n); // refs are prior channels (already exact)
             let pred = dec.predict(&reg);
             rec[n] = res[n] + rnd(pred);
             dec.adapt(&reg, rec[n] as f64, pred);
-            for q in (1..K).rev() { downn[q] = downn[q - 1]; }
+            for q in (1..K).rev() {
+                downn[q] = downn[q - 1];
+            }
             downn[0] = rec[n] as f64;
         }
-        if rec != signal[c] { ok = false; }
+        if rec != signal[c] {
+            ok = false;
+        }
         // entropy::encode per 32768 window (golomb u16 cap) — full-length overflows
         let mut s = 0;
         while s < res.len() {
             let e = (s + 32768).min(res.len());
-            tot += entropy::encode(&res[s..e]).map(|g| g.len()).unwrap_or(1 << 30) + 4;
+            tot += entropy::encode(&res[s..e])
+                .map(|g| g.len())
+                .unwrap_or(1 << 30)
+                + 4;
             s = e;
         }
     }
@@ -143,20 +189,32 @@ fn main() {
         let nm = (nch * t) as f64;
         // baseline = single-λ (the mv_rls cfg-0 equivalent)
         let (base, base_ok) = encode_bytes(&sig, 0.999, 0.999);
-        println!("## {} ({}ch x {})  single-λ baseline = {} ({:.4} bps) rt={}",
-                 name, nch, t, base, base as f64 * 8.0 / nm, if base_ok {"ok"} else {"FAIL"});
-        println!("  {:<8} | {:>10} {:>10} {:>10} {:>10}   (cols = λ_s)", "λ_t \\ λ_s", ls_set[0], ls_set[1], ls_set[2], ls_set[3]);
+        println!(
+            "## {} ({}ch x {})  single-λ baseline = {} ({:.4} bps) rt={}",
+            name,
+            nch,
+            t,
+            base,
+            base as f64 * 8.0 / nm,
+            if base_ok { "ok" } else { "FAIL" }
+        );
+        println!(
+            "  {:<8} | {:>10} {:>10} {:>10} {:>10}   (cols = λ_s)",
+            "λ_t \\ λ_s", ls_set[0], ls_set[1], ls_set[2], ls_set[3]
+        );
         for &lt in &lt_set {
             print!("  {:<8} |", lt);
             for &ls in &ls_set {
                 let (b, ok) = encode_bytes(&sig, lt, ls);
                 let d = 100.0 * (b as f64 - base as f64) / base as f64;
-                print!(" {:>+9.2}%{}", d, if ok {" "} else {"!"});
+                print!(" {:>+9.2}%{}", d, if ok { " " } else { "!" });
             }
             println!();
         }
         println!();
     }
-    println!("# negative = decoupled λ beats the single-λ baseline. Win on the referential LOSE-set");
+    println!(
+        "# negative = decoupled λ beats the single-λ baseline. Win on the referential LOSE-set"
+    );
     println!("# (eegmmidb/siena/tusz/tuar) WITHOUT regressing the WIN-set (ma/chb) ⇒ hypothesis confirmed.");
 }

@@ -24,9 +24,9 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example montage_dependency_probe -- <bin>...
 
-use std::fs;
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_optimum::{mv_rls, LmoCodec};
+use std::fs;
 
 const K: usize = 6; // earlier-channel candidates for the INT-LS exact test
 const WIN: usize = 32768;
@@ -41,7 +41,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -69,7 +72,10 @@ fn rice_bits(vals: &[i64]) -> u64 {
     if vals.is_empty() {
         return 0;
     }
-    let u: Vec<u64> = vals.iter().map(|&v| ((v << 1) ^ (v >> 63)) as u64).collect();
+    let u: Vec<u64> = vals
+        .iter()
+        .map(|&v| ((v << 1) ^ (v >> 63)) as u64)
+        .collect();
     let mut best = u64::MAX;
     for k in 0..=20u32 {
         let mut bits = 0u64;
@@ -85,12 +91,19 @@ fn rice_bits(vals: &[i64]) -> u64 {
 /// constant DC offset (the derivation baseline); a genuine signal leaves a varying residual.
 fn constant_residual(resid: &[i64]) -> Option<i64> {
     let first = *resid.first()?;
-    if resid.iter().all(|&v| v == first) { Some(first) } else { None }
+    if resid.iter().all(|&v| v == first) {
+        Some(first)
+    } else {
+        None
+    }
 }
 
 fn abscorr(a: &[i64], b: &[i64]) -> f64 {
     let n = a.len() as f64;
-    let (ma, mb) = (a.iter().sum::<i64>() as f64 / n, b.iter().sum::<i64>() as f64 / n);
+    let (ma, mb) = (
+        a.iter().sum::<i64>() as f64 / n,
+        b.iter().sum::<i64>() as f64 / n,
+    );
     let (mut sab, mut saa, mut sbb) = (0.0f64, 0.0f64, 0.0f64);
     for i in 0..a.len() {
         let (da, db) = (a[i] as f64 - ma, b[i] as f64 - mb);
@@ -98,7 +111,11 @@ fn abscorr(a: &[i64], b: &[i64]) -> f64 {
         saa += da * da;
         sbb += db * db;
     }
-    if saa <= 0.0 || sbb <= 0.0 { 0.0 } else { (sab / (saa * sbb).sqrt()).abs() }
+    if saa <= 0.0 || sbb <= 0.0 {
+        0.0
+    } else {
+        (sab / (saa * sbb).sqrt()).abs()
+    }
 }
 
 /// Try to find an EXACT integer-linear parent set for channel i among earlier channels.
@@ -119,7 +136,9 @@ fn exact_dependency(sig: &[Vec<i64>], i: usize) -> Option<String> {
     for a in 0..i {
         for b in (a + 1)..i {
             for (sa, sb) in [(1i64, 1i64), (1, -1), (-1, 1), (-1, -1)] {
-                let r: Vec<i64> = (0..t).map(|k| ci[k] - sa * sig[a][k] - sb * sig[b][k]).collect();
+                let r: Vec<i64> = (0..t)
+                    .map(|k| ci[k] - sa * sig[a][k] - sb * sig[b][k])
+                    .collect();
                 if constant_residual(&r).is_some() {
                     let sgn = |s: i64| if s < 0 { "-" } else { "+" };
                     return Some(format!("PAIR {}ch{a} {}ch{b}", sgn(sa), sgn(sb)));
@@ -149,13 +168,23 @@ fn exact_dependency(sig: &[Vec<i64>], i: usize) -> Option<String> {
             let icoef: Vec<i64> = coef.iter().map(|c| c.round() as i64).collect();
             if icoef.iter().any(|&c| c != 0) {
                 let r: Vec<i64> = (0..t)
-                    .map(|k| ci[k] - parents.iter().zip(&icoef).map(|(&pj, &c)| c * sig[pj][k]).sum::<i64>())
+                    .map(|k| {
+                        ci[k]
+                            - parents
+                                .iter()
+                                .zip(&icoef)
+                                .map(|(&pj, &c)| c * sig[pj][k])
+                                .sum::<i64>()
+                    })
                     .collect();
                 if constant_residual(&r).is_some() {
-                    let terms: String = parents.iter().zip(&icoef)
+                    let terms: String = parents
+                        .iter()
+                        .zip(&icoef)
                         .filter(|(_, &c)| c != 0)
                         .map(|(&pj, &c)| format!("{c:+}·ch{pj}"))
-                        .collect::<Vec<_>>().join(" ");
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     return Some(format!("INT-LS {terms}"));
                 }
             }
@@ -168,7 +197,8 @@ fn exact_dependency(sig: &[Vec<i64>], i: usize) -> Option<String> {
 fn solve(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
     let n = b.len();
     for col in 0..n {
-        let piv = (col..n).max_by(|&r1, &r2| a[r1][col].abs().partial_cmp(&a[r2][col].abs()).unwrap())?;
+        let piv =
+            (col..n).max_by(|&r1, &r2| a[r1][col].abs().partial_cmp(&a[r2][col].abs()).unwrap())?;
         if a[piv][col].abs() < 1e-6 {
             return None;
         }
@@ -194,10 +224,15 @@ fn solve(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
 }
 
 fn main() {
-    println!("# Component-1 exact algebraic montage dependency. #dep = channels EXACTLY eliminable; ");
+    println!(
+        "# Component-1 exact algebraic montage dependency. #dep = channels EXACTLY eliminable; "
+    );
     println!("# save% = their standalone (config-0 mv_rls) Rice-bits as a fraction of the whole recording");
     println!("# (the ceiling Component-1 can save here). >~1% ⇒ wire the keep-best pre-pass.\n");
-    println!("{:>12} {:>4} {:>6} {:>7}  detail", "recording", "C", "#dep", "save%");
+    println!(
+        "{:>12} {:>4} {:>6} {:>7}  detail",
+        "recording", "C", "#dep", "save%"
+    );
 
     for path in std::env::args().skip(1) {
         let sig = read_bin(&path);
@@ -218,8 +253,16 @@ fn main() {
             }
         }
         let name = path.rsplit('/').next().unwrap_or(&path);
-        let pct = if total > 0 { 100.0 * saved as f64 / total as f64 } else { 0.0 };
-        let detail = if deps.is_empty() { "(none)".to_string() } else { deps.join("  ") };
+        let pct = if total > 0 {
+            100.0 * saved as f64 / total as f64
+        } else {
+            0.0
+        };
+        let detail = if deps.is_empty() {
+            "(none)".to_string()
+        } else {
+            deps.join("  ")
+        };
         println!("{name:>12} {c:>4} {:>6} {pct:>6.2}%  {detail}", deps.len());
 
         // REAL baseline: does the SHIPPED container already capture these (multi-ref selection)?
@@ -227,17 +270,25 @@ fn main() {
         // ~16 bytes/derived channel covers [n_parents][parent idx×][coeff×][DC:i64] generously.
         if !dep_idx.is_empty() {
             let full = container_bytes(&sig);
-            let reduced_sig: Vec<Vec<i64>> =
-                (0..c).filter(|i| !dep_idx.contains(i)).map(|i| sig[i].clone()).collect();
+            let reduced_sig: Vec<Vec<i64>> = (0..c)
+                .filter(|i| !dep_idx.contains(i))
+                .map(|i| sig[i].clone())
+                .collect();
             let reduced = container_bytes(&reduced_sig) + dep_idx.len() * 16;
             let delta = full as f64 - reduced as f64;
-            let dpct = if full > 0 { 100.0 * delta / full as f64 } else { 0.0 };
+            let dpct = if full > 0 {
+                100.0 * delta / full as f64
+            } else {
+                0.0
+            };
             println!(
                 "{:>12}      container: full {full}B  elim {reduced}B  → REAL save {delta:+.0}B ({dpct:+.2}%)",
                 ""
             );
         }
     }
-    println!("\n# Exact elimination sends a dependent channel to ~0 bits (one DC constant), which no");
+    println!(
+        "\n# Exact elimination sends a dependent channel to ~0 bits (one DC constant), which no"
+    );
     println!("# statistical predictor fully reaches (it pays coeff+adaptation). Patent-clean integer algebra.");
 }

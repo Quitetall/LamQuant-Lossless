@@ -6,8 +6,8 @@
 //!   LAMQUANT_TRY_TRANSFORM_SKIP=1 cargo run ... --example mcu_transform_skip_verify -- <W> <bin>...
 //! The delta in total bytes is the shippable per-packet win (never-worse: flag=1 total ≤ flag=0 total).
 
-use std::fs;
 use lamquant_lml_mcu::lml;
+use std::fs;
 
 fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let b = fs::read(path).expect("read");

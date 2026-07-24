@@ -29,6 +29,8 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example dct_domain_predict_probe -- [B] <bin>...
 
+#![allow(clippy::needless_range_loop)] // explicit matrix indices mirror the DCT equations
+
 use std::collections::HashMap;
 use std::fs;
 
@@ -93,7 +95,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -124,16 +129,24 @@ fn main() {
     if cli_b.is_some() {
         args.remove(0);
     }
-    let blocks: Vec<usize> = cli_b.map(|b| vec![b]).unwrap_or_else(|| vec![256, 512, 1024]);
+    let blocks: Vec<usize> = cli_b
+        .map(|b| vec![b])
+        .unwrap_or_else(|| vec![256, 512, 1024]);
 
     println!("# Phase-1 de-risk: DCT-domain prediction (H.BWC architecture) vs shipped container.");
     println!("# CONT = shipped container bps (bar). B0 = best-config TIME-domain mv_rls bps.");
-    println!("# DCTpred = DCT → per-freq mv_rls (intra=own past blocks + inter=cross-channel present) →");
-    println!("#   real entropy coder. DCTctx = same residual under an IDEAL freq-band×magnitude context");
+    println!(
+        "# DCTpred = DCT → per-freq mv_rls (intra=own past blocks + inter=cross-channel present) →"
+    );
+    println!(
+        "#   real entropy coder. DCTctx = same residual under an IDEAL freq-band×magnitude context"
+    );
     println!("#   (the CABAC-class ceiling). Δ vs CONT; negative = beats production. DCT proxy is");
     println!("#   OPTIMISTIC (IntDCT costs ~1-3% more) — a positive Δ here means the real path won't win.\n");
-    println!("{:>12} {:>5} {:>8} {:>8} | {:>9} {:>9} | {:>9} {:>9}",
-             "recording", "B", "CONT bps", "B0 bps", "DCTpred", "Δ/CONT", "DCTctx", "Δ/CONT");
+    println!(
+        "{:>12} {:>5} {:>8} {:>8} | {:>9} {:>9} | {:>9} {:>9}",
+        "recording", "B", "CONT bps", "B0 bps", "DCTpred", "Δ/CONT", "DCTctx", "Δ/CONT"
+    );
 
     for path in &args {
         let sig = read_bin(path);
@@ -169,7 +182,9 @@ fn main() {
             //    inter cross-channel present) → residual, gather frequency-major per channel.
             let mut resid: Vec<Vec<i64>> = vec![Vec::with_capacity(b * m_blocks); c];
             for k in 0..b {
-                let coefk: Vec<Vec<i64>> = (0..c).map(|ci| (0..m_blocks).map(|m| coef[ci][m][k]).collect()).collect();
+                let coefk: Vec<Vec<i64>> = (0..c)
+                    .map(|ci| (0..m_blocks).map(|m| coef[ci][m][k]).collect())
+                    .collect();
                 let resk = mv_rls::residuals(&coefk, 0, 0);
                 for ci in 0..c {
                     resid[ci].extend_from_slice(&resk[ci]);
@@ -197,7 +212,11 @@ fn main() {
                 for i in 0..r.len() {
                     let k = (i / mb) as u32; // frequency bin (freq-major layout)
                     let band = 32 - (k + 1).leading_zeros(); // floor(log2(k+1))+1 ∈ [1,~11]
-                    let prevmag = if i % mb == 0 { 0 } else { magbucket(r[i - 1]) as u32 };
+                    let prevmag = if i % mb == 0 {
+                        0
+                    } else {
+                        magbucket(r[i - 1]) as u32
+                    };
                     let ctx = band * 16 + prevmag;
                     *pooled.entry(ctx).or_default().entry(r[i]).or_insert(0) += 1;
                     *pcnt.entry(ctx).or_insert(0) += 1;
@@ -214,7 +233,15 @@ fn main() {
                 ctx_bits_tot += n * h;
             }
             let dct_ctx = (ctx_bits_tot / 8.0).ceil() as usize
-                + (0..c).map(|ci| if tail > 0 { enc_windowed(&sig[ci][m_blocks * b..]) } else { 0 }).sum::<usize>();
+                + (0..c)
+                    .map(|ci| {
+                        if tail > 0 {
+                            enc_windowed(&sig[ci][m_blocks * b..])
+                        } else {
+                            0
+                        }
+                    })
+                    .sum::<usize>();
 
             let dct_enc_bps = dct_enc as f64 * 8.0 / nm;
             let dct_ctx_bps = dct_ctx as f64 * 8.0 / nm;
@@ -224,8 +251,12 @@ fn main() {
             println!("{name:>12} {b:>5} {cont_bps:>8.4} {b0_bps:>8.4} | {dct_enc_bps:>9.4} {d_enc:>+8.3}% | {dct_ctx_bps:>9.4} {d_ctx:>+8.3}%");
         }
     }
-    println!("\n# GATE: DCTctx Δ/CONT ≤ 0 on the referential lose-set (siena/eegmmidb/tuar) ⇒ the H.BWC");
+    println!(
+        "\n# GATE: DCTctx Δ/CONT ≤ 0 on the referential lose-set (siena/eegmmidb/tuar) ⇒ the H.BWC"
+    );
     println!("#   architecture closes the gap deterministically ⇒ build the real IntDCT + binary context");
     println!("#   coder (Phase 2). If Δ stays positive even with the optimistic DCT proxy ⇒ the");
-    println!("#   deterministic clone can't reach parity ⇒ route to the learned layer (ADR 0084 D4).");
+    println!(
+        "#   deterministic clone can't reach parity ⇒ route to the learned layer (ADR 0084 D4)."
+    );
 }

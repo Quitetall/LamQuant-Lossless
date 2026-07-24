@@ -102,10 +102,7 @@ pub fn compress_with_backend(
 
 /// Decompress through the selected backend. Byte-identical signal output across
 /// variants.
-pub fn decompress_with_backend(
-    data: &[u8],
-    backend: ComputeBackend,
-) -> LmlResult<Vec<Vec<i64>>> {
+pub fn decompress_with_backend(data: &[u8], backend: ComputeBackend) -> LmlResult<Vec<Vec<i64>>> {
     match backend {
         ComputeBackend::Firmware => lml::decompress(data),
         ComputeBackend::Desktop => crate::parallel::decompress_parallel(data),

@@ -107,12 +107,25 @@ fn ltp_residual(x: &[i64], p: usize) -> (Vec<i64>, f64) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ecg_full.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30000);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ecg_full.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30000);
     let sig = read_window(&path);
     let t = sig[0].len().min(w);
-    println!("# ECG LTP probe: {} ({}ch, window {}). Golomb bytes per channel.", path, sig.len(), t);
-    println!("# {:>3} {:>5} {:>6} | {:>9} {:>9} {:>9} {:>9} {:>9}", "ch", "P", "gain", "A(wv+lpc)", "D(lpc)", "E(blk256)", "F(blk512)", "G(ltp+blk)");
+    println!(
+        "# ECG LTP probe: {} ({}ch, window {}). Golomb bytes per channel.",
+        path,
+        sig.len(),
+        t
+    );
+    println!(
+        "# {:>3} {:>5} {:>6} | {:>9} {:>9} {:>9} {:>9} {:>9}",
+        "ch", "P", "gain", "A(wv+lpc)", "D(lpc)", "E(blk256)", "F(blk512)", "G(ltp+blk)"
+    );
 
     let nm = (sig.len() * t) as f64;
     let (mut ta, mut td, mut te, mut tf, mut tg) = (0usize, 0usize, 0usize, 0usize, 0usize);
@@ -125,8 +138,15 @@ fn main() {
         let e = block_lpc_golomb(x, 256);
         let f = block_lpc_golomb(x, 512);
         let gg = block_lpc_golomb(&resid, 256) + 6;
-        ta += a; td += d; te += e; tf += f; tg += gg;
-        println!("  {:>3} {:>5} {:>6.3} | {:>9} {:>9} {:>9} {:>9} {:>9}", ci, p, g, a, d, e, f, gg);
+        ta += a;
+        td += d;
+        te += e;
+        tf += f;
+        tg += gg;
+        println!(
+            "  {:>3} {:>5} {:>6.3} | {:>9} {:>9} {:>9} {:>9} {:>9}",
+            ci, p, g, a, d, e, f, gg
+        );
     }
     let pct = |v: usize| -100.0 * (ta as f64 - v as f64) / ta as f64;
     let bps = |v: usize| v as f64 * 8.0 / nm;

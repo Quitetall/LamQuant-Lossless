@@ -7,10 +7,12 @@
 //!
 //! cargo run -p lamquant-lml-optimum --features encode --release --example spectral_probe -- <bin>...
 
-use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
+#![allow(clippy::needless_range_loop)] // explicit matrix indices mirror the DCT equations
+
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_optimum::{entropy, LmoCodec};
+use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static DBG: AtomicBool = AtomicBool::new(true);
 
@@ -24,7 +26,10 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let mut s = Vec::with_capacity(nch);
     for _ in 0..nch {
         let mut ch = Vec::with_capacity(t);
-        for _ in 0..t { ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64); off += 4; }
+        for _ in 0..t {
+            ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64);
+            off += 4;
+        }
         s.push(ch);
     }
     s
@@ -52,7 +57,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|ch| ch[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -77,13 +85,17 @@ fn dct_bytes(sig: &[Vec<i64>], b: usize) -> usize {
                 for k in 0..b {
                     let mut acc = 0.0f64;
                     let row = &basis[k];
-                    for n in 0..b { acc += row[n] * win[base + n] as f64; }
+                    for n in 0..b {
+                        acc += row[n] * win[base + n] as f64;
+                    }
                     coeffs[k][blk] = acc.round() as i64;
                 }
             }
             // position-major within the window (≤ WIN values), DC band first.
             let mut stream = Vec::with_capacity(nb * b);
-            for k in 0..b { stream.extend_from_slice(&coeffs[k]); }
+            for k in 0..b {
+                stream.extend_from_slice(&coeffs[k]);
+            }
             // tail samples in this window (win.len() - nb*b) appended raw.
             stream.extend_from_slice(&win[nb * b..]);
             let enc = entropy::encode(&stream).expect("entropy encode");
@@ -91,8 +103,12 @@ fn dct_bytes(sig: &[Vec<i64>], b: usize) -> usize {
             assert_eq!(dec, stream, "entropy NOT lossless on DCT coeffs"); // correctness gate
             if DBG.swap(false, Ordering::Relaxed) {
                 let mx = stream.iter().map(|&x| x.unsigned_abs()).max().unwrap_or(0);
-                eprintln!("    [dbg b={b}] win_stream_len={} max|coef|={} enc_bytes={}",
-                          stream.len(), mx, enc.len());
+                eprintln!(
+                    "    [dbg b={b}] win_stream_len={} max|coef|={} enc_bytes={}",
+                    stream.len(),
+                    mx,
+                    enc.len()
+                );
             }
             tot += enc.len() + 8;
             start = end;
@@ -117,17 +133,35 @@ fn main() {
                 let end = (start + WIN).min(t);
                 let mut d = Vec::with_capacity(end - start);
                 let mut prev = 0i64;
-                for &x in &ch[start..end] { d.push(x - prev); prev = x; }
-                td += entropy::encode(&d).map(|g| g.len()).unwrap_or(usize::MAX).min(1 << 30) + 8;
+                for &x in &ch[start..end] {
+                    d.push(x - prev);
+                    prev = x;
+                }
+                td += entropy::encode(&d)
+                    .map(|g| g.len())
+                    .unwrap_or(usize::MAX)
+                    .min(1 << 30)
+                    + 8;
                 start = end;
             }
         }
         let name = path.rsplit('/').next().unwrap_or(path);
-        print!("  {:<20} {}ch x{:6} | container {:.2} | td-diff {:.2} bps",
-               name, c, t, cont as f64 * 8.0 / nm, td as f64 * 8.0 / nm);
+        print!(
+            "  {:<20} {}ch x{:6} | container {:.2} | td-diff {:.2} bps",
+            name,
+            c,
+            t,
+            cont as f64 * 8.0 / nm,
+            td as f64 * 8.0 / nm
+        );
         for &b in &[256usize, 512, 1024, 2048] {
             let d = dct_bytes(&sig, b);
-            print!("  | DCT-{} {:.2} ({:+.1}%)", b, d as f64 * 8.0 / nm, 100.0 * (d as f64 - cont as f64) / cont as f64);
+            print!(
+                "  | DCT-{} {:.2} ({:+.1}%)",
+                b,
+                d as f64 * 8.0 / nm,
+                100.0 * (d as f64 - cont as f64) / cont as f64
+            );
         }
         println!();
     }

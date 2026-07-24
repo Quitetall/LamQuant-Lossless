@@ -19,9 +19,9 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example perblock_rd_oracle_probe -- [B] <bin>...
 
-use std::fs;
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_optimum::{entropy, mv_rls, LmoCodec};
+use std::fs;
 
 const WIN: usize = 32768;
 const N_CFG: usize = 7;
@@ -75,7 +75,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -99,7 +102,10 @@ fn rice_bits(vals: &[i64]) -> u64 {
     if vals.is_empty() {
         return 0;
     }
-    let u: Vec<u64> = vals.iter().map(|&v| ((v << 1) ^ (v >> 63)) as u64).collect();
+    let u: Vec<u64> = vals
+        .iter()
+        .map(|&v| ((v << 1) ^ (v >> 63)) as u64)
+        .collect();
     let mut best = u64::MAX;
     for k in 0..=20u32 {
         let mut bits = 0u64;
@@ -124,8 +130,10 @@ fn main() {
     println!("# Peer-codec Phase-1 per-block RD ORACLE. Rice-codelength bps. CONT = shipped container (real).");
     println!("# SKIP = mv_rls time residual; DCT = block DCT + spectral-intra-LMS + cc (mv_rls over coeff");
     println!("# vector, freq=time). ORACLE = per-block keep-best(SKIP,DCT)+mode bit. Δ vs CONT + vs SKIP-only.\n");
-    println!("{:>12} {:>4} {:>8} {:>8} {:>8} {:>8} | {:>9} {:>9} | {:>7}",
-             "recording", "B", "CONT", "SKIP", "DCT", "ORACLE", "ORA/CONT", "ORA/SKIP", "DCTwin%");
+    println!(
+        "{:>12} {:>4} {:>8} {:>8} {:>8} {:>8} | {:>9} {:>9} | {:>7}",
+        "recording", "B", "CONT", "SKIP", "DCT", "ORACLE", "ORA/CONT", "ORA/SKIP", "DCTwin%"
+    );
 
     for path in &args {
         let sig = read_bin(path);

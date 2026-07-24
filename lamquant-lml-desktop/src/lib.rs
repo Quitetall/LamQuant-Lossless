@@ -47,11 +47,11 @@ mod tests {
     /// round-trips through the re-exported entry points.
     #[test]
     fn desktop_parallel_round_trips() {
-        let sig: alloc::vec::Vec<alloc::vec::Vec<i64>> =
-            (0..4).map(|c| (0..256).map(|i| ((i * 3 + c) % 50) as i64 - 25).collect()).collect();
-        let bytes =
-            super::compress_with_mode_parallel(&sig, 0, super::lpc::LpcMode::default())
-                .expect("parallel encode");
+        let sig: alloc::vec::Vec<alloc::vec::Vec<i64>> = (0..4)
+            .map(|c| (0..256).map(|i| ((i * 3 + c) % 50) as i64 - 25).collect())
+            .collect();
+        let bytes = super::compress_with_mode_parallel(&sig, 0, super::lpc::LpcMode::default())
+            .expect("parallel encode");
         let back = super::decompress_parallel(&bytes).expect("parallel decode");
         assert_eq!(back, sig);
     }

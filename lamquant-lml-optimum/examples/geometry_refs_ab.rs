@@ -21,6 +21,8 @@
 //! Reads `<window>.bin.coords` (one `x y z` electrode coord per row, meters, or
 //! `nan nan nan` for unresolved) — produced by `tools/scripts/resolve_coords.py`.
 
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
+
 use std::fs;
 
 use lamquant_lml_mcu::lml;
@@ -34,7 +36,10 @@ fn read_coords(path: &str) -> Vec<Option<[f64; 3]>> {
         .unwrap_or_default()
         .lines()
         .map(|l| {
-            let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let v: Vec<f64> = l
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
             if v.len() == 3 && v.iter().all(|x| x.is_finite()) {
                 Some([v[0], v[1], v[2]])
             } else {
@@ -104,7 +109,11 @@ fn joint_ls(target: &[i64], refs: &[usize], chans: &[Vec<i64>]) -> Vec<f64> {
         for c in (r + 1)..k {
             s -= a[r][c] * g[c];
         }
-        g[r] = if a[r][r].abs() < 1e-12 { 0.0 } else { s / a[r][r] };
+        g[r] = if a[r][r].abs() < 1e-12 {
+            0.0
+        } else {
+            s / a[r][r]
+        };
     }
     g
 }
@@ -112,7 +121,11 @@ fn joint_ls(target: &[i64], refs: &[usize], chans: &[Vec<i64>]) -> Vec<f64> {
 fn quantize_gains(g: &[f64]) -> Option<Vec<i32>> {
     let q: Vec<i32> = g
         .iter()
-        .map(|&v| (v * 65536.0).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32)
+        .map(|&v| {
+            (v * 65536.0)
+                .round()
+                .clamp(i32::MIN as f64, i32::MAX as f64) as i32
+        })
         .collect();
     if q.iter().all(|&x| x == 0) {
         None
@@ -130,17 +143,26 @@ fn predict_multi(refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>], k: usize) 
 }
 
 fn residual_multi(target: &[i64], refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>]) -> Vec<i64> {
-    (0..target.len()).map(|k| target[k] - predict_multi(refs, gains_q, chans, k)).collect()
+    (0..target.len())
+        .map(|k| target[k] - predict_multi(refs, gains_q, chans, k))
+        .collect()
 }
 
 fn channel_cost(ch: &[i64]) -> usize {
-    lml::compress(core::slice::from_ref(&ch.to_vec()), 0).map(|v| v.len()).unwrap_or(usize::MAX)
+    lml::compress(core::slice::from_ref(&ch.to_vec()), 0)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX)
 }
 
 const PER_REF_OVERHEAD: usize = 6;
 
 #[allow(clippy::needless_range_loop)]
-fn best_energy_ref(residual: &[i64], chans: &[Vec<i64>], n_prior: usize, chosen: &[usize]) -> Option<usize> {
+fn best_energy_ref(
+    residual: &[i64],
+    chans: &[Vec<i64>],
+    n_prior: usize,
+    chosen: &[usize],
+) -> Option<usize> {
     let mut best = (usize::MAX, 0.0f64);
     for j in 0..n_prior {
         if chosen.contains(&j) {
@@ -165,7 +187,11 @@ fn best_energy_ref(residual: &[i64], chans: &[Vec<i64>], n_prior: usize, chosen:
 
 /// Fit Q16 gains for `refs`, return (cost incl. header overhead, residual). `raw`
 /// fallback (cost = channel_cost(target), no refs) if refs empty or gains vanish.
-fn cost_for_refs(target: &[i64], refs: &[usize], signal: &[Vec<i64>]) -> (usize, Vec<usize>, Vec<i32>) {
+fn cost_for_refs(
+    target: &[i64],
+    refs: &[usize],
+    signal: &[Vec<i64>],
+) -> (usize, Vec<usize>, Vec<i32>) {
     if refs.is_empty() {
         return (channel_cost(target), Vec::new(), Vec::new());
     }
@@ -190,12 +216,19 @@ fn energy_greedy(i: usize, signal: &[Vec<i64>]) -> (usize, Vec<usize>) {
         if !refs.is_empty() && cost < best_cost {
             best_cost = cost;
             best_refs = refs;
-            best_resid = residual_multi(target, &[j], &quantize_gains(&joint_ls(target, &[j], signal)).unwrap(), signal);
+            best_resid = residual_multi(
+                target,
+                &[j],
+                &quantize_gains(&joint_ls(target, &[j], signal)).unwrap(),
+                signal,
+            );
         }
     }
     // (2) energy-greedy add
     while best_refs.len() < MAX_REFS.min(i) && !best_refs.is_empty() {
-        let Some(j) = best_energy_ref(&best_resid, signal, i, &best_refs) else { break };
+        let Some(j) = best_energy_ref(&best_resid, signal, i, &best_refs) else {
+            break;
+        };
         let mut refs = best_refs.clone();
         refs.push(j);
         let (cost, got, gq) = cost_for_refs(target, &refs, signal);
@@ -235,10 +268,12 @@ fn main() {
             // GEOMETRY: K nearest PRIOR resolved electrodes by 3D distance
             let geo_cost = if let Some(ci) = coords[i] {
                 let mut cand: Vec<(f64, usize)> = (0..i)
-                    .filter_map(|j| coords[j].map(|cj| {
-                        let d = (0..3).map(|k| (ci[k] - cj[k]).powi(2)).sum::<f64>();
-                        (d, j)
-                    }))
+                    .filter_map(|j| {
+                        coords[j].map(|cj| {
+                            let d = (0..3).map(|k| (ci[k] - cj[k]).powi(2)).sum::<f64>();
+                            (d, j)
+                        })
+                    })
                     .collect();
                 cand.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
                 let refs: Vec<usize> = cand.iter().take(GEO_K).map(|&(_, j)| j).collect();
@@ -257,7 +292,16 @@ fn main() {
         }
         let gain = 100.0 * (eg as f64 - uni as f64) / eg as f64;
         let short: String = std::path::Path::new(path)
-            .file_name().unwrap().to_string_lossy().chars().rev().take(34).collect::<String>().chars().rev().collect();
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .rev()
+            .take(34)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         println!(
             "  {:>34} | {:>4} {:>4} | {:>10} {:>10} {:>10} | {:>8} {:>6.2}%",
             short, n_ch, n_res, eg, geo, uni, geo_wins, gain
@@ -272,6 +316,10 @@ fn main() {
         "TOTAL", "", "", tot_eg, tot_geo, tot_union, "", gain
     );
     println!("\n# GATE: UNION gain% > 0 means geometry adds a never-worse byte win over the");
-    println!("# production energy-greedy selection. ~0% ⇒ geometry adds nothing → STOP A1, pivot to A2.");
-    println!("# (geometry total may exceed energy-greedy; what matters is UNION, the keep-smaller.)");
+    println!(
+        "# production energy-greedy selection. ~0% ⇒ geometry adds nothing → STOP A1, pivot to A2."
+    );
+    println!(
+        "# (geometry total may exceed energy-greedy; what matters is UNION, the keep-smaller.)"
+    );
 }

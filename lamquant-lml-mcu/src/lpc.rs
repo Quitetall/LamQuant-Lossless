@@ -865,8 +865,9 @@ mod tests {
             return; // no AVX2 on this host → only the scalar path runs anyway
         }
         for &t in &[8usize, 33, 128, 512] {
-            let signal: Vec<i64> =
-                (0..t).map(|i| (((i * 131 + 7) % 4001) as i64) - 2000).collect();
+            let signal: Vec<i64> = (0..t)
+                .map(|i| (((i * 131 + 7) % 4001) as i64) - 2000)
+                .collect();
             let seg_len = (t / 2).clamp(1, 256);
             for &order in &[1usize, 2, 3, 8, 16] {
                 let scalar = autocorr_scalar(&signal, order, seg_len);
@@ -874,7 +875,10 @@ mod tests {
                 let simd = unsafe { autocorr_avx2(&signal, order, seg_len) };
                 let scalar_bits: Vec<u64> = scalar.iter().map(|x| x.to_bits()).collect();
                 let simd_bits: Vec<u64> = simd.iter().map(|x| x.to_bits()).collect();
-                assert_eq!(scalar_bits, simd_bits, "autocorr mismatch t={t} order={order}");
+                assert_eq!(
+                    scalar_bits, simd_bits,
+                    "autocorr mismatch t={t} order={order}"
+                );
             }
         }
     }
@@ -1011,7 +1015,12 @@ mod tests {
         let q = 2 * delta + 1;
         let idx = analyze_closed_loop_bounded(&signal, &[], 0, q);
         let recon = synthesize_closed_loop_bounded(&idx, &[], 0, q);
-        let mae = signal.iter().zip(&recon).map(|(a, b)| (a - b).abs()).max().unwrap();
+        let mae = signal
+            .iter()
+            .zip(&recon)
+            .map(|(a, b)| (a - b).abs())
+            .max()
+            .unwrap();
         assert!(mae <= delta, "order-0 mae={} > delta={}", mae, delta);
     }
 

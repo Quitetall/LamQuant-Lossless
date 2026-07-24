@@ -84,7 +84,13 @@ fn resid_entropy_cv(ch: &[i64]) -> f64 {
                 *hist.entry(v).or_insert(0) += 1;
             }
             let n = w.len() as f64;
-            -hist.values().map(|&c| { let p = c as f64 / n; p * p.log2() }).sum::<f64>()
+            -hist
+                .values()
+                .map(|&c| {
+                    let p = c as f64 / n;
+                    p * p.log2()
+                })
+                .sum::<f64>()
         })
         .collect();
     if h.len() < 2 {
@@ -116,6 +122,8 @@ fn main() {
         let ent = sig.iter().map(|c| resid_entropy_cv(c)).sum::<f64>() / nc;
         println!("  {label:>26} | {amp:>7.4} {st:>10.5} {ent:>9.4}");
     }
-    println!("\n# Pair against the known H.BWC gaps: do the WIN recordings (ma Sub11/13) show higher");
+    println!(
+        "\n# Pair against the known H.BWC gaps: do the WIN recordings (ma Sub11/13) show higher"
+    );
     println!("# ampCV / scaleTrans / entCV than the LOSE recordings (eegmmidb, ma Sub10/14-17)?");
 }

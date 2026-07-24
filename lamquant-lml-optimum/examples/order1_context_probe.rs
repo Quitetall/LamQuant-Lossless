@@ -35,7 +35,11 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
 }
 
 fn bit_len(m: u64) -> i32 {
-    if m == 0 { 0 } else { 64 - m.leading_zeros() as i32 }
+    if m == 0 {
+        0
+    } else {
+        64 - m.leading_zeros() as i32
+    }
 }
 
 /// Online-adaptive coder, context = a function of recent state. `ctx_fn` returns the
@@ -60,8 +64,8 @@ fn adaptive_ctx_bytes<F: FnMut(&CtxState, i64) -> u64>(res: &[i64], mut ctx_fn: 
 
 #[derive(Default)]
 struct CtxState {
-    ema: f64,   // EMA of |x| (scale)
-    prev: i64,  // previous residual
+    ema: f64,  // EMA of |x| (scale)
+    prev: i64, // previous residual
     inited: bool,
 }
 impl CtxState {
@@ -76,7 +80,11 @@ impl CtxState {
     }
     fn update(&mut self, x: i64) {
         let a = x.unsigned_abs() as f64;
-        self.ema = if self.inited { 0.95 * self.ema + 0.05 * a } else { a };
+        self.ema = if self.inited {
+            0.95 * self.ema + 0.05 * a
+        } else {
+            a
+        };
         self.prev = x;
         self.inited = true;
     }
@@ -84,7 +92,10 @@ impl CtxState {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    println!("  {:>26} | {:>11} {:>11} {:>11} | {:>9} {:>9}", "recording", "scaleOnly", "scale×prev", "prevOnly", "s×p vs sc", "best");
+    println!(
+        "  {:>26} | {:>11} {:>11} {:>11} | {:>9} {:>9}",
+        "recording", "scaleOnly", "scale×prev", "prevOnly", "s×p vs sc", "best"
+    );
     let (mut tsc, mut tsp, mut tpr) = (0f64, 0f64, 0f64);
     let mut i = 0;
     while i + 1 < args.len() {
@@ -104,13 +115,34 @@ fn main() {
         }
         let vs = 100.0 * (sp - sc) / sc;
         let best = sp.min(sc).min(pr);
-        let bestlbl = if best == sp { "s×p" } else if best == sc { "scale" } else { "prev" };
-        println!("  {:>26} | {:>11.0} {:>11.0} {:>11.0} | {:>8.2}% {:>9}", label, sc, sp, pr, vs, bestlbl);
-        tsc += sc; tsp += sp; tpr += pr;
+        let bestlbl = if best == sp {
+            "s×p"
+        } else if best == sc {
+            "scale"
+        } else {
+            "prev"
+        };
+        println!(
+            "  {:>26} | {:>11.0} {:>11.0} {:>11.0} | {:>8.2}% {:>9}",
+            label, sc, sp, pr, vs, bestlbl
+        );
+        tsc += sc;
+        tsp += sp;
+        tpr += pr;
     }
-    println!("  {:>26} | {:>11.0} {:>11.0} {:>11.0} | {:>8.2}% {:>9}", "TOTAL", tsc, tsp, tpr, 100.0 * (tsp - tsc) / tsc, "");
+    println!(
+        "  {:>26} | {:>11.0} {:>11.0} {:>11.0} | {:>8.2}% {:>9}",
+        "TOTAL",
+        tsc,
+        tsp,
+        tpr,
+        100.0 * (tsp - tsc) / tsc,
+        ""
+    );
     println!("\n# scale×prev (order-1 online context) vs scaleOnly (the scale_cond baseline). Negative =");
-    println!("# the realizable order-1 context coder beats scale_cond. If ~0/positive, the order-1");
+    println!(
+        "# the realizable order-1 context coder beats scale_cond. If ~0/positive, the order-1"
+    );
     println!("# headroom is eaten by adaptation cost → not worth the production build. keep-best of all 3");
     println!("# is the shippable never-worse design.");
 }

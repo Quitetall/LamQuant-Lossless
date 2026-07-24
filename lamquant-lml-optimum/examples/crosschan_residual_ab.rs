@@ -27,9 +27,11 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example crosschan_residual_ab -- <bin>...
 
-use std::fs;
+#![allow(clippy::needless_range_loop)] // explicit matrix indices mirror Cholesky equations
+
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_optimum::{entropy, mv_rls, LmoCodec};
+use std::fs;
 
 const WIN: usize = 32768;
 const Q: f64 = 65536.0; // Q16 fixed-point for shipped weights
@@ -66,7 +68,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -101,7 +106,10 @@ fn best_config_residual(sig: &[Vec<i64>]) -> (Vec<Vec<i64>>, usize) {
 /// Pearson |corr| of two equal-length slices (0 if either is constant).
 fn abscorr(a: &[i64], b: &[i64]) -> f64 {
     let n = a.len() as f64;
-    let (ma, mb) = (a.iter().sum::<i64>() as f64 / n, b.iter().sum::<i64>() as f64 / n);
+    let (ma, mb) = (
+        a.iter().sum::<i64>() as f64 / n,
+        b.iter().sum::<i64>() as f64 / n,
+    );
     let (mut sab, mut saa, mut sbb) = (0.0f64, 0.0f64, 0.0f64);
     for i in 0..a.len() {
         let (da, db) = (a[i] as f64 - ma, b[i] as f64 - mb);
@@ -109,21 +117,31 @@ fn abscorr(a: &[i64], b: &[i64]) -> f64 {
         saa += da * da;
         sbb += db * db;
     }
-    if saa <= 0.0 || sbb <= 0.0 { 0.0 } else { (sab / (saa * sbb).sqrt()).abs() }
+    if saa <= 0.0 || sbb <= 0.0 {
+        0.0
+    } else {
+        (sab / (saa * sbb).sqrt()).abs()
+    }
 }
 
 /// Solve (G + ridge·I) w = b for w, G symmetric PD (Cholesky). Returns None if not PD.
 fn solve_spd(g: &[Vec<f64>], b: &[f64], ridge: f64) -> Option<Vec<f64>> {
     let n = b.len();
     let mut a = g.to_vec();
-    for i in 0..n { a[i][i] += ridge; }
+    for i in 0..n {
+        a[i][i] += ridge;
+    }
     let mut l = vec![vec![0.0f64; n]; n];
     for i in 0..n {
         for j in 0..=i {
             let mut s = a[i][j];
-            for k in 0..j { s -= l[i][k] * l[j][k]; }
+            for k in 0..j {
+                s -= l[i][k] * l[j][k];
+            }
             if i == j {
-                if s <= 0.0 { return None; }
+                if s <= 0.0 {
+                    return None;
+                }
                 l[i][j] = s.sqrt();
             } else {
                 l[i][j] = s / l[j][j];
@@ -134,13 +152,17 @@ fn solve_spd(g: &[Vec<f64>], b: &[f64], ridge: f64) -> Option<Vec<f64>> {
     let mut y = vec![0.0f64; n];
     for i in 0..n {
         let mut s = b[i];
-        for k in 0..i { s -= l[i][k] * y[k]; }
+        for k in 0..i {
+            s -= l[i][k] * y[k];
+        }
         y[i] = s / l[i][i];
     }
     let mut w = vec![0.0f64; n];
     for i in (0..n).rev() {
         let mut s = y[i];
-        for k in (i + 1)..n { s -= l[k][i] * w[k]; }
+        for k in (i + 1)..n {
+            s -= l[k][i] * w[k];
+        }
         w[i] = s / l[i][i];
     }
     Some(w)
@@ -170,8 +192,19 @@ fn main() {
     println!("# side-info in NET. Two baselines: B0 = best-config per-channel residual (isolates the cross-");
     println!("# stage gain); CONT = shipped LmoCodec Lossless container (the TRUE 'do we beat production' bar).");
     println!("# M1=ALS-MCC scalar, M2=unit-diff, M3=spatial-LS(all earlier), ORACLE=min. Negative Δ = win.\n");
-    println!("{:>12} {:>4} {:>8} {:>8} | {:>8} {:>8} {:>8} | {:>9} {:>9} | {:>16}",
-             "recording", "ch", "CONT bps", "B0 bps", "M1/B0", "M2/B0", "M3/B0", "ORA/B0", "ORA/CONT", "win B0/M1/M2/M3");
+    println!(
+        "{:>12} {:>4} {:>8} {:>8} | {:>8} {:>8} {:>8} | {:>9} {:>9} | {:>16}",
+        "recording",
+        "ch",
+        "CONT bps",
+        "B0 bps",
+        "M1/B0",
+        "M2/B0",
+        "M3/B0",
+        "ORA/B0",
+        "ORA/CONT",
+        "win B0/M1/M2/M3"
+    );
 
     for path in &args {
         let sig = read_bin(path);
@@ -198,7 +231,9 @@ fn main() {
                 // candidate references: all earlier channels j<ci
                 let earlier: Vec<usize> = (0..ci).collect();
                 // best-correlated single reference
-                let bestref = earlier.iter().copied()
+                let bestref = earlier
+                    .iter()
+                    .copied()
                     .map(|j| (j, abscorr(rc, win[j])))
                     .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(j, _)| j);
@@ -208,14 +243,20 @@ fn main() {
                 if let Some(rj) = bestref {
                     // scalar LS gain g = <rc,rj>/<rj,rj>
                     let (mut num, mut den) = (0.0f64, 0.0f64);
-                    for t2 in 0..wl { num += rc[t2] as f64 * win[rj][t2] as f64; den += (win[rj][t2] as f64).powi(2); }
+                    for t2 in 0..wl {
+                        num += rc[t2] as f64 * win[rj][t2] as f64;
+                        den += (win[rj][t2] as f64).powi(2);
+                    }
                     if den > 0.0 {
                         let qg = (num / den * Q).round() as i64;
                         let out = apply_combo(rc, &[win[rj]], &[qg]);
                         c1 = enc_len(&out) + 5; // 1 ref idx + 4 weight bytes
                     }
                 }
-                if c1 < best { best = c1; best_sel = 1; }
+                if c1 < best {
+                    best = c1;
+                    best_sel = 1;
+                }
 
                 // ---- M2: rate-gated unit difference to best-correlated ref ----
                 let mut c2 = 1usize << 30;
@@ -223,7 +264,10 @@ fn main() {
                     let out = apply_combo(rc, &[win[rj]], &[Q as i64]); // g≡1
                     c2 = enc_len(&out) + 1; // ref idx only
                 }
-                if c2 < best { best = c2; best_sel = 2; }
+                if c2 < best {
+                    best = c2;
+                    best_sel = 2;
+                }
 
                 // ---- M3: full spatial LS over ALL earlier residuals (present co-temporal) ----
                 let mut c3 = 1usize << 30;
@@ -235,12 +279,16 @@ fn main() {
                     for a in 0..k {
                         let ra = win[earlier[a]];
                         let mut br = 0.0f64;
-                        for t2 in 0..wl { br += rc[t2] as f64 * ra[t2] as f64; }
+                        for t2 in 0..wl {
+                            br += rc[t2] as f64 * ra[t2] as f64;
+                        }
                         rhs[a] = br;
                         for b in a..k {
                             let rb = win[earlier[b]];
                             let mut s = 0.0f64;
-                            for t2 in 0..wl { s += ra[t2] as f64 * rb[t2] as f64; }
+                            for t2 in 0..wl {
+                                s += ra[t2] as f64 * rb[t2] as f64;
+                            }
                             g[a][b] = s;
                             g[b][a] = s;
                         }
@@ -253,7 +301,10 @@ fn main() {
                         c3 = enc_len(&out) + 4 * k; // 4 bytes/weight
                     }
                 }
-                if c3 < best { best = c3; best_sel = 3; }
+                if c3 < best {
+                    best = c3;
+                    best_sel = 3;
+                }
 
                 m1 += c1.min(base); // report M1 as keep-best vs base (never-worse)
                 m2 += c2.min(base);
@@ -265,7 +316,10 @@ fn main() {
         }
 
         // b0 accumulated in the loop must equal best_config_residual's reported bytes (same field, same coder).
-        assert_eq!(b0, b0chk, "B0 accounting mismatch — residual field / windowing inconsistent");
+        assert_eq!(
+            b0, b0chk,
+            "B0 accounting mismatch — residual field / windowing inconsistent"
+        );
         let cont_bps = cont as f64 * 8.0 / nm;
         let b0_bps = b0 as f64 * 8.0 / nm;
         let pct_b0 = |x: usize| 100.0 * (x as f64 - b0 as f64) / b0 as f64;

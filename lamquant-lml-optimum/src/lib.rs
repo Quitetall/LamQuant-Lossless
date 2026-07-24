@@ -29,14 +29,14 @@ pub mod crosschan;
 pub mod entropy;
 pub mod lmo;
 pub mod lmo_lossless;
+pub mod lmo_pcrd97;
 #[cfg(feature = "encode")]
 pub mod montage;
 pub mod mv_rls;
 pub mod rls;
-pub mod segmentation;
 pub mod scale_cond;
+pub mod segmentation;
 pub mod tcq;
-pub mod lmo_pcrd97;
 pub mod wavelet97;
 
 // Re-export the shared codec seam (defined in -core) so consumers can write
@@ -67,8 +67,9 @@ mod tests {
         // the encoder is present.
         #[cfg(feature = "encode")]
         {
-            let sig: Vec<Vec<i64>> =
-                (0..3).map(|c| (0..200).map(|i| ((i * 5 + c) % 64) as i64 - 32).collect()).collect();
+            let sig: Vec<Vec<i64>> = (0..3)
+                .map(|c| (0..200).map(|i| ((i * 5 + c) % 64) as i64 - 32).collect())
+                .collect();
             let stream = encode(&sig, Mode::Lossless).expect("lmo encode");
             assert_eq!(peek_format(&stream), Some(Format::Lmo));
             let back = decode_any(&stream).expect("lmo dispatch decode");

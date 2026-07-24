@@ -38,12 +38,7 @@ pub const MAX_RANS_SYMBOLS: usize = 1 << 20;
 /// - Fix-#15: assert `freq[sym] > 0` so the `state / f` below cannot
 ///   divide by zero. A symbol with `freq=0` is corrupt by construction
 ///   (it cannot have been emitted by the encoder side).
-pub fn encode(
-    symbols: &[i64],
-    freq: &[i32],
-    start: &[i32],
-    m: u64,
-) -> Result<Vec<u8>, RansError> {
+pub fn encode(symbols: &[i64], freq: &[i32], start: &[i32], m: u64) -> Result<Vec<u8>, RansError> {
     if m == 0 {
         return Err(RansError::ZeroDivisor);
     }
@@ -253,7 +248,7 @@ mod tests {
         let m_u = m as u64;
         let cum2sym = build_cum2sym(&freq, &start, m as usize);
 
-        let symbols: Vec<i64> = (0..200).map(|i| (i % n_sym as i64)).collect();
+        let symbols: Vec<i64> = (0..200).map(|i| i % n_sym as i64).collect();
         let encoded = encode(&symbols, &freq, &start, m_u).expect("encodes ok");
         let decoded =
             decode(&encoded, &freq, &start, &cum2sym, m_u, symbols.len()).expect("decodes ok");
@@ -276,7 +271,10 @@ mod tests {
         for short_len in 0..4 {
             let data = vec![0u8; short_len];
             let out = decode(&data, &freq, &start, &cum2sym, m_u, 0);
-            assert!(matches!(out, Ok(v) if v.is_empty()), "n=0 short={short_len}");
+            assert!(
+                matches!(out, Ok(v) if v.is_empty()),
+                "n=0 short={short_len}"
+            );
         }
         // n_symbols>0 on truncated stream is an error.
         for short_len in 0..4 {
@@ -353,8 +351,10 @@ mod tests {
         let cum2sym = build_cum2sym(&freq, &start, m as usize);
         let data = vec![0u8; 10];
         match decode(&data, &freq, &start, &cum2sym, m_u, MAX_RANS_SYMBOLS + 1) {
-            Err(RansError::HeaderOverflow { claimed, max_allowed })
-                if claimed == MAX_RANS_SYMBOLS + 1 && max_allowed == MAX_RANS_SYMBOLS => {}
+            Err(RansError::HeaderOverflow {
+                claimed,
+                max_allowed,
+            }) if claimed == MAX_RANS_SYMBOLS + 1 && max_allowed == MAX_RANS_SYMBOLS => {}
             other => panic!("expected HeaderOverflow, got {:?}", other),
         }
     }

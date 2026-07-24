@@ -38,8 +38,11 @@ pub fn encode(res: &[i64]) -> LmlResult<Vec<u8>> {
     }
 
     // Best Golomb candidate so far (mode byte + payload length).
-    let (golomb_mode, golomb_len) =
-        if block.len() < single.len() { (MODE_BLOCK, block.len()) } else { (MODE_SINGLE, single.len()) };
+    let (golomb_mode, golomb_len) = if block.len() < single.len() {
+        (MODE_BLOCK, block.len())
+    } else {
+        (MODE_SINGLE, single.len())
+    };
 
     // Third candidate: the online scale-conditioned coder. Keep it only if its
     // body is STRICTLY smaller than the best Golomb body (never-worse).
@@ -67,13 +70,21 @@ pub fn encode(res: &[i64]) -> LmlResult<Vec<u8>> {
 /// Decode a slice produced by [`encode`] (the caller passes the exact byte range).
 pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
     if data.is_empty() {
-        return Err(LmlError::Truncated { expected: 1, actual: 0, context: "entropy mode" });
+        return Err(LmlError::Truncated {
+            expected: 1,
+            actual: 0,
+            context: "entropy mode",
+        });
     }
     match data[0] {
         MODE_SINGLE => Ok(golomb::decode_dense(data, 1)?.0),
         MODE_BLOCK => {
             if data.len() < 5 {
-                return Err(LmlError::Truncated { expected: 5, actual: data.len(), context: "entropy block n" });
+                return Err(LmlError::Truncated {
+                    expected: 5,
+                    actual: data.len(),
+                    context: "entropy block n",
+                });
             }
             let n = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
             let mut out = Vec::with_capacity(n);
@@ -90,7 +101,9 @@ pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
             Ok(out)
         }
         MODE_SCALE_COND => crate::scale_cond::decode(&data[1..]),
-        other => Err(LmlError::InvalidHeader(alloc::format!("entropy unknown mode 0x{other:02X}"))),
+        other => Err(LmlError::InvalidHeader(alloc::format!(
+            "entropy unknown mode 0x{other:02X}"
+        ))),
     }
 }
 

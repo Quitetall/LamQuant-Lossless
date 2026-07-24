@@ -40,18 +40,34 @@ fn prd(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
             den += (*a as f64 - m) * (*a as f64 - m);
         }
     }
-    if den == 0.0 { 0.0 } else { 100.0 * (num / den).sqrt() }
+    if den == 0.0 {
+        0.0
+    } else {
+        100.0 * (num / den).sqrt()
+    }
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/eeg64.bin".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/eeg64.bin".to_string());
     let sig = read_window(&path);
     let nm = (sig.len() * sig[0].len()) as f64;
-    println!("# {} ({}ch x {})  LamQuant lossy (9/7+arith+deadzone+TCQ, auto-pick)", path, sig.len(), sig[0].len());
+    println!(
+        "# {} ({}ch x {})  LamQuant lossy (9/7+arith+deadzone+TCQ, auto-pick)",
+        path,
+        sig.len(),
+        sig[0].len()
+    );
     println!("# {:>8} {:>10} {:>9}", "target", "bps", "PRD%");
     for &tb in &[4.0f64, 3.5, 3.0, 2.5, 2.0, 1.5, 1.0, 0.75] {
         let body = LmoCodec.encode(&sig, Mode::TargetBps(tb)).expect("encode");
         let recon = decode_any(&body).expect("decode");
-        println!("  {:>8.2} {:>10.4} {:>9.4}", tb, body.len() as f64 * 8.0 / nm, prd(&sig, &recon));
+        println!(
+            "  {:>8.2} {:>10.4} {:>9.4}",
+            tb,
+            body.len() as f64 * 8.0 / nm,
+            prd(&sig, &recon)
+        );
     }
 }

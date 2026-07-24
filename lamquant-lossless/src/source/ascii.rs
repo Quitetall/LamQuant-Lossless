@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn parse_float_plain() {
-        assert!((parse_float(b"3.14").unwrap() - 3.14).abs() < 1e-9);
+        assert!((parse_float(b"3.14").unwrap() - 314.0 / 100.0).abs() < 1e-9);
     }
 
     #[test]

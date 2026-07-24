@@ -79,9 +79,7 @@ pub fn decode_dense(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> 
                 n
             )));
         }
-        for _ in 0..r {
-            out.push(0);
-        }
+        out.resize(out.len() + r as usize, 0);
         out.push(v);
     }
     if out.len() > n {

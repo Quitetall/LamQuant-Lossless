@@ -51,7 +51,13 @@ struct Nlms {
 
 impl Nlms {
     fn new(order: usize, mu_log2: i32, min_e_log2: u32) -> Self {
-        Self { w: vec![0i64; order], hist: vec![0i64; order], order, mu_log2, min_e_log2 }
+        Self {
+            w: vec![0i64; order],
+            hist: vec![0i64; order],
+            order,
+            mu_log2,
+            min_e_log2,
+        }
     }
     fn predict(&self) -> i64 {
         let mut acc = 0i64;
@@ -105,11 +111,7 @@ fn nlms_residual(x: &[i64], order: usize, mu: i32, mn: u32) -> (Vec<i64>, bool) 
 
 /// Two-stage cascade: short fast filter then long slow filter (Monkey's-Audio
 /// style; the long filter adaptively captures beat-period / long-lag structure).
-fn cascade_residual(
-    x: &[i64],
-    s1: (usize, i32, u32),
-    s2: (usize, i32, u32),
-) -> (Vec<i64>, bool) {
+fn cascade_residual(x: &[i64], s1: (usize, i32, u32), s2: (usize, i32, u32)) -> (Vec<i64>, bool) {
     let mut e1 = Nlms::new(s1.0, s1.1, s1.2);
     let r1: Vec<i64> = x.iter().map(|&v| e1.encode(v)).collect();
     let mut e2 = Nlms::new(s2.0, s2.1, s2.2);
@@ -134,16 +136,38 @@ fn current_bytes(x: &[i64]) -> usize {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30000);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ecg_100.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30000);
     let sig = read_window(&path);
     let t = sig[0].len().min(w);
     let nm = (sig.len() * t) as f64;
 
     let cur: usize = sig.iter().map(|f| current_bytes(&f[..t])).sum();
-    println!("# NLMS probe: {} ({}ch, {}). current 5/3+LPC = {} B ({:.3} bps)", path, sig.len(), t, cur, cur as f64 * 8.0 / nm);
-    println!("  {:<24} {:>9} {:>8} {:>9} {:>5}", "config", "bytes", "Δvs cur", "bps", "rt");
-    for &(order, mu, mn) in &[(16usize, 1i32, 14u32), (16, 2, 14), (32, 1, 14), (32, 2, 16), (32, 0, 16), (16, 1, 18)] {
+    println!(
+        "# NLMS probe: {} ({}ch, {}). current 5/3+LPC = {} B ({:.3} bps)",
+        path,
+        sig.len(),
+        t,
+        cur,
+        cur as f64 * 8.0 / nm
+    );
+    println!(
+        "  {:<24} {:>9} {:>8} {:>9} {:>5}",
+        "config", "bytes", "Δvs cur", "bps", "rt"
+    );
+    for &(order, mu, mn) in &[
+        (16usize, 1i32, 14u32),
+        (16, 2, 14),
+        (32, 1, 14),
+        (32, 2, 16),
+        (32, 0, 16),
+        (16, 1, 18),
+    ] {
         let mut tot = 0usize;
         let mut allrt = true;
         for f in &sig {
@@ -152,7 +176,16 @@ fn main() {
             tot += golomb::encode_dense(&res).expect("g").len();
         }
         let d = -100.0 * (cur as f64 - tot as f64) / cur as f64;
-        println!("  NLMS o={:<2} mu=2^-{} mn={:<2}    {:>9} {:>+7.1}% {:>9.3} {:>5}", order, mu, mn, tot, d, tot as f64 * 8.0 / nm, if allrt { "ok" } else { "FAIL" });
+        println!(
+            "  NLMS o={:<2} mu=2^-{} mn={:<2}    {:>9} {:>+7.1}% {:>9.3} {:>5}",
+            order,
+            mu,
+            mn,
+            tot,
+            d,
+            tot as f64 * 8.0 / nm,
+            if allrt { "ok" } else { "FAIL" }
+        );
     }
     println!("# -- cascade (short fast → long slow) --");
     type Stage = (usize, i32, u32);
@@ -173,7 +206,16 @@ fn main() {
             tot += golomb::encode_dense(&res).expect("g").len();
         }
         let d = -100.0 * (cur as f64 - tot as f64) / cur as f64;
-        println!("  cascade {:<14}       {:>9} {:>+7.1}% {:>9.3} {:>5}", name, tot, d, tot as f64 * 8.0 / nm, if allrt { "ok" } else { "FAIL" });
+        println!(
+            "  cascade {:<14}       {:>9} {:>+7.1}% {:>9.3} {:>5}",
+            name,
+            tot,
+            d,
+            tot as f64 * 8.0 / nm,
+            if allrt { "ok" } else { "FAIL" }
+        );
     }
-    println!("# negative Δ = beats current 5/3+LPC. (golomb on residual, no wavelet, no LPC header.)");
+    println!(
+        "# negative Δ = beats current 5/3+LPC. (golomb on residual, no wavelet, no LPC header.)"
+    );
 }

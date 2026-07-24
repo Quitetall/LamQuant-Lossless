@@ -21,9 +21,9 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example separated_predict_probe -- [B] <bin>...
 
-use std::fs;
 use lamquant_lml_mcu::codec::{Codec, Mode};
 use lamquant_lml_optimum::{entropy, mv_rls, LmoCodec};
+use std::fs;
 
 const WIN: usize = 32768;
 // mv_rls CONFIGS[0] = (λ=0.999, reset=8192, m=32) — the joint default.
@@ -67,7 +67,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
     while start < t {
         let end = (start + WIN).min(t);
         let win: Vec<Vec<i64>> = sig.iter().map(|c| c[start..end].to_vec()).collect();
-        tot += LmoCodec.encode(&win, Mode::Lossless).map(|x| x.len()).unwrap_or(0);
+        tot += LmoCodec
+            .encode(&win, Mode::Lossless)
+            .map(|x| x.len())
+            .unwrap_or(0);
         start = end;
     }
     tot
@@ -75,7 +78,10 @@ fn container_bytes(sig: &[Vec<i64>]) -> usize {
 
 fn abscorr(a: &[i64], b: &[i64]) -> f64 {
     let n = a.len() as f64;
-    let (ma, mb) = (a.iter().sum::<i64>() as f64 / n, b.iter().sum::<i64>() as f64 / n);
+    let (ma, mb) = (
+        a.iter().sum::<i64>() as f64 / n,
+        b.iter().sum::<i64>() as f64 / n,
+    );
     let (mut sab, mut saa, mut sbb) = (0.0f64, 0.0f64, 0.0f64);
     for i in 0..a.len() {
         let (da, db) = (a[i] as f64 - ma, b[i] as f64 - mb);
@@ -83,7 +89,11 @@ fn abscorr(a: &[i64], b: &[i64]) -> f64 {
         saa += da * da;
         sbb += db * db;
     }
-    if saa <= 0.0 || sbb <= 0.0 { 0.0 } else { (sab / (saa * sbb).sqrt()).abs() }
+    if saa <= 0.0 || sbb <= 0.0 {
+        0.0
+    } else {
+        (sab / (saa * sbb).sqrt()).abs()
+    }
 }
 
 /// Per-block-B backward-adaptive cross-channel gain vs `rj`: fit g on the PREVIOUS block, apply to the
@@ -120,8 +130,10 @@ fn main() {
     println!("# JOINT vs SEPARATED cross-channel (no transform). Same intra RLS both arms. CONT=container.");
     println!("# JOINT = mv_rls (index-adjacent, m=32, joint). SEP = per-block-B best-ref cross gain on RAW");
     println!("# THEN intra-only RLS (m=0). Δ vs CONT + SEP vs JOINT. B = cross-channel block (H.BWC ~16).\n");
-    println!("{:>12} {:>4} {:>8} {:>8} {:>8} | {:>9} {:>9} {:>9}",
-             "recording", "B", "CONT bps", "JOINT", "SEP", "JNT/CONT", "SEP/CONT", "SEP/JNT");
+    println!(
+        "{:>12} {:>4} {:>8} {:>8} {:>8} | {:>9} {:>9} {:>9}",
+        "recording", "B", "CONT bps", "JOINT", "SEP", "JNT/CONT", "SEP/CONT", "SEP/JNT"
+    );
 
     for path in &args {
         let sig = read_bin(path);

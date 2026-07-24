@@ -31,8 +31,8 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example best_basis_probe -- [B] <bin>...
 
-use std::fs;
 use lamquant_lml_optimum::{entropy, mv_rls};
+use std::fs;
 
 const WIN: usize = 32768; // entropy window (u16 cap on entropy::encode)
 
@@ -79,8 +79,12 @@ fn dwt53_level(x: &mut [i64], n: usize) {
         // mirror-extend index into [0,n)
         let mut i = i;
         let m = n as isize;
-        if i < 0 { i = -i; }
-        if i >= m { i = 2 * (m - 1) - i; }
+        if i < 0 {
+            i = -i;
+        }
+        if i >= m {
+            i = 2 * (m - 1) - i;
+        }
         x[i.max(0).min(m - 1) as usize]
     };
     // predict: odd -= floor((left+right)/2)
@@ -89,7 +93,9 @@ fn dwt53_level(x: &mut [i64], n: usize) {
         let p = (at(x, k as isize - 1) + at(x, k as isize + 1)) as f64 / 2.0;
         d[k] = x[k] - p.floor() as i64;
     }
-    for k in (1..n).step_by(2) { x[k] = d[k]; }
+    for k in (1..n).step_by(2) {
+        x[k] = d[k];
+    }
     // update: even += floor((dleft+dright+2)/4)
     let mut a = vec![0i64; n];
     for k in (0..n).step_by(2) {
@@ -97,7 +103,9 @@ fn dwt53_level(x: &mut [i64], n: usize) {
         let dr = if k + 1 < n { x[k + 1] } else { x[k - 1] };
         a[k] = x[k] + ((dl + dr + 2) as f64 / 4.0).floor() as i64;
     }
-    for k in (0..n).step_by(2) { x[k] = a[k]; }
+    for k in (0..n).step_by(2) {
+        x[k] = a[k];
+    }
 }
 
 /// Multi-level 5/3 of a block, returned subband-major: [approx(coarsest), detail_L-1 .. detail_0].
@@ -109,13 +117,19 @@ fn dwt53_block(block: &[i64], levels: usize) -> Vec<i64> {
     let mut details: Vec<Vec<i64>> = Vec::new(); // fine→coarse
     let mut n = b;
     for _ in 0..levels {
-        if n < 8 { break; }
+        if n < 8 {
+            break;
+        }
         dwt53_level(&mut cur[..n], n);
         let half = n / 2;
         let mut approx = Vec::with_capacity(half);
         let mut detail = Vec::with_capacity(half);
         for k in 0..n {
-            if k % 2 == 0 { approx.push(cur[k]); } else { detail.push(cur[k]); }
+            if k % 2 == 0 {
+                approx.push(cur[k]);
+            } else {
+                detail.push(cur[k]);
+            }
         }
         details.push(detail);
         cur[..half].copy_from_slice(&approx);
@@ -124,21 +138,29 @@ fn dwt53_block(block: &[i64], levels: usize) -> Vec<i64> {
     // emit: coarsest approx (cur[..n]) then details coarse→fine
     let mut out = Vec::with_capacity(b);
     out.extend_from_slice(&cur[..n]);
-    for det in details.iter().rev() { out.extend_from_slice(det); }
+    for det in details.iter().rev() {
+        out.extend_from_slice(det);
+    }
     out
 }
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let cli_b = args.first().and_then(|a| a.parse::<usize>().ok());
-    if cli_b.is_some() { args.remove(0); }
-    let block_sizes: Vec<usize> = cli_b.map(|b| vec![b]).unwrap_or_else(|| vec![256, 512, 1024]);
+    if cli_b.is_some() {
+        args.remove(0);
+    }
+    let block_sizes: Vec<usize> = cli_b
+        .map(|b| vec![b])
+        .unwrap_or_else(|| vec![256, 512, 1024]);
 
     println!("# Best-basis per-block competition: P=mv_rls  D=DCT-II(DC-DPCM)  W=5/3 lifting");
     println!("# len via the REAL ship coder. Δ = best-basis vs predictor-only, SAME per-block granularity.");
     println!("# DCT uses the float-rounded proxy (UNDER-states real integer-DCT cost) ⇒ negative is robust.\n");
-    println!("{:>12} {:>5} {:>10} {:>10} {:>8} {:>8} {:>8} | {:>13} {:>13}",
-             "recording", "B", "pred B", "best B", "grossΔ%", "net2b%", "netHb%", "win D%", "win W%");
+    println!(
+        "{:>12} {:>5} {:>10} {:>10} {:>8} {:>8} {:>8} | {:>13} {:>13}",
+        "recording", "B", "pred B", "best B", "grossΔ%", "net2b%", "netHb%", "win D%", "win W%"
+    );
 
     for path in &args {
         let sig = read_bin(path);
@@ -168,7 +190,9 @@ fn main() {
                         for k in 0..b {
                             let row = &basis[k];
                             let mut acc = 0.0f64;
-                            for n in 0..b { acc += row[n] * raw[n] as f64; }
+                            for n in 0..b {
+                                acc += row[n] * raw[n] as f64;
+                            }
                             coeffs[k] = acc.round() as i64;
                         }
                         let dc = coeffs[0];
@@ -181,12 +205,22 @@ fn main() {
 
                         pred_b += lp;
                         let (mut m, mut sel) = (lp, 0usize);
-                        if ld < m { m = ld; sel = 1; }
-                        if lw < m { m = lw; sel = 2; }
+                        if ld < m {
+                            m = ld;
+                            sel = 1;
+                        }
+                        if lw < m {
+                            m = lw;
+                            sel = 2;
+                        }
                         best_b += m;
                         sel_counts[sel] += 1;
-                        if ld < lp { win_d += 1; }
-                        if lw < lp { win_w += 1; }
+                        if ld < lp {
+                            win_d += 1;
+                        }
+                        if lw < lp {
+                            win_w += 1;
+                        }
                         nblk += 1;
                         pos += b;
                     }
@@ -196,10 +230,14 @@ fn main() {
 
             // selector cost: conservative 2 bits/block, and entropy-coded H(sel).
             let sel_2b = (nblk * 2 + 7) / 8; // bytes
-            let hsel: f64 = sel_counts.iter().filter(|&&c| c > 0).map(|&c| {
-                let p = c as f64 / nblk.max(1) as f64;
-                -p * p.log2()
-            }).sum();
+            let hsel: f64 = sel_counts
+                .iter()
+                .filter(|&&c| c > 0)
+                .map(|&c| {
+                    let p = c as f64 / nblk.max(1) as f64;
+                    -p * p.log2()
+                })
+                .sum();
             let sel_h = ((nblk as f64 * hsel / 8.0).ceil()) as usize;
 
             let gross = 100.0 * (best_b as f64 - pred_b as f64) / pred_b as f64;
@@ -212,7 +250,9 @@ fn main() {
         }
     }
     println!("\n# grossΔ% = pure basis-selection ceiling (before selector). net2b/netHb = after 2-bit / entropy selector.");
-    println!("# Gate: net <= -1.0% on the lose-set (siena/eegmmidb) ⇒ build a real switchable codec.");
+    println!(
+        "# Gate: net <= -1.0% on the lose-set (siena/eegmmidb) ⇒ build a real switchable codec."
+    );
     println!("# Else the fixed-transform family (cosine, wavelet, KLT) is spent vs the adaptive predictor —");
     println!("# and the only lever left with lossless headroom is the nonlinear/learned class (separate LMQ thread).");
 }

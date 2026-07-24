@@ -1,12 +1,12 @@
 use lamquant_lml_optimum_v2::bgf1_model_pack::{
     Bgf1ModelPack, BGF1_EXPECTED_PACK_BYTES, BGF1_LEARNED_PARAMETER_COUNT, BGF1_MODEL_ID,
 };
-use lamquant_lml_optimum_v2::model_pack::{ModelPack, Tensor, TensorDtype, LQW_MAGIC};
+use lamquant_lml_optimum_v2::model_pack::{ModelPack, ModelTensor, TensorDtype, LQW_MAGIC};
 use sha2::{Digest, Sha256};
 
-fn tensors() -> Vec<Tensor> {
+fn tensors() -> Vec<ModelTensor> {
     vec![
-        Tensor {
+        ModelTensor {
             name: "z.weight".into(),
             dtype: TensorDtype::I8,
             shape: vec![2, 2],
@@ -14,7 +14,7 @@ fn tensors() -> Vec<Tensor> {
             scale_shift: 7,
             data: vec![1, 2, 3, 4],
         },
-        Tensor {
+        ModelTensor {
             name: "a.bias".into(),
             dtype: TensorDtype::I16,
             shape: vec![2],
@@ -25,13 +25,13 @@ fn tensors() -> Vec<Tensor> {
     ]
 }
 
-fn bgf1_zero_tensors() -> Vec<Tensor> {
+fn bgf1_zero_tensors() -> Vec<ModelTensor> {
     let descriptor = [239_i32, 1, 1, 7_424]
         .into_iter()
         .flat_map(i32::to_le_bytes)
         .collect();
     vec![
-        Tensor {
+        ModelTensor {
             name: "bgf1.descriptor".into(),
             dtype: TensorDtype::I32,
             shape: vec![4],
@@ -39,7 +39,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 0,
             data: descriptor,
         },
-        Tensor {
+        ModelTensor {
             name: "coupling.predict_second".into(),
             dtype: TensorDtype::I8,
             shape: vec![2, 256],
@@ -47,7 +47,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 6,
             data: vec![0; 512],
         },
-        Tensor {
+        ModelTensor {
             name: "coupling.update_first".into(),
             dtype: TensorDtype::I8,
             shape: vec![2, 256],
@@ -55,7 +55,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 6,
             data: vec![0; 512],
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.exponent_logits".into(),
             dtype: TensorDtype::I8,
             shape: vec![16, 16],
@@ -63,7 +63,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.mantissa_logits".into(),
             dtype: TensorDtype::I8,
             shape: vec![16, 16],
@@ -71,7 +71,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.sign_logits".into(),
             dtype: TensorDtype::I8,
             shape: vec![256],
@@ -79,7 +79,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "entropy.token_magnitude_bias".into(),
             dtype: TensorDtype::I8,
             shape: vec![256],
@@ -87,7 +87,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 0,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "prior.graph".into(),
             dtype: TensorDtype::I8,
             shape: vec![256, 4],
@@ -95,7 +95,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 6,
             data: vec![0; 1_024],
         },
-        Tensor {
+        ModelTensor {
             name: "prior.scale_bias".into(),
             dtype: TensorDtype::I8,
             shape: vec![256],
@@ -103,7 +103,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
             scale_shift: 4,
             data: vec![0; 256],
         },
-        Tensor {
+        ModelTensor {
             name: "prior.temporal".into(),
             dtype: TensorDtype::I8,
             shape: vec![256, 16],
@@ -114,7 +114,7 @@ fn bgf1_zero_tensors() -> Vec<Tensor> {
     ]
 }
 
-fn bgf1_sentinel_tensors() -> Vec<Tensor> {
+fn bgf1_sentinel_tensors() -> Vec<ModelTensor> {
     let mut tensors = bgf1_zero_tensors();
     for tensor in &mut tensors {
         match tensor.name.as_str() {

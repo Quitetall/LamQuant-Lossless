@@ -54,10 +54,13 @@ fn h0_bits(res: &[i64]) -> f64 {
         *hist.entry(v).or_insert(0) += 1;
     }
     let n = res.len() as f64;
-    -hist.values().map(|&c| {
-        let p = c as f64 / n;
-        p * p.log2()
-    }).sum::<f64>()
+    -hist
+        .values()
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * p.log2()
+        })
+        .sum::<f64>()
 }
 
 /// Coder-agnostic order-0 floor (bytes) — the best ANY order-0 coder (tANS,
@@ -124,8 +127,8 @@ fn learned_conditional_bytes(res: &[i64]) -> usize {
     // same-scale blocks → one shape model per scale context.
     let mut buckets: HashMap<i32, Vec<i64>> = HashMap::new();
     for block in res.chunks(BLK) {
-        let mean = block.iter().map(|&x| x.unsigned_abs() as f64).sum::<f64>()
-            / block.len().max(1) as f64;
+        let mean =
+            block.iter().map(|&x| x.unsigned_abs() as f64).sum::<f64>() / block.len().max(1) as f64;
         let ctx = mean.max(1.0).log2().floor() as i32; // local-scale context
         buckets.entry(ctx).or_default().extend_from_slice(block);
     }
@@ -177,7 +180,10 @@ fn main() {
         path, n_ch, t
     );
     println!("# baseline = block-adaptive Golomb (production `entropy::encode`).");
-    println!("  {:>22} | {:>12} {:>9} {:>9}", "coder", "bytes", "bps", "vs base");
+    println!(
+        "  {:>22} | {:>12} {:>9} {:>9}",
+        "coder", "bytes", "bps", "vs base"
+    );
     row("block-Golomb (PROD)", block_golomb);
     row("arith order-0 /block", arith_block); // static, transmits per-block model
     row("adaptive order-0", adaptive); // online, no transmitted model

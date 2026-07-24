@@ -112,7 +112,11 @@ fn lmo_target_bps_auto_pick_never_worse_than_5_3_floor() {
                 den += (*a as f64 - m).powi(2);
             }
         }
-        if den == 0.0 { 0.0 } else { 100.0 * (num / den).sqrt() }
+        if den == 0.0 {
+            0.0
+        } else {
+            100.0 * (num / den).sqrt()
+        }
     }
 
     let sig = make_signal(8, 2560, 99);
@@ -142,24 +146,40 @@ fn lmo_lossless_picks_crosschan_on_correlated_and_is_bit_exact() {
     // Channels = gain·(shared base) + small per-channel detail ⇒ real cross-channel
     // redundancy (unlike make_signal's phase-decorrelated channels).
     let t = 4096usize;
-    let base: Vec<i64> = (0..t).map(|i| ((i as f64 * 0.05).sin() * 3000.0) as i64).collect();
+    let base: Vec<i64> = (0..t)
+        .map(|i| ((i as f64 * 0.05).sin() * 3000.0) as i64)
+        .collect();
     let sig: Vec<Vec<i64>> = (0..8)
         .map(|c| {
             let g = 0.6 + 0.1 * c as f64;
             (0..t)
-                .map(|i| (g * base[i] as f64) as i64 + (((i + c * 7) as f64 * 0.9).sin() * 120.0) as i64)
+                .map(|i| {
+                    (g * base[i] as f64) as i64 + (((i + c * 7) as f64 * 0.9).sin() * 120.0) as i64
+                })
                 .collect()
         })
         .collect();
 
     let lmo = LmoCodec.encode(&sig, Mode::Lossless).unwrap();
     assert_eq!(codec::peek_format(&lmo), Some(Format::Lmo));
-    assert_eq!(lmo[6], 2, "correlated channels should select transform_id=2 (Optimum-lossless)");
+    assert_eq!(
+        lmo[6], 2,
+        "correlated channels should select transform_id=2 (Optimum-lossless)"
+    );
 
-    assert_eq!(decode_any(&lmo).unwrap(), sig, "id=2 must be bit-exact lossless");
+    assert_eq!(
+        decode_any(&lmo).unwrap(),
+        sig,
+        "id=2 must be bit-exact lossless"
+    );
 
     let floor = LmlCodec.encode(&sig, Mode::Lossless).unwrap();
-    assert!(lmo.len() <= floor.len(), "auto-pick: LMO {} must be ≤ floor {}", lmo.len(), floor.len());
+    assert!(
+        lmo.len() <= floor.len(),
+        "auto-pick: LMO {} must be ≤ floor {}",
+        lmo.len(),
+        floor.len()
+    );
 }
 
 #[test]

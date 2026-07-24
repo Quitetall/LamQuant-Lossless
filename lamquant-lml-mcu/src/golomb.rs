@@ -198,10 +198,7 @@ pub fn encode_dense(coeffs: &[i64]) -> Result<Vec<u8>, GolombError> {
 ///     corruption when caller did `sub_pos += 3`).
 ///   - Truncated unary / truncated remainder (used to silently
 ///     break out of the unary scan or zero-pad the remainder).
-pub fn decode_dense(
-    data: &[u8],
-    offset: usize,
-) -> Result<(Vec<i64>, usize), GolombError> {
+pub fn decode_dense(data: &[u8], offset: usize) -> Result<(Vec<i64>, usize), GolombError> {
     if data.len().saturating_sub(offset) < 3 {
         return Ok((Vec::new(), 0));
     }

@@ -40,12 +40,20 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
 #[inline]
 fn floor_div(a: i64, b: i64) -> i64 {
     let d = a / b;
-    if (a ^ b) < 0 && d * b != a { d - 1 } else { d }
+    if (a ^ b) < 0 && d * b != a {
+        d - 1
+    } else {
+        d
+    }
 }
 
 /// Faithful copy of `lpc.rs::bias_cancel` (causal running-mean subtraction, invertible).
 fn bias_cancel(data: &mut [i64], ctx_len: usize) {
-    let mask = if ctx_len.is_power_of_two() { ctx_len - 1 } else { 0 };
+    let mask = if ctx_len.is_power_of_two() {
+        ctx_len - 1
+    } else {
+        0
+    };
     let use_mask = mask != 0;
     let mut buf = vec![0i64; ctx_len];
     let mut running_sum = 0i64;
@@ -66,23 +74,31 @@ fn codelen_ch(r: &[i64]) -> usize {
     const W: usize = 32768;
     let mut bits = 0usize;
     for chunk in r.chunks(W) {
-        bits += entropy::encode(chunk).map(|v| 8 * v.len()).unwrap_or_else(|_| {
-            chunk
-                .iter()
-                .map(|&v| (64 - (2 * v.unsigned_abs() + 1).leading_zeros()) as usize)
-                .sum()
-        });
+        bits += entropy::encode(chunk)
+            .map(|v| 8 * v.len())
+            .unwrap_or_else(|_| {
+                chunk
+                    .iter()
+                    .map(|&v| (64 - (2 * v.unsigned_abs() + 1).leading_zeros()) as usize)
+                    .sum()
+            });
     }
     bits
 }
 
 fn main() {
-    let bins: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect();
+    let bins: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
     // The SHIP form: per channel, keep the smallest of {no-bc, bc@ctx for ctx in CTXS}. Each
     // channel picks its own best context ⇒ 1 flag + a 2-bit ctx index/channel. Never-worse.
     const CTXS: [usize; 4] = [8, 16, 32, 64];
     println!("E-A3 ship-form: per-channel keep-best over bc-contexts {CTXS:?} on the mv_rls residual (cfg 1)");
-    println!("{:>18}  {:>8}  {}", "recording", "shipΔ%", "ctx dist (none/8/16/32/64)");
+    println!(
+        "{:>18}  {:>8}  {}",
+        "recording", "shipΔ%", "ctx dist (none/8/16/32/64)"
+    );
     for p in &bins {
         let sig = read_bin(p);
         let r = mv_rls::residuals(&sig, 1, 0); // shipped dominant config

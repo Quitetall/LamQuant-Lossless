@@ -11,7 +11,7 @@
 
 #![cfg(feature = "host")]
 
-use realfft::{RealFftPlanner, num_complex::Complex32};
+use realfft::{num_complex::Complex32, RealFftPlanner};
 
 /// `realfft` — host-side real-valued FFT. Smoke: forward 8 samples,
 /// inverse them back, assert ≤ 1e-3 absolute error. Verifies the lib
@@ -23,8 +23,7 @@ fn realfft_roundtrip_8_point() {
     let inv = planner.plan_fft_inverse(8);
 
     let n: usize = 8;
-    let mut samples: Vec<f32> =
-        (0..n).map(|i| (i as f32 * 0.5).sin()).collect();
+    let mut samples: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5).sin()).collect();
     let original = samples.clone();
     let mut spectrum: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n / 2 + 1];
 
@@ -39,8 +38,12 @@ fn realfft_roundtrip_8_point() {
         *x /= n_f;
     }
     for (orig, rec) in original.iter().zip(samples.iter()) {
-        assert!((orig - rec).abs() < 1e-3,
-                "realfft roundtrip drift {} vs {}", orig, rec);
+        assert!(
+            (orig - rec).abs() < 1e-3,
+            "realfft roundtrip drift {} vs {}",
+            orig,
+            rec
+        );
     }
 }
 
@@ -71,8 +74,8 @@ fn pulp_dispatch_sum_smoke() {
 /// no production use today.
 #[test]
 fn loom_atomic_increment_smoke() {
-    use loom::sync::Arc;
     use loom::sync::atomic::{AtomicUsize, Ordering};
+    use loom::sync::Arc;
     use loom::thread;
     loom::model(|| {
         let counter = Arc::new(AtomicUsize::new(0));
@@ -134,8 +137,8 @@ fn faer_4x4_multiply_smoke() {
 /// 200 MB), this is the lib.
 #[test]
 fn rkyv_struct_archive_smoke() {
-    use rkyv::{archived_root, ser::Serializer, ser::serializers::AllocSerializer};
-    use rkyv::{Archive, Deserialize, Serialize, Infallible};
+    use rkyv::{archived_root, ser::serializers::AllocSerializer, ser::Serializer};
+    use rkyv::{Archive, Deserialize, Infallible, Serialize};
 
     #[derive(Archive, Serialize, Deserialize, Debug, PartialEq)]
     #[archive(check_bytes)]
@@ -144,7 +147,11 @@ fn rkyv_struct_archive_smoke() {
         b: i16,
         s: String,
     }
-    let original = Sample { a: 0xDEAD_BEEF, b: -42, s: "rkyv".into() };
+    let original = Sample {
+        a: 0xDEAD_BEEF,
+        b: -42,
+        s: "rkyv".into(),
+    };
 
     let mut ser: AllocSerializer<128> = AllocSerializer::default();
     ser.serialize_value(&original).expect("serialize");

@@ -30,9 +30,9 @@ use lamquant_lml_optimum::{entropy, mv_rls};
 
 const K: usize = 8; // mirrors mv_rls::K (own temporal taps)
 const M: usize = 32; // cross-channel cap (CONFIGS default)
-// Matched ridge for BOTH the VAW forecaster (P₀=1/ridge) and the batch hindsight. ridge=1 ⇒
-// P₀=1 (the shipped, numerically-stable RLS init) and is negligible vs EEG's Σφφᵀ~1e6·T after
-// one sample, so the VAW bound's constant is unaffected but the recursion doesn't diverge.
+                     // Matched ridge for BOTH the VAW forecaster (P₀=1/ridge) and the batch hindsight. ridge=1 ⇒
+                     // P₀=1 (the shipped, numerically-stable RLS init) and is negligible vs EEG's Σφφᵀ~1e6·T after
+                     // one sample, so the VAW bound's constant is unaffected but the recursion doesn't diverge.
 const RIDGE: f64 = 1.0;
 const BLOCK: usize = 256; // block-refit period for the stable online LS
 
@@ -63,7 +63,9 @@ fn synth(t: usize, switch: bool) -> Vec<Vec<i64>> {
     let mut hist = [0.0f64; 4];
     let mut s: u64 = 0x9e37_79b9_7f4a_7c15;
     for n in 0..t {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let noise = (((s >> 33) % 1001) as i64 - 500) as f64;
         let a = if switch && n >= t / 2 { &a1 } else { &a0 };
         let mut v = noise;
@@ -81,7 +83,13 @@ fn synth(t: usize, switch: bool) -> Vec<Vec<i64>> {
 }
 
 fn sse(res: &[Vec<i64>]) -> f64 {
-    res.iter().flat_map(|r| r.iter()).map(|&v| { let f = v as f64; f * f }).sum()
+    res.iter()
+        .flat_map(|r| r.iter())
+        .map(|&v| {
+            let f = v as f64;
+            f * f
+        })
+        .sum()
 }
 fn n_samples(res: &[Vec<i64>]) -> f64 {
     res.iter().map(|r| r.len()).sum::<usize>() as f64
@@ -105,7 +113,9 @@ fn total_d(n_ch: usize) -> usize {
     (0..n_ch).map(|c| K + c.min(M)).sum()
 }
 fn truncate(sig: &[Vec<i64>], t: usize) -> Vec<Vec<i64>> {
-    sig.iter().map(|ch| ch[..t.min(ch.len())].to_vec()).collect()
+    sig.iter()
+        .map(|ch| ch[..t.min(ch.len())].to_vec())
+        .collect()
 }
 
 /// Non-stationarity proxy: std of per-`w`-window mean log2-energy. High ⇒ the signal's scale

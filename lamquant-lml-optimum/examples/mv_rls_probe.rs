@@ -48,7 +48,12 @@ impl Rls {
         for i in 0..n {
             p[i][i] = 1.0;
         }
-        Self { n, lambda, w: vec![0.0; n], p }
+        Self {
+            n,
+            lambda,
+            w: vec![0.0; n],
+            p,
+        }
     }
     fn predict(&self, reg: &[f64]) -> f64 {
         let mut s = 0.0;
@@ -98,7 +103,7 @@ fn mv_rls_bytes(sig: &[Vec<i64>], k: usize, m: usize, lambda: f64, reset: usize)
         let xref = c.min(m); // # cross-channel taps for this channel
         let order = k + xref;
         let refs: Vec<usize> = (0..xref).map(|r| c - 1 - r).collect(); // recent prior channels
-        // encode
+                                                                       // encode
         let mut rls = Rls::new(order, lambda);
         let mut own = vec![0.0f64; k];
         let mut res = Vec::with_capacity(t);
@@ -165,19 +170,48 @@ fn current_bytes(x: &[i64]) -> usize {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ma_full.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(49152);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ma_full.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(49152);
     let full = read_window(&path);
     let t = full[0].len().min(w);
     let sig: Vec<Vec<i64>> = full.iter().map(|c| c[..t].to_vec()).collect();
     let nm = (sig.len() * t) as f64;
     let cur: usize = sig.iter().map(|c| current_bytes(c)).sum();
-    println!("# MV-RLS probe: {} ({}ch, {}). current 5/3+LPC = {:.3} bps", path, sig.len(), t, cur as f64 * 8.0 / nm);
-    println!("  {:<22} {:>8} {:>9} {:>5}", "K / M(xchan) / reset", "Δvs cur", "bps", "rt");
-    for &(k, m, reset) in &[(8usize, 0usize, 16384usize), (8, 8, 16384), (8, 16, 16384), (16, 16, 16384), (8, 32, 8192), (4, 16, 16384)] {
+    println!(
+        "# MV-RLS probe: {} ({}ch, {}). current 5/3+LPC = {:.3} bps",
+        path,
+        sig.len(),
+        t,
+        cur as f64 * 8.0 / nm
+    );
+    println!(
+        "  {:<22} {:>8} {:>9} {:>5}",
+        "K / M(xchan) / reset", "Δvs cur", "bps", "rt"
+    );
+    for &(k, m, reset) in &[
+        (8usize, 0usize, 16384usize),
+        (8, 8, 16384),
+        (8, 16, 16384),
+        (16, 16, 16384),
+        (8, 32, 8192),
+        (4, 16, 16384),
+    ] {
         let (b, rt) = mv_rls_bytes(&sig, k, m, 0.999, reset);
         let d = -100.0 * (cur as f64 - b as f64) / cur as f64;
-        println!("  K={:<2} M={:<2} reset={:<5} {:>+7.1}% {:>9.3} {:>5}", k, m, reset, d, b as f64 * 8.0 / nm, if rt { "ok" } else { "FAIL" });
+        println!(
+            "  K={:<2} M={:<2} reset={:<5} {:>+7.1}% {:>9.3} {:>5}",
+            k,
+            m,
+            reset,
+            d,
+            b as f64 * 8.0 / nm,
+            if rt { "ok" } else { "FAIL" }
+        );
     }
     println!("# M=0 = per-channel RLS (current production). M>0 adds cross-channel taps.");
 }

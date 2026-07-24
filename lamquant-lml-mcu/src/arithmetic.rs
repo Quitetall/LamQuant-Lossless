@@ -2,8 +2,7 @@
 //!
 //! ADR 0023 Track B5+. Replaces the earlier hand-rolled WNC bit-by-bit
 //! arithmetic coder with `constriction`'s byte-oriented range coder
-//! + `LeakyQuantizer<Laplace>` model. ~25-100× faster encode and ~5-15 %
-//! tighter output on Laplacian residuals than the WNC bootstrap.
+//! + `LeakyQuantizer<Laplace>` model. ~25-100× faster encode and ~5-15 % tighter output on Laplacian residuals than the WNC bootstrap.
 //!
 //! Wire layout (per subband, when this codec wins selection):
 //!
@@ -87,11 +86,7 @@ pub fn encode_dense(coeffs: &[i64]) -> Vec<u8> {
     // Estimate Laplace parameters (mean + scale = mean abs deviation).
     let n = coeffs.len() as f64;
     let mean: f64 = coeffs.iter().map(|&v| v as f64).sum::<f64>() / n;
-    let mad: f64 = coeffs
-        .iter()
-        .map(|&v| (v as f64 - mean).abs())
-        .sum::<f64>()
-        / n;
+    let mad: f64 = coeffs.iter().map(|&v| (v as f64 - mean).abs()).sum::<f64>() / n;
     let scale = mad.max(0.5); // floor — degenerate (all-equal) blocks still encodable
 
     // Quantise mean + scale to fixed-point so decoder reconstructs
@@ -113,7 +108,7 @@ pub fn encode_dense(coeffs: &[i64]) -> Vec<u8> {
         .map(|&v| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
         .collect();
     encoder
-        .encode_iid_symbols(symbols.iter().copied(), &model)
+        .encode_iid_symbols(symbols.iter().copied(), model)
         .expect("constriction encode (model is well-formed)");
     let body: Vec<u8> = {
         // `into_compressed::<u8>()` gives a Vec<u8> stream.
@@ -136,10 +131,7 @@ pub fn encode_dense(coeffs: &[i64]) -> Vec<u8> {
 }
 
 /// Decode `n_samples` symbols from a stream produced by `encode_dense`.
-pub fn decode_dense(
-    bytes: &[u8],
-    n_samples: usize,
-) -> Result<(Vec<i64>, usize), ArithmeticError> {
+pub fn decode_dense(bytes: &[u8], n_samples: usize) -> Result<(Vec<i64>, usize), ArithmeticError> {
     if bytes.len() < 20 {
         return Err(ArithmeticError::EmptyHeader);
     }
@@ -147,8 +139,7 @@ pub fn decode_dense(
     let mx = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let mean_q = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
     let scale_q = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
-    let body_len =
-        u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
+    let body_len = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
 
     if 20 + body_len > bytes.len() {
         return Err(ArithmeticError::Truncated);
@@ -172,8 +163,8 @@ pub fn decode_dense(
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    let mut decoder = DefaultRangeDecoder::from_compressed(words)
-        .map_err(|_| ArithmeticError::DecodeFailure)?;
+    let mut decoder =
+        DefaultRangeDecoder::from_compressed(words).map_err(|_| ArithmeticError::DecodeFailure)?;
 
     let mut out = Vec::with_capacity(n_samples);
     for _ in 0..n_samples {
@@ -245,6 +236,9 @@ mod tests {
         let enc = encode_dense(&c);
         let truncated = &enc[..enc.len() - 4];
         let err = decode_dense(truncated, c.len()).unwrap_err();
-        assert!(matches!(err, ArithmeticError::Truncated | ArithmeticError::DecodeFailure));
+        assert!(matches!(
+            err,
+            ArithmeticError::Truncated | ArithmeticError::DecodeFailure
+        ));
     }
 }

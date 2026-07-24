@@ -48,7 +48,7 @@
 //! entirely. A param-binding `register_with` (constructor taking the
 //! parsed params) is a deferred fast-follow, not part of this increment.
 
-use crate::pass::{DynPass, ErasedPayload, PassRegistry, run_in_lml};
+use crate::pass::{run_in_lml, DynPass, ErasedPayload, PassRegistry};
 use std::vec::Vec;
 
 // ─── Pipeline spec (pure syntax) ────────────────────────────────────────
@@ -112,10 +112,9 @@ impl core::fmt::Display for PipelineDslError {
             Self::BadParam { line } => {
                 write!(f, "malformed `key=value` param on pipeline line {line}")
             }
-            Self::UnterminatedString { line } => write!(
-                f,
-                "unterminated quoted param value on pipeline line {line}"
-            ),
+            Self::UnterminatedString { line } => {
+                write!(f, "unterminated quoted param value on pipeline line {line}")
+            }
             Self::BadEscape { line } => write!(
                 f,
                 "invalid escape sequence in quoted param value on pipeline line {line}"
@@ -188,8 +187,8 @@ fn parse_quoted_value(s: &str, line: usize) -> Result<(String, &str), PipelineDs
                     if hex.is_empty() {
                         return Err(PipelineDslError::BadEscape { line });
                     }
-                    let cp =
-                        u32::from_str_radix(&hex, 16).map_err(|_| PipelineDslError::BadEscape { line })?;
+                    let cp = u32::from_str_radix(&hex, 16)
+                        .map_err(|_| PipelineDslError::BadEscape { line })?;
                     let ch = char::from_u32(cp).ok_or(PipelineDslError::BadEscape { line })?;
                     out.push(ch);
                 }
@@ -289,7 +288,10 @@ impl core::fmt::Debug for LmlDslPipeline {
     /// panic messages and test failure output.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LmlDslPipeline")
-            .field("steps", &self.steps.iter().map(|s| s.name()).collect::<Vec<_>>())
+            .field(
+                "steps",
+                &self.steps.iter().map(|s| s.name()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -341,12 +343,12 @@ pub fn build_lml_pipeline(
         // `register` one still ignores them). `contains` guaranteed the name
         // resolves, so a failure here is a rejected param VALUE, surfaced as
         // `BadParamValue` (not the misleading `UnknownPass`).
-        let built = registry
-            .build_with(&step.name, &step.params)
-            .map_err(|e| PipelineDslError::BadParamValue {
+        let built = registry.build_with(&step.name, &step.params).map_err(|e| {
+            PipelineDslError::BadParamValue {
                 name: step.name.clone(),
                 detail: e.to_string(),
-            })?;
+            }
+        })?;
         if built.lossy() {
             return Err(PipelineDslError::LossyPassInLml {
                 name: step.name.clone(),
@@ -485,7 +487,10 @@ xor_cipher key=66
 
         let original = vec![1u8, 2, 3, 250, 0, 255];
         let encoded = pipeline.run(original.clone()).unwrap();
-        assert_ne!(encoded, original, "sanity: the pass actually changed the bytes");
+        assert_ne!(
+            encoded, original,
+            "sanity: the pass actually changed the bytes"
+        );
 
         // XOR is its own inverse under `process`: running the SAME built
         // pipeline forward a second time undoes the first — proving the
@@ -561,7 +566,8 @@ xor_cipher key=66
     /// pipeline text at every byte offset `0..len` must never panic.
     #[test]
     fn truncation_sweep_never_panics() {
-        let text = "; reversible pipeline\n# comment\nxor_cipher key=\"a\\nb\"\ndelta_filter foo=bar\n";
+        let text =
+            "; reversible pipeline\n# comment\nxor_cipher key=\"a\\nb\"\ndelta_filter foo=bar\n";
         assert!(text.is_ascii(), "sweep corpus must be ASCII-safe to slice");
         for k in 0..text.len() {
             let _ = parse_pipeline(&text[..k]);
@@ -638,7 +644,10 @@ xor_cipher key=66
         let out_b = pb.run(vec![0u8, 0, 0]).unwrap();
         assert_eq!(out_a, vec![1u8, 1, 1]);
         assert_eq!(out_b, vec![255u8, 255, 255]);
-        assert_ne!(out_a, out_b, "M6: params must BIND — different key ⇒ different output");
+        assert_ne!(
+            out_a, out_b,
+            "M6: params must BIND — different key ⇒ different output"
+        );
 
         // A bad param VALUE is a build error (BadParamValue), not a silent default.
         let bad = build_lml_pipeline(&parse_pipeline("param_xor key=notau8\n").unwrap(), &reg);

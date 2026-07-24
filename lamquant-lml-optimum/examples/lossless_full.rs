@@ -32,8 +32,13 @@ fn read_window(path: &str) -> Vec<Vec<i64>> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ecg_full.bin".to_string());
-    let w: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(32768);
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ecg_full.bin".to_string());
+    let w: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32768);
     let sig = read_window(&path);
     let (n_ch, t) = (sig.len(), sig[0].len());
     let nm = (n_ch * t) as f64;
@@ -54,7 +59,11 @@ fn main() {
     let name = path.rsplit('/').next().unwrap_or(&path);
     println!(
         "{:<24} {}ch x {} (W={w}) : {} bytes, {:.4} bps  rt={}",
-        name, n_ch, t, total_bytes, total_bytes as f64 * 8.0 / nm,
+        name,
+        n_ch,
+        t,
+        total_bytes,
+        total_bytes as f64 * 8.0 / nm,
         if ok { "ok" } else { "FAIL" }
     );
 }

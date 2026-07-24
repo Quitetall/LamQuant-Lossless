@@ -34,10 +34,13 @@ fn bounded_mae_packet_respects_delta() {
     for &delta in &[0u64, 1, 2, 5, 13, 100, 1000] {
         for &(n_ch, t) in &[(1usize, 1usize), (1, 2), (3, 250), (8, 2560), (21, 625)] {
             let signal = make_signal(n_ch, t, (delta as i64) * 17 + t as i64);
-            let bytes = compress_bounded_mae(&signal, delta, LpcMode::default())
-                .unwrap_or_else(|e| panic!("encode failed δ={} n_ch={} t={}: {:?}", delta, n_ch, t, e));
-            let recon = decompress(&bytes)
-                .unwrap_or_else(|e| panic!("decode failed δ={} n_ch={} t={}: {:?}", delta, n_ch, t, e));
+            let bytes =
+                compress_bounded_mae(&signal, delta, LpcMode::default()).unwrap_or_else(|e| {
+                    panic!("encode failed δ={} n_ch={} t={}: {:?}", delta, n_ch, t, e)
+                });
+            let recon = decompress(&bytes).unwrap_or_else(|e| {
+                panic!("decode failed δ={} n_ch={} t={}: {:?}", delta, n_ch, t, e)
+            });
 
             assert_eq!(recon.len(), n_ch, "channel count");
             for c in 0..n_ch {
@@ -51,7 +54,11 @@ fn bounded_mae_packet_respects_delta() {
                 assert!(
                     mae <= delta as i64,
                     "MAE bound VIOLATED δ={} n_ch={} t={} ch={} mae={}",
-                    delta, n_ch, t, c, mae
+                    delta,
+                    n_ch,
+                    t,
+                    c,
+                    mae
                 );
                 if delta == 0 {
                     assert_eq!(signal[c], recon[c], "δ=0 must be byte-exact ch={}", c);
@@ -79,11 +86,16 @@ fn bounded_mae_higher_delta_compresses_smaller() {
     // Sanity: a looser error budget should not produce a LARGER packet than
     // a tighter one on the same signal (monotone rate-distortion direction).
     let signal = make_signal(8, 2560, 4242);
-    let lossless = compress_bounded_mae(&signal, 0, LpcMode::default()).unwrap().len();
-    let loose = compress_bounded_mae(&signal, 64, LpcMode::default()).unwrap().len();
+    let lossless = compress_bounded_mae(&signal, 0, LpcMode::default())
+        .unwrap()
+        .len();
+    let loose = compress_bounded_mae(&signal, 64, LpcMode::default())
+        .unwrap()
+        .len();
     assert!(
         loose <= lossless,
         "δ=64 packet ({} B) should be ≤ δ=0 packet ({} B)",
-        loose, lossless
+        loose,
+        lossless
     );
 }

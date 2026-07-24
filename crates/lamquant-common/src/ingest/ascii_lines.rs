@@ -63,12 +63,16 @@ impl LineEnding {
             LineEnding::CrLf => "CrLf",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "Lf" => Some(LineEnding::Lf),
-            "CrLf" => Some(LineEnding::CrLf),
-            _ => None,
+impl core::str::FromStr for LineEnding {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "Lf" => Ok(LineEnding::Lf),
+            "CrLf" => Ok(LineEnding::CrLf),
+            _ => Err(()),
         }
     }
 }
@@ -93,7 +97,7 @@ impl AsciiLinesTemplate {
         let line_ending = v
             .get("line_ending")
             .and_then(|x| x.as_str())
-            .and_then(LineEnding::from_str)
+            .and_then(|value| value.parse().ok())
             .ok_or_else(|| "ascii_lines template: missing/invalid line_ending".to_string())?;
         let leading_whitespace = v
             .get("leading_whitespace")
@@ -172,10 +176,7 @@ pub fn detect_ascii_int_lines(data: &[u8]) -> Option<AsciiLinesTemplate> {
     // integer), so don't try to fingerprint it.
     let scan_end = match line_ending {
         LineEnding::Lf => sniff.iter().rposition(|&b| b == b'\n').map(|p| p + 1),
-        LineEnding::CrLf => sniff
-            .windows(2)
-            .rposition(|w| w == b"\r\n")
-            .map(|p| p + 2),
+        LineEnding::CrLf => sniff.windows(2).rposition(|w| w == b"\r\n").map(|p| p + 2),
     };
     let scan = match scan_end {
         Some(end) => &sniff[..end],
@@ -209,7 +210,7 @@ pub fn detect_ascii_int_lines(data: &[u8]) -> Option<AsciiLinesTemplate> {
         }
         // Parse + bounds check.
         let parsed = std::str::from_utf8(rest).ok()?.parse::<i32>().ok()?;
-        if parsed > VALUE_BOUND || parsed < -VALUE_BOUND - 1 {
+        if !(-VALUE_BOUND - 1..=VALUE_BOUND).contains(&parsed) {
             return None;
         }
         tokens_seen += 1;
@@ -291,6 +292,7 @@ pub fn parse_ascii_int_lines(
 
 /// Inverse of `parse_ascii_int_lines` — given the recovered samples
 /// + the stored template, produce the original byte sequence. Together
+///
 /// with `parse_ascii_int_lines`, this provides the bit-exact roundtrip
 /// promised by ADR 0023.
 pub fn render_ascii_int_lines(samples: &[i16], template: &AsciiLinesTemplate) -> Vec<u8> {
@@ -318,7 +320,7 @@ pub fn render_ascii_int_lines(samples: &[i16], template: &AsciiLinesTemplate) ->
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
-fn split_lines<'a>(data: &'a [u8], le: LineEnding) -> impl Iterator<Item = &'a [u8]> {
+fn split_lines(data: &[u8], le: LineEnding) -> impl Iterator<Item = &[u8]> {
     let sep = le.as_bytes();
     let sep_len = sep.len();
     let mut start = 0usize;
@@ -385,7 +387,7 @@ mod tests {
         // Need >= 64 tokens.
         let mut bytes = Vec::new();
         for i in 0..100 {
-            let v = (i as i32 - 50) * 3;
+            let v = (i - 50) * 3;
             bytes.extend_from_slice(format!("{}\n", v).as_bytes());
         }
         let t = detect_ascii_int_lines(&bytes).expect("should detect");
@@ -399,7 +401,7 @@ mod tests {
     fn detect_bonn_n_style_crlf_with_leading_ws() {
         let mut bytes = Vec::new();
         for i in 0..100 {
-            let v = (i as i32 - 50) * 3;
+            let v = (i - 50) * 3;
             bytes.extend_from_slice(format!("  {}\r\n", v).as_bytes());
         }
         let t = detect_ascii_int_lines(&bytes).expect("should detect");
@@ -435,7 +437,7 @@ mod tests {
     fn parse_then_render_roundtrip_lf() {
         let mut bytes = Vec::new();
         for i in 0..200 {
-            let v = (i as i32 % 100) - 50;
+            let v = (i % 100) - 50;
             bytes.extend_from_slice(format!("{}\n", v).as_bytes());
         }
         let t = detect_ascii_int_lines(&bytes).unwrap();
@@ -448,7 +450,7 @@ mod tests {
     fn parse_then_render_roundtrip_crlf_leading_ws() {
         let mut bytes = Vec::new();
         for i in 0..120 {
-            let v = (i as i32 % 200) - 100;
+            let v = (i % 200) - 100;
             bytes.extend_from_slice(format!("  {}\r\n", v).as_bytes());
         }
         let t = detect_ascii_int_lines(&bytes).unwrap();

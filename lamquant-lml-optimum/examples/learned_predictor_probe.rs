@@ -43,8 +43,16 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
 /// signed magnitude bucket of a residual: sign · bit_length(|x|) → small alphabet.
 fn qbucket(x: i64) -> i32 {
     let m = x.unsigned_abs();
-    let b = if m == 0 { 0 } else { 64 - m.leading_zeros() as i32 };
-    if x < 0 { -b } else { b }
+    let b = if m == 0 {
+        0
+    } else {
+        64 - m.leading_zeros() as i32
+    };
+    if x < 0 {
+        -b
+    } else {
+        b
+    }
 }
 
 /// All RLS residuals of a corpus, concatenated per channel (kept as channels so
@@ -65,7 +73,13 @@ fn entropy_of(counts: &HashMap<i64, u64>) -> f64 {
         return 0.0;
     }
     let nf = n as f64;
-    -counts.values().map(|&c| { let p = c as f64 / nf; p * p.log2() }).sum::<f64>()
+    -counts
+        .values()
+        .map(|&c| {
+            let p = c as f64 / nf;
+            p * p.log2()
+        })
+        .sum::<f64>()
 }
 
 /// Order-0 entropy (bits/symbol) over all residuals.
@@ -134,13 +148,20 @@ fn cross_entropy(res_b: &[Vec<i64>], model_a: &CondModel, order: usize) -> f64 {
                     let d = h.len() as u64;
                     (*h.get(&ch[t]).unwrap_or(&0) as f64 + 1.0) / (tot as f64 + d as f64 + 1.0)
                 }
-                None => (*global.get(&ch[t]).unwrap_or(&0) as f64 + 1.0) / (gtot as f64 + gdist as f64 + 1.0),
+                None => {
+                    (*global.get(&ch[t]).unwrap_or(&0) as f64 + 1.0)
+                        / (gtot as f64 + gdist as f64 + 1.0)
+                }
             };
             bits += -p.log2();
             n += 1;
         }
     }
-    if n > 0 { bits / n as f64 } else { 0.0 }
+    if n > 0 {
+        bits / n as f64
+    } else {
+        0.0
+    }
 }
 
 fn main() {
@@ -158,11 +179,17 @@ fn main() {
     let (h1a, model1a) = fit_conditional(&res_a, 1);
     let (h2a, _model2a) = fit_conditional(&res_a, 2);
     println!("# Stage-0b: learned-predictor headroom on the RLS residual (bits/sym)");
-    println!("  {:<14} | {:>8} {:>8} {:>8} | {:>10} {:>10}", "corpus", "H0", "H|1", "H|2", "head1%", "head2%");
+    println!(
+        "  {:<14} | {:>8} {:>8} {:>8} | {:>10} {:>10}",
+        "corpus", "H0", "H|1", "H|2", "head1%", "head2%"
+    );
     let row = |lbl: &str, h0v: f64, h1v: f64, h2v: f64| {
         println!(
             "  {:<14} | {:>8.4} {:>8.4} {:>8.4} | {:>9.2}% {:>9.2}%",
-            lbl, h0v, h1v, h2v,
+            lbl,
+            h0v,
+            h1v,
+            h2v,
             100.0 * (h0v - h1v) / h0v,
             100.0 * (h0v - h2v) / h0v
         );
@@ -180,12 +207,16 @@ fn main() {
 
         // cross-corpus: A's order-1 model applied to B
         let xeb = cross_entropy(&res_b, &model1a, 1);
-        println!("\n# Stage-0b CROSS-CORPUS (the killer test): fit on {a_label}, eval on {b_label}");
+        println!(
+            "\n# Stage-0b CROSS-CORPUS (the killer test): fit on {a_label}, eval on {b_label}"
+        );
         println!("  {b_label} own H|1 = {h1b:.4} bits/sym");
         println!("  {b_label} under {a_label}'s frozen order-1 model = {xeb:.4} bits/sym  ({:+.2}% vs own, {:+.2}% vs B's H0)",
             100.0 * (xeb - h1b) / h1b, 100.0 * (xeb - h0b) / h0b);
         println!("\n# VERDICT");
-        println!("# - headroom: if head2% is large (≫ scale_cond's residual), a context-model/predictor");
+        println!(
+            "# - headroom: if head2% is large (≫ scale_cond's residual), a context-model/predictor"
+        );
         println!("#   has real structure to exploit; if ~0, the residual is white → predictor is a dead end.");
         println!("# - generalization: if the frozen cross-corpus cross-entropy is WORSE than B's own H0,");
         println!("#   a FROZEN learned model fails cross-corpus (like the +5.9% probe) → only ONLINE-adaptive");

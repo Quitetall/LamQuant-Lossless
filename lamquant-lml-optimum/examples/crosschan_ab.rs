@@ -45,7 +45,11 @@ fn prd(orig: &[Vec<i64>], recon: &[Vec<i64>]) -> f64 {
             den += (*a as f64 - m) * (*a as f64 - m);
         }
     }
-    if den == 0.0 { 0.0 } else { 100.0 * (num / den).sqrt() }
+    if den == 0.0 {
+        0.0
+    } else {
+        100.0 * (num / den).sqrt()
+    }
 }
 
 fn energy(x: &[Vec<i64>]) -> f64 {
@@ -62,7 +66,11 @@ fn energy(x: &[Vec<i64>]) -> f64 {
 /// Closed-loop cross-channel encode→decode at `target` BPS with ridge
 /// `ridge_frac`. Returns (total bytes incl. coeff header, reconstruction,
 /// residual-energy / original-energy ratio).
-fn crosschan_roundtrip(sig: &[Vec<i64>], target: f64, ridge_frac: f64) -> (usize, Vec<Vec<i64>>, f64) {
+fn crosschan_roundtrip(
+    sig: &[Vec<i64>],
+    target: f64,
+    ridge_frac: f64,
+) -> (usize, Vec<Vec<i64>>, f64) {
     let n_ch = sig.len();
     let t = sig[0].len();
     let pred = crosschan::fit_predictor_ridged(sig, ridge_frac);
@@ -70,7 +78,11 @@ fn crosschan_roundtrip(sig: &[Vec<i64>], target: f64, ridge_frac: f64) -> (usize
     let mut x_hat: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     let mut residuals: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for i in 0..n_ch {
-        let p = if i == 0 { vec![0i64; t] } else { pred.predict_channel(i, &x_hat, t) };
+        let p = if i == 0 {
+            vec![0i64; t]
+        } else {
+            pred.predict_channel(i, &x_hat, t)
+        };
         let resid: Vec<i64> = (0..t).map(|k| sig[i][k] - p[k]).collect();
         residuals.push(resid.clone());
         let body = lmo_pcrd97::encode_target_bps_97(&[resid], target, LpcMode::default())
@@ -85,7 +97,9 @@ fn crosschan_roundtrip(sig: &[Vec<i64>], target: f64, ridge_frac: f64) -> (usize
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
     let sig = read_window(&path);
     let n_ch = sig.len();
     let t = sig[0].len();
@@ -104,7 +118,10 @@ fn main() {
             "\n# target {target:.1} BPS  baseline 9/7+arith: {:.3} bps, PRD {prd97:.3}",
             b97.len() as f64 * 8.0 / nm
         );
-        println!("# {:>8} | {:>8} {:>9} {:>8} | {:>8}", "ridge", "cc bps", "cc PRD", "resE", "dPRD%");
+        println!(
+            "# {:>8} | {:>8} {:>9} {:>8} | {:>8}",
+            "ridge", "cc bps", "cc PRD", "resE", "dPRD%"
+        );
         for &ridge in &[1e-6f64, 1e-2, 1e-1, 0.3, 1.0, 3.0] {
             let (cc_bytes, r_cc, ratio) = crosschan_roundtrip(&sig, target, ridge);
             let prd_cc = prd(&sig, &r_cc);

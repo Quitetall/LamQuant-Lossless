@@ -120,7 +120,7 @@ pub fn min_bits_for(coeffs: &[i64]) -> Result<u8, BitPackError> {
 pub fn encoded_byte_len(coeffs: &[i64]) -> Result<usize, BitPackError> {
     let n_bits = min_bits_for(coeffs)? as usize;
     let payload_bits = coeffs.len() * n_bits;
-    let payload_bytes = (payload_bits + 7) / 8;
+    let payload_bytes = payload_bits.div_ceil(8);
     Ok(1 + payload_bytes) // 1-byte header + payload
 }
 
@@ -130,7 +130,7 @@ pub fn encoded_byte_len(coeffs: &[i64]) -> Result<usize, BitPackError> {
 pub fn encode_dense(coeffs: &[i64]) -> Result<Vec<u8>, BitPackError> {
     let n_bits = min_bits_for(coeffs)?;
     let payload_bits = coeffs.len() * n_bits as usize;
-    let payload_bytes = (payload_bits + 7) / 8;
+    let payload_bytes = payload_bits.div_ceil(8);
     let mut out = Vec::with_capacity(1 + payload_bytes);
     out.push(n_bits);
     out.resize(1 + payload_bytes, 0);
@@ -161,10 +161,7 @@ pub fn encode_dense(coeffs: &[i64]) -> Result<Vec<u8>, BitPackError> {
 /// band; the function reads `1 + ceil(n_samples × n_bits / 8)` bytes
 /// from `bytes` starting at offset 0 and returns the decoded `Vec<i64>`
 /// + how many bytes were consumed.
-pub fn decode_dense(
-    bytes: &[u8],
-    n_samples: usize,
-) -> Result<(Vec<i64>, usize), BitPackError> {
+pub fn decode_dense(bytes: &[u8], n_samples: usize) -> Result<(Vec<i64>, usize), BitPackError> {
     if bytes.is_empty() {
         return Err(BitPackError::Truncated);
     }
@@ -173,7 +170,7 @@ pub fn decode_dense(
         return Err(BitPackError::InvalidBitWidth(n_bits));
     }
     let payload_bits = n_samples * n_bits as usize;
-    let payload_bytes = (payload_bits + 7) / 8;
+    let payload_bytes = payload_bits.div_ceil(8);
     if bytes.len() < 1 + payload_bytes {
         return Err(BitPackError::Truncated);
     }

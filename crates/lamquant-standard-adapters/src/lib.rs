@@ -15,6 +15,9 @@ use semantic_abir::{AbirDataset, ContentId, PayloadAccess, PayloadLease, Validat
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+mod edf_full;
+pub use edf_full::EdfAdapter;
+
 #[derive(Clone, Copy)]
 enum ParserKind {
     Edf,
@@ -304,24 +307,6 @@ impl Adapter for StandardFileAdapter {
     }
 }
 
-pub struct EdfAdapter(StandardFileAdapter);
-
-impl EdfAdapter {
-    pub fn new(max_source_bytes: u64) -> Self {
-        Self(StandardFileAdapter::new(
-            profile(
-                "edfplus.1.signal",
-                "EDF/EDF+/BDF",
-                "EDF+ 1 signal subset",
-                &["application/edf", "application/bdf"],
-                "pyedflib",
-            ),
-            ParserKind::Edf,
-            max_source_bytes,
-        ))
-    }
-}
-
 pub struct DicomAdapter(StandardFileAdapter);
 
 impl DicomAdapter {
@@ -559,7 +544,6 @@ macro_rules! delegate_adapter {
     };
 }
 
-delegate_adapter!(EdfAdapter);
 delegate_adapter!(DicomAdapter);
 delegate_adapter!(NwbAdapter);
 

@@ -10,6 +10,8 @@
 //!   --example tuh_tune -- <bin> [<bin> ...]
 //! ```
 
+#![allow(clippy::doc_lazy_continuation)]
+
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -69,7 +71,10 @@ fn main() {
         let (mut container, mut grid, mut search) = (0usize, 0usize, 0usize);
         // per-window winners for THIS recording (a config can win on some windows)
         for win in windows(&sig) {
-            container += LmoCodec.encode(&win, Mode::Lossless).map(|b| b.len()).unwrap_or(0);
+            container += LmoCodec
+                .encode(&win, Mode::Lossless)
+                .map(|b| b.len())
+                .unwrap_or(0);
             grid += mv_rls::encode(&win).map(|b| b.len()).unwrap_or(usize::MAX);
             let mut best = usize::MAX;
             let mut bestp = (0.0f64, 0usize, 0usize, 0usize);
@@ -87,7 +92,9 @@ fn main() {
                 }
             }
             search += best;
-            *winners.entry(((bestp.0 * 10000.0) as u64, bestp.1, bestp.2, bestp.3)).or_insert(0) += 1;
+            *winners
+                .entry(((bestp.0 * 10000.0) as u64, bestp.1, bestp.2, bestp.3))
+                .or_insert(0) += 1;
         }
         let name = path.rsplit('/').next().unwrap_or(path);
         let vs_grid = 100.0 * (search as f64 - grid as f64) / grid as f64;
@@ -100,16 +107,33 @@ fn main() {
         sum_search += search as u64;
         sum_container += container as u64;
     }
-    println!("\n  TOTALS: container {} | mvrls_grid {} | search {} ({:+.2}% vs grid)",
-        sum_container, sum_grid, sum_search,
-        100.0 * (sum_search as f64 - sum_grid as f64) / sum_grid as f64);
+    println!(
+        "\n  TOTALS: container {} | mvrls_grid {} | search {} ({:+.2}% vs grid)",
+        sum_container,
+        sum_grid,
+        sum_search,
+        100.0 * (sum_search as f64 - sum_grid as f64) / sum_grid as f64
+    );
     println!("\n  winning params (count) — candidates to ADD to CONFIGS (keep-best, never-worse):");
     let mut wv: Vec<_> = winners.into_iter().collect();
-    wv.sort_by(|a, b| b.1.cmp(&a.1));
+    wv.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     for ((lm, rst, m, seg), cnt) in wv {
-        println!("    ({:.4}, {}, {}) seg={}   x{}", lm as f64 / 10000.0, rst, m, seg, cnt);
+        println!(
+            "    ({:.4}, {}, {}) seg={}   x{}",
+            lm as f64 / 10000.0,
+            rst,
+            m,
+            seg,
+            cnt
+        );
     }
-    println!("\n  # 'search vs grid' < 0 ⇒ configs outside the current grid cut TUH bytes ⇒ add them.");
-    println!("  # 'MV*' marks recordings where MV-RLS already binds (≤ container); only there does");
-    println!("  # tuning MV-RLS configs change the shipped bytes. Validate on held-out + no-regression.");
+    println!(
+        "\n  # 'search vs grid' < 0 ⇒ configs outside the current grid cut TUH bytes ⇒ add them."
+    );
+    println!(
+        "  # 'MV*' marks recordings where MV-RLS already binds (≤ container); only there does"
+    );
+    println!(
+        "  # tuning MV-RLS configs change the shipped bytes. Validate on held-out + no-regression."
+    );
 }

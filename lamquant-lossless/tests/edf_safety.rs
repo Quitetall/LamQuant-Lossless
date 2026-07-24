@@ -23,24 +23,6 @@ fn write_tmp(bytes: &[u8]) -> tempfile::NamedTempFile {
     tf
 }
 
-/// Build a 256-byte EDF main header padded with spaces. The EDF
-/// spec requires fixed-width ASCII fields; this helper makes the
-/// padding explicit so tests can override one field at a time.
-fn ascii_header(version: &str) -> Vec<u8> {
-    let mut h = Vec::with_capacity(256);
-    // version: 8 chars, "0       " for EDF
-    let mut v = version.as_bytes().to_vec();
-    v.resize(8, b' ');
-    h.extend_from_slice(&v);
-    // patient_id, recording_id: 80 + 80 = 160, all spaces
-    h.resize(8 + 80 + 80, b' ');
-    // startdate (8), starttime (8)
-    h.resize(8 + 80 + 80 + 8 + 8, b' ');
-    // header_bytes (8), reserved (44), n_data_records (8), dur_record (8), n_signals (4)
-    h.resize(256, b' ');
-    h
-}
-
 #[test]
 fn read_edf_rejects_bad_bdf_magic() {
     // 0xFF prefix without "BIOSEMI" used to be silently accepted

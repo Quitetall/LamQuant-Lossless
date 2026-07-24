@@ -29,9 +29,17 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
 
 fn main() {
     const W: usize = 32768;
-    let bins: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect();
-    println!("Shipped lmo::encode(Mode::BoundedMae) — windowed at {W}  (tid 3 = mv_rls-bounded won)");
-    println!("{:>14}  {:>4}  {:>9}  {:>12}  {:>8}", "recording", "δ", "bps", "mv_rls won", "maxErr");
+    let bins: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
+    println!(
+        "Shipped lmo::encode(Mode::BoundedMae) — windowed at {W}  (tid 3 = mv_rls-bounded won)"
+    );
+    println!(
+        "{:>14}  {:>4}  {:>9}  {:>12}  {:>8}",
+        "recording", "δ", "bps", "mv_rls won", "maxErr"
+    );
     for p in &bins {
         let sig = read_bin(p);
         let (nch, t) = (sig.len(), sig[0].len());

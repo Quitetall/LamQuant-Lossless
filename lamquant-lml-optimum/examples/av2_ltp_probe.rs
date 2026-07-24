@@ -18,13 +18,13 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example av2_ltp_probe -- <bin>...
 
-use std::fs;
 use lamquant_lml_optimum::{entropy, mv_rls};
+use std::fs;
 
-const W: usize = 32768;      // entropy window
-const BLK: usize = 8192;     // LTP lag re-estimation block
+const W: usize = 32768; // entropy window
+const BLK: usize = 8192; // LTP lag re-estimation block
 const TMIN: usize = 16;
-const TMAX: usize = 512;     // covers ECG-ish + slow rhythmic EEG at typical fs
+const TMAX: usize = 512; // covers ECG-ish + slow rhythmic EEG at typical fs
 
 fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let b = fs::read(path).expect("read");
@@ -34,17 +34,24 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let mut s = Vec::with_capacity(nch);
     for _ in 0..nch {
         let mut ch = Vec::with_capacity(t);
-        for _ in 0..t { ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64); off += 4; }
+        for _ in 0..t {
+            ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64);
+            off += 4;
+        }
         s.push(ch);
     }
     s
 }
 
 fn entropy_bytes(q: &[i64]) -> usize {
-    let mut tot = 0; let mut s = 0;
+    let mut tot = 0;
+    let mut s = 0;
     while s < q.len() {
         let e = (s + W).min(q.len());
-        tot += entropy::encode(&q[s..e]).map(|g| g.len()).unwrap_or(1 << 30) + 4;
+        tot += entropy::encode(&q[s..e])
+            .map(|g| g.len())
+            .unwrap_or(1 << 30)
+            + 4;
         s = e;
     }
     tot
@@ -64,30 +71,51 @@ fn ltp_channel(r: &[i64]) -> (Vec<i64>, f64) {
         let mut best_t = 0usize;
         let mut best_red = 0.0f64; // energy reduction
         let e0: f64 = (bs..be).map(|i| (r[i] * r[i]) as f64).sum();
-        if e0 <= 0.0 { bs = be; continue; }
+        if e0 <= 0.0 {
+            bs = be;
+            continue;
+        }
         for t in TMIN..=TMAX {
             let mut num = 0.0f64; // Σ r·r_T
             let mut den = 0.0f64; // Σ r_T²
             for i in bs..be {
-                if i < t { continue; }
+                if i < t {
+                    continue;
+                }
                 let rt = r[i - t] as f64;
                 num += r[i] as f64 * rt;
                 den += rt * rt;
             }
-            if den <= 0.0 { continue; }
+            if den <= 0.0 {
+                continue;
+            }
             let g = num / den;
             // energy after LTP ≈ e0_block - num²/den (LS residual energy drop)
             let red = num * num / den;
-            if red > best_red { best_red = red; best_t = t; }
+            if red > best_red {
+                best_red = red;
+                best_t = t;
+            }
             let _ = g;
         }
         // apply if the reduction is worth the ~per-block side info (lag u16 + gain ~ 3 bytes ≈ 24 bits)
         if best_t != 0 && best_red > 24.0 * 8.0 {
             // recompute gain at best_t
-            let mut num = 0.0; let mut den = 0.0;
-            for i in bs..be { if i >= best_t { let rt = r[i - best_t] as f64; num += r[i] as f64 * rt; den += rt * rt; } }
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for i in bs..be {
+                if i >= best_t {
+                    let rt = r[i - best_t] as f64;
+                    num += r[i] as f64 * rt;
+                    den += rt * rt;
+                }
+            }
             let g = num / den;
-            for i in bs..be { if i >= best_t { out[i] = r[i] - (g * r[i - best_t] as f64).round() as i64; } }
+            for i in bs..be {
+                if i >= best_t {
+                    out[i] = r[i] - (g * r[i - best_t] as f64).round() as i64;
+                }
+            }
             active += 1;
         }
         bs = be;
@@ -117,11 +145,25 @@ fn main() {
         let total = ltp + side;
         let d = 100.0 * (total as f64 - base as f64) / base as f64;
         println!("## {} ({}ch x {})", name, nch, t);
-        println!("   baseline (mv_rls resid)  = {:>10} ({:.4} bps)", base, base as f64 * 8.0 / nm);
-        println!("   + LTP cascade            = {:>10} + side {:>7} = {:>10}  ({:+.2}% vs baseline)", ltp, side, total, d);
-        println!("   blocks with LTP gain     = {:.1}%  (high ⇒ residual periodicity mv_rls missed)", 100.0 * act / nch as f64);
+        println!(
+            "   baseline (mv_rls resid)  = {:>10} ({:.4} bps)",
+            base,
+            base as f64 * 8.0 / nm
+        );
+        println!(
+            "   + LTP cascade            = {:>10} + side {:>7} = {:>10}  ({:+.2}% vs baseline)",
+            ltp, side, total, d
+        );
+        println!(
+            "   blocks with LTP gain     = {:.1}%  (high ⇒ residual periodicity mv_rls missed)",
+            100.0 * act / nch as f64
+        );
         println!();
     }
-    println!("# negative ⇒ LTP shaves residual periodicity mv_rls couldn't reach. Expected strong on");
-    println!("# ECG/rhythmic, ~0 on desynchronised scalp EEG. (ECG untested — no ECG data on hand.)");
+    println!(
+        "# negative ⇒ LTP shaves residual periodicity mv_rls couldn't reach. Expected strong on"
+    );
+    println!(
+        "# ECG/rhythmic, ~0 on desynchronised scalp EEG. (ECG untested — no ECG data on hand.)"
+    );
 }

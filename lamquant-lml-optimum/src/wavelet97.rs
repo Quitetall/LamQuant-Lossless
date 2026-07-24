@@ -281,13 +281,19 @@ mod tests {
     use super::*;
 
     fn max_abs_err(a: &[i64], b: &[i64]) -> i64 {
-        a.iter().zip(b).map(|(x, y)| (x - y).abs()).max().unwrap_or(0)
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .max()
+            .unwrap_or(0)
     }
 
     #[test]
     fn single_level_roundtrip_various_lengths() {
         for n in [2usize, 3, 4, 7, 8, 10, 63, 128, 625, 1250, 2500] {
-            let signal: Vec<f64> = (0..n).map(|i| ((i * 137) % 10000) as f64 - 5000.0).collect();
+            let signal: Vec<f64> = (0..n)
+                .map(|i| ((i * 137) % 10000) as f64 - 5000.0)
+                .collect();
             let (a, d) = forward_97(&signal);
             assert_eq!(a.len(), n.div_ceil(2), "approx len at n={n}");
             assert_eq!(d.len(), n / 2, "detail len at n={n}");

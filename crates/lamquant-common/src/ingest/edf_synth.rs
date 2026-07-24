@@ -4,6 +4,7 @@
 //!   - Header length = `SYNTH_EDF_HEADER_LEN` bytes (main 256 + signal 256).
 //!   - Sample data is little-endian `i16`, immediately after header.
 //!   - Exactly one signal, one record, `samples_per_record = samples.len()`.
+//!
 //! Bumping any of these is a wire-format change — extract code that
 //! reads back from the manifest's `synthetic_from` template depends
 //! on the constants below being stable. Add new layouts as a new
@@ -66,9 +67,9 @@ pub fn synth_single_channel_edf(samples: &[i16], sample_rate: f64) -> Vec<u8> {
     push_padded(&mut out, "EEG ch0", 16); // label
     push_padded(&mut out, "", 80); // transducer
     push_padded(&mut out, "uV", 8); // phys_dim
-    // Use the full i16 domain so the parser's observed range is always
-    // representable. Pre-fix versions used ±2048 (12-bit) which clipped
-    // S-set Bonn data (range ±1885 — within ±2048 by luck, not design).
+                                    // Use the full i16 domain so the parser's observed range is always
+                                    // representable. Pre-fix versions used ±2048 (12-bit) which clipped
+                                    // S-set Bonn data (range ±1885 — within ±2048 by luck, not design).
     push_padded(&mut out, "-32768", 8);
     push_padded(&mut out, "32767", 8);
     push_padded(&mut out, "-32768", 8);

@@ -17,8 +17,8 @@
 //!
 //! cargo run -p lamquant-lml-optimum --features encode --release --example mcu_transform_skip_probe -- [W] <bin>...
 
-use std::fs;
 use lamquant_lml_mcu::{golomb, lml, lpc};
+use std::fs;
 
 const LVL: u8 = 3; // shipped default depth for clinical-scale windows (matches decomp probe)
 
@@ -71,13 +71,17 @@ fn main() {
         args.remove(0);
     }
     // Realistic MCU packet scales (~5s/10s/20s @ 256 Hz). Per-window stationarity varies at these sizes.
-    let wins: Vec<usize> = cli_w.map(|w| vec![w]).unwrap_or_else(|| vec![1280, 2560, 5120]);
+    let wins: Vec<usize> = cli_w
+        .map(|w| vec![w])
+        .unwrap_or_else(|| vec![1280, 2560, 5120]);
 
     println!("# Adaptive 5/3 transform-skip. ALWAYS = shipped (5/3 every window). PKT = per-window keep-best");
     println!("# n_levels∈{{0,3}} shared by all channels (wire-compatible NOW). CH = per-window-per-channel");
     println!("# (needs a per-channel n_levels wire change). Δ vs ALWAYS; skip%% = windows PKT picked skip.\n");
-    println!("{:>12} {:>5} {:>9} {:>9} {:>9} | {:>8} {:>8} | {:>7}",
-             "recording", "W", "ALWAYS", "PKT", "CH", "PKT/ALW", "CH/ALW", "skip%");
+    println!(
+        "{:>12} {:>5} {:>9} {:>9} {:>9} | {:>8} {:>8} | {:>7}",
+        "recording", "W", "ALWAYS", "PKT", "CH", "PKT/ALW", "CH/ALW", "skip%"
+    );
 
     for path in &args {
         let sig = read_bin(path);
@@ -113,12 +117,20 @@ fn main() {
             let bps = |x: usize| x as f64 * 8.0 / nm;
             let name = path.rsplit('/').next().unwrap_or(path);
             let d = |x: usize| 100.0 * (x as f64 - always as f64) / always as f64;
-            println!("{name:>12} {w:>5} {:>9.4} {:>9.4} {:>9.4} | {:>+7.3}% {:>+7.3}% | {:>6.1}%",
-                     bps(always), bps(pkt_tot), bps(ch_tot), d(pkt_tot), d(ch_tot),
-                     100.0 * n_skip as f64 / n_win.max(1) as f64);
+            println!(
+                "{name:>12} {w:>5} {:>9.4} {:>9.4} {:>9.4} | {:>+7.3}% {:>+7.3}% | {:>6.1}%",
+                bps(always),
+                bps(pkt_tot),
+                bps(ch_tot),
+                d(pkt_tot),
+                d(ch_tot),
+                100.0 * n_skip as f64 / n_win.max(1) as f64
+            );
         }
     }
     println!("\n# PKT/ALW < 0 ⇒ wire-compatible per-window transform-skip is a real never-worse win (ship it).");
     println!("# CH/ALW materially below PKT/ALW ⇒ per-channel n_levels (a wire change) buys enough more to");
-    println!("# justify the schema bump; CH ≈ PKT ⇒ per-packet skip captures it, no wire change needed.");
+    println!(
+        "# justify the schema bump; CH ≈ PKT ⇒ per-packet skip captures it, no wire change needed."
+    );
 }

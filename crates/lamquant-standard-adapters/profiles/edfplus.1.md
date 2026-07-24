@@ -1,13 +1,18 @@
-# EDF/EDF+/BDF mapping profile `edfplus.1.signal`
+# EDF/EDF+/BDF mapping profile `edfplus.1`
 
-- Projects decoded channel order, integer sample values, regular sample rate,
-  and labels into ABIR. Physical calibration, absolute recording origin, and
-  EDF+ discontinuities are not promoted; EDF+D inputs fail closed.
+- Promotes every non-annotation channel, including off-rate channels, as an
+  exact integer signal with its own rational sample rate and exact affine
+  physical calibration.
+- Maps EDF+D record timekeeping annotations to piecewise time axes. Missing or
+  malformed timekeeping evidence fails closed instead of being flattened.
+- Promotes EDF+ TAL annotations to explicit events and an exact annotation
+  payload. Annotation text, onset, and optional duration are retained.
+- Preserves the local recording date/time and explicitly marks the absent EDF
+  timezone rather than inventing UTC.
+- Supports EDF, EDF+C, EDF+D, and signed 24-bit BDF samples.
 - Binds the complete original file as an exact source capsule.
-- Exact export currently restores that capsule; synthesized export from a
-  transformed ABIR dataset is not yet claimed.
-- EDF Annotations and off-rate/non-signal channels remain recoverable in the
-  source capsule but are not yet promoted into ABIR temporal tables.
-- Status remains forensic/projected. First-class status requires calibration
-  and timing promotion plus independent EDFbrowser evidence in addition to the
-  internal malformed-input and round-trip suite.
+- Exact export restores that identity-bound capsule. A changed semantic root
+  cannot authorize a stale source capsule.
+- The first-class profile is independently checked with pyedflib across EDF+C,
+  EDF+D, and BDF fixtures; the source capsule additionally preserves private or
+  future header fields outside the standardized semantic surface.

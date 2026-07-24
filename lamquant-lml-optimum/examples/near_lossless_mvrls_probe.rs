@@ -19,8 +19,8 @@
 //! Run UNDER the cap: `ulimit -v 8388608`.
 //! cargo run -p lamquant-lml-optimum --features encode --release --example near_lossless_mvrls_probe -- <bin>...
 
-use std::fs;
 use lamquant_lml_optimum::{entropy, mv_rls};
+use std::fs;
 
 const W: usize = 32768;
 
@@ -32,17 +32,24 @@ fn read_bin(path: &str) -> Vec<Vec<i64>> {
     let mut s = Vec::with_capacity(nch);
     for _ in 0..nch {
         let mut ch = Vec::with_capacity(t);
-        for _ in 0..t { ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64); off += 4; }
+        for _ in 0..t {
+            ch.push(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as i64);
+            off += 4;
+        }
         s.push(ch);
     }
     s
 }
 
 fn entropy_bytes(q: &[i64]) -> usize {
-    let mut tot = 0; let mut s = 0;
+    let mut tot = 0;
+    let mut s = 0;
     while s < q.len() {
         let e = (s + W).min(q.len());
-        tot += entropy::encode(&q[s..e]).map(|g| g.len()).unwrap_or(1 << 30) + 4;
+        tot += entropy::encode(&q[s..e])
+            .map(|g| g.len())
+            .unwrap_or(1 << 30)
+            + 4;
         s = e;
     }
     tot
@@ -52,24 +59,50 @@ fn entropy_bytes(q: &[i64]) -> usize {
 const K: usize = 8;
 const M: usize = 32;
 const RESET: usize = 8192;
-struct Rls { n: usize, w: Vec<f64>, p: Vec<Vec<f64>>, lambda: f64 }
+struct Rls {
+    n: usize,
+    w: Vec<f64>,
+    p: Vec<Vec<f64>>,
+    lambda: f64,
+}
 impl Rls {
     fn new(n: usize, lambda: f64) -> Self {
         let mut p = vec![vec![0.0f64; n]; n];
-        for i in 0..n { p[i][i] = 1.0; }
-        Self { n, w: vec![0.0; n], p, lambda }
+        for i in 0..n {
+            p[i][i] = 1.0;
+        }
+        Self {
+            n,
+            w: vec![0.0; n],
+            p,
+            lambda,
+        }
     }
-    fn predict(&self, r: &[f64]) -> f64 { (0..self.n).map(|k| self.w[k] * r[k]).sum() }
+    fn predict(&self, r: &[f64]) -> f64 {
+        (0..self.n).map(|k| self.w[k] * r[k]).sum()
+    }
     fn adapt(&mut self, r: &[f64], x: f64, pred: f64) {
         let n = self.n;
         let mut px = vec![0.0; n];
-        for i in 0..n { px[i] = (0..n).map(|j| self.p[i][j] * r[j]).sum(); }
+        for i in 0..n {
+            px[i] = (0..n).map(|j| self.p[i][j] * r[j]).sum();
+        }
         let mut den = self.lambda;
-        for j in 0..n { den += r[j] * px[j]; }
-        let inv = 1.0 / den; let e = x - pred;
-        for i in 0..n { self.w[i] += px[i] * inv * e; }
+        for j in 0..n {
+            den += r[j] * px[j];
+        }
+        let inv = 1.0 / den;
+        let e = x - pred;
+        for i in 0..n {
+            self.w[i] += px[i] * inv * e;
+        }
         let il = 1.0 / self.lambda;
-        for i in 0..n { let ki = px[i] * inv; for j in 0..n { self.p[i][j] = (self.p[i][j] - ki * px[j]) * il; } }
+        for i in 0..n {
+            let ki = px[i] * inv;
+            for j in 0..n {
+                self.p[i][j] = (self.p[i][j] - ki * px[j]) * il;
+            }
+        }
     }
 }
 
@@ -90,21 +123,29 @@ fn closed_loop_nl(sig: &[Vec<i64>], delta: i64) -> (usize, i64) {
         let mut q_res = Vec::with_capacity(t);
         let mut rec = Vec::with_capacity(t);
         for n in 0..t {
-            if n != 0 && n % RESET == 0 { rls = Rls::new(order, 0.999); } // reset RLS only (mv_rls keeps own)
+            if n != 0 && n % RESET == 0 {
+                rls = Rls::new(order, 0.999);
+            } // reset RLS only (mv_rls keeps own)
             let mut reg = vec![0.0f64; order];
             reg[..K].copy_from_slice(&own);
-            for (i, &j) in refs.iter().enumerate() { reg[K + i] = xhat[j][n] as f64; } // reconstructed refs
+            for (i, &j) in refs.iter().enumerate() {
+                reg[K + i] = xhat[j][n] as f64;
+            } // reconstructed refs
             let pred = rls.predict(&reg);
             let pr = pred.round() as i64;
             let r = sig[c][n] - pr;
             let q = (r as f64 / grid as f64).round() as i64;
-            let xh = pr + grid * q;            // reconstruction
+            let xh = pr + grid * q; // reconstruction
             let err = (sig[c][n] - xh).abs();
-            if err > max_err { max_err = err; }
+            if err > max_err {
+                max_err = err;
+            }
             q_res.push(q);
             rec.push(xh);
-            rls.adapt(&reg, xh as f64, pred);  // adapt on reconstructed
-            for k in (1..K).rev() { own[k] = own[k - 1]; }
+            rls.adapt(&reg, xh as f64, pred); // adapt on reconstructed
+            for k in (1..K).rev() {
+                own[k] = own[k - 1];
+            }
             own[0] = xh as f64;
         }
         bytes += entropy_bytes(&q_res);
@@ -114,7 +155,9 @@ fn closed_loop_nl(sig: &[Vec<i64>], delta: i64) -> (usize, i64) {
 }
 
 fn main() {
-    println!("# Guaranteed-bound near-lossless on the MV-RLS residual (δ = max per-sample error)\n");
+    println!(
+        "# Guaranteed-bound near-lossless on the MV-RLS residual (δ = max per-sample error)\n"
+    );
     let deltas = [0i64, 1, 2, 3, 5, 8, 12, 16, 24, 32, 48, 64];
     for path in std::env::args().skip(1) {
         let sig = read_bin(&path);
@@ -123,18 +166,33 @@ fn main() {
         let res = mv_rls::residuals(&sig, 0, 0); // shipped Optimum residual
         let name = path.rsplit('/').next().unwrap_or(&path);
         println!("## {} ({}ch x {})", name, nch, t);
-        println!("  {:>4} | {:>5} | {:>10} {:>9} | {:>10} {:>9} {:>7}", "δ", "grid", "OL-bytes", "OL-bps", "CL-bytes", "CL-bps", "maxErr");
+        println!(
+            "  {:>4} | {:>5} | {:>10} {:>9} | {:>10} {:>9} {:>7}",
+            "δ", "grid", "OL-bytes", "OL-bps", "CL-bytes", "CL-bps", "maxErr"
+        );
         for &d in &deltas {
             let grid = (2 * d + 1) as f64;
             let mut ol = 0usize;
             for ch in &res {
-                let q: Vec<i64> = ch.iter().map(|&r| (r as f64 / grid).round() as i64).collect();
+                let q: Vec<i64> = ch
+                    .iter()
+                    .map(|&r| (r as f64 / grid).round() as i64)
+                    .collect();
                 ol += entropy_bytes(&q);
             }
             let (cl, me) = closed_loop_nl(&sig, d);
             let guard = if me <= d { "ok" } else { "VIOLATED!" };
-            println!("  {:>4} | {:>5} | {:>10} {:>9.4} | {:>10} {:>9.4} {:>4}{}", d, 2 * d + 1,
-                     ol, ol as f64 * 8.0 / nm, cl, cl as f64 * 8.0 / nm, me, guard);
+            println!(
+                "  {:>4} | {:>5} | {:>10} {:>9.4} | {:>10} {:>9.4} {:>4}{}",
+                d,
+                2 * d + 1,
+                ol,
+                ol as f64 * 8.0 / nm,
+                cl,
+                cl as f64 * 8.0 / nm,
+                me,
+                guard
+            );
         }
         println!();
     }

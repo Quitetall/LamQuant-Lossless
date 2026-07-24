@@ -134,7 +134,9 @@ mod tests {
     /// the encoder's Viterbi actually used (the load-bearing consistency property).
     #[test]
     fn decode_reproduces_encoder_recon() {
-        let coeffs: Vec<f64> = (0..500).map(|i| ((i as f64 * 0.3).sin() * 50.0) + ((i % 7) as f64 - 3.0)).collect();
+        let coeffs: Vec<f64> = (0..500)
+            .map(|i| ((i as f64 * 0.3).sin() * 50.0) + ((i % 7) as f64 - 3.0))
+            .collect();
         for &q in &[1i64, 3, 8, 32] {
             let levels = quantize_tcq(&coeffs, q, 1.0, 0.2 * (q * q) as f64);
             let recon_dec = dequantize_tcq(&levels, q);
@@ -142,7 +144,10 @@ mod tests {
             let mut s = 0u8;
             for (i, &lvl) in levels.iter().enumerate() {
                 let r = recon(s >> 1, lvl, q as f64);
-                assert!((r - recon_dec[i]).abs() < 1e-9, "decode mismatch at {i}, q={q}");
+                assert!(
+                    (r - recon_dec[i]).abs() < 1e-9,
+                    "decode mismatch at {i}, q={q}"
+                );
                 s = STATE_TRANS[s as usize][(lvl & 1) as usize];
             }
         }
@@ -153,11 +158,17 @@ mod tests {
     /// at that matched rate ⇒ TCQ MSE ≤ scalar-at-2q MSE.
     #[test]
     fn tcq_beats_rate_matched_scalar() {
-        let coeffs: Vec<f64> = (0..2000).map(|i| (i as f64 * 0.05).sin() * 200.0 + (i as f64 * 0.9).cos() * 40.0).collect();
+        let coeffs: Vec<f64> = (0..2000)
+            .map(|i| (i as f64 * 0.05).sin() * 200.0 + (i as f64 * 0.9).cos() * 40.0)
+            .collect();
         let q = 16i64;
         let levels = quantize_tcq(&coeffs, q, 1.0, 0.0); // λ=0 ⇒ pure distortion
         let tcq_recon = dequantize_tcq(&levels, q);
-        let tcq_mse: f64 = coeffs.iter().zip(&tcq_recon).map(|(&c, &r)| (c - r) * (c - r)).sum();
+        let tcq_mse: f64 = coeffs
+            .iter()
+            .zip(&tcq_recon)
+            .map(|(&c, &r)| (c - r) * (c - r))
+            .sum();
         // Rate-matched scalar: step 2q (same transmitted level magnitudes).
         let s2 = (2 * q) as f64;
         let scalar2_mse: f64 = coeffs
@@ -167,6 +178,9 @@ mod tests {
                 (c - r) * (c - r)
             })
             .sum();
-        assert!(tcq_mse <= scalar2_mse, "tcq {tcq_mse:.1} should beat rate-matched scalar-2q {scalar2_mse:.1}");
+        assert!(
+            tcq_mse <= scalar2_mse,
+            "tcq {tcq_mse:.1} should beat rate-matched scalar-2q {scalar2_mse:.1}"
+        );
     }
 }

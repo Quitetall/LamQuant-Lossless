@@ -9,12 +9,14 @@
 //!   --example lossy_rls_probe -- /tmp/chb01_01_60s.bin
 //! ```
 
+#![allow(clippy::needless_range_loop)] // explicit matrix updates mirror the RLS equations
+
 use std::fs;
 
 use lamquant_lml_mcu::lpc::LpcMode;
 use lamquant_lml_mcu::{golomb, lml, lpc};
-use lamquant_lml_optimum::{entropy, wavelet97};
 use lamquant_lml_optimum::wavelet97::round_i64;
+use lamquant_lml_optimum::{entropy, wavelet97};
 
 fn read_window(path: &str) -> Vec<Vec<i64>> {
     let bytes = fs::read(path).expect("read");
@@ -45,7 +47,11 @@ impl Rls {
         for i in 0..ORDER {
             p[i][i] = 1.0;
         }
-        Self { w: [0.0; ORDER], p, hist: [0.0; ORDER] }
+        Self {
+            w: [0.0; ORDER],
+            p,
+            hist: [0.0; ORDER],
+        }
     }
     fn step(&mut self, x: i64) -> i64 {
         let mut pred = 0.0;
@@ -94,15 +100,26 @@ fn lpc_golomb(idx: &[i64], sb: usize) -> usize {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/chb01_01_60s.bin".to_string());
     let sig = read_window(&path);
     let t = sig[0].len();
     let n_levels = lml::compute_n_levels(t);
-    let chan_subs: Vec<Vec<Vec<f64>>> = sig.iter().map(|c| wavelet97::forward_97_levels(c, n_levels)).collect();
-    let n_sub = chan_subs[0].len();
+    let chan_subs: Vec<Vec<Vec<f64>>> = sig
+        .iter()
+        .map(|c| wavelet97::forward_97_levels(c, n_levels))
+        .collect();
 
-    println!("# lossy-RLS probe: {} ({}ch). index-coding bytes at fixed q (same distortion).", path, sig.len());
-    println!("  {:>5} | {:>11} {:>11} {:>11} {:>8}", "q", "LPC+gol", "RLS+gol", "RLS+ent", "best dLPC");
+    println!(
+        "# lossy-RLS probe: {} ({}ch). index-coding bytes at fixed q (same distortion).",
+        path,
+        sig.len()
+    );
+    println!(
+        "  {:>5} | {:>11} {:>11} {:>11} {:>8}",
+        "q", "LPC+gol", "RLS+gol", "RLS+ent", "best dLPC"
+    );
     for &q in &[8i64, 16, 32, 64, 128] {
         let (mut lpc_b, mut rls_g, mut rls_e) = (0usize, 0usize, 0usize);
         for subs in &chan_subs {
@@ -117,8 +134,14 @@ fn main() {
         let best = rls_g.min(rls_e);
         println!(
             "  {:>5} | {:>11} {:>11} {:>11} {:>+7.1}%",
-            q, lpc_b, rls_g, rls_e, -100.0 * (lpc_b as f64 - best as f64) / lpc_b as f64
+            q,
+            lpc_b,
+            rls_g,
+            rls_e,
+            -100.0 * (lpc_b as f64 - best as f64) / lpc_b as f64
         );
     }
-    println!("# negative best-dLPC = RLS beats LPC at index coding (same q ⇒ same distortion ⇒ RD win).");
+    println!(
+        "# negative best-dLPC = RLS beats LPC at index coding (same q ⇒ same distortion ⇒ RD win)."
+    );
 }

@@ -53,7 +53,11 @@ fn zigzag(e: i64) -> u64 {
 /// Magnitude bucket = number of significant bits of the zigzagged residual.
 #[inline]
 fn bucket(m: u64) -> usize {
-    if m == 0 { 0 } else { (64 - m.leading_zeros()) as usize }
+    if m == 0 {
+        0
+    } else {
+        (64 - m.leading_zeros()) as usize
+    }
 }
 
 /// Raw uniform mantissa bits below the leading 1 of a bucket.
@@ -140,11 +144,15 @@ fn windows_of(resids: &[Vec<i64>]) -> Vec<&[i64]> {
 }
 
 fn main() {
-    let fit_path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/ma_full.bin".into());
+    let fit_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/ma_full.bin".into());
     let eval_path = std::env::args().nth(2);
 
-    let fit_resids: Vec<Vec<i64>> =
-        read_window(&fit_path).iter().map(|ch| rls::residual(ch)).collect();
+    let fit_resids: Vec<Vec<i64>> = read_window(&fit_path)
+        .iter()
+        .map(|ch| rls::residual(ch))
+        .collect();
 
     // FIT / EVAL split: cross-corpus if a 2nd file is given, else 60/40 by window.
     let (fit_wins, eval_wins, eval_label): (Vec<&[i64]>, Vec<&[i64]>, String);
@@ -186,13 +194,31 @@ fn main() {
     let a_bps = adaptive_bytes as f64 * 8.0 / n_samples as f64;
 
     println!("# learned-entropy probe (CAUSAL context, generalized): fit={fit_path}");
-    println!("# {eval_label}  ({} fit / {} eval windows, {n_samples} eval samples)",
-        fit_wins.len(), eval_wins.len());
+    println!(
+        "# {eval_label}  ({} fit / {} eval windows, {n_samples} eval samples)",
+        fit_wins.len(),
+        eval_wins.len()
+    );
     println!("  {:>22} | {:>12} {:>9}", "coder", "bytes", "bps");
-    println!("  {:>22} | {:>12} {:>9.4}", "block-Golomb (PROD)", golomb_bytes, g_bps);
+    println!(
+        "  {:>22} | {:>12} {:>9.4}",
+        "block-Golomb (PROD)", golomb_bytes, g_bps
+    );
     let pct = |b: usize| 100.0 * (b as f64 - golomb_bytes as f64) / golomb_bytes as f64;
-    println!("  {:>22} | {:>12} {:>9.4}  {:+.1}%", "learned frozen (fit)", learned_bytes, l_bps, pct(learned_bytes));
-    println!("  {:>22} | {:>12} {:>9.4}  {:+.1}%", "adaptive causal online", adaptive_bytes, a_bps, pct(adaptive_bytes));
+    println!(
+        "  {:>22} | {:>12} {:>9.4}  {:+.1}%",
+        "learned frozen (fit)",
+        learned_bytes,
+        l_bps,
+        pct(learned_bytes)
+    );
+    println!(
+        "  {:>22} | {:>12} {:>9.4}  {:+.1}%",
+        "adaptive causal online",
+        adaptive_bytes,
+        a_bps,
+        pct(adaptive_bytes)
+    );
     println!("# frozen = shipped table (generalization-fragile). adaptive = online, no table,");
     println!("# corpus-agnostic, deterministic/no_std — the deployable candidate.");
 }

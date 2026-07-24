@@ -44,7 +44,10 @@ fn golden(name: &str) -> Vec<i32> {
     .iter()
     .collect();
     let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-        panic!("read golden {}: {e} (run tools/dump_normalize_golden.py)", path.display())
+        panic!(
+            "read golden {}: {e} (run tools/dump_normalize_golden.py)",
+            path.display()
+        )
     });
     bytes
         .chunks_exact(4)
@@ -78,7 +81,10 @@ fn assert_parity(flat: Vec<i32>, name: &str, tol: i64) {
         gold[worst_at],
         flat.len()
     );
-    eprintln!("{name} parity OK: max|Δ|={max_delta} (tol {tol}), {n_mismatch}/{} differ", flat.len());
+    eprintln!(
+        "{name} parity OK: max|Δ|={max_delta} (tol {tol}), {n_mismatch}/{} differ",
+        flat.len()
+    );
 }
 
 /// 250 Hz: resample is identity, so this is the bit-exact HP+Q31 chain — expect
@@ -103,7 +109,11 @@ fn parity_200hz_resample_hp_q31() {
     let out = lamquant_core::normalize::normalize_eeg(&synth_input(160), 200.0)
         .expect("poly branch, no FFT")
         .expect("non-flat input normalizes");
-    assert_parity(out.into_iter().flatten().collect(), "eeg_200hz_resample_hp_q31", 4);
+    assert_parity(
+        out.into_iter().flatten().collect(),
+        "eeg_200hz_resample_hp_q31",
+        4,
+    );
 }
 
 /// The remaining common poly-branch rates (500/512/1000 Hz). 512 is the
@@ -149,7 +159,13 @@ fn fft_resample_333hz_matches_scipy_within_noise_floor() {
 
     // scipy.signal.resample golden (first 8, last 4, and total energy).
     const FIRST8: [f64; 8] = [
-        -0.707940769, 0.360265401, -0.022266587, 0.35070882, 0.533184042, 0.358612047, 0.922335941,
+        -0.707940769,
+        0.360265401,
+        -0.022266587,
+        0.35070882,
+        0.533184042,
+        0.358612047,
+        0.922335941,
         0.531804831,
     ];
     const LAST4: [f64; 4] = [-0.746287344, -1.353769254, -0.706335912, -0.847381202];
@@ -157,8 +173,16 @@ fn fft_resample_333hz_matches_scipy_within_noise_floor() {
         assert!((y[k] - g).abs() < 1e-4, "y[{k}] = {} vs scipy {g}", y[k]);
     }
     for (k, &g) in LAST4.iter().enumerate() {
-        assert!((y[750 - 4 + k] - g).abs() < 1e-4, "y[last-{}] = {} vs scipy {g}", 4 - k, y[750 - 4 + k]);
+        assert!(
+            (y[750 - 4 + k] - g).abs() < 1e-4,
+            "y[last-{}] = {} vs scipy {g}",
+            4 - k,
+            y[750 - 4 + k]
+        );
     }
     let sumsq: f64 = y.iter().map(|v| v * v).sum();
-    assert!((sumsq - 482.993909).abs() / 482.993909 < 1e-5, "energy {sumsq} vs scipy 482.99");
+    assert!(
+        (sumsq - 482.993909).abs() / 482.993909 < 1e-5,
+        "energy {sumsq} vs scipy 482.99"
+    );
 }

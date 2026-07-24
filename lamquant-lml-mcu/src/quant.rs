@@ -10,6 +10,7 @@
 //! subbands get finer steps. A single global `scale` then trades total rate
 //! against distortion (binary-searched to the BPS ceiling in `lml.rs`).
 
+#[cfg(feature = "std")]
 use alloc::vec;
 use alloc::vec::Vec;
 

@@ -178,12 +178,19 @@ pub fn decode_dense(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> 
         });
     }
     if body_len % 4 != 0 {
-        return Err(LmlError::InvalidHeader("arith_cat body not word-aligned".into()));
+        return Err(LmlError::InvalidHeader(
+            "arith_cat body not word-aligned".into(),
+        ));
     }
     let mut words = Vec::with_capacity(body_len / 4);
     for w in 0..body_len / 4 {
         let b = pos + w * 4;
-        words.push(u32::from_le_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]]));
+        words.push(u32::from_le_bytes([
+            data[b],
+            data[b + 1],
+            data[b + 2],
+            data[b + 3],
+        ]));
     }
 
     let model = DefaultContiguousCategoricalEntropyModel::from_nonzero_fixed_point_probabilities(
@@ -228,9 +235,7 @@ fn ctx_of(prev: i64) -> usize {
     }
 }
 
-fn build_models(
-    freqs: &[Vec<u32>],
-) -> LmlResult<Vec<DefaultContiguousCategoricalEntropyModel>> {
+fn build_models(freqs: &[Vec<u32>]) -> LmlResult<Vec<DefaultContiguousCategoricalEntropyModel>> {
     freqs
         .iter()
         .map(|f| {
@@ -337,7 +342,12 @@ pub fn decode_dense_ctx(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usiz
     let mut words = Vec::with_capacity(body_len / 4);
     for w in 0..body_len / 4 {
         let b = pos + w * 4;
-        words.push(u32::from_le_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]]));
+        words.push(u32::from_le_bytes([
+            data[b],
+            data[b + 1],
+            data[b + 2],
+            data[b + 3],
+        ]));
     }
     let models = build_models(&freqs)?;
     let mut decoder = DefaultRangeDecoder::from_compressed(words)
@@ -396,7 +406,13 @@ mod tests {
         roundtrip_ctx(&[5, 5, 5]);
         roundtrip_ctx(&[0, 0, 9, 0, 0, -4, 0, 0, 0, 1]);
         let clustered: Vec<i64> = (0..2000)
-            .map(|i| if (i / 50) % 2 == 0 { 0 } else { ((i % 7) - 3) as i64 })
+            .map(|i| {
+                if (i / 50) % 2 == 0 {
+                    0
+                } else {
+                    ((i % 7) - 3) as i64
+                }
+            })
             .collect();
         roundtrip_ctx(&clustered);
     }
@@ -417,7 +433,12 @@ mod tests {
             .collect();
         let c0 = encode_dense(&v).unwrap().len();
         let c1 = encode_dense_ctx(&v).unwrap().len();
-        assert!(c1 < c0, "ctx {} should beat order-0 {} on clustered", c1, c0);
+        assert!(
+            c1 < c0,
+            "ctx {} should beat order-0 {} on clustered",
+            c1,
+            c0
+        );
     }
 
     #[test]

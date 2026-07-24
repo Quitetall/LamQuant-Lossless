@@ -44,7 +44,11 @@ const HP_PADLEN: usize = 9;
 /// Private; the sole caller (`sosfiltfilt_hp`) enforces the precondition — the
 /// `debug_assert` makes the contract explicit if that ever changes.
 fn odd_ext(x: &[f64], n: usize) -> Vec<f64> {
-    debug_assert!(x.len() > n, "odd_ext requires x.len() ({}) > n ({n})", x.len());
+    debug_assert!(
+        x.len() > n,
+        "odd_ext requires x.len() ({}) > n ({n})",
+        x.len()
+    );
     let len = x.len();
     let mut out = Vec::with_capacity(len + 2 * n);
     // left: 2*x[0] - x[n], 2*x[0] - x[n-1], …, 2*x[0] - x[1]
@@ -118,7 +122,11 @@ pub fn q31_normalize(data: &[Vec<f64>]) -> Option<Vec<Vec<i32>>> {
     let gain = Q31_HEADROOM / max_abs;
     Some(
         data.iter()
-            .map(|row| row.iter().map(|&v| (v * gain * 2_147_483_647.0) as i32).collect())
+            .map(|row| {
+                row.iter()
+                    .map(|&v| (v * gain * 2_147_483_647.0) as i32)
+                    .collect()
+            })
             .collect(),
     )
 }
@@ -319,9 +327,9 @@ fn resample_fft(x: &[f64], num: usize) -> Vec<f64> {
         let idx = n / 2;
         if idx < out_bins {
             if num < nx {
-                y[idx] = y[idx] * 2.0;
+                y[idx] *= 2.0;
             } else if num > nx {
-                y[idx] = y[idx] * 0.5;
+                y[idx] *= 0.5;
             }
         }
     }
@@ -368,7 +376,10 @@ pub fn resample_to_250(x: &[f64], orig_sr: f64) -> Result<Vec<f64>, NormalizeErr
 /// Full EEG normalization for channels already in 21-target order: resample→250
 /// → 0.5 Hz zero-phase HP → Q31. `Ok(None)` on an all-flat signal;
 /// `Err(FftResampleUnsupported)` when the rate needs the unported FFT branch.
-pub fn normalize_eeg(data: &[Vec<f64>], orig_sr: f64) -> Result<Option<Vec<Vec<i32>>>, NormalizeError> {
+pub fn normalize_eeg(
+    data: &[Vec<f64>],
+    orig_sr: f64,
+) -> Result<Option<Vec<Vec<i32>>>, NormalizeError> {
     let resampled: Vec<Vec<f64>> = data
         .iter()
         .map(|ch| resample_to_250(ch, orig_sr))
@@ -418,7 +429,11 @@ mod tests {
         assert_eq!(y.len(), 20);
         // scipy 1.18.0 reference (dumped): first 5 and last 3 samples.
         let head = [
-            -14.1847655339, -13.6226265744, -13.0645789879, -12.5106270293, -11.9607746278,
+            -14.1847655339,
+            -13.6226265744,
+            -13.0645789879,
+            -12.5106270293,
+            -11.9607746278,
         ];
         let tail = [-5.1870319854, -4.6948357005, -4.2067679559];
         for (i, &e) in head.iter().enumerate() {
@@ -447,9 +462,14 @@ mod tests {
     fn q31_to_signal_f32_matches_numpy() {
         let q31 = vec![vec![123456789i32, -2000000000, 0, 715827882]];
         let out = q31_to_signal_f32(&q31);
-        let expect: [f32; 4] = [57.48904800415039, -931.3225708007812, 0.0, 333.3333435058594];
+        let expect: [f32; 4] = [57.489_048, -931.322_6, 0.0, 333.333_34];
         for (i, &e) in expect.iter().enumerate() {
-            assert_eq!(out[0][i].to_bits(), e.to_bits(), "sample {i}: {} != {e}", out[0][i]);
+            assert_eq!(
+                out[0][i].to_bits(),
+                e.to_bits(),
+                "sample {i}: {} != {e}",
+                out[0][i]
+            );
         }
     }
 
@@ -498,7 +518,9 @@ mod tests {
     /// to surface any Rust-specific resample bug the looser oracle missed.
     #[test]
     fn resample_poly_tight_on_parity_input() {
-        let x: Vec<f64> = (0..160).map(|t| (((t * 5) % 4001) as i64 - 2000) as f64).collect();
+        let x: Vec<f64> = (0..160)
+            .map(|t| (((t * 5) % 4001) as i64 - 2000) as f64)
+            .collect();
         let y = resample_poly(&x, 5, 4);
         assert_eq!(y.len(), 200);
         let refv = [-2001.301033, -2121.074965, -1868.163585, -2071.997204];
@@ -506,21 +528,22 @@ mod tests {
         for (i, &e) in refv.iter().enumerate() {
             maxd = maxd.max((y[i] - e).abs());
         }
-        assert!(maxd < 1e-4, "resample tight: max|Δ|={maxd:.6e}; y[:4]={:?}", &y[..4]);
+        assert!(
+            maxd < 1e-4,
+            "resample tight: max|Δ|={maxd:.6e}; y[:4]={:?}",
+            &y[..4]
+        );
     }
 
-    /// `resample_to_250` is identity within ±0.5 Hz and errors on the FFT branch.
+    /// `resample_to_250` is identity within ±0.5 Hz and supports the FFT branch.
     #[test]
     fn resample_to_250_branch_logic() {
         let x: Vec<f64> = (0..32).map(|t| t as f64).collect();
         assert_eq!(resample_to_250(&x, 250.0).unwrap(), x); // exact
         assert_eq!(resample_to_250(&x, 250.4).unwrap(), x); // within tolerance
         assert_eq!(resample_to_250(&x, 500.0).unwrap().len(), 16); // poly branch
-        // 257 Hz: gcd(250,257)=1 → down=257 > 256 → FFT branch (unported).
-        assert!(matches!(
-            resample_to_250(&x, 257.0),
-            Err(NormalizeError::FftResampleUnsupported { .. })
-        ));
+                                                                   // 257 Hz: gcd(250,257)=1 → down=257 > 256 → FFT branch.
+        assert_eq!(resample_to_250(&x, 257.0).unwrap().len(), 31);
     }
 
     /// Q31 truncates toward zero (not round), left-to-right f64 multiply.

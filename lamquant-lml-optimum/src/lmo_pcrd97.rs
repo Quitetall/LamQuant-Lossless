@@ -60,7 +60,13 @@ const TCQ_LAMBDA_C: f64 = 0.12;
 /// levels (Viterbi), recon via the state machine. Levels feed LPC+entropy as the
 /// `idx` either way; the reconstruction drives the PCRD distortion + the decoder.
 #[cfg(feature = "encode")]
-fn quantize_subband(coeffs: &[f64], q: i64, gain: f64, use_tcq: bool, dz_offset: f64) -> (Vec<i64>, Vec<f64>) {
+fn quantize_subband(
+    coeffs: &[f64],
+    q: i64,
+    gain: f64,
+    use_tcq: bool,
+    dz_offset: f64,
+) -> (Vec<i64>, Vec<f64>) {
     if use_tcq {
         let lambda = gain * (q as f64) * (q as f64) * TCQ_LAMBDA_C;
         let levels = tcq::quantize_tcq(coeffs, q, gain, lambda);
@@ -68,7 +74,10 @@ fn quantize_subband(coeffs: &[f64], q: i64, gain: f64, use_tcq: bool, dz_offset:
         (levels, recon)
     } else {
         let qf = q as f64;
-        let idx: Vec<i64> = coeffs.iter().map(|&c| quant_f64_dz(c, q, dz_offset)).collect();
+        let idx: Vec<i64> = coeffs
+            .iter()
+            .map(|&c| quant_f64_dz(c, q, dz_offset))
+            .collect();
         let recon: Vec<f64> = idx.iter().map(|&i| i as f64 * qf).collect();
         (idx, recon)
     }
@@ -246,7 +255,8 @@ fn decode_residual(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, usize)> {
 fn encode_subband(idx: &[i64], sb_idx: usize, mode: lpc::LpcMode) -> LmlResult<(Vec<u8>, Vec<u8>)> {
     // LPC path.
     let scoped = lml::scope_lpc_mode(mode, lml::lpc_max_order(idx.len()));
-    let (coeffs, residual, order) = lpc::analyze_with_mode(idx, sb_idx, scoped, lml::BIAS_CTX, None);
+    let (coeffs, residual, order) =
+        lpc::analyze_with_mode(idx, sb_idx, scoped, lml::BIAS_CTX, None);
     let lpc_payload = encode_residual(&residual)?;
     let lpc_total = 1 + 4 * coeffs.len() + lpc_payload.len();
 
@@ -301,11 +311,17 @@ pub fn encode_target_bps_97(
         Ok(())
     };
     for &dz in &[0.5f64, 0.42, 0.375] {
-        consider(encode_target_bps_97_q(signal, target_bps, mode, dz, false)?, &mut best)?;
+        consider(
+            encode_target_bps_97_q(signal, target_bps, mode, dz, false)?,
+            &mut best,
+        )?;
     }
     // TCQ dependent-quantization candidate (ADR 0054). Decode auto-detects via the
     // body quant_mode byte; keep-best ⇒ never worse than the scalar paths.
-    consider(encode_target_bps_97_q(signal, target_bps, mode, 0.5, true)?, &mut best)?;
+    consider(
+        encode_target_bps_97_q(signal, target_bps, mode, 0.5, true)?,
+        &mut best,
+    )?;
     Ok(best.expect("at least one candidate").1)
 }
 
@@ -447,7 +463,8 @@ pub fn encode_target_bps_97_q(
     let mut payload = Vec::new();
     for subs in &chan_subs {
         for (sb_idx, sub) in subs.iter().enumerate() {
-            let (idx, _recon) = quantize_subband(sub, qs[sb_idx], gains[sb_idx], use_tcq, dz_offset);
+            let (idx, _recon) =
+                quantize_subband(sub, qs[sb_idx], gains[sb_idx], use_tcq, dz_offset);
             let (meta, pay) = encode_subband(&idx, sb_idx, mode)?;
             meta_body.extend_from_slice(&meta);
             payload.extend_from_slice(&pay);
@@ -533,23 +550,45 @@ pub fn decode_97(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             let idx = if order == 255 {
                 // RLS-coded subband: payload = [len u32][entropy stream].
                 if pay_pos + 4 > payload.len() {
-                    return Err(LmlError::Truncated { expected: pay_pos + 4, actual: payload.len(), context: "9/7 rls len" });
+                    return Err(LmlError::Truncated {
+                        expected: pay_pos + 4,
+                        actual: payload.len(),
+                        context: "9/7 rls len",
+                    });
                 }
-                let plen = u32::from_le_bytes([payload[pay_pos], payload[pay_pos + 1], payload[pay_pos + 2], payload[pay_pos + 3]]) as usize;
+                let plen = u32::from_le_bytes([
+                    payload[pay_pos],
+                    payload[pay_pos + 1],
+                    payload[pay_pos + 2],
+                    payload[pay_pos + 3],
+                ]) as usize;
                 pay_pos += 4;
                 if pay_pos + plen > payload.len() {
-                    return Err(LmlError::Truncated { expected: pay_pos + plen, actual: payload.len(), context: "9/7 rls stream" });
+                    return Err(LmlError::Truncated {
+                        expected: pay_pos + plen,
+                        actual: payload.len(),
+                        context: "9/7 rls stream",
+                    });
                 }
                 let res = crate::entropy::decode(&payload[pay_pos..pay_pos + plen])?;
                 pay_pos += plen;
                 crate::rls::reconstruct(&res)
             } else {
                 if meta_pos + 4 * order > meta.len() {
-                    return Err(LmlError::Truncated { expected: meta_pos + 4 * order, actual: meta.len(), context: "9/7 lpc coeffs" });
+                    return Err(LmlError::Truncated {
+                        expected: meta_pos + 4 * order,
+                        actual: meta.len(),
+                        context: "9/7 lpc coeffs",
+                    });
                 }
                 let mut coeffs = Vec::with_capacity(order);
                 for _ in 0..order {
-                    coeffs.push(i32::from_le_bytes([meta[meta_pos], meta[meta_pos + 1], meta[meta_pos + 2], meta[meta_pos + 3]]));
+                    coeffs.push(i32::from_le_bytes([
+                        meta[meta_pos],
+                        meta[meta_pos + 1],
+                        meta[meta_pos + 2],
+                        meta[meta_pos + 3],
+                    ]));
                     meta_pos += 4;
                 }
                 let (residual, consumed) = decode_residual(payload, pay_pos)?;
@@ -581,7 +620,11 @@ mod tests {
                         let x = (i as i64 + ph) as f64;
                         let lo = (x * 0.05).sin() * 3000.0;
                         let hi = (x * 0.9).sin() * 250.0;
-                        let spike = if (i as i64 + ph) % 101 == 0 { 1200.0 } else { 0.0 };
+                        let spike = if (i as i64 + ph) % 101 == 0 {
+                            1200.0
+                        } else {
+                            0.0
+                        };
                         (lo + hi + spike) as i64
                     })
                     .collect()
@@ -627,8 +670,10 @@ mod tests {
     #[test]
     fn higher_budget_lower_distortion() {
         let signal = make_signal(8, 2560, 7);
-        let lo = decode_97(&encode_target_bps_97(&signal, 1.0, lpc::LpcMode::default()).unwrap()).unwrap();
-        let hi = decode_97(&encode_target_bps_97(&signal, 4.0, lpc::LpcMode::default()).unwrap()).unwrap();
+        let lo = decode_97(&encode_target_bps_97(&signal, 1.0, lpc::LpcMode::default()).unwrap())
+            .unwrap();
+        let hi = decode_97(&encode_target_bps_97(&signal, 4.0, lpc::LpcMode::default()).unwrap())
+            .unwrap();
         assert!(
             prd(&signal, &hi) <= prd(&signal, &lo),
             "more bits must not raise PRD: 4.0→{:.2} vs 1.0→{:.2}",

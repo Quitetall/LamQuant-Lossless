@@ -53,8 +53,12 @@ fn round_i64(v: f64) -> i64 {
 
 /// Smallest of Golomb-Rice / zero-RLE (the no_std floor) for one value block.
 fn floor_bytes(values: &[i64]) -> usize {
-    let g = golomb::encode_dense(values).map(|v| v.len()).unwrap_or(usize::MAX);
-    let z = zrle::encode_dense(values).map(|v| v.len()).unwrap_or(usize::MAX);
+    let g = golomb::encode_dense(values)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
+    let z = zrle::encode_dense(values)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
     g.min(z)
 }
 
@@ -114,8 +118,16 @@ fn main() {
                 #[cfg(feature = "experimental_arithmetic")]
                 {
                     use lamquant_lml_mcu::arith_cat;
-                    let a0 = |v: &[i64]| arith_cat::encode_dense(v).map(|x| x.len()).unwrap_or(usize::MAX);
-                    let a1 = |v: &[i64]| arith_cat::encode_dense_ctx(v).map(|x| x.len()).unwrap_or(usize::MAX);
+                    let a0 = |v: &[i64]| {
+                        arith_cat::encode_dense(v)
+                            .map(|x| x.len())
+                            .unwrap_or(usize::MAX)
+                    };
+                    let a1 = |v: &[i64]| {
+                        arith_cat::encode_dense_ctx(v)
+                            .map(|x| x.len())
+                            .unwrap_or(usize::MAX)
+                    };
                     lpc_a0 += lpc_hdr + a0(&residual);
                     lpc_a1 += lpc_hdr + a1(&residual);
                     coeff_a0 += 1 + a0(&residual0);
@@ -135,7 +147,11 @@ fn main() {
         #[cfg(not(feature = "experimental_arithmetic"))]
         println!(
             "{:>5} | {:>8} {:>5.3} {:>8} {:>5.3}",
-            q, lpc_floor, bps(lpc_floor), coeff_floor, bps(coeff_floor)
+            q,
+            lpc_floor,
+            bps(lpc_floor),
+            coeff_floor,
+            bps(coeff_floor)
         );
     }
 }

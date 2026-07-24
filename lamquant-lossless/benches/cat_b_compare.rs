@@ -188,7 +188,8 @@ fn try_load_chbmit_edf() -> Option<edf::EdfFile> {
             Err(e) => {
                 eprintln!(
                     "[cat_b_compare] direct edf parse failed for {}: {}",
-                    direct.display(), e,
+                    direct.display(),
+                    e,
                 );
             }
         }
@@ -256,20 +257,37 @@ fn bench_entropy_compare_chbmit(c: &mut Criterion) {
 
 /// Minimal Direct-Form-1 biquad — f32 in/out, f32 coefficients.
 struct HandRolledDf1F32 {
-    b0: f32, b1: f32, b2: f32, a1: f32, a2: f32,
-    x1: f32, x2: f32, y1: f32, y2: f32,
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
 }
 
 impl HandRolledDf1F32 {
     fn new(b: [f32; 3], a: [f32; 2]) -> Self {
-        Self { b0: b[0], b1: b[1], b2: b[2], a1: a[0], a2: a[1],
-               x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+        Self {
+            b0: b[0],
+            b1: b[1],
+            b2: b[2],
+            a1: a[0],
+            a2: a[1],
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
     }
 
     #[inline]
     fn process(&mut self, x: f32) -> f32 {
         let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
-              - self.a1 * self.y1 - self.a2 * self.y2;
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = x;
         self.y2 = self.y1;
@@ -290,8 +308,11 @@ fn bench_biquad_compare(c: &mut Criterion) {
     // High-pass biquad at 0.5 Hz / 250 Hz nyquist (matches the
     // firmware HP filter operating point in spirit).
     const BA: [f32; 5] = [
-        0.99986_f32, -1.99973, 0.99986,  // b0, b1, b2
-        -1.99959, 0.99986,                // a1, a2
+        0.99986_f32,
+        -1.99973,
+        0.99986, // b0, b1, b2
+        -1.99959,
+        0.99986, // a1, a2
     ];
 
     let bytes = samples.len() * core::mem::size_of::<f32>();
@@ -301,10 +322,7 @@ fn bench_biquad_compare(c: &mut Criterion) {
 
     group.bench_function("handrolled_df1_f32", |b| {
         b.iter(|| {
-            let mut filter = HandRolledDf1F32::new(
-                [BA[0], BA[1], BA[2]],
-                [BA[3], BA[4]],
-            );
+            let mut filter = HandRolledDf1F32::new([BA[0], BA[1], BA[2]], [BA[3], BA[4]]);
             let mut sum: f32 = 0.0;
             for &x in samples.iter() {
                 sum += filter.process(black_box(x));
@@ -338,26 +356,39 @@ fn bench_biquad_compare(c: &mut Criterion) {
 /// `BiquadState::process` shape (i64 accumulator, round-half-up >>30,
 /// saturating i32 cast).
 struct HandRolledDf1Q30 {
-    b0: i32, b1: i32, b2: i32, a1: i32, a2: i32,
-    x1: i32, x2: i32, y1: i32, y2: i32,
+    b0: i32,
+    b1: i32,
+    b2: i32,
+    a1: i32,
+    a2: i32,
+    x1: i32,
+    x2: i32,
+    y1: i32,
+    y2: i32,
 }
 
 impl HandRolledDf1Q30 {
     fn new(ba: [i32; 5]) -> Self {
         Self {
-            b0: ba[0], b1: ba[1], b2: ba[2], a1: ba[3], a2: ba[4],
-            x1: 0, x2: 0, y1: 0, y2: 0,
+            b0: ba[0],
+            b1: ba[1],
+            b2: ba[2],
+            a1: ba[3],
+            a2: ba[4],
+            x1: 0,
+            x2: 0,
+            y1: 0,
+            y2: 0,
         }
     }
 
     #[inline]
     fn process(&mut self, x: i32) -> i32 {
-        let acc: i64 =
-            (self.b0 as i64) * (x as i64)
-          + (self.b1 as i64) * (self.x1 as i64)
-          + (self.b2 as i64) * (self.x2 as i64)
-          - (self.a1 as i64) * (self.y1 as i64)
-          - (self.a2 as i64) * (self.y2 as i64);
+        let acc: i64 = (self.b0 as i64) * (x as i64)
+            + (self.b1 as i64) * (self.x1 as i64)
+            + (self.b2 as i64) * (self.x2 as i64)
+            - (self.a1 as i64) * (self.y1 as i64)
+            - (self.a2 as i64) * (self.y2 as i64);
         let rounded = (acc + (1i64 << 29)) >> 30;
         let y = rounded.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         self.x2 = self.x1;
@@ -374,17 +405,18 @@ fn bench_biquad_compare_q30(c: &mut Criterion) {
     use idsp::iir::{Biquad, DirectForm1Wide};
 
     let mut state: u64 = 0xFADE_BEEF;
-    let samples: Vec<i32> =
-        (0..1024).map(|_| (xorshift64(&mut state) as i32) >> 11).collect();
+    let samples: Vec<i32> = (0..1024)
+        .map(|_| (xorshift64(&mut state) as i32) >> 11)
+        .collect();
 
     // Same HP at 0.5 Hz / 250 Hz Nyquist, expressed in Q30 i32:
     //   round(coeff * 2^30) for coeff ∈ [-2.0, 2.0)
     const BA_Q30: [i32; 5] = [
-        1073312824,   // b0 ≈ +0.9998
-        -2146625648,  // b1 ≈ -1.9996
-        1073312824,   // b2 ≈ +0.9998
-        -2146458584,  // a1 ≈ -1.9994
-        1072458672,   // a2 ≈ +0.9989
+        1073312824,  // b0 ≈ +0.9998
+        -2146625648, // b1 ≈ -1.9996
+        1073312824,  // b2 ≈ +0.9998
+        -2146458584, // a1 ≈ -1.9994
+        1072458672,  // a2 ≈ +0.9989
     ];
 
     let bytes = samples.len() * core::mem::size_of::<i32>();

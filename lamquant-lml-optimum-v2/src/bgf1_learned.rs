@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 
 use crate::bgf1_model_pack::Bgf1ModelPack;
-use crate::model_pack::Tensor;
+use crate::model_pack::ModelTensor;
 use crate::OptimumV2Error;
 
 const BGF_CONSTRUCTION_FLAGS: u8 = 1;
@@ -106,7 +106,7 @@ pub struct Bgf1LearnedCodec {
 impl Bgf1LearnedCodec {
     pub fn from_lqw1(bytes: &[u8]) -> Result<Self, OptimumV2Error> {
         let pack = Bgf1ModelPack::decode(bytes)?;
-        let tensor = |name: &str| -> Result<&Tensor, OptimumV2Error> {
+        let tensor = |name: &str| -> Result<&ModelTensor, OptimumV2Error> {
             pack.tensors
                 .iter()
                 .find(|tensor| tensor.name == name)
@@ -1558,7 +1558,7 @@ fn crc32c_zeroed_field(data: &[u8], offset: usize) -> u32 {
     state ^ !0
 }
 
-fn i8_vector(tensor: &Tensor, length: usize) -> Result<Vec<i8>, OptimumV2Error> {
+fn i8_vector(tensor: &ModelTensor, length: usize) -> Result<Vec<i8>, OptimumV2Error> {
     if tensor.data.len() != length {
         return Err(OptimumV2Error::InvalidPacket(
             "BGF1 signed-int8 vector has the wrong length".into(),
@@ -1567,7 +1567,11 @@ fn i8_vector(tensor: &Tensor, length: usize) -> Result<Vec<i8>, OptimumV2Error> 
     Ok(tensor.data.iter().map(|&byte| byte as i8).collect())
 }
 
-fn i8_matrix(tensor: &Tensor, rows: usize, columns: usize) -> Result<Vec<Vec<i8>>, OptimumV2Error> {
+fn i8_matrix(
+    tensor: &ModelTensor,
+    rows: usize,
+    columns: usize,
+) -> Result<Vec<Vec<i8>>, OptimumV2Error> {
     let values = i8_vector(
         tensor,
         rows.checked_mul(columns)
