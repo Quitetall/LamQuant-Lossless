@@ -12,6 +12,8 @@ blake3 = "=1.5.5"
 # The first-class DICOM profile needs raw element access, not just the
 # waveform reader the codec exposes.
 dicom-core = "0.8"
+# BIDS mandates gzipped continuous-recording tables.
+flate2 = "1"
 dicom-object = "0.8"
 hdf5-metno = "0.12"
 lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom", "nwb"] }
