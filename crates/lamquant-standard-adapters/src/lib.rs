@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 mod edf_full;
+mod xdf;
 pub use edf_full::EdfAdapter;
+pub use xdf::XdfAdapter;
 
 #[derive(Clone, Copy)]
 enum ParserKind {
