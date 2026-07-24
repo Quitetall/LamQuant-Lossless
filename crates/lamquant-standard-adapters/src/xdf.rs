@@ -565,6 +565,21 @@ fn exact(source_path: String, target: String) -> MappingEntry {
 /// Convert an observed clock reading to an exact rational at microsecond
 /// resolution. XDF measures these in seconds as f64; rounding to a fixed grid
 /// keeps the recorded relation reproducible instead of platform-dependent.
+fn microsecond_ticks(value: f64) -> Result<i64, AdapterError> {
+    if !value.is_finite() {
+        return Err(AdapterError::InvalidSource(
+            "XDF timestamp is not finite".to_owned(),
+        ));
+    }
+    let micros = (value * 1_000_000.0).round();
+    if micros.abs() > 9.0e15 {
+        return Err(AdapterError::InvalidSource(
+            "XDF timestamp is out of range".to_owned(),
+        ));
+    }
+    Ok(micros as i64)
+}
+
 fn seconds_rational(value: f64) -> Result<Rational, AdapterError> {
     if !value.is_finite() {
         return Err(AdapterError::InvalidSource(
@@ -717,17 +732,20 @@ impl XdfAdapter {
                         stream.id
                     )));
                 }
+                // ABIR carries explicit timestamps as exact integer ticks, so
+                // the f64 seconds XDF records are pinned to a microsecond grid
+                // rather than handed on as binary floating point.
                 let mut bytes = Vec::with_capacity(explicit.len() * 8);
                 for value in &explicit {
-                    bytes.extend_from_slice(&value.to_le_bytes());
+                    bytes.extend_from_slice(&microsecond_ticks(*value)?.to_le_bytes());
                 }
-                let content_id = abir_payload_id(ElementType::F64, &bytes);
+                let content_id = abir_payload_id(ElementType::I64, &bytes);
                 (
                     TimeAxis::Explicit {
                         timestamps: content_id,
                         count: samples,
                     },
-                    Some(PayloadObject { content_id, bytes }),
+                    Some((content_id, bytes)),
                 )
             };
 
@@ -780,8 +798,35 @@ impl XdfAdapter {
                 content_id,
                 bytes: value_bytes,
             });
-            if let Some(payload) = timestamp_payload {
-                payloads.push(payload);
+            // An explicit time axis names a companion payload, and ABIR
+            // requires that payload to belong to a real atom -- a dangling
+            // reference is exactly the failure this prevents.
+            let mut atom_ids = vec![atom_id];
+            if let Some((stamp_id, stamp_bytes)) = timestamp_payload {
+                let stamp_atom = id::<AtomTag>(&seed, b"timestamps", position);
+                draft.add_atom(Atom::Tensor(semantic_abir::Tensor::new(
+                    stamp_atom,
+                    Presence::Present,
+                    Some(PayloadDescriptor::new(
+                        stamp_id,
+                        stamp_bytes.len() as u64,
+                        ElementType::I64,
+                        ByteOrder::Little,
+                        vec![samples],
+                        Layout::DenseRowMajor,
+                        Some(concept("abir:encoding/raw")?),
+                        None,
+                    )),
+                    vec![semantic_abir::SemanticAxis::new(
+                        concept("abir:axis/sample")?,
+                        samples,
+                    )],
+                )));
+                payloads.push(PayloadObject {
+                    content_id: stamp_id,
+                    bytes: stamp_bytes,
+                });
+                atom_ids.push(stamp_atom);
             }
 
             // The stream's own XML, byte-exact. Fields this adapter models are
@@ -822,7 +867,10 @@ impl XdfAdapter {
                 stream_id,
                 recording_id,
                 concept(modality)?,
-                vec![atom_id, metadata_id],
+                {
+                    atom_ids.push(metadata_id);
+                    atom_ids
+                },
                 Some(clock_id),
                 None,
                 None,

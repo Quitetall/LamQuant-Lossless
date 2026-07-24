@@ -16,8 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 mod edf_full;
+mod nwb_full;
 mod xdf;
 pub use edf_full::EdfAdapter;
+pub use nwb_full::NwbAdapter;
 pub use xdf::XdfAdapter;
 
 #[derive(Clone, Copy)]
@@ -327,9 +329,9 @@ impl DicomAdapter {
     }
 }
 
-pub struct NwbAdapter(StandardFileAdapter);
+pub struct NwbSubsetAdapter(StandardFileAdapter);
 
-impl NwbAdapter {
+impl NwbSubsetAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self(StandardFileAdapter::new(
             profile(
@@ -547,7 +549,7 @@ macro_rules! delegate_adapter {
 }
 
 delegate_adapter!(DicomAdapter);
-delegate_adapter!(NwbAdapter);
+delegate_adapter!(NwbSubsetAdapter);
 
 impl Adapter for BidsAdapter {
     fn profile(&self) -> &AdapterProfile {

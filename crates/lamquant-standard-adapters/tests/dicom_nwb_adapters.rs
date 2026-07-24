@@ -1,5 +1,5 @@
 use abir_adapter::{Adapter, ForeignEntry, ForeignObject, PayloadResolver, ProfileId};
-use lamquant_standard_adapters::{DicomAdapter, NwbAdapter};
+use lamquant_standard_adapters::{DicomAdapter, NwbSubsetAdapter as NwbAdapter};
 use semantic_abir::{ContentId, ValidationLimits};
 use std::collections::BTreeMap;
 

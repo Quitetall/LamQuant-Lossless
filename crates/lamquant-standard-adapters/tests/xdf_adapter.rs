@@ -180,6 +180,67 @@ fn xdf_import_maps_every_stream_clock_and_boundary() {
     assert_eq!(inspect.required_resources["clock-offsets"], 3);
 }
 
+/// A NUMERIC stream with explicit per-sample timestamps. The string marker
+/// stream in the main fixture becomes a blob, so it never exercised the
+/// explicit time axis; this one does, and ABIR requires that axis to name a
+/// companion payload belonging to a real atom.
+fn irregular_numeric_fixture() -> Vec<u8> {
+    let xml = concat!(
+        "<?xml version=\"1.0\"?><info><name>Irregular</name><type>EEG</type>",
+        "<channel_count>1</channel_count><nominal_srate>0</nominal_srate>",
+        "<channel_format>int16</channel_format></info>"
+    );
+    let mut file = b"XDF:".to_vec();
+    file.extend_from_slice(&chunk(
+        1,
+        b"<?xml version=\"1.0\"?><info><version>1.0</version></info>",
+    ));
+    file.extend_from_slice(&stream_header(1, xml));
+    let mut samples = 1_u32.to_le_bytes().to_vec();
+    samples.push(1);
+    samples.push(3);
+    for (index, stamp) in [0.0_f64, 0.75, 2.5].into_iter().enumerate() {
+        samples.push(8);
+        samples.extend_from_slice(&stamp.to_le_bytes());
+        samples.extend_from_slice(&(index as i16).to_le_bytes());
+    }
+    file.extend_from_slice(&chunk(3, &samples));
+    file
+}
+
+#[test]
+fn xdf_irregular_numeric_stream_carries_its_own_timestamps() {
+    let adapter = XdfAdapter::new(1 << 20);
+    let outcome = adapter
+        .import(
+            &foreign(irregular_numeric_fixture()),
+            ValidationLimits::default(),
+        )
+        .expect("an irregular numeric stream imports");
+    let block = outcome
+        .dataset
+        .atoms()
+        .iter()
+        .find_map(|atom| match atom {
+            semantic_abir::Atom::SignalBlock(block) => Some(block),
+            _ => None,
+        })
+        .expect("the stream is a signal block");
+    // No rate was invented for a stream that declared none.
+    let semantic_abir::TimeAxis::Explicit { timestamps, count } = block.time_axis() else {
+        panic!("an irregular stream must not be given a regular axis");
+    };
+    assert_eq!(*count, 3);
+    // The companion payload resolves to a real atom, which is what ABIR
+    // validation refuses to let dangle.
+    assert!(outcome
+        .dataset
+        .atoms()
+        .iter()
+        .filter_map(semantic_abir::Atom::payload)
+        .any(|payload| payload.content_id() == *timestamps));
+}
+
 #[test]
 fn xdf_reverse_export_restores_the_source_byte_for_byte() {
     let adapter = XdfAdapter::new(1 << 20);
