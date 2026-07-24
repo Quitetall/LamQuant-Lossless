@@ -1,0 +1,9 @@
+{
+  "adapter_exit_code": 1,
+  "case_id": "non-numeric-header-field",
+  "fixture_bytes": 1304,
+  "fixture_sha256": "041b74f3afd3945fc9f31faa2e379e5b4ee4d54c3b0e18b4718c60f1d4e74fc3",
+  "rejected": true,
+  "schema": "lamquant.adr0139.archive-malformed-receipt/v1",
+  "status": "pass"
+}

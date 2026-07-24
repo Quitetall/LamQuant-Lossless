@@ -1,0 +1,9 @@
+{
+  "adapter_exit_code": 1,
+  "case_id": "truncated-header",
+  "fixture_bytes": 400,
+  "fixture_sha256": "4e59dfd75fa11f64f03cfe27e7d86abc69e31560e2be634c09117744371fb6c5",
+  "rejected": true,
+  "schema": "lamquant.adr0139.archive-malformed-receipt/v1",
+  "status": "pass"
+}

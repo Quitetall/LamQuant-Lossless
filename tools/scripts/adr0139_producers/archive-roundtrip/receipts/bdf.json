@@ -1,0 +1,11 @@
+{
+  "case_id": "bdf",
+  "corpus": "bdf",
+  "independent_validator": "dependency-free EDF/EDF+/BDF reader",
+  "independent_validator_status": "pass",
+  "restored_sha256": "63422230e03aad55fe36530871a6948c66b8937d39c71cb3ba3d350eb63ddc6a",
+  "schema": "lamquant.adr0139.archive-roundtrip-receipt/v1",
+  "signal_count": 1,
+  "source_sha256": "63422230e03aad55fe36530871a6948c66b8937d39c71cb3ba3d350eb63ddc6a",
+  "status": "pass"
+}

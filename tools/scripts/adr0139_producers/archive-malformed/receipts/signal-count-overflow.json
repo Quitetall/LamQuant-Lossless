@@ -1,0 +1,9 @@
+{
+  "adapter_exit_code": 1,
+  "case_id": "signal-count-overflow",
+  "fixture_bytes": 1304,
+  "fixture_sha256": "1f1419c87d1c6f4509cb97d25951564a26d1a8e0d187101a4d9879af6041d116",
+  "rejected": true,
+  "schema": "lamquant.adr0139.archive-malformed-receipt/v1",
+  "status": "pass"
+}

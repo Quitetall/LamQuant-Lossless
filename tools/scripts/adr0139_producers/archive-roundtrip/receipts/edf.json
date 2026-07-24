@@ -1,0 +1,11 @@
+{
+  "case_id": "edf",
+  "corpus": "edf",
+  "independent_validator": "dependency-free EDF/EDF+/BDF reader",
+  "independent_validator_status": "pass",
+  "restored_sha256": "2bea49be4f2579cf66d8b1d4459a799169cf4bfcf9b9cf0f65d58d1808ff7f99",
+  "schema": "lamquant.adr0139.archive-roundtrip-receipt/v1",
+  "signal_count": 3,
+  "source_sha256": "2bea49be4f2579cf66d8b1d4459a799169cf4bfcf9b9cf0f65d58d1808ff7f99",
+  "status": "pass"
+}
