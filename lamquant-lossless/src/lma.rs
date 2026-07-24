@@ -2184,6 +2184,101 @@ fn build_sibling_manifest_json(
 }
 
 /// List contents of an LMA archive without extracting.
+/// Write an LMA v2 archive from payloads that are ALREADY LML-encoded.
+///
+/// `pack_archive` classifies entries by file extension, so a pre-encoded `.lml`
+/// file becomes a `Method::Store` entry and is no longer recognisable as a
+/// signal. Semantic re-emission needs the opposite: the caller already holds
+/// LML bytes and must record them as `Method::Lml`. This is that entry point.
+///
+/// Each element of `entries` is `(archive-relative path, LML bytes)`. The bytes
+/// are written verbatim, so the caller owns encoding; this function only frames
+/// them. Byte-for-byte layout matches `pack_archive`'s v2 output, including the
+/// manifest cascade and its uncompressed-fallback flag.
+pub fn pack_lml_entries(
+    entries: &[(&str, &[u8])],
+    output_path: &Path,
+    zstd_level: i32,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    const MANIFEST_LEN_MAX: u32 = 0x7FFF_FFFF;
+    const MANIFEST_UNCOMPRESSED_FLAG: u32 = 0x8000_0000;
+    if entries.is_empty() {
+        return Err("refusing to write an archive with no entries".into());
+    }
+
+    let mut out = BufWriter::new(std::fs::File::create(output_path)?);
+    let mut hasher = Sha256::new();
+    {
+        let mut header = [0u8; 16];
+        header[0..4].copy_from_slice(LMA_MAGIC_V2);
+        header[4..8].copy_from_slice(&LMA_VERSION_V2.to_le_bytes());
+        out.write_all(&header)?;
+        hasher.update(header);
+    }
+
+    let mut manifest_entries: Vec<ArchiveEntry> = Vec::with_capacity(entries.len());
+    let mut payload_offset: u64 = 0;
+    for (path, bytes) in entries {
+        if path.is_empty() || path.contains("..") || path.starts_with('/') {
+            return Err(format!("unsafe archive entry path: {path}").into());
+        }
+        let size = *bytes as &[u8];
+        out.write_all(size)?;
+        hasher.update(size);
+        let mut digest = Sha256::new();
+        digest.update(size);
+        manifest_entries.push(ArchiveEntry {
+            path: (*path).to_string(),
+            original_size: size.len() as u64,
+            compressed_size: size.len() as u64,
+            method: Method::Lml,
+            sha256: format!("{:x}", digest.finalize()),
+            offset: payload_offset,
+            mtime: None,
+            mtime_nanos: None,
+            mode: None,
+            synthetic_from: None,
+        });
+        payload_offset = payload_offset
+            .checked_add(size.len() as u64)
+            .ok_or("archive payload section overflowed")?;
+    }
+
+    let manifest_json = build_manifest_json(&manifest_entries, zstd_level, &[]);
+    let (manifest_payload, manifest_uncompressed): (Vec<u8>, bool) =
+        match zstd::encode_all(manifest_json.as_bytes(), zstd_level) {
+            Ok(bytes) => (bytes, false),
+            Err(_) => (manifest_json.into_bytes(), true),
+        };
+    if manifest_payload.len() > MANIFEST_LEN_MAX as usize {
+        return Err("manifest exceeds the LMA length field".into());
+    }
+    // Enforce at write what the reader caps at read, so an archive can never be
+    // written that later refuses to load.
+    if manifest_uncompressed && manifest_payload.len() > MAX_MANIFEST_SIZE {
+        return Err("uncompressed manifest exceeds the reader cap".into());
+    }
+    let manifest_len_field = (manifest_payload.len() as u32)
+        | if manifest_uncompressed {
+            MANIFEST_UNCOMPRESSED_FLAG
+        } else {
+            0
+        };
+    out.write_all(&manifest_payload)?;
+    hasher.update(&manifest_payload);
+
+    let mut footer = [0u8; LMA_V2_FOOTER_LEN as usize];
+    footer[0..4].copy_from_slice(&manifest_len_field.to_le_bytes());
+    footer[4..8].copy_from_slice(&(manifest_entries.len() as u32).to_le_bytes());
+    footer[8..12].copy_from_slice(LMA_FOOT_MAGIC);
+    out.write_all(&footer)?;
+    hasher.update(footer);
+    out.write_all(&hasher.finalize())?;
+    out.flush()?;
+    drop(out);
+    Ok(std::fs::metadata(output_path)?.len())
+}
+
 pub fn list_archive(
     archive_path: &Path,
 ) -> Result<Vec<ArchiveEntry>, Box<dyn std::error::Error + Send + Sync>> {
@@ -5085,4 +5180,25 @@ mod tests {
     // wraps: `MmapArchive::open` → `entry_bytes` → `read_bytes_into_f32_calibrated_selected`)
     // is bit-identical to the full decode's corresponding rows. This is the combined
     // path the canonical training decode now takes.
+    #[test]
+    fn pack_lml_entries_round_trips_as_lml_method() {
+        // Pre-encoded payloads must come back as Method::Lml with byte-exact
+        // bytes; `pack_archive` would have recorded them as Method::Store.
+        let dir = std::env::temp_dir().join(format!("lma-pack-lml-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("archive.lma");
+        let first = b"LML1-first-entry-payload".to_vec();
+        let second = b"LML1-second-entry-payload-longer".to_vec();
+        let written =
+            pack_lml_entries(&[("a/one.lml", &first), ("b/two.lml", &second)], &out, 3).unwrap();
+        assert!(written > 0);
+        assert!(std::fs::read(&out).unwrap().starts_with(LMA_MAGIC_V2));
+
+        let entries = list_archive(&out).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.method == Method::Lml));
+        assert_eq!(read_entry(&out, "a/one.lml").unwrap(), first);
+        assert_eq!(read_entry(&out, "b/two.lml").unwrap(), second);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
