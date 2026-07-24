@@ -62,6 +62,12 @@ gui/src-tauri/gen/
 *.swp
 .DS_Store
 *.edf
+# Test fixtures are the exception: a committed fixture that git silently drops
+# leaves a test that only passes in the author's working tree, which is exactly
+# what the ADR 0139 immutable-checkout gate exists to catch. Negate the blanket
+# rule for the fixture trees rather than force-adding each file.
+!crates/*/tests/fixtures/**/*.edf
+!lamquant-lossless/tests/fixtures/**/*.edf
 ai_models/dataset_sim/datasets/
 .training_queue.json
 .training_state.json
