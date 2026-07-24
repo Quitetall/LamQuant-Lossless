@@ -15,9 +15,11 @@ use semantic_abir::{AbirDataset, ContentId, PayloadAccess, PayloadLease, Validat
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+mod dicom_full;
 mod edf_full;
 mod nwb_full;
 mod xdf;
+pub use dicom_full::DicomSemanticAdapter;
 pub use edf_full::EdfAdapter;
 pub use nwb_full::NwbAdapter;
 pub use xdf::XdfAdapter;

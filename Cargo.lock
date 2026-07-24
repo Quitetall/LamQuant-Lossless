@@ -3505,6 +3505,8 @@ dependencies = [
  "abir",
  "abir-adapter",
  "blake3",
+ "dicom-core",
+ "dicom-object",
  "hdf5-metno",
  "lamquant-common",
  "lamquant-lml",

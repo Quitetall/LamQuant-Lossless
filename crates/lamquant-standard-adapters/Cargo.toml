@@ -9,6 +9,10 @@ publish = false
 [dependencies]
 abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432" }
 blake3 = "=1.5.5"
+# The first-class DICOM profile needs raw element access, not just the
+# waveform reader the codec exposes.
+dicom-core = "0.8"
+dicom-object = "0.8"
 hdf5-metno = "0.12"
 lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom", "nwb"] }
 semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "c101513167ad8d7cdefa6387b20c644fdaf66432" }
