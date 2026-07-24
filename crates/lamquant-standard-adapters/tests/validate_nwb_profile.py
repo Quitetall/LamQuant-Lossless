@@ -220,11 +220,26 @@ def main() -> int:
             directory = Path(temporary)
             cases = [("wide.nwb", 4, 10), ("narrow.nwb", 2, 6)]
             if role == "exact-source-restoration":
-                cases = cases[:1]
+                # The COMMITTED fixture, not a freshly written one. pynwb
+                # embeds a random object id and a write timestamp in every
+                # file it creates, so a fresh fixture would make this receipt
+                # a different document on every run and its bound digest would
+                # go stale immediately. The committed file is fixed bytes, and
+                # the round trip through the adapter is just as real.
+                cases = [("multi_container_session.nwb", 4, 10)]
             digests = []
             for name, electrodes, rows in cases:
                 source = directory / name
-                write_fixture(source, electrodes=electrodes, rows=rows)
+                if role == "exact-source-restoration":
+                    source.write_bytes(
+                        (
+                            CODEC
+                            / "crates/lamquant-standard-adapters/tests/fixtures"
+                            / name
+                        ).read_bytes()
+                    )
+                else:
+                    write_fixture(source, electrodes=electrodes, rows=rows)
                 output = directory / f"restored-{name}"
                 measured = roundtrip(source, output, temporary)
                 if output.read_bytes() != source.read_bytes():
