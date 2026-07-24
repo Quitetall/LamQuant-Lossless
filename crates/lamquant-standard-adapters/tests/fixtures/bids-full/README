@@ -1,1 +1,7 @@
-Synthetic bounded BIDS EEG conformance fixture.
+ADR 0143 BIDS 1.11.1 first-class coverage fixture.
+
+Carries one scalp recording, one intracranial recording, a gzipped
+physiological table, an events table, an electrodes table with a
+coordinate system, and one derivative. The EEG, iEEG and derivative EDF
+files are deliberately byte-identical: the point of the fixture is that
+the same bytes mean different things depending on where BIDS puts them.

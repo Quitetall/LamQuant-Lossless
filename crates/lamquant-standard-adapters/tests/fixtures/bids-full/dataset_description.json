@@ -1,7 +1,9 @@
 {
-  "Name": "ABIR BIDS EEG conformance fixture",
+  "Name": "ADR 0143 first-class BIDS coverage dataset",
   "BIDSVersion": "1.11.1",
   "DatasetType": "raw",
-  "Authors": ["ABIR conformance fixture generator"],
+  "Authors": [
+    "ABIR conformance fixture generator"
+  ],
   "License": "CC0"
 }
