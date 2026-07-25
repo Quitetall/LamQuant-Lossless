@@ -5,7 +5,7 @@ version = 3
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=c101513167ad8d7cdefa6387b20c644fdaf66432#c101513167ad8d7cdefa6387b20c644fdaf66432"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=387be313c0b639f5f8e0bb37b80036d26159dfb5#387be313c0b639f5f8e0bb37b80036d26159dfb5"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=c101513167ad8d7cdefa6387b20c644fdaf66432#c101513167ad8d7cdefa6387b20c644fdaf66432"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=387be313c0b639f5f8e0bb37b80036d26159dfb5#387be313c0b639f5f8e0bb37b80036d26159dfb5"
 dependencies = [
  "abir",
  "blake3",
@@ -25,7 +25,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=c101513167ad8d7cdefa6387b20c644fdaf66432#c101513167ad8d7cdefa6387b20c644fdaf66432"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=387be313c0b639f5f8e0bb37b80036d26159dfb5#387be313c0b639f5f8e0bb37b80036d26159dfb5"
 dependencies = [
  "abir",
  "blake3",
