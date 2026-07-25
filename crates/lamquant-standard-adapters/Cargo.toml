@@ -7,7 +7,7 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
-abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "0d3c6e6ddb2e5f91eb8692ed44f992e288a9e0ee" }
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "6a5f9ad40554c98ff9b8c8d7d9a9bc8c66d014dc" }
 blake3 = "=1.5.5"
 # The first-class DICOM profile needs raw element access, not just the
 # waveform reader the codec exposes.
@@ -17,7 +17,7 @@ flate2 = "1"
 dicom-object = "0.8"
 hdf5-metno = "0.12"
 lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom", "nwb"] }
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "0d3c6e6ddb2e5f91eb8692ed44f992e288a9e0ee" }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "6a5f9ad40554c98ff9b8c8d7d9a9bc8c66d014dc" }
 serde_json = "1"
 tempfile = "3"
 
