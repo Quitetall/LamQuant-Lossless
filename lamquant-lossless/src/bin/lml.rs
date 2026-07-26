@@ -824,6 +824,25 @@ EXAMPLES:
         /// same key. Mutually exclusive with `LAMQUANT_KEY` env path.
         #[arg(long)]
         password: bool,
+        /// Write a BCS2 privacy envelope instead of an LMLCRYPT file
+        ///
+        /// The header stops being a private magic and becomes the same
+        /// header every other LamQuant artifact has, authenticated in full
+        /// as AEAD associated data -- so tampering anywhere in it is an
+        /// authentication failure rather than a parse error. Defaults to
+        /// the opaque privacy mode, which discloses nothing; `decrypt`
+        /// accepts either container without a flag.
+        #[arg(long)]
+        envelope: bool,
+        /// Publish the inner profile, root kind and content id in the
+        /// envelope header so a store can index sealed data it cannot read
+        ///
+        /// Off by default and deliberately so: the inner content id is a
+        /// stable fingerprint of a specific recording, and publishing it
+        /// lets an observer confirm a suspected file is present without
+        /// ever holding the key. Requires --envelope.
+        #[arg(long, requires = "envelope")]
+        discoverable: bool,
     },
     /// Phase 7.1 — AES-256-GCM decrypt + authenticate. Errors on bad
     /// magic / version / auth-tag mismatch / wrong key.
@@ -1854,7 +1873,9 @@ fn main() {
                 output,
                 force,
                 password,
-            } => cmd_encrypt(&input, &output, force, password),
+                envelope,
+                discoverable,
+            } => cmd_encrypt(&input, &output, force, password, envelope, discoverable),
             Commands::Decrypt {
                 input,
                 output,
@@ -9935,7 +9956,14 @@ fn read_password_for_decrypt() -> Result<String, Box<dyn std::error::Error + Sen
     Ok(pw)
 }
 
-fn cmd_encrypt(input: &Path, output: &Path, force: bool, password: bool) -> R {
+fn cmd_encrypt(
+    input: &Path,
+    output: &Path,
+    force: bool,
+    password: bool,
+    envelope: bool,
+    discoverable: bool,
+) -> R {
     lamquant_core::paths::ensure_can_write(output, force)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
     use lamquant_core::security::{encrypt_aes_gcm, Argon2Params, Key, LmcryptHeader};
@@ -9949,7 +9977,22 @@ fn cmd_encrypt(input: &Path, output: &Path, force: bool, password: bool) -> R {
         (Key::from_env()?, None)
     };
     let plaintext = std::fs::read(input)?;
-    let blob = encrypt_aes_gcm(&key, &plaintext)?;
+    let cipher = if envelope {
+        "XChaCha20-Poly1305"
+    } else {
+        "AES-256-GCM"
+    };
+    let blob = if envelope {
+        use semantic_abir_bcs::PrivacyMode;
+        let mode = if discoverable {
+            PrivacyMode::EncryptedDiscoverable
+        } else {
+            PrivacyMode::EncryptedOpaque
+        };
+        lamquant_core::security_bcs2::encrypt_bytes(&plaintext, &key, mode)?
+    } else {
+        encrypt_aes_gcm(&key, &plaintext)?
+    };
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -9961,7 +10004,7 @@ fn cmd_encrypt(input: &Path, output: &Path, force: bool, password: bool) -> R {
         let sidecar_path = output.with_extension("lmcrypt.header");
         std::fs::write(&sidecar_path, header.to_bytes())?;
         println!(
-            "Encrypted {} → {} ({} → {} bytes, AES-256-GCM); KDF sidecar {} (Argon2id m={} t={} p={})",
+            "Encrypted {} → {} ({} → {} bytes, {cipher}); KDF sidecar {} (Argon2id m={} t={} p={})",
             input.display(),
             output.display(),
             plaintext.len(),
@@ -9973,7 +10016,7 @@ fn cmd_encrypt(input: &Path, output: &Path, force: bool, password: bool) -> R {
         );
     } else {
         println!(
-            "Encrypted {} → {} ({} → {} bytes, AES-256-GCM)",
+            "Encrypted {} → {} ({} → {} bytes, {cipher})",
             input.display(),
             output.display(),
             plaintext.len(),
@@ -10005,7 +10048,20 @@ fn cmd_decrypt(input: &Path, output: &Path, force: bool, password: bool) -> R {
         Key::from_env()?
     };
     let blob = std::fs::read(input)?;
-    let plaintext = decrypt_aes_gcm(&key, &blob)?;
+    // Dispatch on the file's own header, not on a flag. Both containers are
+    // self-identifying, so making the operator declare which one they hold
+    // would only create a way to be wrong -- and getting it wrong reports a
+    // decryption failure for a perfectly good file.
+    let privacy_mode = lamquant_core::security_bcs2::envelope_privacy_mode(&blob);
+    let cipher = match privacy_mode {
+        Some(mode) => format!("XChaCha20-Poly1305, {mode:?}"),
+        None => "AES-256-GCM".to_string(),
+    };
+    let plaintext = if privacy_mode.is_some() {
+        lamquant_core::security_bcs2::decrypt_bytes(&blob, &key)?
+    } else {
+        decrypt_aes_gcm(&key, &blob)?
+    };
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -10013,7 +10069,7 @@ fn cmd_decrypt(input: &Path, output: &Path, force: bool, password: bool) -> R {
     }
     std::fs::write(output, &plaintext)?;
     println!(
-        "Decrypted {} → {} ({} → {} bytes, AES-256-GCM auth OK)",
+        "Decrypted {} → {} ({} → {} bytes, {cipher} auth OK)",
         input.display(),
         output.display(),
         blob.len(),

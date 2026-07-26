@@ -168,6 +168,10 @@ pub mod source;
 // ─── security: encryption / signing primitives ────────────────────
 #[cfg(feature = "security")]
 pub mod security;
+// Encryption expressed as the BCS2 header PrivacyMode (ADR 0139 contract 5).
+// Additive: `security` keeps encrypting and decrypting LMLCRYPT.
+#[cfg(all(feature = "security", feature = "archive"))]
+pub mod security_bcs2;
 
 // ─── tui: interactive TUI panels ──────────────────────────────────
 #[cfg(feature = "tui")]
