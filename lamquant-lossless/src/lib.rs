@@ -110,6 +110,10 @@ pub mod codec_stages;
 pub mod normalize;
 /// ADR 0075 — the LQTP1 training tensor pack (BFP window store). Host-only.
 pub mod tensor_pack;
+// The training window pack expressed as a BCS2 TRAINING_* snapshot (ADR 0139
+// contract 5). Additive: `tensor_pack` keeps reading and writing LQTP1.
+#[cfg(feature = "archive")]
+pub mod tensor_pack_bcs2;
 #[cfg(feature = "archive")]
 pub use crate::bcs2_container as container;
 #[cfg(feature = "archive")]
