@@ -264,7 +264,7 @@ pub struct ArchiveSummary {
 /// race-deleted file). Previously the `.filter_map(|e| e.ok())` chain
 /// silently dropped the error — an archive could miss whole
 /// subdirectories with no diagnostic to the operator.
-fn walk_files(root: &Path) -> Vec<(PathBuf, String)> {
+pub(crate) fn walk_files(root: &Path) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
     let walker = walkdir::WalkDir::new(root).sort_by_file_name();
     for entry_result in walker.into_iter() {
@@ -296,7 +296,7 @@ fn walk_files(root: &Path) -> Vec<(PathBuf, String)> {
 /// the archive caller can hard-error on their presence — silently
 /// dropping symlinks would lose data, and following them would risk
 /// duplicating content + escaping the input root.
-fn walk_symlinks(root: &Path) -> Vec<(PathBuf, String)> {
+pub(crate) fn walk_symlinks(root: &Path) -> Vec<(PathBuf, String)> {
     let mut links = Vec::new();
     let walker = walkdir::WalkDir::new(root).sort_by_file_name();
     for entry_result in walker.into_iter() {
@@ -325,7 +325,7 @@ fn walk_symlinks(root: &Path) -> Vec<(PathBuf, String)> {
 }
 
 /// Collect all directories with relative paths and modification times.
-fn walk_dirs(root: &Path) -> Vec<(String, u64)> {
+pub(crate) fn walk_dirs(root: &Path) -> Vec<(String, u64)> {
     let mut dirs = Vec::new();
     let walker = walkdir::WalkDir::new(root).sort_by_file_name();
     for entry_result in walker.into_iter() {
@@ -395,7 +395,7 @@ fn bounded_alloc_usize(
 /// ADR 0021 Tier 2 audit (N5): closes the zstd-bomb attack surface
 /// at manifest decompression (lma.rs:2207/2607/2748) and per-entry
 /// `Method::Zstd` extraction (lma.rs:1665/2373/2670).
-fn decode_zstd_bounded(
+pub(crate) fn decode_zstd_bounded(
     input: &[u8],
     max_size: usize,
     context: &str,
@@ -641,7 +641,7 @@ fn read_lma_index<R: Read + Seek>(
 }
 
 /// SHA-256 hex digest of a byte slice.
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
@@ -653,7 +653,7 @@ fn sha256_hex(data: &[u8]) -> String {
 /// parses the metadata to recover the original EDF header and non-EEG channels,
 /// then interleaves everything back into the original EDF byte layout.
 /// If `original_size` is provided, pads output to match (preserves trailing zeros).
-fn decode_lml_to_edf(
+pub(crate) fn decode_lml_to_edf(
     lml_bytes: &[u8],
     original_size: Option<u64>,
     tmp_dir_hint: Option<&Path>,
@@ -1036,7 +1036,7 @@ fn try_ingest_to_lml(
 /// EDF bytes and the format info, returns the original (non-EDF)
 /// byte sequence. Roundtrip integrity is validated by the existing
 /// SHA-256 check against `entry.sha256`.
-fn re_emit_synthetic(
+pub(crate) fn re_emit_synthetic(
     edf_bytes: &[u8],
     info: &SyntheticFromInfo,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1349,7 +1349,7 @@ fn encode_edf_to_lml(
 /// archive write thread so the per-file LML/zstd encode (the pack hot path) can
 /// run on many rayon workers in parallel. The sequential writer consumes these
 /// IN ORDER, so the archive stays byte-identical to the old single-threaded pack.
-enum EncodedEntry {
+pub(crate) enum EncodedEntry {
     /// File read failed — skip it (logged) and record the error.
     Skipped { rel_path: String, msg: String },
     /// Encoded OK. `warnings` carries non-fatal cascade messages (e.g. an
@@ -1374,7 +1374,7 @@ enum EncodedEntry {
 /// `tempfile::Builder` names, so parallel calls never collide. All ordered
 /// side-effects (write, offset, counts, sha) are done by the sequential writer
 /// in [`pack_archive`], keeping the output byte-identical.
-fn encode_archive_entry(
+pub(crate) fn encode_archive_entry(
     full_path: &Path,
     rel_path: &str,
     zstd_level: i32,

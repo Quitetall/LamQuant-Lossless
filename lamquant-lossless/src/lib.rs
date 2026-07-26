@@ -123,6 +123,10 @@ pub use lamquant_common::ingest;
 pub mod io;
 #[cfg(feature = "archive")]
 pub mod lma;
+// LMA directory archives expressed as BCS2 forensic capsules (ADR 0139
+// contract 5). Additive: `lma` keeps reading and writing LMA1/LMA2.
+#[cfg(feature = "archive")]
+pub mod lma_forensic;
 // NWB/HDF5 integer-signal reader → LML ingest (ADR 0051 Track 3). Host-only:
 // the `nwb` feature gates in libhdf5 via hdf5-metno; never in the no_std build.
 #[cfg(feature = "nwb")]

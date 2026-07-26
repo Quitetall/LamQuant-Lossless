@@ -9,7 +9,7 @@
 
 use clap::{Parser, Subcommand};
 use lamquant_core::deployment::LosslessMode;
-use lamquant_core::{container, edf, lma, lml, tui};
+use lamquant_core::{container, edf, lma, lma_forensic, lml, tui};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::io::{BufWriter, Write};
@@ -494,6 +494,15 @@ SOURCE FORMATS:
         /// Zstd compression level for sidecars (1-22, default 9)
         #[arg(long, default_value = "9")]
         zstd_level: i32,
+        /// Write a BCS2 forensic capsule instead of an .lma container
+        ///
+        /// Same compression cascade and identical stored bytes per entry —
+        /// only the container differs. The capsule additionally binds every
+        /// entry's identity to the original file rather than to whatever was
+        /// stored for it, so extraction is verified rather than attempted.
+        /// `extract` accepts either form without a flag.
+        #[arg(long)]
+        capsule: bool,
     },
     /// Extract an .lma archive to a directory (byte-exact roundtrip)
     ///
@@ -1748,7 +1757,8 @@ fn main() {
                 input,
                 output,
                 zstd_level,
-            } => cmd_archive(&input, output.as_deref(), zstd_level),
+                capsule,
+            } => cmd_archive(&input, output.as_deref(), zstd_level, capsule),
             Commands::Extract {
                 input,
                 output,
@@ -7529,11 +7539,12 @@ fn cmd_recover(input: &Path, output: &Path) -> R {
     Ok(())
 }
 
-fn cmd_archive(input: &Path, output: Option<&Path>, zstd_level: i32) -> R {
+fn cmd_archive(input: &Path, output: Option<&Path>, zstd_level: i32, capsule: bool) -> R {
     let _span = tracing::info_span!(
         "archive",
         input = %input.display(),
         zstd_level = zstd_level,
+        capsule = capsule,
     )
     .entered();
     let output_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
@@ -7541,16 +7552,24 @@ fn cmd_archive(input: &Path, output: Option<&Path>, zstd_level: i32) -> R {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "archive".to_string());
+        // Distinct extension by default: the two containers are not
+        // interchangeable for third-party tooling, so defaulting a capsule to
+        // `.lma` would hand out files that look like something they are not.
+        let extension = if capsule { "bcs2" } else { "lma" };
         input
             .parent()
             .unwrap_or(Path::new("."))
-            .join(format!("{}.lma", name))
+            .join(format!("{name}.{extension}"))
     });
 
     let t0 = Instant::now();
     println!("Archiving {} → {}", input.display(), output_path.display());
 
-    let summary = lma::pack_archive(input, &output_path, zstd_level, true, None)?;
+    let summary = if capsule {
+        lma_forensic::pack_directory(input, &output_path, zstd_level, true, None)?
+    } else {
+        lma::pack_archive(input, &output_path, zstd_level, true, None)?
+    };
 
     let elapsed = t0.elapsed();
     println!("\nDone in {:.1}s", elapsed.as_secs_f64());
@@ -7591,7 +7610,16 @@ fn cmd_extract(input: &Path, output: Option<&Path>, verify: bool) -> R {
     let t0 = Instant::now();
     println!("Extracting {} → {}", input.display(), output_dir.display());
 
-    let summary = lma::unpack_archive(input, &output_dir, verify, true, None)?;
+    // Dispatch on the file's own magic, not on its extension or a flag. The two
+    // containers are self-identifying, so making the operator declare which one
+    // they have would only create a way to be wrong.
+    let summary = if lma_forensic::is_capsule(input) {
+        // A capsule verifies every entry against its content id unconditionally,
+        // so there is no cheaper unverified mode to opt into.
+        lma_forensic::unpack_capsule(input, &output_dir, true)?
+    } else {
+        lma::unpack_archive(input, &output_dir, verify, true, None)?
+    };
 
     let elapsed = t0.elapsed();
     println!("\nDone in {:.1}s", elapsed.as_secs_f64());
