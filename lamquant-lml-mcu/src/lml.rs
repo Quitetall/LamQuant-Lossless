@@ -2206,8 +2206,92 @@ fn find_magic_offset(data: &[u8]) -> LmlResult<usize> {
     Err(LmlError::InvalidMagic(m))
 }
 
+/// Whether decoding `packet` needs the arithmetic subband coders.
+///
+/// The track-2 payload coder is chosen per subband as whichever of Golomb
+/// (`0x00`), zero-run-length (`0x01`) or — in a build with the range coders
+/// compiled in — the empirical-categorical coders (`0x02`/`0x03`) is smallest.
+/// The last two are the only tags a default build cannot decode.
+///
+/// Callers use this to decide whether a container must declare
+/// `CAP_LML_ARITHMETIC_V1`, so the answer must be about THIS packet rather than
+/// about the build that produced it. A producer compiled with the coders
+/// available still emits packets any reader can decode whenever they did not
+/// win, and declaring a requirement those packets do not have would lock
+/// baseline readers out of data they could read perfectly well.
+///
+/// Exact for every packet shape that can appear in an LML bundle or an archive
+/// entry: those are strict-lossless (track-1) packets, which carry no per-subband
+/// tags at all, so the flag test below is conclusive.
+///
+/// Conservative in one case, stated rather than hidden: a packet that is both
+/// track-2 AND per-subband-tagged reports `true` without walking its subbands.
+/// Such packets are lossy and no current producer places one in a bundle or an
+/// archive, so this over-declares nothing in practice — but it would rather
+/// over-declare than under-declare, because under-declaring is the failure that
+/// hands a reader bytes it cannot decode.
+pub fn requires_arithmetic_coders(packet: &[u8]) -> bool {
+    let Some(offset) = packet
+        .windows(4)
+        .take(129)
+        .position(|window| window == b"LML1")
+    else {
+        return false;
+    };
+    let Some(flags) = packet.get(offset + 9) else {
+        return false;
+    };
+    // Per-subband tags exist only when BOTH flags are set; either alone cannot
+    // carry a coder tag, so neither alone can require the range coders.
+    flags & FLAG_BIT_TRACK2_MODE != 0 && flags & FLAG_BIT_PER_SUBBAND_TAG != 0
+}
+
 #[cfg(test)]
 mod tests {
+    use super::requires_arithmetic_coders;
+
+    /// Minimal packet header: magic at 0, flags at byte 9.
+    fn packet_with_flags(flags: u8) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec![0_u8; 32];
+        bytes[..4].copy_from_slice(b"LML1");
+        bytes[9] = flags;
+        bytes
+    }
+
+    #[test]
+    fn strict_lossless_packets_never_require_the_range_coders() {
+        // The conclusive case: every packet an LML bundle or an archive entry
+        // can contain is track-1, which carries no per-subband tags at all. If
+        // this regressed, those containers would start declaring a capability
+        // their data does not need and lock out baseline readers.
+        assert!(!requires_arithmetic_coders(&packet_with_flags(0)));
+    }
+
+    #[test]
+    fn either_flag_alone_cannot_carry_a_coder_tag() {
+        // Per-subband tags exist only when BOTH are set. Treating either alone
+        // as requiring the coders would over-declare on ordinary packets.
+        assert!(!requires_arithmetic_coders(&packet_with_flags(
+            super::FLAG_BIT_TRACK2_MODE
+        )));
+        assert!(!requires_arithmetic_coders(&packet_with_flags(
+            super::FLAG_BIT_PER_SUBBAND_TAG
+        )));
+    }
+
+    #[test]
+    fn a_per_subband_tagged_track2_packet_requires_them() {
+        assert!(requires_arithmetic_coders(&packet_with_flags(
+            super::FLAG_BIT_TRACK2_MODE | super::FLAG_BIT_PER_SUBBAND_TAG
+        )));
+    }
+
+    #[test]
+    fn a_packet_without_the_magic_is_not_claimed() {
+        // Never assert a requirement about bytes that are not an LML packet.
+        assert!(!requires_arithmetic_coders(b"not an lml packet at all"));
+    }
+
     use super::*;
 
     #[test]
