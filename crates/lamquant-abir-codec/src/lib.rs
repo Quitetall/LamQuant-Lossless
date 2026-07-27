@@ -11,6 +11,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "optimum")]
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec;
@@ -21,6 +23,8 @@ use semantic_abir::{
     canonical_debug_json, verify_payload_content, AbirDataset, Atom, ByteOrder, ContentId,
     ElementType, Layout, PayloadAccess, PayloadDescriptor, PayloadLease, Presence,
 };
+#[cfg(feature = "optimum")]
+use semantic_abir_bcs::Bcs2View;
 use semantic_abir_bcs::{
     encode_codec_bundle, CodecBundleError, CodecBundleInput, CodecBundleView, CodecFidelity,
     CodecFidelityKind, CodecImplementation, CodecParameter, CodecParameterValue, CodecProfile,
@@ -59,6 +63,23 @@ pub const MAX_PACKET_CHANNELS: usize = 1024;
 /// logical data than the encoded packet frames occupy, so the trust envelope
 /// must reject that expansion before reserving the output matrix.
 const MAX_DECODED_BUNDLE_BYTES: usize = 1024 * 1024 * 1024;
+/// Conservative logical-output ceiling for Optimum bundles.
+///
+/// Optimum transform-2 decode retains residual/reconstruction scratch in
+/// addition to returned samples. Keeping logical output at 64 MiB bounds peak
+/// working memory to a host-safe envelope until streaming decode lands.
+#[cfg(feature = "optimum")]
+const MAX_OPTIMUM_DECODED_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(feature = "optimum")]
+const LMO_HEADER_SIZE: usize = 7;
+#[cfg(feature = "optimum")]
+const LMO_VERSION: u8 = 2;
+#[cfg(feature = "optimum")]
+const LMO_MODE_LOSSLESS: u8 = 0;
+#[cfg(feature = "optimum")]
+const LMO_TRANSFORM_LML_53: u8 = 0;
+#[cfg(feature = "optimum")]
+const LMO_TRANSFORM_OPTIMUM_LOSSLESS: u8 = 2;
 
 /// A validated BCS2 LML bundle with decoded, semantics-verified samples.
 #[derive(Debug)]
@@ -81,6 +102,44 @@ impl<'a> OpenedLmlBundle<'a> {
         self.bundle
             .packet(0)
             .expect("validated LML bundles contain at least one packet")
+    }
+
+    pub fn packets(&self) -> impl ExactSizeIterator<Item = &'a [u8]> + '_ {
+        self.bundle.packets()
+    }
+
+    pub fn packet_sample_counts(&self) -> &[usize] {
+        &self.packet_sample_counts
+    }
+
+    pub const fn bundle(&self) -> &CodecBundleView<'a> {
+        &self.bundle
+    }
+}
+
+/// Validated optimum BCS2 bundle with exact decoded samples.
+#[cfg(feature = "optimum")]
+#[derive(Debug)]
+pub struct OpenedOptimumBundle<'a> {
+    bundle: CodecBundleView<'a>,
+    packet_sample_counts: Vec<usize>,
+    signal: Vec<Vec<i64>>,
+}
+
+#[cfg(feature = "optimum")]
+impl<'a> OpenedOptimumBundle<'a> {
+    pub const fn dataset(&self) -> &AbirDataset {
+        self.bundle.dataset()
+    }
+
+    pub fn signal(&self) -> &[Vec<i64>] {
+        &self.signal
+    }
+
+    pub fn packet(&self) -> &'a [u8] {
+        self.bundle
+            .packet(0)
+            .expect("validated optimum bundles contain at least one packet")
     }
 
     pub fn packets(&self) -> impl ExactSizeIterator<Item = &'a [u8]> + '_ {
@@ -388,10 +447,12 @@ pub fn implementation_identity() -> CodecImplementation {
     }
 }
 
-/// Implementation identity for the Optimum tier.
+/// Linked Optimum source/build identity.
 ///
-/// Differs from [`implementation_identity`] only in `kernel_id`, so a consumer
-/// can tell which decoder produced a bundle without inspecting packet bytes.
+/// Use this as producer identity only when the exact linked Optimum encoder
+/// emitted the packets. [`seal_optimum_packets`] accepts identity explicitly so
+/// importing pre-existing packets cannot silently claim this build produced
+/// them.
 #[cfg(feature = "optimum")]
 pub fn optimum_implementation_identity() -> CodecImplementation {
     CodecImplementation {
@@ -416,6 +477,7 @@ pub fn optimum_implementation_identity() -> CodecImplementation {
 pub fn seal_optimum_packets(
     dataset: &AbirDataset,
     packets: &[&[u8]],
+    producer: CodecImplementation,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
     use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
@@ -423,7 +485,10 @@ pub fn seal_optimum_packets(
     if packets.is_empty() {
         return Err(LmlBundleError::PacketCount);
     }
-    let signal = decode_optimum_sequence(packets)?;
+    if producer.kernel_id != OPTIMUM_KERNEL_ID {
+        return Err(LmlBundleError::CatalogContract);
+    }
+    let (signal, _) = decode_optimum_sequence(dataset, packets)?;
     verify_signal_closure(dataset, &signal)?;
 
     let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
@@ -432,7 +497,7 @@ pub fn seal_optimum_packets(
             required_capabilities: CAP_LML_OPTIMUM_V1,
             canonical_semantics: &semantics,
             fidelity: exact_fidelity(),
-            implementation: optimum_implementation_identity(),
+            implementation: producer,
             model_provenance: None,
             packets,
             parameters: canonical_parameters(),
@@ -454,13 +519,16 @@ pub fn seal_optimum_packets(
 pub fn open_optimum_bundle(
     bytes: &[u8],
     bounds: ResourceBounds,
-) -> Result<(CodecBundleView<'_>, Vec<Vec<i64>>), LmlBundleError> {
+) -> Result<OpenedOptimumBundle<'_>, LmlBundleError> {
     use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
 
     let bundle = CodecBundleView::open_with_capabilities(bytes, CAP_LML_OPTIMUM_V1, bounds)
         .map_err(LmlBundleError::Bundle)?;
     let catalog = bundle.catalog();
-    if catalog.profile() != CodecProfile::LmlLossless || catalog.packet_count() == 0 {
+    if catalog.profile() != CodecProfile::LmlLossless {
+        return Err(LmlBundleError::CatalogContract);
+    }
+    if catalog.packet_count() == 0 {
         return Err(LmlBundleError::PacketCount);
     }
     if catalog.model_provenance().is_some()
@@ -470,10 +538,37 @@ pub fn open_optimum_bundle(
     {
         return Err(LmlBundleError::CatalogContract);
     }
+    let wire = Bcs2View::parse(bytes, CAP_LML_OPTIMUM_V1, bounds)
+        .map_err(|error| LmlBundleError::Bundle(CodecBundleError::Bcs2(error)))?;
+    let packet_ids = (0..catalog.packet_count())
+        .map(|ordinal| {
+            catalog
+                .packet_content_id(ordinal)
+                .ok_or(LmlBundleError::CatalogContract)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut seen_packet_ids = BTreeSet::new();
+    for frame in wire.frames() {
+        if packet_ids.contains(&frame.content_id()) {
+            if frame.required_capabilities() != CAP_LML_OPTIMUM_V1 {
+                return Err(LmlBundleError::CatalogContract);
+            }
+            seen_packet_ids.insert(frame.content_id());
+        } else if frame.required_capabilities() != 0 {
+            return Err(LmlBundleError::CatalogContract);
+        }
+    }
+    if seen_packet_ids != packet_ids {
+        return Err(LmlBundleError::CatalogContract);
+    }
     let packets: Vec<&[u8]> = bundle.packets().collect();
-    let signal = decode_optimum_sequence(&packets)?;
+    let (signal, packet_sample_counts) = decode_optimum_sequence(bundle.dataset(), &packets)?;
     verify_signal_closure(bundle.dataset(), &signal)?;
-    Ok((bundle, signal))
+    Ok(OpenedOptimumBundle {
+        bundle,
+        packet_sample_counts,
+        signal,
+    })
 }
 
 /// Decode an ordered optimum packet sequence into one concatenated signal.
@@ -482,23 +577,91 @@ pub fn open_optimum_bundle(
 /// does not describe one recording, and concatenating it anyway would produce a
 /// signal that passes closure by accident on the first channel.
 #[cfg(feature = "optimum")]
-fn decode_optimum_sequence(packets: &[&[u8]]) -> Result<Vec<Vec<i64>>, LmlBundleError> {
-    let mut signal: Vec<Vec<i64>> = Vec::new();
+fn decode_optimum_sequence(
+    dataset: &AbirDataset,
+    packets: &[&[u8]],
+) -> Result<(Vec<Vec<i64>>, Vec<usize>), LmlBundleError> {
+    let descriptors = ordered_descriptors(dataset)?;
+    let expected_samples = descriptors
+        .first()
+        .and_then(|descriptor| descriptor.shape().last())
+        .copied()
+        .and_then(|samples| usize::try_from(samples).ok())
+        .ok_or(LmlBundleError::SignalShapeMismatch)?;
+    let decoded_bytes = descriptors
+        .len()
+        .checked_mul(expected_samples)
+        .and_then(|elements| elements.checked_mul(core::mem::size_of::<i64>()))
+        .ok_or(LmlBundleError::DecodedResourceLimit)?;
+    if decoded_bytes > MAX_OPTIMUM_DECODED_BUNDLE_BYTES {
+        return Err(LmlBundleError::DecodedResourceLimit);
+    }
+    let mut signal: Option<Vec<Vec<i64>>> = None;
+    let mut packet_sample_counts = Vec::with_capacity(packets.len());
+
     for packet in packets {
-        let decoded = lamquant_lml_optimum::lmo::decode_any(packet)
-            .map_err(|_| LmlBundleError::NotExactLossless)?;
-        if signal.is_empty() {
-            signal = decoded;
-            continue;
-        }
-        if decoded.len() != signal.len() {
+        validate_strict_optimum_packet(packet)?;
+        let accumulated = signal
+            .as_ref()
+            .and_then(|channels| channels.first())
+            .map_or(0, Vec::len);
+        let remaining = expected_samples
+            .checked_sub(accumulated)
+            .ok_or(LmlBundleError::SignalShapeMismatch)?;
+        let decoded =
+            lamquant_lml_optimum::decode_lossless_bounded(packet, descriptors.len(), remaining)
+                .map_err(LmlBundleError::Optimum)?;
+        if decoded.len() != descriptors.len() {
             return Err(LmlBundleError::SignalShapeMismatch);
         }
-        for (channel, more) in signal.iter_mut().zip(decoded) {
-            channel.extend(more);
+        let samples = decoded.first().map_or(0, Vec::len);
+        if samples == 0 || decoded.iter().any(|channel| channel.len() != samples) {
+            return Err(LmlBundleError::SignalShapeMismatch);
         }
+        let end = accumulated
+            .checked_add(samples)
+            .ok_or(LmlBundleError::DecodedResourceLimit)?;
+        if end > expected_samples {
+            return Err(LmlBundleError::SignalShapeMismatch);
+        }
+        if let Some(output) = signal.as_mut() {
+            for (channel, more) in output.iter_mut().zip(decoded) {
+                channel
+                    .try_reserve_exact(more.len())
+                    .map_err(|_| LmlBundleError::DecodedResourceLimit)?;
+                channel.extend(more);
+            }
+        } else {
+            signal = Some(decoded);
+        }
+        packet_sample_counts.push(samples);
     }
-    Ok(signal)
+    let signal = signal.ok_or(LmlBundleError::PacketCount)?;
+    if signal
+        .iter()
+        .any(|channel| channel.len() != expected_samples)
+    {
+        return Err(LmlBundleError::SignalShapeMismatch);
+    }
+    Ok((signal, packet_sample_counts))
+}
+
+#[cfg(feature = "optimum")]
+fn validate_strict_optimum_packet(packet: &[u8]) -> Result<(), LmlBundleError> {
+    if packet.len() < LMO_HEADER_SIZE || &packet[..4] != b"LMO1" {
+        return Err(LmlBundleError::NotOptimum);
+    }
+    if packet[4] != LMO_VERSION {
+        return Err(LmlBundleError::NotOptimum);
+    }
+    if packet[5] != LMO_MODE_LOSSLESS {
+        return Err(LmlBundleError::NotExactLossless);
+    }
+    match packet[6] {
+        LMO_TRANSFORM_LML_53 => validate_strict_lossless_packet(&packet[LMO_HEADER_SIZE..]),
+        LMO_TRANSFORM_OPTIMUM_LOSSLESS => Ok(()),
+        _ => Err(LmlBundleError::NotExactLossless),
+    }
 }
 
 fn exact_fidelity() -> CodecFidelity {
@@ -859,6 +1022,10 @@ pub enum LmlBundleError {
     Lml(lamquant_lml_mcu::error::LmlError),
     NotExactLossless,
     NotLml1,
+    #[cfg(feature = "optimum")]
+    NotOptimum,
+    #[cfg(feature = "optimum")]
+    Optimum(lamquant_lml_mcu::codec::CodecError),
     PacketCount,
     PacketExtent,
     PayloadAccess(semantic_abir::PayloadAccessError),
@@ -874,6 +1041,8 @@ impl fmt::Display for LmlBundleError {
         match self {
             Self::Bundle(error) => error.fmt(formatter),
             Self::Lml(error) => error.fmt(formatter),
+            #[cfg(feature = "optimum")]
+            Self::Optimum(error) => error.fmt(formatter),
             Self::PayloadAccess(error) => error.fmt(formatter),
             Self::UnsupportedSemantics(reason) => {
                 write!(formatter, "unsupported LML ABIR semantics: {reason}")
@@ -896,7 +1065,7 @@ mod tests {
     };
 
     fn fixture() -> OpenedDataset<InMemoryPayloadAccess> {
-        let signal = [
+        fixture_from_signal(&[
             (ElementType::I16, vec![1_i64, -2, 3, -4, 5, -6, 7, -8]),
             (
                 ElementType::I24,
@@ -906,7 +1075,20 @@ mod tests {
                 ElementType::I64,
                 vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
             ),
-        ];
+        ])
+    }
+
+    fn fixture_from_signal(
+        signal: &[(ElementType, Vec<i64>)],
+    ) -> OpenedDataset<InMemoryPayloadAccess> {
+        assert!(!signal.is_empty());
+        let sample_count = signal[0].1.len();
+        assert!(
+            sample_count > 0
+                && signal
+                    .iter()
+                    .all(|(_, samples)| samples.len() == sample_count)
+        );
         let dataset_id = ObjectId::<DatasetTag>::from_bytes([1; 16]);
         let recording_id = ObjectId::<RecordingTag>::from_bytes([2; 16]);
         let stream_id = ObjectId::<StreamTag>::from_bytes([3; 16]);
@@ -967,6 +1149,28 @@ mod tests {
             None,
         ));
         OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
+    }
+
+    #[cfg(feature = "optimum")]
+    fn optimum_packet(signal: &[Vec<i64>]) -> Vec<u8> {
+        let inner = lamquant_lml_mcu::lml::compress(signal, 0).expect("baseline LML packet");
+        let mut packet = Vec::with_capacity(7 + inner.len());
+        packet.extend_from_slice(b"LMO1");
+        packet.extend_from_slice(&[2, 0, 0]);
+        packet.extend_from_slice(&inner);
+        packet
+    }
+
+    #[cfg(feature = "optimum")]
+    fn real_optimum_packet(signal: &[Vec<i64>]) -> Vec<u8> {
+        let packet = lamquant_lml_optimum::encode(signal, lamquant_lml_optimum::Mode::Lossless)
+            .expect("real optimum packet");
+        assert_eq!(
+            packet.get(6),
+            Some(&LMO_TRANSFORM_OPTIMUM_LOSSLESS),
+            "fixture must exercise transform-2 rather than wrapped baseline LML"
+        );
+        packet
     }
 
     fn oversized_semantic_dataset() -> AbirDataset {
@@ -1082,6 +1286,250 @@ mod tests {
             canonical_debug_json(mapped.dataset()).unwrap()
         );
         assert!(core::ptr::eq(opened.dataset(), opened.bundle().dataset()));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn optimum_bundle_roundtrips_and_baseline_reader_refuses_it() {
+        let mapped = fixture();
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7, -8],
+            vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+            vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+        ];
+        let packet = optimum_packet(&signal);
+        let bytes = seal_optimum_packets(
+            mapped.dataset(),
+            &[packet.as_slice()],
+            optimum_implementation_identity(),
+            ResourceBounds::default(),
+        )
+        .expect("optimum bundle");
+
+        assert!(matches!(
+            open_lml_bundle(&bytes, ResourceBounds::default()),
+            Err(LmlBundleError::Bundle(CodecBundleError::Bcs2(
+                semantic_abir_bcs::Bcs2Error::UnsupportedCapabilities(
+                    semantic_abir_bcs::CAP_LML_OPTIMUM_V1
+                )
+            )))
+        ));
+        let opened = open_optimum_bundle(&bytes, ResourceBounds::default()).expect("open optimum");
+        assert_eq!(opened.signal(), signal);
+        assert_eq!(opened.packet_sample_counts(), &[8]);
+        assert_eq!(
+            opened.bundle().catalog().implementation().kernel_id,
+            OPTIMUM_KERNEL_ID
+        );
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn optimum_sequence_rejects_disagreeing_channel_counts() {
+        let mapped = fixture_from_signal(&[
+            (ElementType::I64, vec![1, 2, 5, 6]),
+            (ElementType::I64, vec![3, 4, 7, 8]),
+        ]);
+        let first = optimum_packet(&[vec![1, 2], vec![3, 4]]);
+        let second = optimum_packet(&[vec![5, 6]]);
+        assert!(matches!(
+            decode_optimum_sequence(mapped.dataset(), &[first.as_slice(), second.as_slice()]),
+            Err(LmlBundleError::Optimum(_))
+        ));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn optimum_sealer_rejects_raw_baseline_lml() {
+        let mapped = fixture();
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7, -8],
+            vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+            vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+        ];
+        let packet = lamquant_lml_mcu::lml::compress(&signal, 0).unwrap();
+        assert!(matches!(
+            seal_optimum_packets(
+                mapped.dataset(),
+                &[packet.as_slice()],
+                optimum_implementation_identity(),
+                ResourceBounds::default()
+            ),
+            Err(LmlBundleError::NotOptimum)
+        ));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn optimum_semantic_expansion_is_bounded_before_decode() {
+        let packet = optimum_packet(&[vec![0]]);
+        assert!(matches!(
+            seal_optimum_packets(
+                &oversized_semantic_dataset(),
+                &[packet.as_slice()],
+                optimum_implementation_identity(),
+                ResourceBounds::default()
+            ),
+            Err(LmlBundleError::DecodedResourceLimit)
+        ));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn optimum_sequence_cannot_exceed_declared_sample_extent() {
+        let mapped = fixture();
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7, -8],
+            vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+            vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+        ];
+        let packet = optimum_packet(&signal);
+        assert!(matches!(
+            decode_optimum_sequence(mapped.dataset(), &[packet.as_slice(), packet.as_slice()]),
+            Err(LmlBundleError::Optimum(_))
+        ));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn forged_inner_sample_extent_is_rejected_before_decode() {
+        let mapped = fixture_from_signal(&[(ElementType::I64, vec![0; 8])]);
+        let mut packet = b"LMO1\x02\x00\x02".to_vec();
+        packet.extend_from_slice(&[3, 0, 1, 0]); // v3, feature=0, one channel
+        packet.push(0); // channel 0 has no spatial references
+        packet.push(1); // RLS residual coder
+        packet.extend_from_slice(&1_u16.to_le_bytes());
+        packet.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_optimum_sequence(mapped.dataset(), &[packet.as_slice()]),
+            Err(LmlBundleError::Optimum(_))
+        ));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn forged_inner_encoded_extent_is_rejected_without_panicking() {
+        let mapped = fixture_from_signal(&[(ElementType::I64, vec![0; 8])]);
+        let mut packet = b"LMO1\x02\x00\x02".to_vec();
+        packet.extend_from_slice(&[3, 0, 1, 0]); // v3, feature=0, one channel
+        packet.push(0); // channel 0 has no spatial references
+        packet.push(1); // RLS residual coder
+        packet.extend_from_slice(&1_u16.to_le_bytes());
+        packet.extend_from_slice(&8_u32.to_le_bytes());
+        packet.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_optimum_sequence(mapped.dataset(), &[packet.as_slice()]),
+            Err(LmlBundleError::Optimum(_))
+        ));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn transform_two_roundtrips_through_abir_closure() {
+        let base = (0..2048)
+            .map(|index| ((index * 17 + index * index * 3) % 4096) as i64 - 2048)
+            .collect::<Vec<_>>();
+        let signal = (0..8)
+            .map(|channel| {
+                base.iter()
+                    .map(|sample| sample + channel as i64 * 7)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let semantic_signal = signal
+            .iter()
+            .cloned()
+            .map(|channel| (ElementType::I64, channel))
+            .collect::<Vec<_>>();
+        let mapped = fixture_from_signal(&semantic_signal);
+        let packet = real_optimum_packet(&signal);
+        let bytes = seal_optimum_packets(
+            mapped.dataset(),
+            &[packet.as_slice()],
+            optimum_implementation_identity(),
+            ResourceBounds::default(),
+        )
+        .expect("transform-2 bundle");
+        let opened =
+            open_optimum_bundle(&bytes, ResourceBounds::default()).expect("open transform-2");
+        assert_eq!(opened.signal(), signal);
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn optimum_open_rejects_missing_packet_capability() {
+        let mapped = fixture();
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7, -8],
+            vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+            vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+        ];
+        let packet = optimum_packet(&signal);
+        let semantics = canonical_debug_json(mapped.dataset()).unwrap();
+        let packets = [packet.as_slice()];
+        let bytes = encode_codec_bundle(
+            CodecBundleInput {
+                required_capabilities: 0,
+                canonical_semantics: &semantics,
+                fidelity: exact_fidelity(),
+                implementation: optimum_implementation_identity(),
+                model_provenance: None,
+                packets: &packets,
+                parameters: canonical_parameters(),
+                profile: CodecProfile::LmlLossless,
+            },
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            open_optimum_bundle(&bytes, ResourceBounds::default()),
+            Err(LmlBundleError::CatalogContract)
+        ));
+    }
+
+    #[cfg(feature = "optimum")]
+    #[test]
+    fn optimum_open_reports_wrong_profile_as_catalog_contract() {
+        use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
+
+        let mapped = fixture();
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7, -8],
+            vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+            vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+        ];
+        let packet = optimum_packet(&signal);
+        let semantics = canonical_debug_json(mapped.dataset()).unwrap();
+        let packets = [packet.as_slice()];
+        let bytes = encode_codec_bundle(
+            CodecBundleInput {
+                required_capabilities: CAP_LML_OPTIMUM_V1,
+                canonical_semantics: &semantics,
+                fidelity: CodecFidelity {
+                    bound: None,
+                    contract_id: ContentId::from_bytes([0x31; 32]),
+                    kind: CodecFidelityKind::Transformed,
+                    metric: Some("test-only".into()),
+                },
+                implementation: optimum_implementation_identity(),
+                model_provenance: Some(semantic_abir_bcs::ModelProvenance {
+                    checkpoint_content_id: ContentId::from_bytes([0x32; 32]),
+                    checkpoint_sha256: [0x33; 32],
+                    pccp_change_id: "test-only".into(),
+                    pccp_evidence_id: ContentId::from_bytes([0x34; 32]),
+                    pccp_status: semantic_abir_bcs::PccpStatus::Candidate,
+                }),
+                packets: &packets,
+                parameters: canonical_parameters(),
+                profile: CodecProfile::LmqProgressive,
+            },
+            ResourceBounds::default(),
+        )
+        .expect("wrong-profile fixture");
+        assert!(matches!(
+            open_optimum_bundle(&bytes, ResourceBounds::default()),
+            Err(LmlBundleError::CatalogContract)
+        ));
     }
 
     #[test]

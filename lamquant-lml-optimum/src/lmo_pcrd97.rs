@@ -572,7 +572,7 @@ pub fn decode_97(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
                 }
                 let res = crate::entropy::decode(&payload[pay_pos..pay_pos + plen])?;
                 pay_pos += plen;
-                crate::rls::reconstruct(&res)
+                crate::rls::reconstruct(&res)?
             } else {
                 if meta_pos + 4 * order > meta.len() {
                     return Err(LmlError::Truncated {

@@ -69,6 +69,16 @@ pub fn encode(res: &[i64]) -> LmlResult<Vec<u8>> {
 
 /// Decode a slice produced by [`encode`] (the caller passes the exact byte range).
 pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
+    decode_inner(data, None)
+}
+
+/// Decode exactly `expected` residuals, rejecting forged inner length headers
+/// before they can drive an oversized allocation.
+pub fn decode_exact(data: &[u8], expected: usize) -> LmlResult<Vec<i64>> {
+    decode_inner(data, Some(expected))
+}
+
+fn decode_inner(data: &[u8], expected: Option<usize>) -> LmlResult<Vec<i64>> {
     if data.is_empty() {
         return Err(LmlError::Truncated {
             expected: 1,
@@ -77,7 +87,22 @@ pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
         });
     }
     match data[0] {
-        MODE_SINGLE => Ok(golomb::decode_dense(data, 1)?.0),
+        MODE_SINGLE => {
+            if data.len() < 4 {
+                return Err(LmlError::Truncated {
+                    expected: 4,
+                    actual: data.len(),
+                    context: "entropy single header",
+                });
+            }
+            let declared = data[2] as usize | ((data[3] as usize) << 8);
+            if expected.is_some_and(|value| value != declared) {
+                return Err(LmlError::InvalidHeader(
+                    "entropy single length mismatch".into(),
+                ));
+            }
+            Ok(golomb::decode_dense(data, 1)?.0)
+        }
         MODE_BLOCK => {
             if data.len() < 5 {
                 return Err(LmlError::Truncated {
@@ -87,6 +112,11 @@ pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
                 });
             }
             let n = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+            if expected.is_some_and(|value| value != n) {
+                return Err(LmlError::InvalidHeader(
+                    "entropy block length mismatch".into(),
+                ));
+            }
             let mut out = Vec::with_capacity(n);
             let mut pos = 5usize;
             while out.len() < n {
@@ -100,7 +130,22 @@ pub fn decode(data: &[u8]) -> LmlResult<Vec<i64>> {
             out.truncate(n);
             Ok(out)
         }
-        MODE_SCALE_COND => crate::scale_cond::decode(&data[1..]),
+        MODE_SCALE_COND => {
+            if data.len() < 5 {
+                return Err(LmlError::Truncated {
+                    expected: 5,
+                    actual: data.len(),
+                    context: "entropy scale-conditioned header",
+                });
+            }
+            let declared = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+            if expected.is_some_and(|value| value != declared) {
+                return Err(LmlError::InvalidHeader(
+                    "entropy scale-conditioned length mismatch".into(),
+                ));
+            }
+            crate::scale_cond::decode(&data[1..])
+        }
         other => Err(LmlError::InvalidHeader(alloc::format!(
             "entropy unknown mode 0x{other:02X}"
         ))),
@@ -132,5 +177,12 @@ mod tests {
             let enc = encode(&v).unwrap();
             assert_eq!(decode(&enc).unwrap(), v, "n={n}");
         }
+    }
+
+    #[test]
+    fn exact_decode_rejects_forged_length_before_allocation() {
+        let mut forged = vec![MODE_BLOCK];
+        forged.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_exact(&forged, 8).is_err());
     }
 }

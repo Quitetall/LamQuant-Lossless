@@ -33,3 +33,8 @@ lamquant-lml-optimum = { version = "0.0.1", path = "../../lamquant-lml-optimum",
 
 [build-dependencies]
 blake3 = { version = "=1.5.5" }
+
+[dev-dependencies]
+# Tests exercise the real transform-2 encoder. Production consumers still pull
+# only the no_std-capable decoder through the optional dependency above.
+lamquant-lml-optimum = { version = "0.0.1", path = "../../lamquant-lml-optimum", default-features = false, features = ["encode"] }

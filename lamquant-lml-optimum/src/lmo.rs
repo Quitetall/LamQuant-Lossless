@@ -50,6 +50,32 @@ const TRANSFORM_OPTIMUM_LOSSLESS: u8 = 2;
 /// STRUCTURALLY beats H.BWC (it has no per-sample error bound). Keep-best vs the floor.
 const TRANSFORM_MVRLS_BOUNDED: u8 = 3;
 
+fn invalid_shape(reason: &str) -> CodecError {
+    CodecError::Backend(alloc::format!("invalid lossless LMO extent: {reason}"))
+}
+
+pub(crate) fn lml_declared_shape(bytes: &[u8]) -> Result<(usize, usize), CodecError> {
+    let offset = if bytes.starts_with(b"LML1") {
+        Some(0)
+    } else {
+        (0..bytes.len().min(128)).find_map(|index| {
+            (bytes.get(index) == Some(&b'\n')
+                && bytes.get(index + 1..index + 5) == Some(&b"LML1"[..])
+                && bytes[..index]
+                    .iter()
+                    .all(|byte| (0x20..=0x7e).contains(byte)))
+            .then_some(index + 1)
+        })
+    }
+    .ok_or_else(|| invalid_shape("missing inner LML1 header"))?;
+    let header = bytes
+        .get(offset..offset + 22)
+        .ok_or_else(|| invalid_shape("truncated inner LML1 header"))?;
+    let channels = u16::from_le_bytes([header[4], header[5]]) as usize;
+    let samples = u16::from_le_bytes([header[6], header[7]]) as usize;
+    Ok((channels, samples))
+}
+
 /// The Optimum (LMO) codec. Implements the shared [`Codec`] seam.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LmoCodec;
@@ -208,6 +234,40 @@ pub fn decode(bytes: &[u8]) -> Result<Signal, CodecError> {
             "unknown LMO transform_id 0x{other:02X}"
         ))),
     }
+}
+
+/// Decode an exact-lossless LMO packet only after its declared shape fits the
+/// caller's remaining output budget.
+///
+/// This preflight is required for hostile containers: several Optimum
+/// subcodecs carry `u32` sample counts and otherwise could reserve from forged
+/// inner headers before a caller compared the result with semantic metadata.
+pub fn decode_lossless_bounded(
+    bytes: &[u8],
+    expected_channels: usize,
+    max_samples: usize,
+) -> Result<Signal, CodecError> {
+    if bytes.len() < LMO_HEADER_LEN || &bytes[..4] != LMO_MAGIC.as_slice() {
+        return Err(CodecError::UnknownFormat);
+    }
+    if bytes[4] != LMO_VERSION {
+        return Err(invalid_shape("unsupported LMO version"));
+    }
+    if bytes[5] != 0 {
+        return Err(invalid_shape("packet is not lossless"));
+    }
+    let inner = &bytes[LMO_HEADER_LEN..];
+    let (channels, samples) = match bytes[6] {
+        TRANSFORM_LML_53 => lml_declared_shape(inner)?,
+        TRANSFORM_OPTIMUM_LOSSLESS => {
+            crate::lmo_lossless::declared_shape(inner).map_err(to_backend)?
+        }
+        _ => return Err(invalid_shape("packet uses non-lossless transform")),
+    };
+    if channels != expected_channels || samples == 0 || samples > max_samples {
+        return Err(invalid_shape("declared matrix exceeds caller budget"));
+    }
+    decode(bytes)
 }
 
 /// Universal magic-dispatch decode for a build that has the LMO decoder linked.

@@ -25,7 +25,6 @@ use crate::wavelet97::round_i64;
 
 /// own temporal order — written into the header by the encoder; decode reads it
 /// back, so this const is encode-side.
-#[cfg(feature = "encode")]
 const K: usize = 8;
 
 /// Keep-best `(λ, reset, m)` adaptation configs — the chosen INDEX is signaled in
@@ -624,12 +623,10 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let packed = body[8] as usize;
     let cfg = packed % CONFIGS.len();
     let seg = packed / CONFIGS.len();
-    if k == 0 || seg >= SEG_VARIANTS {
+    let (lambda, reset, canonical_m) = CONFIGS[cfg];
+    if k != K || m != canonical_m || seg >= SEG_VARIANTS {
         return Err(LmlError::InvalidHeader("mv_rls bad params".into()));
     }
-    // `m` comes from the header byte (encode wrote CONFIGS[cfg].2 there), NOT from
-    // indexing CONFIGS — keeps decode robust to the per-config M axis.
-    let (lambda, reset, _m_cfg) = CONFIGS[cfg];
     let mut pos = 9usize;
     let mut out: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for c in 0..n_ch {
@@ -643,15 +640,18 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         let glen =
             u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
-        if pos + glen > body.len() {
+        let data_end = pos
+            .checked_add(glen)
+            .ok_or_else(|| LmlError::InvalidHeader("mv_rls ch extent overflow".into()))?;
+        if data_end > body.len() {
             return Err(LmlError::Truncated {
-                expected: pos + glen,
+                expected: data_end,
                 actual: body.len(),
                 context: "mv_rls ch data",
             });
         }
-        let res = crate::entropy::decode(&body[pos..pos + glen])?;
-        pos += glen;
+        let res = crate::entropy::decode_exact(&body[pos..data_end], t)?;
+        pos = data_end;
         if res.len() != t {
             return Err(LmlError::InvalidHeader("mv_rls ch t".into()));
         }
@@ -671,7 +671,9 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             }
             let reg = regressor(&own, &out, &refs, n);
             let pred = rls.predict(&reg);
-            let x = res[n] + round_i64(pred);
+            let x = res[n]
+                .checked_add(round_i64(pred))
+                .ok_or_else(|| LmlError::InvalidHeader("mv_rls synthesis overflow".into()))?;
             ch.push(x);
             rls.adapt(&reg, x as f64, pred);
             cp_next = seg != 0 && det.observe(x);
@@ -770,10 +772,10 @@ pub fn decode_bc(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let packed = body[8] as usize;
     let cfg = packed % CONFIGS.len();
     let seg = packed / CONFIGS.len();
-    if k == 0 || seg >= SEG_VARIANTS {
+    let (lambda, reset, canonical_m) = CONFIGS[cfg];
+    if k != K || m != canonical_m || seg >= SEG_VARIANTS {
         return Err(LmlError::InvalidHeader("mv_rls_bc bad params".into()));
     }
-    let (lambda, reset, _m_cfg) = CONFIGS[cfg];
     let mut pos = 9usize;
     let mut out: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for c in 0..n_ch {
@@ -789,15 +791,18 @@ pub fn decode_bc(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         let glen =
             u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
-        if pos + glen > body.len() {
+        let data_end = pos
+            .checked_add(glen)
+            .ok_or_else(|| LmlError::InvalidHeader("mv_rls_bc ch extent overflow".into()))?;
+        if data_end > body.len() {
             return Err(LmlError::Truncated {
-                expected: pos + glen,
+                expected: data_end,
                 actual: body.len(),
                 context: "mv_rls_bc ch data",
             });
         }
-        let mut res = crate::entropy::decode(&body[pos..pos + glen])?;
-        pos += glen;
+        let mut res = crate::entropy::decode_exact(&body[pos..data_end], t)?;
+        pos = data_end;
         if res.len() != t {
             return Err(LmlError::InvalidHeader("mv_rls_bc ch t".into()));
         }
@@ -823,7 +828,9 @@ pub fn decode_bc(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             }
             let reg = regressor(&own, &out, &refs, n);
             let pred = rls.predict(&reg);
-            let x = res[n] + round_i64(pred);
+            let x = res[n]
+                .checked_add(round_i64(pred))
+                .ok_or_else(|| LmlError::InvalidHeader("mv_rls_bc synthesis overflow".into()))?;
             ch.push(x);
             rls.adapt(&reg, x as f64, pred);
             cp_next = seg != 0 && det.observe(x);
@@ -950,15 +957,18 @@ pub fn decode_bounded_mae(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         let glen =
             u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
-        if pos + glen > body.len() {
+        let data_end = pos
+            .checked_add(glen)
+            .ok_or_else(|| LmlError::InvalidHeader("mv_rls_nl ch extent overflow".into()))?;
+        if data_end > body.len() {
             return Err(LmlError::Truncated {
-                expected: pos + glen,
+                expected: data_end,
                 actual: body.len(),
                 context: "mv_rls_nl ch data",
             });
         }
-        let q_res = crate::entropy::decode(&body[pos..pos + glen])?;
-        pos += glen;
+        let q_res = crate::entropy::decode_exact(&body[pos..data_end], t)?;
+        pos = data_end;
         if q_res.len() != t {
             return Err(LmlError::InvalidHeader("mv_rls_nl ch t".into()));
         }
@@ -975,7 +985,12 @@ pub fn decode_bounded_mae(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             let reg = regressor(&own, &xhat, &refs, n);
             let pred = rls.predict(&reg);
             let pr = round_i64(pred);
-            let xh = pr + grid * q_res[n];
+            let correction = grid.checked_mul(q_res[n]).ok_or_else(|| {
+                LmlError::InvalidHeader("mv_rls bounded correction overflow".into())
+            })?;
+            let xh = pr.checked_add(correction).ok_or_else(|| {
+                LmlError::InvalidHeader("mv_rls bounded synthesis overflow".into())
+            })?;
             rec.push(xh);
             rls.adapt(&reg, xh as f64, pred);
             for q in (1..k).rev() {
@@ -1042,6 +1057,25 @@ mod tests {
         for (n_ch, t) in [(4usize, 4000usize), (21, 3000)] {
             let sig = make_sig(n_ch, t);
             assert!(encode_bc(&sig).unwrap().len() <= encode(&sig).unwrap().len() + n_ch);
+        }
+    }
+
+    #[test]
+    fn decoder_rejects_noncanonical_predictor_dimensions() {
+        let signal = make_sig(2, 32);
+        for mut body in [encode(&signal).unwrap(), encode_bc(&signal).unwrap()] {
+            body[6] = u8::MAX;
+            assert!(
+                decode(&body).is_err() && decode_bc(&body).is_err(),
+                "noncanonical predictor order must fail before matrix allocation"
+            );
+        }
+        for mut body in [encode(&signal).unwrap(), encode_bc(&signal).unwrap()] {
+            body[7] = u8::MAX;
+            assert!(
+                decode(&body).is_err() && decode_bc(&body).is_err(),
+                "noncanonical cross-channel width must fail before matrix allocation"
+            );
         }
     }
 

@@ -113,12 +113,14 @@ impl Rls {
         e
     }
 
-    fn decode_sample(&mut self, e: i64) -> i64 {
+    fn decode_sample(&mut self, e: i64) -> LmlResult<i64> {
         let pred = self.predict();
-        let x = e + crate::wavelet97::round_i64(pred);
+        let x = e
+            .checked_add(crate::wavelet97::round_i64(pred))
+            .ok_or_else(|| LmlError::InvalidHeader("rls synthesis overflow".into()))?;
         self.adapt(x as f64, pred);
         self.push(x as f64);
-        x
+        Ok(x)
     }
 }
 
@@ -139,7 +141,7 @@ pub fn residual(seq: &[i64]) -> Vec<i64> {
 }
 
 /// Reconstruct a sequence from its RLS [`residual`] (no_std). Inverse of [`residual`].
-pub fn reconstruct(res: &[i64]) -> Vec<i64> {
+pub fn reconstruct(res: &[i64]) -> LmlResult<Vec<i64>> {
     let mut rls = Rls::new();
     res.iter()
         .enumerate()
@@ -209,15 +211,18 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         let glen =
             u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
-        if pos + glen > body.len() {
+        let data_end = pos
+            .checked_add(glen)
+            .ok_or_else(|| LmlError::InvalidHeader("rls ch extent overflow".into()))?;
+        if data_end > body.len() {
             return Err(LmlError::Truncated {
-                expected: pos + glen,
+                expected: data_end,
                 actual: body.len(),
                 context: "rls ch data",
             });
         }
-        let res = crate::entropy::decode(&body[pos..pos + glen])?;
-        pos += glen;
+        let res = crate::entropy::decode_exact(&body[pos..data_end], t)?;
+        pos = data_end;
         if res.len() != t {
             return Err(LmlError::InvalidHeader(alloc::format!(
                 "rls ch t={} != {t}",
@@ -225,7 +230,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             )));
         }
         let mut rls = Rls::new();
-        let ch: Vec<i64> = res
+        let ch = res
             .iter()
             .enumerate()
             .map(|(i, &e)| {
@@ -234,7 +239,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
                 }
                 rls.decode_sample(e)
             })
-            .collect();
+            .collect::<LmlResult<Vec<_>>>()?;
         out.push(ch);
     }
     Ok(out)
@@ -309,15 +314,18 @@ pub fn decode_seg(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         let glen =
             u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
         pos += 4;
-        if pos + glen > body.len() {
+        let data_end = pos
+            .checked_add(glen)
+            .ok_or_else(|| LmlError::InvalidHeader("rls_seg ch extent overflow".into()))?;
+        if data_end > body.len() {
             return Err(LmlError::Truncated {
-                expected: pos + glen,
+                expected: data_end,
                 actual: body.len(),
                 context: "rls_seg ch data",
             });
         }
-        let res = crate::entropy::decode(&body[pos..pos + glen])?;
-        pos += glen;
+        let res = crate::entropy::decode_exact(&body[pos..data_end], t)?;
+        pos = data_end;
         if res.len() != t {
             return Err(LmlError::InvalidHeader(alloc::format!(
                 "rls_seg ch t={} != {t}",
@@ -332,7 +340,7 @@ pub fn decode_seg(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             if i != 0 && (i % RESET_PERIOD == 0 || cp_next) {
                 rls = Rls::new();
             }
-            let x = rls.decode_sample(e);
+            let x = rls.decode_sample(e)?;
             cp_next = det.observe(x);
             ch.push(x);
         }

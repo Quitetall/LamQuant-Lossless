@@ -72,20 +72,97 @@ const MAX_SPLIT: usize = 2;
 const FEATURE_CROSSCHAN: u8 = 0x01;
 /// Max references per predicted channel (diminishing returns past ~3; bounds the
 /// header + the encoder search).
-#[cfg(feature = "encode")]
 const MAX_REFS: usize = 3;
+
+/// Read exact-lossless body dimensions without allocating decoded samples.
+pub(crate) fn declared_shape(body: &[u8]) -> LmlResult<(usize, usize)> {
+    declared_shape_inner(body, true)
+}
+
+fn declared_shape_inner(body: &[u8], allow_split: bool) -> LmlResult<(usize, usize)> {
+    if body.first() == Some(&SPLIT_MAGIC) {
+        if !allow_split || body.len() < 12 {
+            return Err(LmlError::InvalidHeader(
+                "nested or truncated lsb-split body".into(),
+            ));
+        }
+        let channels = u16::from_le_bytes([body[2], body[3]]) as usize;
+        let samples = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
+        let upper_len = u32::from_le_bytes([body[8], body[9], body[10], body[11]]) as usize;
+        let upper_end = 12usize
+            .checked_add(upper_len)
+            .filter(|end| *end <= body.len())
+            .ok_or_else(|| LmlError::InvalidHeader("invalid lsb-split upper extent".into()))?;
+        let upper_shape = declared_shape_inner(&body[12..upper_end], false)?;
+        if upper_shape != (channels, samples) {
+            return Err(LmlError::InvalidHeader(
+                "lsb-split upper shape mismatch".into(),
+            ));
+        }
+        return Ok((channels, samples));
+    }
+    if body.len() < 4 || body[0] != KERNEL_VERSION {
+        return Err(LmlError::InvalidHeader(
+            "invalid optimum-lossless body header".into(),
+        ));
+    }
+    let channels = u16::from_le_bytes([body[2], body[3]]) as usize;
+    let mut position = 4usize;
+    for _ in 0..channels {
+        let references = *body
+            .get(position)
+            .ok_or_else(|| LmlError::InvalidHeader("truncated channel metadata".into()))?
+            as usize;
+        position = position
+            .checked_add(1)
+            .and_then(|value| value.checked_add(references.checked_mul(6)?))
+            .filter(|value| *value <= body.len())
+            .ok_or_else(|| LmlError::InvalidHeader("invalid channel metadata extent".into()))?;
+    }
+    let coder = *body
+        .get(position)
+        .ok_or_else(|| LmlError::InvalidHeader("missing residual coder".into()))?;
+    position += 1;
+    let residual = &body[position..];
+    let (inner_channels, samples) = match coder {
+        CODER_LML => crate::lmo::lml_declared_shape(residual).map_err(to_lml_header)?,
+        CODER_RLS | CODER_RLS_SEG | CODER_MV_RLS | CODER_MV_RLS_BC => {
+            if residual.len() < 6 {
+                return Err(LmlError::InvalidHeader(
+                    "truncated residual coder header".into(),
+                ));
+            }
+            (
+                u16::from_le_bytes([residual[0], residual[1]]) as usize,
+                u32::from_le_bytes([residual[2], residual[3], residual[4], residual[5]]) as usize,
+            )
+        }
+        _ => return Err(LmlError::InvalidHeader("unknown residual coder".into())),
+    };
+    if inner_channels != channels {
+        return Err(LmlError::InvalidHeader(
+            "residual coder channel mismatch".into(),
+        ));
+    }
+    Ok((channels, samples))
+}
+
+fn to_lml_header(error: lamquant_lml_mcu::codec::CodecError) -> LmlError {
+    LmlError::InvalidHeader(alloc::format!("{error}"))
+}
 
 /// Integer multi-reference prediction — the bit-identical quantity encode and
 /// decode form: `round_q16(Σ_r gain_q[r]·chans[ref[r]][k])`. Round-half-up via
 /// arithmetic shift. NO float. (Q16 gains, ≤3 refs ⇒ the i64 accumulator cannot
 /// overflow for realistic O(1) gains and ≤24-bit samples.)
 #[inline]
-fn predict_multi(refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>], k: usize) -> i64 {
-    let mut acc: i64 = 0;
+fn predict_multi(refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>], k: usize) -> LmlResult<i64> {
+    let mut acc: i128 = 0;
     for (g, &r) in gains_q.iter().zip(refs) {
-        acc += *g as i64 * chans[r][k];
+        acc += *g as i128 * chans[r][k] as i128;
     }
-    (acc + (1 << 15)) >> 16
+    i64::try_from((acc + (1 << 15)) >> 16)
+        .map_err(|_| LmlError::InvalidHeader("spatial prediction overflow".into()))
 }
 
 /// Decode an id=2 body back to the signal. `no_std`-capable (integer only).
@@ -110,7 +187,7 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     // Parse the n_ch metadata entries; the remainder is the lml stream.
     let mut pos = 4usize;
     let mut metas: Vec<(Vec<usize>, Vec<i32>)> = Vec::with_capacity(n_ch);
-    for _ in 0..n_ch {
+    for channel_index in 0..n_ch {
         if pos >= body.len() {
             return Err(LmlError::Truncated {
                 expected: pos + 1,
@@ -120,24 +197,38 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         }
         let n_refs = body[pos] as usize;
         pos += 1;
+        if n_refs > MAX_REFS || n_refs > channel_index {
+            return Err(LmlError::InvalidHeader(
+                "invalid spatial reference count".into(),
+            ));
+        }
         let mut refs = Vec::with_capacity(n_refs);
         let mut gains = Vec::with_capacity(n_refs);
         for _ in 0..n_refs {
-            if pos + 6 > body.len() {
+            let end = pos.checked_add(6).ok_or_else(|| {
+                LmlError::InvalidHeader("spatial metadata extent overflow".into())
+            })?;
+            if end > body.len() {
                 return Err(LmlError::Truncated {
-                    expected: pos + 6,
+                    expected: end,
                     actual: body.len(),
                     context: "lmo_lossless meta ref",
                 });
             }
-            refs.push(u16::from_le_bytes([body[pos], body[pos + 1]]) as usize);
+            let reference = u16::from_le_bytes([body[pos], body[pos + 1]]) as usize;
+            if reference >= channel_index || refs.contains(&reference) {
+                return Err(LmlError::InvalidHeader(
+                    "spatial references must be unique and prior".into(),
+                ));
+            }
+            refs.push(reference);
             gains.push(i32::from_le_bytes([
                 body[pos + 2],
                 body[pos + 3],
                 body[pos + 4],
                 body[pos + 5],
             ]));
-            pos += 6;
+            pos = end;
         }
         metas.push((refs, gains));
     }
@@ -191,9 +282,14 @@ pub fn decode(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
                 )));
             }
         }
-        let ch: Vec<i64> = (0..r.len())
-            .map(|k| r[k] + predict_multi(refs, gains, &recon, k))
-            .collect();
+        let ch = (0..r.len())
+            .map(|k| {
+                r[k].checked_add(predict_multi(refs, gains, &recon, k)?)
+                    .ok_or_else(|| {
+                        LmlError::InvalidHeader("spatial reconstruction overflow".into())
+                    })
+            })
+            .collect::<LmlResult<Vec<_>>>()?;
         recon.push(ch);
     }
     Ok(recon)
@@ -222,12 +318,19 @@ fn decode_lsb_split(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let upper_len = u32::from_le_bytes([body[8], body[9], body[10], body[11]]) as usize;
     let upend = 12usize
         .checked_add(upper_len)
-        .filter(|&e| e <= body.len())
-        .ok_or(LmlError::Truncated {
-            expected: 12 + upper_len,
+        .ok_or_else(|| LmlError::InvalidHeader("lsb-split upper extent overflow".into()))?;
+    if upend > body.len() {
+        return Err(LmlError::Truncated {
+            expected: upend,
             actual: body.len(),
             context: "lsb-split upper body",
-        })?;
+        });
+    }
+    if body.get(12) == Some(&SPLIT_MAGIC) {
+        return Err(LmlError::InvalidHeader(
+            "nested lsb-split body is forbidden".into(),
+        ));
+    }
     let upper = decode(&body[12..upend])?;
     if upper.len() != n_ch {
         return Err(LmlError::InvalidHeader(alloc::format!(
@@ -238,9 +341,12 @@ fn decode_lsb_split(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
     let mut pos = upend;
     let mut recon: Vec<Vec<i64>> = Vec::with_capacity(n_ch);
     for (c, upper_channel) in upper.iter().enumerate().take(n_ch) {
-        if pos + 4 > body.len() {
+        let length_end = pos
+            .checked_add(4)
+            .ok_or_else(|| LmlError::InvalidHeader("lsb length extent overflow".into()))?;
+        if length_end > body.len() {
             return Err(LmlError::Truncated {
-                expected: pos + 4,
+                expected: length_end,
                 actual: body.len(),
                 context: "lsb-split lsb len",
             });
@@ -250,24 +356,36 @@ fn decode_lsb_split(body: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
         pos += 4;
         let end = pos
             .checked_add(lsb_len)
-            .filter(|&e| e <= body.len())
-            .ok_or(LmlError::Truncated {
-                expected: pos + lsb_len,
+            .ok_or_else(|| LmlError::InvalidHeader("lsb body extent overflow".into()))?;
+        if end > body.len() {
+            return Err(LmlError::Truncated {
+                expected: end,
                 actual: body.len(),
                 context: "lsb-split lsb body",
-            })?;
-        let lsb = crate::entropy::decode(&body[pos..end])?;
+            });
+        }
+        let lsb = crate::entropy::decode_exact(&body[pos..end], t)?;
         pos = end;
         if lsb.len() != t || upper_channel.len() != t {
             return Err(LmlError::InvalidHeader(alloc::format!(
                 "lsb-split ch {c} length mismatch"
             )));
         }
-        let ch: Vec<i64> = upper_channel
+        let ch = upper_channel
             .iter()
             .zip(&lsb)
-            .map(|(&upper_sample, &low_bits)| (upper_sample << s) | low_bits)
-            .collect();
+            .map(|(&upper_sample, &low_bits)| {
+                let low_limit = 1_i64 << s;
+                if !(0..low_limit).contains(&low_bits) {
+                    return Err(LmlError::InvalidHeader(
+                        "lsb-split low bits are noncanonical".into(),
+                    ));
+                }
+                let combined = ((upper_sample as i128) << s) | low_bits as i128;
+                i64::try_from(combined)
+                    .map_err(|_| LmlError::InvalidHeader("lsb-split overflow".into()))
+            })
+            .collect::<LmlResult<Vec<_>>>()?;
         recon.push(ch);
     }
     Ok(recon)
@@ -352,9 +470,18 @@ fn quantize_gains(g: &[f64]) -> Option<Vec<i32>> {
 /// Residual `target − round_q16(Σ gq·chans[ref])` using the QUANTIZED gains, so
 /// decode (same `predict_multi`) reconstructs exactly.
 #[cfg(feature = "encode")]
-fn residual_multi(target: &[i64], refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>]) -> Vec<i64> {
+fn residual_multi(
+    target: &[i64],
+    refs: &[usize],
+    gains_q: &[i32],
+    chans: &[Vec<i64>],
+) -> LmlResult<Vec<i64>> {
     (0..target.len())
-        .map(|k| target[k] - predict_multi(refs, gains_q, chans, k))
+        .map(|k| {
+            target[k]
+                .checked_sub(predict_multi(refs, gains_q, chans, k)?)
+                .ok_or_else(|| LmlError::InvalidHeader("spatial residual overflow".into()))
+        })
         .collect()
 }
 
@@ -526,7 +653,7 @@ pub fn encode_with_geometry(
             let Some(gq) = quantize_gains(&g) else {
                 continue;
             };
-            let r = residual_multi(&signal[i], &[j], &gq, signal);
+            let r = residual_multi(&signal[i], &[j], &gq, signal)?;
             let cost = channel_cost(&r).saturating_add(PER_REF_OVERHEAD + 1);
             if cost < best_cost {
                 best_cost = cost;
@@ -545,7 +672,7 @@ pub fn encode_with_geometry(
             refs.push(j);
             let g = joint_ls(&signal[i], &refs, signal);
             let Some(gq) = quantize_gains(&g) else { break };
-            let r = residual_multi(&signal[i], &refs, &gq, signal);
+            let r = residual_multi(&signal[i], &refs, &gq, signal)?;
             let cost = channel_cost(&r).saturating_add(refs.len() * PER_REF_OVERHEAD + 1);
             if cost < best_cost {
                 best_cost = cost;
@@ -566,7 +693,7 @@ pub fn encode_with_geometry(
             if !geo_refs.is_empty() && geo_refs != best_refs {
                 let gv = joint_ls(&signal[i], &geo_refs, signal);
                 if let Some(gq) = quantize_gains(&gv) {
-                    let r = residual_multi(&signal[i], &geo_refs, &gq, signal);
+                    let r = residual_multi(&signal[i], &geo_refs, &gq, signal)?;
                     let cost =
                         channel_cost(&r).saturating_add(geo_refs.len() * PER_REF_OVERHEAD + 1);
                     if cost < best_cost {
@@ -707,6 +834,24 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn forged_spatial_metadata_and_prediction_overflow_fail_closed() {
+        let malformed = [KERNEL_VERSION, 0, 2, 0, 0, 4];
+        assert!(decode(&malformed).is_err());
+
+        let channels = vec![vec![i64::MAX], vec![i64::MAX], vec![i64::MAX]];
+        assert!(predict_multi(&[0, 1, 2], &[i32::MAX, i32::MAX, i32::MAX], &channels, 0).is_err());
+    }
+
+    #[test]
+    fn nested_lsb_split_is_rejected_without_recursion() {
+        let mut body = vec![SPLIT_MAGIC, 1, 1, 0];
+        body.extend_from_slice(&1_u32.to_le_bytes());
+        body.extend_from_slice(&1_u32.to_le_bytes());
+        body.push(SPLIT_MAGIC);
+        assert!(decode(&body).is_err());
     }
 
     #[test]

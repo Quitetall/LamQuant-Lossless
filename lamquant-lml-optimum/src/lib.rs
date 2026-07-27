@@ -47,7 +47,7 @@ pub use lamquant_lml_mcu::codec::{
 };
 
 // The headline LMO surface.
-pub use lmo::{decode, decode_any, LmoCodec, LMO_HEADER_LEN, LMO_VERSION};
+pub use lmo::{decode, decode_any, decode_lossless_bounded, LmoCodec, LMO_HEADER_LEN, LMO_VERSION};
 
 #[cfg(feature = "encode")]
 pub use lmo::encode;
