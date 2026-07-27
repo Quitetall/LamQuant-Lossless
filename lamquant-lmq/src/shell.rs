@@ -152,6 +152,8 @@ pub fn encode_bundle<A: PayloadAccess>(
     let packets = [&packet[..]];
     encode_codec_bundle(
         CodecBundleInput {
+            // Baseline kernels: any reader of the profile can decode these packets.
+            required_capabilities: 0,
             canonical_semantics: &semantics,
             fidelity,
             implementation,

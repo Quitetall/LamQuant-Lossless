@@ -256,6 +256,8 @@ fn encode_verified_packets(
     let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
     encode_codec_bundle(
         CodecBundleInput {
+            // Baseline kernels: any reader of the profile can decode these packets.
+            required_capabilities: 0,
             canonical_semantics: &semantics,
             fidelity: exact_fidelity(),
             implementation: implementation_identity(),
@@ -1026,6 +1028,8 @@ mod tests {
         let packets = [&packet[..]];
         let bytes = encode_codec_bundle(
             CodecBundleInput {
+                // Baseline kernels: any reader of the profile can decode these packets.
+                required_capabilities: 0,
                 canonical_semantics: &semantics,
                 fidelity: exact_fidelity(),
                 implementation: implementation_identity(),
@@ -1066,6 +1070,8 @@ mod tests {
         implementation.kernel_id = "unregistered-lookalike".to_string();
         let bytes = encode_codec_bundle(
             CodecBundleInput {
+                // Baseline kernels: any reader of the profile can decode these packets.
+                required_capabilities: 0,
                 canonical_semantics: &semantics,
                 fidelity: exact_fidelity(),
                 implementation,
