@@ -17,6 +17,5 @@ path = "src/bin/optimum_v2_codec.rs"
 
 [dependencies]
 libc = "0.2"
-lamquant-lml-optimum = { path = "../lamquant-lml-optimum", default-features = false, features = ["encode"] }
 serde_json = "1"
 sha2 = "0.10"
