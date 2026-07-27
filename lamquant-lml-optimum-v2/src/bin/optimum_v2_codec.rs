@@ -900,58 +900,6 @@ fn run(args: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         return write_standard_output(&packet);
     }
-    if args.len() == 3 && args[1] == "mix1-peer-wavelet-encode-stdio" {
-        let block_size: usize = args[2]
-            .parse()
-            .map_err(|_| "WPX1 BLOCK_SIZE must be 256 or 512".to_owned())?;
-        let raw = read_standard_input(
-            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
-            "WPX1 LQR1 standard input",
-        )?;
-        let (signal, context) =
-            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
-        let packet = Mix1Codec
-            .encode_wavelet_override_window(
-                &signal,
-                context.sample_rate_mhz,
-                context.bit_depth,
-                block_size,
-            )
-            .map_err(|error| error.to_string())?;
-        return write_standard_output(&packet);
-    }
-    if args.len() == 3 && args[1] == "mix1-peer-wavelet-split-encode-stdio" {
-        let block_size: usize = args[2]
-            .parse()
-            .map_err(|_| "WSX1 BLOCK_SIZE must be 256 or 512".to_owned())?;
-        let raw = read_standard_input(
-            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
-            "WSX1 LQR1 standard input",
-        )?;
-        let (signal, context) =
-            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
-        let packet = Mix1Codec
-            .encode_wavelet_split_window(
-                &signal,
-                context.sample_rate_mhz,
-                context.bit_depth,
-                block_size,
-            )
-            .map_err(|error| error.to_string())?;
-        return write_standard_output(&packet);
-    }
-    if args.len() == 2 && args[1] == "mix1-peer-legacy-encode-stdio" {
-        let raw = read_standard_input(
-            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
-            "LPX1 LQR1 standard input",
-        )?;
-        let (signal, context) =
-            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
-        let packet = Mix1Codec
-            .encode_legacy_optimum_window(&signal, context.sample_rate_mhz, context.bit_depth)
-            .map_err(|error| error.to_string())?;
-        return write_standard_output(&packet);
-    }
     if args.len() == 2 && args[1] == "mix1-peer-bitplane-encode-stdio" {
         let raw = read_standard_input(
             lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
@@ -1179,7 +1127,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-peer-encode-best-no-alias-stdio | mix1-peer-wavelet-encode-stdio BLOCK_SIZE | mix1-peer-wavelet-split-encode-stdio BLOCK_SIZE | mix1-peer-legacy-encode-stdio | mix1-peer-bitplane-encode-stdio | mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK | mix1-peer-tuned-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE PARENT_HISTORY_DEPTH PARENT_PENALTY | mix1-peer-compact-common-profile-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-peer-encode-best-no-alias-stdio | mix1-peer-bitplane-encode-stdio | mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK | mix1-peer-tuned-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE PARENT_HISTORY_DEPTH PARENT_PENALTY | mix1-peer-compact-common-profile-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }

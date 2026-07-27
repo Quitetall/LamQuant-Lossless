@@ -199,7 +199,16 @@ fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1
     assert!(best.len() <= incumbent.len());
     assert!(matches!(
         peer_magic(&best),
-        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1" | b"ALX1"
+        b"MIX1"
+            | b"MMV1"
+            | b"MCH1"
+            | b"MCX1"
+            | b"MQX1"
+            | b"MPX1"
+            | b"APX1"
+            | b"BQX1"
+            | b"ALX1"
+            | b"BLX1"
     ));
     assert_eq!(Mix1Codec.decode_window(&best).unwrap().samples, signal());
     assert_eq!(
@@ -398,85 +407,8 @@ fn peer_tuned_permuted_carrier_roundtrips_deterministically() {
 }
 
 #[test]
-fn wavelet_override_peer_roundtrips_complete_packet() {
-    let mut input = vec![vec![0i64; 1_025]; 3];
-    for time in 0..input[0].len() {
-        let ramp = time as i64 - 512;
-        input[0][time] = ramp * 7 + (time % 13) as i64 - 6;
-        input[1][time] = if time % 127 == 0 {
-            12_000 - ramp
-        } else {
-            ramp * -3 + (time % 5) as i64 - 2
-        };
-        input[2][time] = input[0][time] - input[1][time] / 2;
-    }
-
-    let packet = Mix1Codec
-        .encode_wavelet_override_window(&input, 250_000, 16, 512)
-        .expect("encode WPX1");
-    assert_eq!(peer_magic(&packet), b"WPX1");
-
-    let decoded = Mix1Codec.decode_window(&packet).expect("decode WPX1");
-    assert_eq!(decoded.samples, input);
-    assert_eq!(decoded.sample_rate_mhz, 250_000);
-    assert_eq!(decoded.bit_depth, 16);
-}
-
-#[test]
-fn wavelet_split_peer_roundtrips_complete_packet() {
-    let input = (0..4)
-        .map(|channel| {
-            (0..1_025)
-                .map(|time| {
-                    let ramp = time as i64 - 512;
-                    ramp * (channel as i64 + 2) + ((time * (channel + 3)) % 29) as i64 - 14
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    let packet = Mix1Codec
-        .encode_wavelet_split_window(&input, 250_000, 16, 512)
-        .expect("encode WSX1");
-    assert_eq!(peer_magic(&packet), b"WSX1");
-    assert_eq!(
-        Mix1Codec
-            .decode_window(&packet)
-            .expect("decode WSX1")
-            .samples,
-        input
-    );
-}
-
-#[test]
-fn legacy_optimum_peer_roundtrips_complete_packet() {
-    let input = (0..4)
-        .map(|channel| {
-            (0..2_000)
-                .map(|time| {
-                    let common = (time as i64 * 19) / 7 - 2_000;
-                    common + channel as i64 * 11 + ((time + channel * 13) % 17) as i64 - 8
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    let packet = Mix1Codec
-        .encode_legacy_optimum_window(&input, 250_000, 16)
-        .expect("encode LPX1");
-    assert_eq!(peer_magic(&packet), b"LPX1");
-    assert_eq!(
-        Mix1Codec
-            .decode_window(&packet)
-            .expect("decode LPX1")
-            .samples,
-        input
-    );
-}
-
-#[test]
 fn bitplane_layer_peer_roundtrips_complete_packet() {
-    let input = (0..5)
+    let input = (0..4)
         .map(|channel| {
             (0..2_000)
                 .map(|time| {
@@ -495,7 +427,7 @@ fn bitplane_layer_peer_roundtrips_complete_packet() {
         .encode_bitplane_layer_window(&input, 250_000, 16)
         .expect("encode BLX1");
     assert_eq!(peer_magic(&packet), b"BLX1");
-    assert_eq!(packet[29], 2, "BLX1 predictor-map wire version");
+    assert_eq!(packet[29], 2, "BLX1 low-bit mode-map wire version");
     assert_eq!(
         Mix1Codec
             .decode_window(&packet)
@@ -516,6 +448,12 @@ fn bitplane_layer_peer_roundtrips_complete_packet() {
             "accepted truncated BLX1 prefix {end}"
         );
     }
+    let mut trailed = packet.clone();
+    trailed.push(0);
+    assert!(Mix1Codec.decode_window(&trailed).is_err());
+    let mut corrupted = packet;
+    *corrupted.last_mut().unwrap() ^= 1;
+    assert!(Mix1Codec.decode_window(&corrupted).is_err());
 }
 
 #[test]
