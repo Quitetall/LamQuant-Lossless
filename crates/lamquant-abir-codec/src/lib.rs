@@ -29,6 +29,18 @@ use semantic_abir_bcs::{
 
 /// Stable algorithm identity. Build-specific identity is recorded separately.
 pub const LML_KERNEL_ID: &str = "org.quitetall.lamquant.lml-mcu.lossless-v1";
+
+/// Kernel id for the Optimum (LMO) tier.
+///
+/// A DISTINCT kernel id under the SAME profile, which is the whole shape of the
+/// decision recorded when `CAP_LML_OPTIMUM_V1` was allocated: optimum produces
+/// the same semantics as baseline LML -- exact fidelity, the same decoded
+/// signal -- from a materially different bitstream. Profiles answer "what kind
+/// of artifact is this"; the kernel id and the capability answer "can this
+/// reader decode it at all". Giving optimum its own profile would have implied
+/// a different KIND of artifact where there is only a different compressor.
+#[cfg(feature = "optimum")]
+pub const OPTIMUM_KERNEL_ID: &str = "org.quitetall.lamquant.lml-optimum.lossless-v1";
 /// Exact semantic-to-packet closure enforced by this integration crate.
 pub const LML_FIDELITY_CONTRACT: &str =
     "org.quitetall.lamquant.bcs2.lml.exact-signal-block-closure-v1";
@@ -374,6 +386,119 @@ pub fn implementation_identity() -> CodecImplementation {
         implementation_id: ContentId::from_bytes(*hasher.finalize().as_bytes()),
         kernel_id: LML_KERNEL_ID.to_string(),
     }
+}
+
+/// Implementation identity for the Optimum tier.
+///
+/// Differs from [`implementation_identity`] only in `kernel_id`, so a consumer
+/// can tell which decoder produced a bundle without inspecting packet bytes.
+#[cfg(feature = "optimum")]
+pub fn optimum_implementation_identity() -> CodecImplementation {
+    CodecImplementation {
+        kernel_id: OPTIMUM_KERNEL_ID.to_string(),
+        ..implementation_identity()
+    }
+}
+
+/// Seal optimum-coded packets after proving they reconstruct the dataset.
+///
+/// The proof is the point. Sealing without it would produce a bundle asserting
+/// that its packets reproduce the declared signal on the strength of nobody
+/// having checked -- and the optimum bitstream is precisely the one whose
+/// correctness cannot be eyeballed. So this decodes what it is about to seal,
+/// exactly as the baseline path does, which is why the crate needs the optimum
+/// decoder at all.
+///
+/// The resulting bundle declares [`CAP_LML_OPTIMUM_V1`], so a baseline-only
+/// reader is refused at the envelope instead of failing somewhere inside a
+/// bitstream it was never able to parse.
+#[cfg(feature = "optimum")]
+pub fn seal_optimum_packets(
+    dataset: &AbirDataset,
+    packets: &[&[u8]],
+    bounds: ResourceBounds,
+) -> Result<Vec<u8>, LmlBundleError> {
+    use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
+
+    if packets.is_empty() {
+        return Err(LmlBundleError::PacketCount);
+    }
+    let signal = decode_optimum_sequence(packets)?;
+    verify_signal_closure(dataset, &signal)?;
+
+    let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
+    encode_codec_bundle(
+        CodecBundleInput {
+            required_capabilities: CAP_LML_OPTIMUM_V1,
+            canonical_semantics: &semantics,
+            fidelity: exact_fidelity(),
+            implementation: optimum_implementation_identity(),
+            model_provenance: None,
+            packets,
+            parameters: canonical_parameters(),
+            profile: CodecProfile::LmlLossless,
+        },
+        bounds,
+    )
+    .map_err(LmlBundleError::Bundle)
+}
+
+/// Open an optimum-coded bundle, authenticate it, and prove semantic closure.
+///
+/// A separate entry point rather than a flag on [`open_lml_bundle`], because
+/// the two differ in what the caller must be able to do. `open_lml_bundle`
+/// advertises no capabilities and therefore refuses an optimum bundle outright
+/// -- the correct default, since a baseline-only consumer calling it is
+/// asserting exactly that it cannot decode optimum.
+#[cfg(feature = "optimum")]
+pub fn open_optimum_bundle(
+    bytes: &[u8],
+    bounds: ResourceBounds,
+) -> Result<(CodecBundleView<'_>, Vec<Vec<i64>>), LmlBundleError> {
+    use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
+
+    let bundle = CodecBundleView::open_with_capabilities(bytes, CAP_LML_OPTIMUM_V1, bounds)
+        .map_err(LmlBundleError::Bundle)?;
+    let catalog = bundle.catalog();
+    if catalog.profile() != CodecProfile::LmlLossless || catalog.packet_count() == 0 {
+        return Err(LmlBundleError::PacketCount);
+    }
+    if catalog.model_provenance().is_some()
+        || catalog.fidelity() != &exact_fidelity()
+        || catalog.implementation().kernel_id != OPTIMUM_KERNEL_ID
+        || catalog.parameters() != canonical_parameters()
+    {
+        return Err(LmlBundleError::CatalogContract);
+    }
+    let packets: Vec<&[u8]> = bundle.packets().collect();
+    let signal = decode_optimum_sequence(&packets)?;
+    verify_signal_closure(bundle.dataset(), &signal)?;
+    Ok((bundle, signal))
+}
+
+/// Decode an ordered optimum packet sequence into one concatenated signal.
+///
+/// Channel count must agree across packets: a sequence whose packets disagree
+/// does not describe one recording, and concatenating it anyway would produce a
+/// signal that passes closure by accident on the first channel.
+#[cfg(feature = "optimum")]
+fn decode_optimum_sequence(packets: &[&[u8]]) -> Result<Vec<Vec<i64>>, LmlBundleError> {
+    let mut signal: Vec<Vec<i64>> = Vec::new();
+    for packet in packets {
+        let decoded = lamquant_lml_optimum::lmo::decode_any(packet)
+            .map_err(|_| LmlBundleError::NotExactLossless)?;
+        if signal.is_empty() {
+            signal = decoded;
+            continue;
+        }
+        if decoded.len() != signal.len() {
+            return Err(LmlBundleError::SignalShapeMismatch);
+        }
+        for (channel, more) in signal.iter_mut().zip(decoded) {
+            channel.extend(more);
+        }
+    }
+    Ok(signal)
 }
 
 fn exact_fidelity() -> CodecFidelity {

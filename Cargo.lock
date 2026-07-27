@@ -3370,6 +3370,7 @@ dependencies = [
  "blake3",
  "lamquant-lml-desktop",
  "lamquant-lml-mcu",
+ "lamquant-lml-optimum",
 ]
 
 [[package]]
