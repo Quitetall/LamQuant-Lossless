@@ -9,6 +9,7 @@ use crate::mix1_entropy;
 use crate::mix1_lattice::{self, LatticeSide, ORDER};
 use crate::mix1_multivariate::MultivariateSession;
 use crate::{canonical_i32_bytes, crc32c, OptimumV2Error};
+use lamquant_lml_optimum::{Codec as LegacyCodec, LmoCodec, Mode as LegacyMode};
 use std::collections::HashMap;
 
 const HEADER_LEN: usize = 72;
@@ -18,6 +19,7 @@ const MAX_CHANNELS: usize = 256;
 const MAX_SAMPLES: usize = 32_768;
 const MAX_VALUES: usize = 131_072;
 const MAX_EVENTS_PER_VALUE: usize = 129;
+const WPX1_BLOCK_SIZES: [usize; 2] = [256, 512];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mix1Decoded {
@@ -588,7 +590,402 @@ impl Mix1Codec {
         })
     }
 
+    pub fn encode_wavelet_override_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+        block_size: usize,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        if !WPX1_BLOCK_SIZES.contains(&block_size) {
+            return Err(input_error("WPX1 block size must be 256 or 512"));
+        }
+        let profile = Mix1TunedProfile {
+            entropy: Mix1EntropyProfile {
+                score_shift: 8,
+                channel_context_mask: 7,
+                history_context: 52,
+                scale_profile: 4,
+            },
+            parent_history_depth: 2,
+            parent_penalty: 6,
+        };
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        let permutation = fit_channel_permutation(signal)?;
+        let permuted = permutation
+            .iter()
+            .map(|&channel| signal[channel].clone())
+            .collect::<Vec<_>>();
+        let universal = universal_residuals(&permuted, bit_depth)?;
+        let (side, lattice) =
+            mix1_lattice::fit_and_analyze_with_parent_penalty(&permuted, profile.parent_penalty)?;
+        let multivariate = multivariate_residuals_with_parent_history(
+            &permuted,
+            &side.parents,
+            bit_depth,
+            usize::from(profile.parent_history_depth),
+        )?;
+        let common_mode = common_mode_residuals(&permuted)?;
+        let selected = select_four_residuals(
+            &universal,
+            &lattice,
+            &multivariate,
+            &common_mode,
+            profile.entropy.score_shift,
+        )?;
+        let blocks_per_channel = samples / block_size;
+        let map_bits = channels
+            .checked_mul(blocks_per_channel)
+            .ok_or_else(|| input_error("WPX1 block map size overflows"))?;
+        let mut candidates = Vec::new();
+        let local_parents = vec![Vec::new()];
+        for channel in 0..channels {
+            for block in 0..blocks_per_channel {
+                let start = block * block_size;
+                let end = start + block_size;
+                let wavelet = wavelet53_forward(&permuted[channel][start..end])?;
+                let residual_cost = mix1_entropy::encode_profile_channel_context(
+                    &[selected[channel][start..end].to_vec()],
+                    &local_parents,
+                    profile.entropy.channel_context_mask,
+                    profile.entropy.history_context,
+                    profile.entropy.scale_profile,
+                )?
+                .0
+                .len();
+                let wavelet_cost = mix1_entropy::encode_profile_channel_context(
+                    std::slice::from_ref(&wavelet),
+                    &local_parents,
+                    profile.entropy.channel_context_mask,
+                    profile.entropy.history_context,
+                    profile.entropy.scale_profile,
+                )?
+                .0
+                .len();
+                if wavelet_cost < residual_cost {
+                    candidates.push((residual_cost - wavelet_cost, channel, block, wavelet));
+                }
+            }
+        }
+        candidates.sort_by_key(|(savings, channel, block, _)| {
+            (core::cmp::Reverse(*savings), *channel, *block)
+        });
+
+        let mut block_map = vec![0u8; map_bits.div_ceil(8)];
+        let mut coded = selected.clone();
+        let (mut payload, mut event_count) = mix1_entropy::encode_profile_channel_context(
+            &selected,
+            &side.parents,
+            profile.entropy.channel_context_mask,
+            profile.entropy.history_context,
+            profile.entropy.scale_profile,
+        )?;
+        for (_, channel, block, wavelet) in candidates {
+            let start = block * block_size;
+            let end = start + block_size;
+            coded[channel][start..end].copy_from_slice(&wavelet);
+            let trial = mix1_entropy::encode_profile_channel_context(
+                &coded,
+                &side.parents,
+                profile.entropy.channel_context_mask,
+                profile.entropy.history_context,
+                profile.entropy.scale_profile,
+            )?;
+            if trial.0.len() < payload.len() {
+                set_block_map(&mut block_map, channel * blocks_per_channel + block);
+                payload = trial.0;
+                event_count = trial.1;
+            } else {
+                coded[channel][start..end].copy_from_slice(&selected[channel][start..end]);
+            }
+        }
+        let (mut graph, coefficient_rice_k, weight_rice_k) =
+            mix1_lattice::pack_side_adaptive(&side, profile.entropy.score_shift)?;
+        graph[..4].copy_from_slice(b"WPX1");
+        let tail = graph.split_off(6);
+        graph.extend_from_slice(&[
+            profile.entropy.channel_context_mask,
+            profile.entropy.history_context,
+            profile.entropy.scale_profile,
+            profile.parent_history_depth,
+            coefficient_rice_k,
+            weight_rice_k,
+            block_size.trailing_zeros() as u8,
+        ]);
+        graph.extend_from_slice(&pack_permutation_indices(&permutation)?);
+        graph.extend_from_slice(&block_map);
+        graph.extend_from_slice(&tail);
+        pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count,
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
+    pub fn encode_wavelet_split_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+        block_size: usize,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        if !WPX1_BLOCK_SIZES.contains(&block_size) {
+            return Err(input_error("WSX1 block size must be 256 or 512"));
+        }
+        let profile = Mix1TunedProfile {
+            entropy: Mix1EntropyProfile {
+                score_shift: 8,
+                channel_context_mask: 7,
+                history_context: 52,
+                scale_profile: 4,
+            },
+            parent_history_depth: 2,
+            parent_penalty: 6,
+        };
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        let permutation = fit_channel_permutation(signal)?;
+        let permuted = permutation
+            .iter()
+            .map(|&channel| signal[channel].clone())
+            .collect::<Vec<_>>();
+        let universal = universal_residuals(&permuted, bit_depth)?;
+        let (side, lattice) =
+            mix1_lattice::fit_and_analyze_with_parent_penalty(&permuted, profile.parent_penalty)?;
+        let multivariate = multivariate_residuals_with_parent_history(
+            &permuted,
+            &side.parents,
+            bit_depth,
+            usize::from(profile.parent_history_depth),
+        )?;
+        let common_mode = common_mode_residuals(&permuted)?;
+        let selected = select_four_residuals(
+            &universal,
+            &lattice,
+            &multivariate,
+            &common_mode,
+            profile.entropy.score_shift,
+        )?;
+        let blocks_per_channel = samples / block_size;
+        let map_bits = channels
+            .checked_mul(blocks_per_channel)
+            .ok_or_else(|| input_error("WSX1 block map size overflows"))?;
+        let local_parents = vec![Vec::new()];
+        let mut candidates = Vec::new();
+        for channel in 0..channels {
+            for block in 0..blocks_per_channel {
+                let start = block * block_size;
+                let end = start + block_size;
+                let wavelet = wavelet53_forward(&permuted[channel][start..end])?;
+                let residual_cost = mix1_entropy::encode_profile_channel_context(
+                    &[selected[channel][start..end].to_vec()],
+                    &local_parents,
+                    profile.entropy.channel_context_mask,
+                    profile.entropy.history_context,
+                    profile.entropy.scale_profile,
+                )?
+                .0
+                .len();
+                let wavelet_payload = mix1_entropy::encode_profile_channel_context(
+                    &[wavelet],
+                    &local_parents,
+                    profile.entropy.channel_context_mask,
+                    profile.entropy.history_context,
+                    profile.entropy.scale_profile,
+                )?
+                .0;
+                if wavelet_payload.len() + 2 < residual_cost {
+                    candidates.push((
+                        residual_cost - wavelet_payload.len() - 2,
+                        channel,
+                        block,
+                        wavelet_payload,
+                    ));
+                }
+            }
+        }
+        candidates.sort_by_key(|(savings, channel, block, _)| {
+            (core::cmp::Reverse(*savings), *channel, *block)
+        });
+
+        let mut block_map = vec![0u8; map_bits.div_ceil(8)];
+        let mut coded = selected.clone();
+        let (mut main_payload, mut event_count) = mix1_entropy::encode_profile_channel_context(
+            &coded,
+            &side.parents,
+            profile.entropy.channel_context_mask,
+            profile.entropy.history_context,
+            profile.entropy.scale_profile,
+        )?;
+        let mut block_payloads = vec![None; map_bits];
+        let mut total_payload_len = 4usize
+            .checked_add(main_payload.len())
+            .ok_or_else(|| input_error("WSX1 payload length overflows"))?;
+        for (_, channel, block, block_payload) in candidates {
+            let start = block * block_size;
+            let end = start + block_size;
+            coded[channel][start..end].fill(0);
+            let trial = mix1_entropy::encode_profile_channel_context(
+                &coded,
+                &side.parents,
+                profile.entropy.channel_context_mask,
+                profile.entropy.history_context,
+                profile.entropy.scale_profile,
+            )?;
+            let trial_total = total_payload_len
+                .checked_sub(main_payload.len())
+                .and_then(|length| length.checked_add(trial.0.len()))
+                .and_then(|length| length.checked_add(2 + block_payload.len()))
+                .ok_or_else(|| input_error("WSX1 trial payload length overflows"))?;
+            if trial_total < total_payload_len {
+                let bit = channel * blocks_per_channel + block;
+                set_block_map(&mut block_map, bit);
+                block_payloads[bit] = Some(block_payload);
+                main_payload = trial.0;
+                event_count = trial.1;
+                total_payload_len = trial_total;
+            } else {
+                coded[channel][start..end].copy_from_slice(&selected[channel][start..end]);
+            }
+        }
+        let mut payload = Vec::with_capacity(total_payload_len);
+        payload.extend_from_slice(
+            &u32::try_from(main_payload.len())
+                .map_err(|_| input_error("WSX1 main payload exceeds u32"))?
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(&main_payload);
+        for block_payload in block_payloads.into_iter().flatten() {
+            payload.extend_from_slice(
+                &u16::try_from(block_payload.len())
+                    .map_err(|_| input_error("WSX1 block payload exceeds u16"))?
+                    .to_le_bytes(),
+            );
+            payload.extend_from_slice(&block_payload);
+        }
+        debug_assert_eq!(payload.len(), total_payload_len);
+
+        let (mut graph, coefficient_rice_k, weight_rice_k) =
+            mix1_lattice::pack_side_adaptive(&side, profile.entropy.score_shift)?;
+        graph[..4].copy_from_slice(b"WSX1");
+        let tail = graph.split_off(6);
+        graph.extend_from_slice(&[
+            profile.entropy.channel_context_mask,
+            profile.entropy.history_context,
+            profile.entropy.scale_profile,
+            profile.parent_history_depth,
+            coefficient_rice_k,
+            weight_rice_k,
+            block_size.trailing_zeros() as u8,
+        ]);
+        graph.extend_from_slice(&pack_permutation_indices(&permutation)?);
+        graph.extend_from_slice(&block_map);
+        graph.extend_from_slice(&tail);
+        pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count,
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
+    pub fn encode_legacy_optimum_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        let payload = LmoCodec
+            .encode(signal, LegacyMode::Lossless)
+            .map_err(|error| input_error(format!("LPX1 nested LMO encode failed: {error}")))?;
+        let mut graph = Vec::with_capacity(6);
+        graph.extend_from_slice(b"LPX1");
+        graph.extend_from_slice(&[0xa7, 1]);
+        let values = channels
+            .checked_mul(samples)
+            .ok_or_else(|| input_error("LPX1 value count overflows"))?;
+        pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count: u32::try_from(values)
+                .map_err(|_| input_error("LPX1 value count exceeds u32"))?,
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
+    pub fn encode_bitplane_layer_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        if bit_depth < 2 {
+            return Err(input_error("BLX1 requires bit depth of at least two"));
+        }
+        let upper = signal
+            .iter()
+            .map(|channel| channel.iter().map(|sample| sample >> 1).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let nested = self.encode_best_peer_window_without_bitplane(
+            &upper,
+            sample_rate_mhz,
+            bit_depth.saturating_sub(1),
+        )?;
+        let nested_len = u32::try_from(nested.len())
+            .map_err(|_| input_error("BLX1 nested packet exceeds u32"))?;
+        let modes = fit_low_bit_modes(signal)?;
+        let low_bits = encode_low_bit_payload(signal, &modes)?;
+        let mut payload = Vec::with_capacity(4 + nested.len() + low_bits.len());
+        payload.extend_from_slice(&nested_len.to_le_bytes());
+        payload.extend_from_slice(&nested);
+        payload.extend_from_slice(&low_bits);
+        let mut graph = b"BLX1\xa7\x02\x01".to_vec();
+        graph.extend_from_slice(&pack_low_bit_modes(&modes)?);
+        pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count: u32::try_from(channels * samples)
+                .map_err(|_| input_error("BLX1 value count exceeds u32"))?,
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
     pub fn encode_best_peer_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let mut best =
+            self.encode_best_peer_window_without_bitplane(signal, sample_rate_mhz, bit_depth)?;
+        if bit_depth >= 2 {
+            let bitplane = self.encode_bitplane_layer_window(signal, sample_rate_mhz, bit_depth)?;
+            if bitplane.len() < best.len() {
+                best = bitplane;
+            }
+        }
+        Ok(best)
+    }
+
+    fn encode_best_peer_window_without_bitplane(
         &self,
         signal: &[Vec<i64>],
         sample_rate_mhz: u32,
@@ -632,7 +1029,7 @@ impl Mix1Codec {
             .map(|&index| signal[index].clone())
             .collect::<Vec<_>>();
         let nested =
-            self.encode_best_peer_window_without_alias(&unique, sample_rate_mhz, bit_depth)?;
+            self.encode_best_peer_window_without_legacy(&unique, sample_rate_mhz, bit_depth)?;
         let unique_count = u8::try_from(unique.len())
             .map_err(|_| input_error("ALX1 unique channel count exceeds u8"))?;
         let mut graph = Vec::with_capacity(7 + channels);
@@ -656,6 +1053,22 @@ impl Mix1Codec {
     }
 
     pub fn encode_best_peer_window_without_alias(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let incumbent =
+            self.encode_best_peer_window_without_legacy(signal, sample_rate_mhz, bit_depth)?;
+        let legacy = self.encode_legacy_optimum_window(signal, sample_rate_mhz, bit_depth)?;
+        if legacy.len() < incumbent.len() && legacy_peer_is_independently_decodable(&legacy)? {
+            Ok(legacy)
+        } else {
+            Ok(incumbent)
+        }
+    }
+
+    fn encode_best_peer_window_without_legacy(
         &self,
         signal: &[Vec<i64>],
         sample_rate_mhz: u32,
@@ -800,9 +1213,17 @@ impl Mix1Codec {
         if magic == Some(&b"ALX1"[..]) {
             return decode_alias_frame(frame);
         }
+        if magic == Some(&b"BLX1"[..]) {
+            return decode_bitplane_layer_frame(frame);
+        }
+        if magic == Some(&b"LPX1"[..]) {
+            return decode_legacy_optimum_frame(frame);
+        }
+        let split_wavelet_mode = magic == Some(&b"WSX1"[..]);
+        let wavelet_override_mode = magic == Some(&b"WPX1"[..]) || split_wavelet_mode;
         let hierarchical = magic == Some(&b"MCH1"[..]);
         let channel_context = magic == Some(&b"MCX1"[..]);
-        let tuned_permuted = magic == Some(&b"APX1"[..]);
+        let tuned_permuted = magic == Some(&b"APX1"[..]) || wavelet_override_mode;
         let compact_common_profile = magic == Some(&b"BQX1"[..]);
         let permuted_mode = magic == Some(&b"MPX1"[..]) || tuned_permuted;
         let common_mode = magic == Some(&b"MQX1"[..])
@@ -874,7 +1295,63 @@ impl Mix1Codec {
             None
         };
 
-        let permutation = if tuned_permuted {
+        let wavelet_override = if wavelet_override_mode {
+            let block_log2 = *graph
+                .get(12)
+                .ok_or_else(|| packet_error("WPX1 block size is truncated"))?;
+            let block_size = 1usize
+                .checked_shl(u32::from(block_log2))
+                .ok_or_else(|| packet_error("WPX1 block size overflows"))?;
+            if !WPX1_BLOCK_SIZES.contains(&block_size) {
+                return Err(packet_error("WPX1 block size is invalid"));
+            }
+            let blocks_per_channel = frame.samples / block_size;
+            let map_bits = frame
+                .channels
+                .checked_mul(blocks_per_channel)
+                .ok_or_else(|| packet_error("WPX1 block map size overflows"))?;
+            let permutation_len = packed_permutation_len(frame.channels)?;
+            let map_start = 13usize
+                .checked_add(permutation_len)
+                .ok_or_else(|| packet_error("WPX1 block map offset overflows"))?;
+            let map_end = map_start
+                .checked_add(map_bits.div_ceil(8))
+                .ok_or_else(|| packet_error("WPX1 block map length overflows"))?;
+            let block_map = graph
+                .get(map_start..map_end)
+                .ok_or_else(|| packet_error("WPX1 block map is truncated"))?
+                .to_vec();
+            validate_block_map_padding(&block_map, map_bits)?;
+            Some(WaveletOverride {
+                block_size,
+                blocks_per_channel,
+                block_map,
+            })
+        } else {
+            None
+        };
+
+        let permutation = if wavelet_override_mode {
+            let start = 13usize;
+            let end = start
+                .checked_add(packed_permutation_len(frame.channels)?)
+                .ok_or_else(|| packet_error("MIX peer permutation length overflows"))?;
+            if graph.len() < end {
+                return Err(packet_error("MIX peer permutation is truncated"));
+            }
+            let permutation = unpack_permutation_indices(&graph[start..end], frame.channels)?;
+            let map_end = end
+                .checked_add(
+                    wavelet_override
+                        .as_ref()
+                        .expect("WPX1 metadata parsed")
+                        .block_map
+                        .len(),
+                )
+                .ok_or_else(|| packet_error("WPX1 block map end overflows"))?;
+            graph.drain(12..map_end);
+            Some(permutation)
+        } else if tuned_permuted {
             let start = 12usize;
             let end = start
                 .checked_add(packed_permutation_len(frame.channels)?)
@@ -947,7 +1424,22 @@ impl Mix1Codec {
                 mix1_lattice::parse_side(&graph, frame.channels, frame.samples)?
             };
 
-        let residuals = if let Some(mask) = channel_context_mask {
+        let residuals = if split_wavelet_mode {
+            let (history, scale, _, _, _) =
+                tuned_profile.ok_or_else(|| packet_error("WSX1 tuned profile is missing"))?;
+            decode_wavelet_split_payload(
+                &frame.payload,
+                (frame.channels, frame.samples),
+                &side.parents,
+                channel_context_mask
+                    .ok_or_else(|| packet_error("WSX1 channel context is missing"))?,
+                history,
+                scale,
+                wavelet_override
+                    .as_ref()
+                    .ok_or_else(|| packet_error("WSX1 block metadata is missing"))?,
+            )?
+        } else if let Some(mask) = channel_context_mask {
             if let Some((history, scale, _, _)) = compact_profile {
                 mix1_entropy::decode_profile_channel_context(
                     &frame.payload,
@@ -998,14 +1490,26 @@ impl Mix1Codec {
 
         let mut samples = if common_mode {
             if let Some((_, _, parent_history_depth, _, _)) = tuned_profile {
-                decode_common_mode_samples_with_parent_history(
-                    &residuals,
-                    score_shift,
-                    &side,
-                    &side.parents,
-                    frame.bit_depth,
-                    usize::from(parent_history_depth),
-                )?
+                if let Some(wavelet_override) = &wavelet_override {
+                    decode_wavelet_override_samples(
+                        &residuals,
+                        score_shift,
+                        &side,
+                        &side.parents,
+                        frame.bit_depth,
+                        usize::from(parent_history_depth),
+                        wavelet_override,
+                    )?
+                } else {
+                    decode_common_mode_samples_with_parent_history(
+                        &residuals,
+                        score_shift,
+                        &side,
+                        &side.parents,
+                        frame.bit_depth,
+                        usize::from(parent_history_depth),
+                    )?
+                }
             } else {
                 decode_common_mode_samples(
                     &residuals,
@@ -1046,6 +1550,314 @@ impl Mix1Codec {
     }
 }
 
+fn fit_low_bit_modes(signal: &[Vec<i64>]) -> Result<Vec<u8>, OptimumV2Error> {
+    if signal.is_empty() || signal.iter().any(Vec::is_empty) {
+        return Err(input_error("BLX1 low-bit signal is empty"));
+    }
+    signal
+        .iter()
+        .map(|samples| {
+            let first = (samples[0] & 1) as u8;
+            if samples.iter().all(|sample| (*sample & 1) as u8 == first) {
+                return Ok(first);
+            }
+            let raw_bytes = samples.len().div_ceil(8);
+            let mut run_bytes = 1usize;
+            let mut current = first;
+            let mut run = 1usize;
+            for sample in &samples[1..] {
+                let bit = (*sample & 1) as u8;
+                if bit == current {
+                    run += 1;
+                } else {
+                    run_bytes += uleb128_len(run);
+                    current = bit;
+                    run = 1;
+                }
+            }
+            run_bytes += uleb128_len(run);
+            Ok(if raw_bytes <= run_bytes { 2 } else { 3 })
+        })
+        .collect()
+}
+
+fn uleb128_len(mut value: usize) -> usize {
+    debug_assert!(value != 0);
+    let mut bytes = 1usize;
+    while value >= 0x80 {
+        bytes += 1;
+        value >>= 7;
+    }
+    bytes
+}
+
+fn pack_low_bit_modes(modes: &[u8]) -> Result<Vec<u8>, OptimumV2Error> {
+    if modes.is_empty() || modes.len() > MAX_CHANNELS || modes.iter().any(|&mode| mode > 3) {
+        return Err(input_error("BLX1 low-bit modes are invalid"));
+    }
+    let mut packed = vec![0u8; (modes.len() * 2).div_ceil(8)];
+    for (index, &mode) in modes.iter().enumerate() {
+        packed[index / 4] |= mode << (6 - (index % 4) * 2);
+    }
+    Ok(packed)
+}
+
+fn unpack_low_bit_modes(packed: &[u8], channels: usize) -> Result<Vec<u8>, OptimumV2Error> {
+    let expected = (channels * 2).div_ceil(8);
+    if packed.len() != expected {
+        return Err(packet_error("BLX1 low-bit mode-map length differs"));
+    }
+    if channels % 4 != 0 {
+        let padding_bits = (4 - channels % 4) * 2;
+        let padding_mask = (1u8 << padding_bits) - 1;
+        if packed.last().is_some_and(|byte| byte & padding_mask != 0) {
+            return Err(packet_error("BLX1 low-bit mode map has nonzero padding"));
+        }
+    }
+    Ok((0..channels)
+        .map(|index| (packed[index / 4] >> (6 - (index % 4) * 2)) & 3)
+        .collect())
+}
+
+fn encode_low_bit_payload(signal: &[Vec<i64>], modes: &[u8]) -> Result<Vec<u8>, OptimumV2Error> {
+    if signal.len() != modes.len() {
+        return Err(input_error("BLX1 low-bit dimensions differ"));
+    }
+    let mut encoded = Vec::new();
+    for (channel, &mode) in signal.iter().zip(modes) {
+        match mode {
+            0 | 1 => {
+                if channel.iter().any(|sample| (*sample & 1) as u8 != mode) {
+                    return Err(input_error("BLX1 constant low-bit mode disagrees"));
+                }
+            }
+            2 => {
+                for chunk in channel.chunks(8) {
+                    let mut packed = 0u8;
+                    for (index, sample) in chunk.iter().enumerate() {
+                        packed |= ((*sample & 1) as u8) << (7 - index);
+                    }
+                    encoded.push(packed);
+                }
+            }
+            3 => {
+                let first = (channel
+                    .first()
+                    .ok_or_else(|| input_error("BLX1 low-bit channel is empty"))?
+                    & 1) as u8;
+                encoded.push(first);
+                let mut current = first;
+                let mut run = 1usize;
+                for sample in &channel[1..] {
+                    let bit = (*sample & 1) as u8;
+                    if bit == current {
+                        run = run
+                            .checked_add(1)
+                            .ok_or_else(|| input_error("BLX1 low-bit run length overflows"))?;
+                    } else {
+                        encode_uleb128(run, &mut encoded);
+                        current = bit;
+                        run = 1;
+                    }
+                }
+                encode_uleb128(run, &mut encoded);
+            }
+            _ => return Err(input_error("BLX1 low-bit mode is invalid")),
+        }
+    }
+    Ok(encoded)
+}
+
+fn encode_uleb128(mut value: usize, output: &mut Vec<u8>) {
+    debug_assert!(value != 0);
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        output.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn decode_low_bit_run_channel(
+    bytes: &[u8],
+    expected: usize,
+) -> Result<(Vec<u8>, usize), OptimumV2Error> {
+    let (&first, mut tail) = bytes
+        .split_first()
+        .ok_or_else(|| packet_error("BLX1 low-bit run channel is truncated"))?;
+    if first > 1 {
+        return Err(packet_error("BLX1 first low bit is invalid"));
+    }
+    let mut decoded = Vec::with_capacity(expected);
+    let mut bit = first;
+    while decoded.len() < expected {
+        let original = tail;
+        let mut value = 0usize;
+        let mut shift = 0u32;
+        loop {
+            let (&byte, rest) = tail
+                .split_first()
+                .ok_or_else(|| packet_error("BLX1 low-bit run is truncated"))?;
+            tail = rest;
+            if shift >= usize::BITS || usize::from(byte & 0x7f) > (usize::MAX >> shift) {
+                return Err(packet_error("BLX1 low-bit run length overflows"));
+            }
+            value |= usize::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        if value == 0 {
+            return Err(packet_error("BLX1 low-bit run is empty"));
+        }
+        let consumed = original.len() - tail.len();
+        let mut canonical = Vec::new();
+        encode_uleb128(value, &mut canonical);
+        if canonical.as_slice() != &original[..consumed] {
+            return Err(packet_error("BLX1 low-bit run is noncanonical"));
+        }
+        let end = decoded
+            .len()
+            .checked_add(value)
+            .ok_or_else(|| packet_error("BLX1 low-bit run end overflows"))?;
+        if end > expected {
+            return Err(packet_error("BLX1 low-bit run exceeds signal shape"));
+        }
+        decoded.resize(end, bit);
+        bit ^= 1;
+    }
+    Ok((decoded, bytes.len() - tail.len()))
+}
+
+fn decode_low_bit_payload(
+    bytes: &[u8],
+    modes: &[u8],
+    samples: usize,
+) -> Result<Vec<Vec<u8>>, OptimumV2Error> {
+    let mut tail = bytes;
+    let mut decoded = Vec::with_capacity(modes.len());
+    for &mode in modes {
+        match mode {
+            0 | 1 => decoded.push(vec![mode; samples]),
+            2 => {
+                let packed_len = samples.div_ceil(8);
+                let (packed, rest) = tail
+                    .split_at_checked(packed_len)
+                    .ok_or_else(|| packet_error("BLX1 raw low-bit channel is truncated"))?;
+                if samples % 8 != 0 {
+                    let padding = 8 - samples % 8;
+                    if packed
+                        .last()
+                        .is_some_and(|byte| byte & ((1 << padding) - 1) != 0)
+                    {
+                        return Err(packet_error("BLX1 raw low-bit channel has nonzero padding"));
+                    }
+                }
+                decoded.push(
+                    (0..samples)
+                        .map(|index| (packed[index / 8] >> (7 - index % 8)) & 1)
+                        .collect(),
+                );
+                tail = rest;
+            }
+            3 => {
+                let (channel, consumed) = decode_low_bit_run_channel(tail, samples)?;
+                decoded.push(channel);
+                tail = &tail[consumed..];
+            }
+            _ => return Err(packet_error("BLX1 low-bit mode is invalid")),
+        }
+    }
+    if !tail.is_empty() {
+        return Err(packet_error("BLX1 low-bit payload has trailing bytes"));
+    }
+    Ok(decoded)
+}
+
+fn decode_bitplane_layer_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
+    let mode_len = (frame.channels * 2).div_ceil(8);
+    if frame.graph.len() != 7 + mode_len
+        || frame.graph.get(..7) != Some(&b"BLX1\xa7\x02\x01"[..])
+        || frame.bit_depth < 2
+    {
+        return Err(packet_error("BLX1 side data is invalid or noncanonical"));
+    }
+    let modes = unpack_low_bit_modes(&frame.graph[7..], frame.channels)?;
+    let nested_len = usize::try_from(read_u32(&frame.payload, 0)?)
+        .map_err(|_| packet_error("BLX1 nested packet length exceeds usize"))?;
+    let nested_end = 4usize
+        .checked_add(nested_len)
+        .ok_or_else(|| packet_error("BLX1 nested packet end overflows"))?;
+    let nested_packet = frame
+        .payload
+        .get(4..nested_end)
+        .ok_or_else(|| packet_error("BLX1 nested packet is truncated"))?;
+    let nested_frame = unpack_frame(nested_packet)?;
+    if nested_frame.graph.get(..4) == Some(&b"BLX1"[..]) {
+        return Err(packet_error("BLX1 nesting depth exceeds one"));
+    }
+    let nested = Mix1Codec.decode_window(nested_packet)?;
+    if nested.samples.len() != frame.channels
+        || nested
+            .samples
+            .iter()
+            .any(|channel| channel.len() != frame.samples)
+        || nested.sample_rate_mhz != frame.sample_rate_mhz
+        || nested.bit_depth != frame.bit_depth - 1
+    {
+        return Err(packet_error(
+            "BLX1 nested peer dimensions or metadata disagree",
+        ));
+    }
+    let low_bits = decode_low_bit_payload(
+        frame
+            .payload
+            .get(nested_end..)
+            .ok_or_else(|| packet_error("BLX1 low-bit stream is truncated"))?,
+        &modes,
+        frame.samples,
+    )?;
+    let magnitude = 1i64 << (frame.bit_depth - 1);
+    let minimum = -magnitude;
+    let maximum = magnitude - 1;
+    let score_shift = nested.score_shift;
+    let mut samples = nested.samples;
+    for channel in 0..frame.channels {
+        for time in 0..frame.samples {
+            let sample = &mut samples[channel][time];
+            *sample = sample
+                .checked_mul(2)
+                .and_then(|upper| upper.checked_add(i64::from(low_bits[channel][time])))
+                .ok_or_else(|| packet_error("BLX1 reconstructed sample exceeds i64"))?;
+            if !(minimum..=maximum).contains(sample) {
+                return Err(packet_error(
+                    "BLX1 reconstructed sample exceeds declared bit depth",
+                ));
+            }
+        }
+    }
+    if fit_low_bit_modes(&samples).map_err(as_packet_error)? != modes {
+        return Err(packet_error("BLX1 low-bit mode map is noncanonical"));
+    }
+    if crc32c(&canonical_i32_bytes(&samples).map_err(as_packet_error)?) != frame.decoded_crc {
+        return Err(OptimumV2Error::Integrity(
+            "BLX1 decoded sample CRC32C mismatch".into(),
+        ));
+    }
+    Ok(Mix1Decoded {
+        samples,
+        sample_rate_mhz: frame.sample_rate_mhz,
+        bit_depth: frame.bit_depth,
+        score_shift,
+    })
+}
+
 fn fit_channel_aliases(signal: &[Vec<i64>]) -> Result<(Vec<usize>, Vec<u8>), OptimumV2Error> {
     let mut lookup: HashMap<&[i64], u8> = HashMap::new();
     let mut representatives = Vec::new();
@@ -1062,6 +1874,83 @@ fn fit_channel_aliases(signal: &[Vec<i64>]) -> Result<(Vec<usize>, Vec<u8>), Opt
         aliases.push(index);
     }
     Ok((representatives, aliases))
+}
+
+fn decode_legacy_optimum_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
+    if frame.graph != b"LPX1\xa7\x01" {
+        return Err(packet_error("LPX1 side data is invalid or noncanonical"));
+    }
+    let samples = LmoCodec
+        .decode(&frame.payload)
+        .map_err(|error| packet_error(format!("LPX1 nested LMO decode failed: {error}")))?;
+    let (channels, sample_count) =
+        validate_signal(&samples, frame.sample_rate_mhz, frame.bit_depth)
+            .map_err(as_packet_error)?;
+    if channels != frame.channels || sample_count != frame.samples {
+        return Err(packet_error("LPX1 nested LMO dimensions disagree"));
+    }
+    let canonical = LmoCodec
+        .encode(&samples, LegacyMode::Lossless)
+        .map_err(|error| packet_error(format!("LPX1 nested LMO re-encode failed: {error}")))?;
+    if canonical != frame.payload {
+        return Err(packet_error("LPX1 nested LMO packet is noncanonical"));
+    }
+    if crc32c(&canonical_i32_bytes(&samples).map_err(as_packet_error)?) != frame.decoded_crc {
+        return Err(OptimumV2Error::Integrity(
+            "LPX1 decoded sample CRC32C mismatch".into(),
+        ));
+    }
+    Ok(Mix1Decoded {
+        samples,
+        sample_rate_mhz: frame.sample_rate_mhz,
+        bit_depth: frame.bit_depth,
+        score_shift: 0,
+    })
+}
+
+fn legacy_peer_is_independently_decodable(packet: &[u8]) -> Result<bool, OptimumV2Error> {
+    let frame = unpack_frame(packet)?;
+    let payload = frame.payload;
+    if payload.get(..7) != Some(&b"LMO1\x02\x00\x02"[..]) {
+        return Ok(false);
+    }
+    let body = &payload[7..];
+    let base = if body.first() == Some(&0xfe) {
+        if body.len() < 12 || body[1] == 0 || body[1] > 16 {
+            return Ok(false);
+        }
+        let upper_len = usize::try_from(read_u32(body, 8)?)
+            .map_err(|_| packet_error("LPX1 upper body length exceeds usize"))?;
+        let upper_end = 12usize
+            .checked_add(upper_len)
+            .ok_or_else(|| packet_error("LPX1 upper body end overflows"))?;
+        match body.get(12..upper_end) {
+            Some(base) => base,
+            None => return Ok(false),
+        }
+    } else {
+        body
+    };
+    if base.len() < 5 || base[0] != 3 {
+        return Ok(false);
+    }
+    let channels = usize::from(u16::from_le_bytes([base[2], base[3]]));
+    let mut position = 4usize;
+    for _ in 0..channels {
+        let Some(&references) = base.get(position) else {
+            return Ok(false);
+        };
+        position = match position
+            .checked_add(1)
+            .and_then(|value| value.checked_add(usize::from(references) * 6))
+        {
+            Some(position) if position <= base.len() => position,
+            _ => return Ok(false),
+        };
+    }
+    Ok(base
+        .get(position)
+        .is_some_and(|mode| (1..=4).contains(mode)))
 }
 
 fn decode_alias_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
@@ -1687,6 +2576,227 @@ fn valid_profile_history(history_context: u8) -> bool {
     history_context & 0x0f == 4 && (1..=7).contains(&(history_context >> 4))
 }
 
+#[derive(Debug, Clone)]
+struct WaveletOverride {
+    block_size: usize,
+    blocks_per_channel: usize,
+    block_map: Vec<u8>,
+}
+
+impl WaveletOverride {
+    fn selected(&self, channel: usize, time: usize) -> bool {
+        let block = time / self.block_size;
+        block < self.blocks_per_channel
+            && block_map_is_set(&self.block_map, channel * self.blocks_per_channel + block)
+    }
+}
+
+fn set_block_map(block_map: &mut [u8], bit: usize) {
+    block_map[bit / 8] |= 1 << (7 - bit % 8);
+}
+
+fn block_map_is_set(block_map: &[u8], bit: usize) -> bool {
+    block_map[bit / 8] & (1 << (7 - bit % 8)) != 0
+}
+
+fn validate_block_map_padding(block_map: &[u8], bits: usize) -> Result<(), OptimumV2Error> {
+    if block_map.len() != bits.div_ceil(8) {
+        return Err(packet_error("WPX1 block map length differs"));
+    }
+    if bits % 8 != 0 {
+        let padding_mask = (1u8 << (8 - bits % 8)) - 1;
+        if block_map
+            .last()
+            .is_some_and(|last| last & padding_mask != 0)
+        {
+            return Err(packet_error("WPX1 block map has nonzero padding"));
+        }
+    }
+    Ok(())
+}
+
+fn wavelet53_forward(block: &[i64]) -> Result<Vec<i64>, OptimumV2Error> {
+    if !WPX1_BLOCK_SIZES.contains(&block.len()) {
+        return Err(input_error("WPX1 wavelet block length is invalid"));
+    }
+    let mut approximation = block.to_vec();
+    let mut details = Vec::new();
+    while approximation.len() >= 8 {
+        let half = approximation.len() / 2;
+        let mut detail = Vec::with_capacity(half);
+        for index in 0..half {
+            let left = i128::from(approximation[index * 2]);
+            let right = i128::from(
+                approximation
+                    .get(index * 2 + 2)
+                    .copied()
+                    .unwrap_or(approximation[index * 2]),
+            );
+            let prediction = (left + right).div_euclid(2);
+            let value = i128::from(approximation[index * 2 + 1]) - prediction;
+            detail.push(
+                i64::try_from(value)
+                    .map_err(|_| arithmetic_error("WPX1 forward wavelet detail exceeds i64"))?,
+            );
+        }
+        let mut next = Vec::with_capacity(half);
+        for index in 0..half {
+            let left_detail = i128::from(if index == 0 {
+                detail[0]
+            } else {
+                detail[index - 1]
+            });
+            let right_detail = i128::from(detail[index]);
+            let update = (left_detail + right_detail + 2).div_euclid(4);
+            let value = i128::from(approximation[index * 2]) + update;
+            next.push(
+                i64::try_from(value).map_err(|_| {
+                    arithmetic_error("WPX1 forward wavelet approximation exceeds i64")
+                })?,
+            );
+        }
+        details.push(detail);
+        approximation = next;
+    }
+    let mut transformed = Vec::with_capacity(block.len());
+    transformed.extend_from_slice(&approximation);
+    for detail in details.iter().rev() {
+        transformed.extend_from_slice(detail);
+    }
+    debug_assert_eq!(transformed.len(), block.len());
+    Ok(transformed)
+}
+
+fn wavelet53_inverse(coefficients: &[i64]) -> Result<Vec<i64>, OptimumV2Error> {
+    if !WPX1_BLOCK_SIZES.contains(&coefficients.len()) {
+        return Err(packet_error("WPX1 wavelet coefficient length is invalid"));
+    }
+    let levels = coefficients.len().trailing_zeros() as usize - 2;
+    let coarsest = coefficients.len() >> levels;
+    let mut approximation = coefficients[..coarsest].to_vec();
+    let mut offset = coarsest;
+    for _ in 0..levels {
+        let detail_len = approximation.len();
+        let end = offset
+            .checked_add(detail_len)
+            .ok_or_else(|| packet_error("WPX1 wavelet detail offset overflows"))?;
+        let detail = coefficients
+            .get(offset..end)
+            .ok_or_else(|| packet_error("WPX1 wavelet detail is truncated"))?;
+        let mut even = Vec::with_capacity(detail_len);
+        for index in 0..detail_len {
+            let left_detail = i128::from(if index == 0 {
+                detail[0]
+            } else {
+                detail[index - 1]
+            });
+            let right_detail = i128::from(detail[index]);
+            let update = (left_detail + right_detail + 2).div_euclid(4);
+            let value = i128::from(approximation[index]) - update;
+            even.push(
+                i64::try_from(value)
+                    .map_err(|_| packet_error("WPX1 inverse wavelet even sample exceeds i64"))?,
+            );
+        }
+        let mut restored = Vec::with_capacity(detail_len * 2);
+        for index in 0..detail_len {
+            let left = i128::from(even[index]);
+            let right = i128::from(even.get(index + 1).copied().unwrap_or(even[index]));
+            let prediction = (left + right).div_euclid(2);
+            let odd = i128::from(detail[index]) + prediction;
+            restored.push(even[index]);
+            restored.push(
+                i64::try_from(odd)
+                    .map_err(|_| packet_error("WPX1 inverse wavelet odd sample exceeds i64"))?,
+            );
+        }
+        approximation = restored;
+        offset = end;
+    }
+    if offset != coefficients.len() || approximation.len() != coefficients.len() {
+        return Err(packet_error("WPX1 wavelet layout is noncanonical"));
+    }
+    Ok(approximation)
+}
+
+fn decode_wavelet_split_payload(
+    payload: &[u8],
+    dimensions: (usize, usize),
+    parents: &[Vec<usize>],
+    channel_context_mask: u8,
+    history_context: u8,
+    scale_profile: u8,
+    wavelet_override: &WaveletOverride,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    let main_len = usize::try_from(read_u32(payload, 0)?)
+        .map_err(|_| packet_error("WSX1 main payload length exceeds usize"))?;
+    let main_end = 4usize
+        .checked_add(main_len)
+        .ok_or_else(|| packet_error("WSX1 main payload end overflows"))?;
+    let main_payload = payload
+        .get(4..main_end)
+        .ok_or_else(|| packet_error("WSX1 main payload is truncated"))?;
+    let mut residuals = mix1_entropy::decode_profile_channel_context(
+        main_payload,
+        0,
+        dimensions,
+        parents,
+        channel_context_mask,
+        history_context,
+        scale_profile,
+    )?;
+    if wavelet_override.blocks_per_channel != dimensions.1 / wavelet_override.block_size {
+        return Err(packet_error("WSX1 block geometry differs"));
+    }
+    let local_parents = vec![Vec::new()];
+    let mut cursor = main_end;
+    for (channel, residual_channel) in residuals.iter_mut().enumerate().take(dimensions.0) {
+        for block in 0..wavelet_override.blocks_per_channel {
+            let bit = channel * wavelet_override.blocks_per_channel + block;
+            if !block_map_is_set(&wavelet_override.block_map, bit) {
+                continue;
+            }
+            let start = block * wavelet_override.block_size;
+            let end = start + wavelet_override.block_size;
+            if residual_channel[start..end].iter().any(|&value| value != 0) {
+                return Err(packet_error(
+                    "WSX1 selected block has nonzero main-stream data",
+                ));
+            }
+            let length_end = cursor
+                .checked_add(2)
+                .ok_or_else(|| packet_error("WSX1 block length offset overflows"))?;
+            let length_bytes = payload
+                .get(cursor..length_end)
+                .ok_or_else(|| packet_error("WSX1 block length is truncated"))?;
+            let block_len = usize::from(u16::from_le_bytes(
+                length_bytes.try_into().expect("two bytes"),
+            ));
+            let block_end = length_end
+                .checked_add(block_len)
+                .ok_or_else(|| packet_error("WSX1 block payload end overflows"))?;
+            let block_payload = payload
+                .get(length_end..block_end)
+                .ok_or_else(|| packet_error("WSX1 block payload is truncated"))?;
+            let block_coefficients = mix1_entropy::decode_profile_channel_context(
+                block_payload,
+                0,
+                (1, wavelet_override.block_size),
+                &local_parents,
+                channel_context_mask,
+                history_context,
+                scale_profile,
+            )?;
+            residual_channel[start..end].copy_from_slice(&block_coefficients[0]);
+            cursor = block_end;
+        }
+    }
+    if cursor != payload.len() {
+        return Err(packet_error("WSX1 payload has trailing bytes"));
+    }
+    Ok(residuals)
+}
+
 fn select_residuals(
     universal: &[Vec<i64>],
     lattice: &[Vec<i64>],
@@ -2075,6 +3185,7 @@ fn decode_common_mode_samples(
         multivariate_parents,
         bit_depth,
         1,
+        None,
     )
 }
 
@@ -2093,6 +3204,27 @@ fn decode_common_mode_samples_with_parent_history(
         multivariate_parents,
         bit_depth,
         parent_history_depth,
+        None,
+    )
+}
+
+fn decode_wavelet_override_samples(
+    residuals: &[Vec<i64>],
+    score_shift: u8,
+    side: &LatticeSide,
+    multivariate_parents: &[Vec<usize>],
+    bit_depth: u8,
+    parent_history_depth: usize,
+    wavelet_override: &WaveletOverride,
+) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
+    decode_four_mode_samples(
+        residuals,
+        score_shift,
+        side,
+        multivariate_parents,
+        bit_depth,
+        parent_history_depth,
+        Some(wavelet_override),
     )
 }
 
@@ -2103,6 +3235,7 @@ fn decode_four_mode_samples(
     multivariate_parents: &[Vec<usize>],
     bit_depth: u8,
     parent_history_depth: usize,
+    wavelet_override: Option<&WaveletOverride>,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     let channels = residuals.len();
     if channels == 0
@@ -2140,6 +3273,27 @@ fn decode_four_mode_samples(
     let mut previous_backward = vec![vec![0i128; ORDER + 1]; channels];
     let mut previous_samples = vec![0i64; channels];
     let mut reconstructed = vec![vec![0i64; samples]; channels];
+    let override_samples = if let Some(wavelet_override) = wavelet_override {
+        if wavelet_override.blocks_per_channel != samples / wavelet_override.block_size {
+            return Err(packet_error("WPX1 block geometry differs"));
+        }
+        let mut override_samples = residuals.to_vec();
+        for channel in 0..channels {
+            for block in 0..wavelet_override.blocks_per_channel {
+                let bit = channel * wavelet_override.blocks_per_channel + block;
+                if !block_map_is_set(&wavelet_override.block_map, bit) {
+                    continue;
+                }
+                let start = block * wavelet_override.block_size;
+                let end = start + wavelet_override.block_size;
+                let restored = wavelet53_inverse(&residuals[channel][start..end])?;
+                override_samples[channel][start..end].copy_from_slice(&restored);
+            }
+        }
+        Some(override_samples)
+    } else {
+        None
+    };
     let magnitude = 1i64 << (bit_depth - 1);
     let minimum = -magnitude;
     let maximum = magnitude - 1;
@@ -2163,26 +3317,38 @@ fn decode_four_mode_samples(
                     .map_err(as_packet_error)?;
             let choice = selector.choice(channel).map_err(as_packet_error)?;
             let coded = residuals[channel][time];
-            let sample = match choice {
-                QuadExpertChoice::Universal => universal_prediction
-                    .checked_add(coded)
-                    .ok_or_else(|| packet_error("MIX1 universal reconstruction exceeds i64"))?,
-                QuadExpertChoice::Multivariate => multivariate_prediction
-                    .checked_add(coded)
-                    .ok_or_else(|| packet_error("MIX1 multivariate reconstruction exceeds i64"))?,
-                QuadExpertChoice::CommonMode => fourth_prediction
-                    .checked_add(coded)
-                    .ok_or_else(|| packet_error("MIX1 fourth-mode reconstruction exceeds i64"))?,
-                QuadExpertChoice::Lattice => {
-                    let innovation = coded
-                        .checked_add(graph_prediction)
-                        .ok_or_else(|| packet_error("MIX1 lattice innovation exceeds i64"))?;
-                    mix1_lattice::inverse_sample(
-                        innovation,
-                        &side.coefficients,
-                        &previous_backward[channel],
-                    )
-                    .map_err(as_packet_error)?
+            let overridden = wavelet_override
+                .is_some_and(|wavelet_override| wavelet_override.selected(channel, time));
+            let sample = if overridden {
+                override_samples
+                    .as_ref()
+                    .expect("WPX1 override samples reconstructed")[channel][time]
+            } else {
+                match choice {
+                    QuadExpertChoice::Universal => universal_prediction
+                        .checked_add(coded)
+                        .ok_or_else(|| packet_error("MIX1 universal reconstruction exceeds i64"))?,
+                    QuadExpertChoice::Multivariate => {
+                        multivariate_prediction.checked_add(coded).ok_or_else(|| {
+                            packet_error("MIX1 multivariate reconstruction exceeds i64")
+                        })?
+                    }
+                    QuadExpertChoice::CommonMode => {
+                        fourth_prediction.checked_add(coded).ok_or_else(|| {
+                            packet_error("MIX1 fourth-mode reconstruction exceeds i64")
+                        })?
+                    }
+                    QuadExpertChoice::Lattice => {
+                        let innovation = coded
+                            .checked_add(graph_prediction)
+                            .ok_or_else(|| packet_error("MIX1 lattice innovation exceeds i64"))?;
+                        mix1_lattice::inverse_sample(
+                            innovation,
+                            &side.coefficients,
+                            &previous_backward[channel],
+                        )
+                        .map_err(as_packet_error)?
+                    }
                 }
             };
             if !(minimum..=maximum).contains(&sample) {
@@ -2215,7 +3381,7 @@ fn decode_four_mode_samples(
                 QuadExpertChoice::Multivariate => multivariate_residual,
                 QuadExpertChoice::CommonMode => fourth_residual,
             };
-            if selected != coded {
+            if !overridden && selected != coded {
                 return Err(packet_error(
                     "decoded MIX1 four-mode selector residual is inconsistent",
                 ));
@@ -2543,5 +3709,27 @@ fn as_packet_error(error: OptimumV2Error) -> OptimumV2Error {
     match error {
         OptimumV2Error::Integrity(message) => OptimumV2Error::Integrity(message),
         other => packet_error(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn low_bit_modes_choose_constant_raw_and_run_encodings() {
+        let constant_zero = vec![0; 32];
+        let constant_one = vec![1; 32];
+        let raw = (0..32)
+            .map(|index| i64::from(matches!(index % 5, 1 | 2)))
+            .collect::<Vec<_>>();
+        let runs = (0..32)
+            .map(|index| i64::from(index >= 16))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            fit_low_bit_modes(&[constant_zero, constant_one, raw, runs]).unwrap(),
+            vec![0, 1, 2, 3]
+        );
     }
 }
