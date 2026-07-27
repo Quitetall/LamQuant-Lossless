@@ -25,7 +25,11 @@ std = ["semantic-abir/std", "blut-graph-core/std"]
 # the projection lives HERE, on the LamQuant side, depending on both.
 semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "3f89c404a239c94d9660100db8b5b631963a1e0c", default-features = false, features = ["alloc"] }
 blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "704d3b3542150e91fa9767a0d286983940ca3788", default-features = false }
+# Deterministic montage object ids. no_std: the projection must stay usable in
+# the firmware build like the rest of this crate.
+sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 # Only the tests serialise; the projection itself never touches JSON.
 serde_json = "1"
+

@@ -35,7 +35,11 @@
 //! preserve `NaN` numerically would be inventing a position for an electrode
 //! nobody located.
 
-use semantic_abir::{ExactNumber, Rational};
+use alloc::vec::Vec;
+use semantic_abir::{
+    ChannelSpec, ConceptId, CoordinateFrame, CoordinateFrameTag, ExactNumber, ObjectId, Rational,
+};
+use sha2::{Digest, Sha256};
 
 /// Why a coordinate could not be projected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,5 +246,199 @@ mod tests {
             exact_from_f32(1e-38),
             Err(MontageError::DenominatorTooLarge)
         );
+    }
+}
+
+/// Domain separator for montage object ids.
+const ID_DOMAIN: &[u8] = b"org.quitetall.lamquant.montage-v1\0";
+
+/// Concept naming an electrode-position frame.
+const ELECTRODE_FRAME_CONCEPT: &str = "lamquant:electrode-position-frame";
+
+/// Derive a coordinate-frame id from the montage content itself.
+///
+/// Deterministic on purpose. A random id would make two byte-identical montages
+/// produce different artifacts, which defeats content addressing: the same
+/// recording archived twice would no longer deduplicate, and comparing two
+/// captures of one montage would report a difference that does not exist.
+///
+/// The channel index is included because two electrodes may legitimately sit at
+/// the same measured position (a reference tied to another site, say) and still
+/// need distinct frames.
+pub fn frame_id_for(montage_digest: &[u8; 32], channel_index: u32) -> ObjectId<CoordinateFrameTag> {
+    let mut hasher = Sha256::new();
+    hasher.update(ID_DOMAIN);
+    hasher.update(montage_digest);
+    hasher.update(channel_index.to_le_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    ObjectId::from_bytes(bytes)
+}
+
+/// A 4x4 row-major homogeneous transform placing an electrode at `position`.
+///
+/// Identity rotation with the position in the translation column: an electrode
+/// frame is a displacement from its parent, not a reorientation. Encoding it as
+/// a transform rather than three loose numbers is what lets a consumer compose
+/// it with the head frame without knowing it came from a `.lmq` file.
+fn translation_transform(position: [ExactNumber; 3]) -> [ExactNumber; 16] {
+    let zero = ExactNumber::Integer(0);
+    let one = ExactNumber::Integer(1);
+    [
+        one,
+        zero,
+        zero,
+        position[0],
+        zero,
+        one,
+        zero,
+        position[1],
+        zero,
+        zero,
+        one,
+        position[2],
+        zero,
+        zero,
+        zero,
+        one,
+    ]
+}
+
+/// Build the coordinate frame for one electrode, or `None` when unlocated.
+///
+/// `uncertainty` is the MEASUREMENT precision of the montage — how well the
+/// electrode position is actually known. It is deliberately a caller input
+/// rather than something inferred from the numbers, because nothing in an `f32`
+/// says how carefully it was measured, and inferring it would manufacture a
+/// confidence the data never carried.
+pub fn coordinate_frame_for(
+    montage_digest: &[u8; 32],
+    channel_index: u32,
+    coordinate: Coordinate,
+    parent: Option<ObjectId<CoordinateFrameTag>>,
+    uncertainty: Rational,
+) -> Result<Option<CoordinateFrame>, MontageError> {
+    let Coordinate::Known(position) = coordinate else {
+        return Ok(None);
+    };
+    let concept = ConceptId::new(ELECTRODE_FRAME_CONCEPT).map_err(|_| MontageError::NotFinite)?;
+    Ok(Some(CoordinateFrame::new(
+        frame_id_for(montage_digest, channel_index),
+        concept,
+        parent,
+        Some(translation_transform(position)),
+        uncertainty,
+    )))
+}
+
+/// Build the channel spec for one electrode.
+///
+/// An unlocated electrode gets a spec with no coordinate frame rather than no
+/// spec at all: the channel exists and carries signal regardless of whether
+/// anyone measured where it sat.
+pub fn channel_spec_for(
+    concept: ConceptId,
+    frame: Option<ObjectId<CoordinateFrameTag>>,
+) -> ChannelSpec {
+    let spec = ChannelSpec::new(concept);
+    match frame {
+        Some(id) => spec.with_coordinate_frame(id),
+        None => spec,
+    }
+}
+
+/// Project a whole montage: one frame per located electrode, in channel order.
+pub fn frames_for_montage(
+    montage_digest: &[u8; 32],
+    coordinates: &[[f32; 3]],
+    parent: Option<ObjectId<CoordinateFrameTag>>,
+    uncertainty: Rational,
+) -> Result<Vec<Option<CoordinateFrame>>, MontageError> {
+    let mut frames = Vec::with_capacity(coordinates.len());
+    for (index, xyz) in coordinates.iter().enumerate() {
+        let index = u32::try_from(index).map_err(|_| MontageError::NotFinite)?;
+        frames.push(coordinate_frame_for(
+            montage_digest,
+            index,
+            coordinate_from_f32(*xyz)?,
+            parent,
+            uncertainty,
+        )?);
+    }
+    Ok(frames)
+}
+
+#[cfg(test)]
+mod entity_tests {
+    use super::*;
+
+    fn micrometre() -> Rational {
+        // 1e-6 m: a realistic digitiser precision, and the point is that it is
+        // DECLARED rather than implied by how the numbers were rounded.
+        Rational::new(1, 1_000_000).expect("valid rational")
+    }
+
+    #[test]
+    fn identical_montages_derive_identical_frame_ids() {
+        // Content addressing depends on this: a random id would make the same
+        // recording archived twice fail to deduplicate.
+        let digest = [0x7a_u8; 32];
+        assert_eq!(frame_id_for(&digest, 3), frame_id_for(&digest, 3));
+    }
+
+    #[test]
+    fn different_channels_and_montages_derive_different_ids() {
+        let digest = [0x7a_u8; 32];
+        let other = [0x7b_u8; 32];
+        assert_ne!(
+            frame_id_for(&digest, 3),
+            frame_id_for(&digest, 4),
+            "two electrodes may share a position and still need distinct frames"
+        );
+        assert_ne!(frame_id_for(&digest, 3), frame_id_for(&other, 3));
+    }
+
+    #[test]
+    fn an_unlocated_electrode_gets_no_frame() {
+        let frame = coordinate_frame_for(&[0_u8; 32], 0, Coordinate::Unknown, None, micrometre())
+            .expect("projects");
+        assert!(frame.is_none(), "absence must stay absence");
+    }
+
+    #[test]
+    fn a_located_electrode_carries_its_position_in_the_transform() {
+        let coordinate = coordinate_from_f32([0.081, -0.0725, 0.0341]).unwrap();
+        let Coordinate::Known(expected) = coordinate else {
+            panic!("finite triple");
+        };
+        let frame = coordinate_frame_for(&[0_u8; 32], 0, coordinate, None, micrometre())
+            .expect("projects")
+            .expect("located electrodes get a frame");
+        let transform = frame.transform().expect("a position is a transform");
+        // Translation column of a row-major 4x4.
+        assert_eq!(transform[3], expected[0]);
+        assert_eq!(transform[7], expected[1]);
+        assert_eq!(transform[11], expected[2]);
+        assert_eq!(transform[15], ExactNumber::Integer(1));
+    }
+
+    #[test]
+    fn an_unlocated_electrode_still_gets_a_channel_spec() {
+        // The channel carries signal whether or not anyone measured where it sat.
+        let concept = ConceptId::new("lamquant:eeg-channel").expect("valid concept");
+        let spec = channel_spec_for(concept, None);
+        assert!(spec.coordinate_frame_id().is_none());
+    }
+
+    #[test]
+    fn a_montage_projects_one_frame_per_channel_in_order() {
+        let coordinates = [[0.081_f32, 0.0, 0.0], [f32::NAN; 3], [0.0, 0.05, 0.0]];
+        let frames =
+            frames_for_montage(&[0_u8; 32], &coordinates, None, micrometre()).expect("projects");
+        assert_eq!(frames.len(), 3);
+        assert!(frames[0].is_some());
+        assert!(frames[1].is_none(), "the NaN sentinel must stay an absence");
+        assert!(frames[2].is_some());
     }
 }
