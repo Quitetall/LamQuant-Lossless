@@ -153,8 +153,9 @@ fn to_lml_header(error: lamquant_lml_mcu::codec::CodecError) -> LmlError {
 
 /// Integer multi-reference prediction — the bit-identical quantity encode and
 /// decode form: `round_q16(Σ_r gain_q[r]·chans[ref[r]][k])`. Round-half-up via
-/// arithmetic shift. NO float. (Q16 gains, ≤3 refs ⇒ the i64 accumulator cannot
-/// overflow for realistic O(1) gains and ≤24-bit samples.)
+/// arithmetic shift. NO float. The i128 accumulator provides headroom for all
+/// accepted i64 samples and i32 gains; the checked narrowing rejects values
+/// outside the representable reconstructed-sample range.
 #[inline]
 fn predict_multi(refs: &[usize], gains_q: &[i32], chans: &[Vec<i64>], k: usize) -> LmlResult<i64> {
     let mut acc: i128 = 0;
