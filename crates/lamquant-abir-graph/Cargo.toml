@@ -1,0 +1,31 @@
+[package]
+name = "lamquant-abir-graph"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Conformance projection between ABIR's semantic atoms and blut-graph-core's node-graph type mirror."
+
+# Placed in codec-lossless rather than the meta-repo root on purpose: firmware is
+# a separate repository, cannot path-depend into the root tree, and already
+# git-pins codec-lossless. Anywhere else would add a fourth cross-repo revision
+# to keep coherent.
+#
+# `no_std + alloc` for the same reason -- firmware must be able to consume it.
+
+[lib]
+name = "lamquant_abir_graph"
+
+[features]
+default = ["std"]
+std = ["semantic-abir/std", "blut-graph-core/std"]
+
+[dependencies]
+# ADR 0139 contract 4: blut-graph-core models ABIR by string convention and takes
+# NO ABIR dependency. That independence is correct and this crate preserves it --
+# the projection lives HERE, on the LamQuant side, depending on both.
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "3f89c404a239c94d9660100db8b5b631963a1e0c", default-features = false, features = ["alloc"] }
+blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "704d3b3542150e91fa9767a0d286983940ca3788", default-features = false }
+
+[dev-dependencies]
+# Only the tests serialise; the projection itself never touches JSON.
+serde_json = "1"
