@@ -588,7 +588,64 @@ impl Mix1Codec {
         })
     }
 
+    pub fn encode_bitplane_layer_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        if bit_depth < 2 {
+            return Err(input_error("BLX1 requires bit depth of at least two"));
+        }
+        let upper = signal
+            .iter()
+            .map(|channel| channel.iter().map(|sample| sample >> 1).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let nested =
+            self.encode_best_peer_window_without_bitplane(&upper, sample_rate_mhz, bit_depth - 1)?;
+        let nested_len = u32::try_from(nested.len())
+            .map_err(|_| input_error("BLX1 nested packet exceeds u32"))?;
+        let modes = fit_low_bit_modes(signal)?;
+        let low_bits = encode_low_bit_payload(signal, &modes)?;
+        let mut payload = Vec::with_capacity(4 + nested.len() + low_bits.len());
+        payload.extend_from_slice(&nested_len.to_le_bytes());
+        payload.extend_from_slice(&nested);
+        payload.extend_from_slice(&low_bits);
+        let mut graph = b"BLX1\xa7\x02\x01".to_vec();
+        graph.extend_from_slice(&pack_low_bit_modes(&modes)?);
+        pack_frame_ultracompact(Frame {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            event_count: u32::try_from(channels * samples)
+                .map_err(|_| input_error("BLX1 value count exceeds u32"))?,
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
     pub fn encode_best_peer_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let mut best =
+            self.encode_best_peer_window_without_bitplane(signal, sample_rate_mhz, bit_depth)?;
+        let has_exact_alias = fit_channel_aliases(signal)?.0.len() != signal.len();
+        if bit_depth >= 2 && !has_exact_alias {
+            let bitplane = self.encode_bitplane_layer_window(signal, sample_rate_mhz, bit_depth)?;
+            if bitplane.len() < best.len() {
+                best = bitplane;
+            }
+        }
+        Ok(best)
+    }
+
+    fn encode_best_peer_window_without_bitplane(
         &self,
         signal: &[Vec<i64>],
         sample_rate_mhz: u32,
@@ -799,6 +856,9 @@ impl Mix1Codec {
         let magic = frame.graph.get(..4);
         if magic == Some(&b"ALX1"[..]) {
             return decode_alias_frame(frame);
+        }
+        if magic == Some(&b"BLX1"[..]) {
+            return decode_bitplane_layer_frame(frame);
         }
         let hierarchical = magic == Some(&b"MCH1"[..]);
         let channel_context = magic == Some(&b"MCX1"[..]);
@@ -1044,6 +1104,322 @@ impl Mix1Codec {
             score_shift,
         })
     }
+}
+
+fn fit_low_bit_modes(signal: &[Vec<i64>]) -> Result<Vec<u8>, OptimumV2Error> {
+    if signal.is_empty() || signal.iter().any(Vec::is_empty) {
+        return Err(input_error("BLX1 low-bit signal is empty"));
+    }
+    signal
+        .iter()
+        .map(|samples| {
+            let first = (samples[0] & 1) as u8;
+            if samples.iter().all(|sample| (*sample & 1) as u8 == first) {
+                return Ok(first);
+            }
+            let raw_bytes = samples.len().div_ceil(8);
+            let mut run_bytes = 1usize;
+            let mut current = first;
+            let mut run = 1usize;
+            for sample in &samples[1..] {
+                let bit = (*sample & 1) as u8;
+                if bit == current {
+                    run += 1;
+                } else {
+                    run_bytes += uleb128_len(run);
+                    current = bit;
+                    run = 1;
+                }
+            }
+            run_bytes += uleb128_len(run);
+            Ok(if raw_bytes <= run_bytes { 2 } else { 3 })
+        })
+        .collect()
+}
+
+fn uleb128_len(mut value: usize) -> usize {
+    debug_assert!(value != 0);
+    let mut bytes = 1usize;
+    while value >= 0x80 {
+        bytes += 1;
+        value >>= 7;
+    }
+    bytes
+}
+
+fn pack_low_bit_modes(modes: &[u8]) -> Result<Vec<u8>, OptimumV2Error> {
+    if modes.is_empty() || modes.len() > MAX_CHANNELS || modes.iter().any(|&mode| mode > 3) {
+        return Err(input_error("BLX1 low-bit modes are invalid"));
+    }
+    let mut packed = vec![0u8; (modes.len() * 2).div_ceil(8)];
+    for (index, &mode) in modes.iter().enumerate() {
+        packed[index / 4] |= mode << (6 - (index % 4) * 2);
+    }
+    Ok(packed)
+}
+
+fn unpack_low_bit_modes(packed: &[u8], channels: usize) -> Result<Vec<u8>, OptimumV2Error> {
+    let expected = (channels * 2).div_ceil(8);
+    if packed.len() != expected {
+        return Err(packet_error("BLX1 low-bit mode-map length differs"));
+    }
+    if channels % 4 != 0 {
+        let padding_bits = (4 - channels % 4) * 2;
+        let padding_mask = (1u8 << padding_bits) - 1;
+        if packed.last().is_some_and(|byte| byte & padding_mask != 0) {
+            return Err(packet_error("BLX1 low-bit mode map has nonzero padding"));
+        }
+    }
+    Ok((0..channels)
+        .map(|index| (packed[index / 4] >> (6 - (index % 4) * 2)) & 3)
+        .collect())
+}
+
+fn encode_low_bit_payload(signal: &[Vec<i64>], modes: &[u8]) -> Result<Vec<u8>, OptimumV2Error> {
+    if signal.len() != modes.len() {
+        return Err(input_error("BLX1 low-bit dimensions differ"));
+    }
+    let mut encoded = Vec::new();
+    for (channel, &mode) in signal.iter().zip(modes) {
+        match mode {
+            0 | 1 => {
+                if channel.iter().any(|sample| (*sample & 1) as u8 != mode) {
+                    return Err(input_error("BLX1 constant low-bit mode disagrees"));
+                }
+            }
+            2 => {
+                for chunk in channel.chunks(8) {
+                    let mut packed = 0u8;
+                    for (index, sample) in chunk.iter().enumerate() {
+                        packed |= ((*sample & 1) as u8) << (7 - index);
+                    }
+                    encoded.push(packed);
+                }
+            }
+            3 => {
+                let first = (channel
+                    .first()
+                    .ok_or_else(|| input_error("BLX1 low-bit channel is empty"))?
+                    & 1) as u8;
+                encoded.push(first);
+                let mut current = first;
+                let mut run = 1usize;
+                for sample in &channel[1..] {
+                    let bit = (*sample & 1) as u8;
+                    if bit == current {
+                        run = run
+                            .checked_add(1)
+                            .ok_or_else(|| input_error("BLX1 low-bit run length overflows"))?;
+                    } else {
+                        encode_uleb128(run, &mut encoded);
+                        current = bit;
+                        run = 1;
+                    }
+                }
+                encode_uleb128(run, &mut encoded);
+            }
+            _ => return Err(input_error("BLX1 low-bit mode is invalid")),
+        }
+    }
+    Ok(encoded)
+}
+
+fn encode_uleb128(mut value: usize, output: &mut Vec<u8>) {
+    debug_assert!(value != 0);
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        output.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn decode_low_bit_run_channel(
+    bytes: &[u8],
+    expected: usize,
+) -> Result<(Vec<u8>, usize), OptimumV2Error> {
+    let (&first, mut tail) = bytes
+        .split_first()
+        .ok_or_else(|| packet_error("BLX1 low-bit run channel is truncated"))?;
+    if first > 1 {
+        return Err(packet_error("BLX1 first low bit is invalid"));
+    }
+    let mut decoded = Vec::with_capacity(expected);
+    let mut bit = first;
+    while decoded.len() < expected {
+        let original = tail;
+        let mut value = 0usize;
+        let mut shift = 0u32;
+        loop {
+            let (&byte, rest) = tail
+                .split_first()
+                .ok_or_else(|| packet_error("BLX1 low-bit run is truncated"))?;
+            tail = rest;
+            if shift >= usize::BITS || usize::from(byte & 0x7f) > (usize::MAX >> shift) {
+                return Err(packet_error("BLX1 low-bit run length overflows"));
+            }
+            value |= usize::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        if value == 0 {
+            return Err(packet_error("BLX1 low-bit run is empty"));
+        }
+        let consumed = original.len() - tail.len();
+        let mut canonical = Vec::new();
+        encode_uleb128(value, &mut canonical);
+        if canonical.as_slice() != &original[..consumed] {
+            return Err(packet_error("BLX1 low-bit run is noncanonical"));
+        }
+        let end = decoded
+            .len()
+            .checked_add(value)
+            .ok_or_else(|| packet_error("BLX1 low-bit run end overflows"))?;
+        if end > expected {
+            return Err(packet_error("BLX1 low-bit run exceeds signal shape"));
+        }
+        decoded.resize(end, bit);
+        bit ^= 1;
+    }
+    Ok((decoded, bytes.len() - tail.len()))
+}
+
+fn decode_low_bit_payload(
+    bytes: &[u8],
+    modes: &[u8],
+    samples: usize,
+) -> Result<Vec<Vec<u8>>, OptimumV2Error> {
+    let mut tail = bytes;
+    let mut decoded = Vec::with_capacity(modes.len());
+    for &mode in modes {
+        match mode {
+            0 | 1 => decoded.push(vec![mode; samples]),
+            2 => {
+                let packed_len = samples.div_ceil(8);
+                let (packed, rest) = tail
+                    .split_at_checked(packed_len)
+                    .ok_or_else(|| packet_error("BLX1 raw low-bit channel is truncated"))?;
+                if samples % 8 != 0 {
+                    let padding = 8 - samples % 8;
+                    if packed
+                        .last()
+                        .is_some_and(|byte| byte & ((1 << padding) - 1) != 0)
+                    {
+                        return Err(packet_error("BLX1 raw low-bit channel has nonzero padding"));
+                    }
+                }
+                decoded.push(
+                    (0..samples)
+                        .map(|index| (packed[index / 8] >> (7 - index % 8)) & 1)
+                        .collect(),
+                );
+                tail = rest;
+            }
+            3 => {
+                let (channel, consumed) = decode_low_bit_run_channel(tail, samples)?;
+                decoded.push(channel);
+                tail = &tail[consumed..];
+            }
+            _ => return Err(packet_error("BLX1 low-bit mode is invalid")),
+        }
+    }
+    if !tail.is_empty() {
+        return Err(packet_error("BLX1 low-bit payload has trailing bytes"));
+    }
+    Ok(decoded)
+}
+
+fn packet_contains_bitplane(packet: &[u8]) -> Result<bool, OptimumV2Error> {
+    let frame = unpack_frame(packet)?;
+    match frame.graph.get(..4) {
+        Some(b"BLX1") => Ok(true),
+        Some(b"ALX1") => packet_contains_bitplane(&frame.payload),
+        _ => Ok(false),
+    }
+}
+
+fn decode_bitplane_layer_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
+    let mode_len = (frame.channels * 2).div_ceil(8);
+    if frame.graph.len() != 7 + mode_len
+        || frame.graph.get(..7) != Some(&b"BLX1\xa7\x02\x01"[..])
+        || frame.bit_depth < 2
+    {
+        return Err(packet_error("BLX1 side data is invalid or noncanonical"));
+    }
+    let modes = unpack_low_bit_modes(&frame.graph[7..], frame.channels)?;
+    let nested_len = usize::try_from(read_u32(&frame.payload, 0)?)
+        .map_err(|_| packet_error("BLX1 nested packet length exceeds usize"))?;
+    let nested_end = 4usize
+        .checked_add(nested_len)
+        .ok_or_else(|| packet_error("BLX1 nested packet end overflows"))?;
+    let nested_packet = frame
+        .payload
+        .get(4..nested_end)
+        .ok_or_else(|| packet_error("BLX1 nested packet is truncated"))?;
+    if packet_contains_bitplane(nested_packet)? {
+        return Err(packet_error("BLX1 nesting depth exceeds one"));
+    }
+    let nested = Mix1Codec.decode_window(nested_packet)?;
+    if nested.samples.len() != frame.channels
+        || nested
+            .samples
+            .iter()
+            .any(|channel| channel.len() != frame.samples)
+        || nested.sample_rate_mhz != frame.sample_rate_mhz
+        || nested.bit_depth != frame.bit_depth - 1
+    {
+        return Err(packet_error(
+            "BLX1 nested peer dimensions or metadata disagree",
+        ));
+    }
+    let low_bits = decode_low_bit_payload(
+        frame
+            .payload
+            .get(nested_end..)
+            .ok_or_else(|| packet_error("BLX1 low-bit stream is truncated"))?,
+        &modes,
+        frame.samples,
+    )?;
+    let magnitude = 1i64 << (frame.bit_depth - 1);
+    let minimum = -magnitude;
+    let maximum = magnitude - 1;
+    let score_shift = nested.score_shift;
+    let mut samples = nested.samples;
+    for channel in 0..frame.channels {
+        for time in 0..frame.samples {
+            let sample = &mut samples[channel][time];
+            *sample = sample
+                .checked_mul(2)
+                .and_then(|upper| upper.checked_add(i64::from(low_bits[channel][time])))
+                .ok_or_else(|| packet_error("BLX1 reconstructed sample exceeds i64"))?;
+            if !(minimum..=maximum).contains(sample) {
+                return Err(packet_error(
+                    "BLX1 reconstructed sample exceeds declared bit depth",
+                ));
+            }
+        }
+    }
+    if fit_low_bit_modes(&samples).map_err(as_packet_error)? != modes {
+        return Err(packet_error("BLX1 low-bit mode map is noncanonical"));
+    }
+    if crc32c(&canonical_i32_bytes(&samples).map_err(as_packet_error)?) != frame.decoded_crc {
+        return Err(OptimumV2Error::Integrity(
+            "BLX1 decoded sample CRC32C mismatch".into(),
+        ));
+    }
+    Ok(Mix1Decoded {
+        samples,
+        sample_rate_mhz: frame.sample_rate_mhz,
+        bit_depth: frame.bit_depth,
+        score_shift,
+    })
 }
 
 fn fit_channel_aliases(signal: &[Vec<i64>]) -> Result<(Vec<usize>, Vec<u8>), OptimumV2Error> {
@@ -2543,5 +2919,49 @@ fn as_packet_error(error: OptimumV2Error) -> OptimumV2Error {
     match error {
         OptimumV2Error::Integrity(message) => OptimumV2Error::Integrity(message),
         other => packet_error(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn low_bit_modes_choose_constant_raw_and_run_encodings() {
+        let constant_zero = vec![0; 32];
+        let constant_one = vec![1; 32];
+        let raw = (0..32)
+            .map(|index| i64::from(matches!(index % 5, 1 | 2)))
+            .collect::<Vec<_>>();
+        let runs = (0..32)
+            .map(|index| i64::from(index >= 16))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            fit_low_bit_modes(&[constant_zero, constant_one, raw, runs]).unwrap(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn low_bit_run_decoder_rejects_noncanonical_or_invalid_streams() {
+        for invalid in [
+            &[0, 0][..],
+            &[0, 0x81, 0][..],
+            &[0, 5][..],
+            &[2, 1][..],
+            &[0, 0x80][..],
+        ] {
+            assert!(
+                decode_low_bit_run_channel(invalid, 4).is_err(),
+                "accepted invalid BLX1 run stream {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_low_bit_decoder_rejects_nonzero_padding_and_trailing_bytes() {
+        assert!(decode_low_bit_payload(&[0b1010_0001], &[2], 4).is_err());
+        assert!(decode_low_bit_payload(&[0b1010_0000, 0], &[2], 4).is_err());
     }
 }

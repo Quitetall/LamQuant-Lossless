@@ -116,7 +116,16 @@ fn peer_stdio_worker_emits_a_complete_exact_packet() {
     assert!(best.stdout.len() <= incumbent.stdout.len());
     assert!(matches!(
         peer_magic(&best.stdout),
-        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1" | b"ALX1"
+        b"MIX1"
+            | b"MMV1"
+            | b"MCH1"
+            | b"MCX1"
+            | b"MQX1"
+            | b"MPX1"
+            | b"APX1"
+            | b"BQX1"
+            | b"ALX1"
+            | b"BLX1"
     ));
     let restored = stdio_worker(binary, &["mix1-decode-stdio"], &best.stdout);
     assert_eq!(restored.stdout, raw);
@@ -131,6 +140,22 @@ fn peer_no_alias_control_worker_emits_a_complete_exact_packet() {
     assert!(control.status.success());
     assert_ne!(peer_magic(&control.stdout), b"ALX1");
     let restored = stdio_worker(binary, &["mix1-decode-stdio"], &control.stdout);
+    assert_eq!(restored.stdout, raw);
+}
+
+#[test]
+fn bitplane_layer_worker_emits_a_complete_exact_packet() {
+    let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
+    let raw = lqraw_fixture();
+    let encoded = stdio_worker(binary, &["mix1-peer-bitplane-encode-stdio"], &raw);
+
+    assert!(
+        encoded.status.success(),
+        "BLX1 encode failed: {}",
+        String::from_utf8_lossy(&encoded.stderr)
+    );
+    assert_eq!(peer_magic(&encoded.stdout), b"BLX1");
+    let restored = stdio_worker(binary, &["mix1-decode-stdio"], &encoded.stdout);
     assert_eq!(restored.stdout, raw);
 }
 

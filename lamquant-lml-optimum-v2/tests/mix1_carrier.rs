@@ -199,7 +199,16 @@ fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1
     assert!(best.len() <= incumbent.len());
     assert!(matches!(
         peer_magic(&best),
-        b"MIX1" | b"MMV1" | b"MCH1" | b"MCX1" | b"MQX1" | b"MPX1" | b"APX1" | b"BQX1" | b"ALX1"
+        b"MIX1"
+            | b"MMV1"
+            | b"MCH1"
+            | b"MCX1"
+            | b"MQX1"
+            | b"MPX1"
+            | b"APX1"
+            | b"BQX1"
+            | b"ALX1"
+            | b"BLX1"
     ));
     assert_eq!(Mix1Codec.decode_window(&best).unwrap().samples, signal());
     assert_eq!(
@@ -395,6 +404,56 @@ fn peer_tuned_permuted_carrier_roundtrips_deterministically() {
             },
         )
         .is_err());
+}
+
+#[test]
+fn bitplane_layer_peer_roundtrips_complete_packet() {
+    let input = (0..4)
+        .map(|channel| {
+            (0..2_000)
+                .map(|time| {
+                    let base = ((time as i64 * (channel as i64 + 3)) % 2_000) - 1_000;
+                    if channel == 3 {
+                        base * 2 + 1
+                    } else {
+                        base * 2
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let packet = Mix1Codec
+        .encode_bitplane_layer_window(&input, 250_000, 16)
+        .expect("encode BLX1");
+    assert_eq!(peer_magic(&packet), b"BLX1");
+    assert_eq!(packet[29], 2, "BLX1 low-bit mode-map wire version");
+    assert_eq!(
+        Mix1Codec
+            .decode_window(&packet)
+            .expect("decode BLX1")
+            .samples,
+        input
+    );
+    assert_eq!(
+        Mix1Codec
+            .encode_best_peer_window(&input, 250_000, 16)
+            .expect("select best peer packet"),
+        packet,
+        "strict portfolio should select shorter BLX1 packet"
+    );
+    for end in 0..packet.len() {
+        assert!(
+            Mix1Codec.decode_window(&packet[..end]).is_err(),
+            "accepted truncated BLX1 prefix {end}"
+        );
+    }
+    let mut trailed = packet.clone();
+    trailed.push(0);
+    assert!(Mix1Codec.decode_window(&trailed).is_err());
+    let mut corrupted = packet;
+    *corrupted.last_mut().unwrap() ^= 1;
+    assert!(Mix1Codec.decode_window(&corrupted).is_err());
 }
 
 #[test]
