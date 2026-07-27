@@ -36,6 +36,8 @@
 
 extern crate alloc;
 
+pub mod montage;
+
 use blut_graph_core::{AbirRootType, AbirViewType};
 use semantic_abir::Atom;
 
