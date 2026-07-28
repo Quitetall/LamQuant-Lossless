@@ -22,7 +22,10 @@ pub use standard_nodes::{
     DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE, DICOM_SINK_NODE_TYPE,
     EDFPLUS_IMPORT_NODE_TYPE, EDFPLUS_RESTORE_NODE_TYPE, EDFPLUS_SINK_NODE_TYPE,
     EXACT_SOURCE_RESTORATION_PROOF, NWB_IMPORT_NODE_TYPE, NWB_RESTORE_NODE_TYPE,
-    NWB_SINK_NODE_TYPE, XDF_IMPORT_NODE_TYPE, XDF_RESTORE_NODE_TYPE, XDF_SINK_NODE_TYPE,
+    NWB_SINK_NODE_TYPE, STANDARD_MAX_FOREIGN_ENTRIES, STANDARD_MAX_FOREIGN_MEDIA_TYPE_BYTES,
+    STANDARD_MAX_FOREIGN_METADATA_BYTES, STANDARD_MAX_FOREIGN_PATH_BYTES,
+    STANDARD_MAX_FOREIGN_PATH_DEPTH, STANDARD_MAX_FOREIGN_TREE_BYTES, STANDARD_MAX_SOURCE_BYTES,
+    XDF_IMPORT_NODE_TYPE, XDF_RESTORE_NODE_TYPE, XDF_SINK_NODE_TYPE,
 };
 
 pub const LML_TRANSFORM_NODE_TYPE: &str = lml_reference::LML_TRANSFORM_NODE_TYPE;
@@ -152,6 +155,8 @@ pub enum LamQuantNodeValue<'a> {
     Bcs2(Vec<u8>),
     #[cfg(feature = "standard-adapters")]
     ForeignObject(abir_adapter::ForeignObject),
+    #[cfg(feature = "standard-adapters")]
+    ExportPlan(abir_adapter::ExportPlan),
     AbirDataset(Box<AbirDatasetValue>),
     #[cfg(feature = "standard-adapters")]
     MappingReport(abir_adapter::MappingReport),

@@ -1301,6 +1301,10 @@ fn plan_id(plan: &ExportPlan) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+pub fn canonical_export_plan_id(plan: &ExportPlan) -> String {
+    plan_id(plan)
+}
+
 fn hash_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);

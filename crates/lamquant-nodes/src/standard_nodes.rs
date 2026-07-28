@@ -50,13 +50,21 @@ const CAP_DURABLE_FILE_SINK: &str = "org.quitetall.lamquant.sink.durable-file-v1
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.standard";
 // Current adapters materialize decoded host values before ABIR payloads.
 // Keep source cap conservative until streaming decoders replace those copies.
-const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+pub const STANDARD_MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+pub const STANDARD_MAX_FOREIGN_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+pub const STANDARD_MAX_FOREIGN_TREE_BYTES: u64 =
+    STANDARD_MAX_SOURCE_BYTES + STANDARD_MAX_FOREIGN_METADATA_BYTES;
+pub const STANDARD_MAX_FOREIGN_ENTRIES: usize = 100_000;
+pub const STANDARD_MAX_FOREIGN_PATH_BYTES: usize = 4_096;
+pub const STANDARD_MAX_FOREIGN_PATH_DEPTH: usize = 128;
+pub const STANDARD_MAX_FOREIGN_MEDIA_TYPE_BYTES: usize = 512;
+const MAX_SOURCE_BYTES: u64 = STANDARD_MAX_SOURCE_BYTES;
 const MAX_DATASET_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_SEMANTIC_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REPORT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PEAK_BYTES: u64 =
-    2 * MAX_SOURCE_BYTES + 2 * MAX_SEMANTIC_PAYLOAD_BYTES + MAX_REPORT_BYTES;
-const MAX_FOREIGN_ENTRIES: usize = 1_000_000;
+    2 * STANDARD_MAX_FOREIGN_TREE_BYTES + 2 * MAX_SEMANTIC_PAYLOAD_BYTES + MAX_REPORT_BYTES;
+const MAX_FOREIGN_ENTRIES: usize = STANDARD_MAX_FOREIGN_ENTRIES;
 
 const STANDARD_SPECS: &[StandardSpec] = &[
     StandardSpec {
@@ -273,7 +281,11 @@ fn execute_import<'a>(
         }
     };
     if source.entries.len() > MAX_FOREIGN_ENTRIES
-        || foreign_object_bytes(source).is_none_or(|bytes| bytes > max_source_bytes)
+        || foreign_object_payload_bytes(source).is_none_or(|bytes| bytes > max_source_bytes)
+        || foreign_object_metadata_bytes(source)
+            .is_none_or(|bytes| bytes > STANDARD_MAX_FOREIGN_METADATA_BYTES)
+        || foreign_object_resident_bytes(source)
+            .is_none_or(|bytes| bytes > STANDARD_MAX_FOREIGN_TREE_BYTES)
     {
         return Err(kernel_failure(
             node,
@@ -353,7 +365,11 @@ fn execute_restore<'a>(
         .map_err(|error| adapter_failure(node, error))?;
     if !receipt.exact_source_restoration
         || foreign.entries.len() > MAX_FOREIGN_ENTRIES
-        || foreign_object_bytes(&foreign).is_none_or(|bytes| bytes > max_source_bytes)
+        || foreign_object_payload_bytes(&foreign).is_none_or(|bytes| bytes > max_source_bytes)
+        || foreign_object_metadata_bytes(&foreign)
+            .is_none_or(|bytes| bytes > STANDARD_MAX_FOREIGN_METADATA_BYTES)
+        || foreign_object_resident_bytes(&foreign)
+            .is_none_or(|bytes| bytes > STANDARD_MAX_FOREIGN_TREE_BYTES)
         || !fidelity_receipt_fits(&receipt)
     {
         return Err(kernel_failure(
@@ -364,6 +380,7 @@ fn execute_restore<'a>(
     }
     Ok(vec![
         LamQuantNodeValue::ForeignObject(foreign),
+        LamQuantNodeValue::ExportPlan(plan),
         LamQuantNodeValue::FidelityReceipt(receipt),
     ])
 }
@@ -476,13 +493,36 @@ fn node_validation_limits() -> ValidationLimits {
     }
 }
 
-fn foreign_object_bytes(source: &abir_adapter::ForeignObject) -> Option<u64> {
+fn foreign_object_payload_bytes(source: &abir_adapter::ForeignObject) -> Option<u64> {
+    source.entries.iter().try_fold(0u64, |total, entry| {
+        total.checked_add(u64::try_from(entry.bytes.len()).ok()?)
+    })
+}
+
+fn foreign_object_resident_bytes(source: &abir_adapter::ForeignObject) -> Option<u64> {
     source
         .entries
         .iter()
         .try_fold(source.profile.0.len() as u64 + 64, |total, entry| {
             total
                 .checked_add(entry.bytes.len() as u64)?
+                .checked_add(entry.path.len() as u64)?
+                .checked_add(
+                    entry
+                        .media_type
+                        .as_ref()
+                        .map_or(0_u64, |value| value.len() as u64),
+                )?
+                .checked_add(64)
+        })
+}
+
+fn foreign_object_metadata_bytes(source: &abir_adapter::ForeignObject) -> Option<u64> {
+    source
+        .entries
+        .iter()
+        .try_fold(source.profile.0.len() as u64 + 64, |total, entry| {
+            total
                 .checked_add(entry.path.len() as u64)?
                 .checked_add(
                     entry
@@ -612,6 +652,7 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
             vec![dataset_port("dataset", &source_proof, false)],
             vec![
                 foreign_port("source", spec.profile),
+                export_plan_port("export_plan", spec.profile),
                 fidelity_receipt_port("fidelity_receipt", true),
             ],
             ProofContract {
@@ -631,6 +672,7 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
             spec.sink_type,
             vec![
                 foreign_port("source", spec.profile),
+                export_plan_port("export_plan", spec.profile),
                 fidelity_receipt_port("fidelity_receipt", false),
             ],
             vec![],
@@ -728,7 +770,7 @@ fn foreign_port(name: &str, profile: &str) -> PortDescriptor {
         semantic_type: semantic_type.clone(),
         optional: false,
         layouts: vec![Layout::Packed],
-        max_bytes: MAX_SOURCE_BYTES,
+        max_bytes: STANDARD_MAX_FOREIGN_TREE_BYTES,
         abir: AbirSemanticType {
             root: AbirRootType::Unknown(semantic_type.clone()),
             view: AbirViewType::Unknown(semantic_type),
@@ -736,7 +778,7 @@ fn foreign_port(name: &str, profile: &str) -> PortDescriptor {
         proof: empty_proof(),
         policy: empty_policy(),
         fidelity: exact_fidelity(),
-        extent: byte_extent(MAX_SOURCE_BYTES),
+        extent: byte_extent(STANDARD_MAX_FOREIGN_TREE_BYTES),
         lease: read_lease(false),
     }
 }
@@ -817,6 +859,17 @@ fn fidelity_receipt_port(name: &str, provides_proof: bool) -> PortDescriptor {
     port
 }
 
+fn export_plan_port(name: &str, profile: &str) -> PortDescriptor {
+    let mut port = report_port(name);
+    let semantic_type = format!("abir.export-plan.{profile}");
+    port.semantic_type = semantic_type.clone();
+    port.abir = AbirSemanticType {
+        root: AbirRootType::Unknown(semantic_type.clone()),
+        view: AbirViewType::Unknown(semantic_type),
+    };
+    port
+}
+
 fn standard_kernel(id: KernelId, type_name: &str, operation: Operation) -> KernelDescriptor {
     let (input_layouts, output_layouts, lowering) = match operation {
         Operation::Import => (
@@ -826,11 +879,11 @@ fn standard_kernel(id: KernelId, type_name: &str, operation: Operation) -> Kerne
         ),
         Operation::Restore => (
             vec![Layout::Opaque],
-            vec![Layout::Packed, Layout::Opaque],
+            vec![Layout::Packed, Layout::Opaque, Layout::Opaque],
             "adapter:plan-export+exact-source-export:v1",
         ),
         Operation::Sink => (
-            vec![Layout::Packed, Layout::Opaque],
+            vec![Layout::Packed, Layout::Opaque, Layout::Opaque],
             vec![],
             "adapter:accepted-plan-durable-tree-sink:v1",
         ),
@@ -979,11 +1032,12 @@ mod tests {
     #[test]
     fn sink_requires_exact_export_receipt_and_proof() {
         let descriptor = standard_sink_descriptor("bids.1.11.1").unwrap();
-        assert_eq!(descriptor.inputs.len(), 2);
+        assert_eq!(descriptor.inputs.len(), 3);
         assert_eq!(descriptor.inputs[0].name, "source");
-        assert_eq!(descriptor.inputs[1].name, "fidelity_receipt");
+        assert_eq!(descriptor.inputs[1].name, "export_plan");
+        assert_eq!(descriptor.inputs[2].name, "fidelity_receipt");
         assert_eq!(
-            descriptor.inputs[1].proof.requires,
+            descriptor.inputs[2].proof.requires,
             [EXACT_SOURCE_RESTORATION_PROOF]
         );
         assert_eq!(descriptor.proof.requires, [EXACT_SOURCE_RESTORATION_PROOF]);

@@ -326,6 +326,10 @@ fn sink_graph(sink_type: &str, profile: &str, destination_resource: &str) -> Gra
             },
             PortRef {
                 node: NodeId(0),
+                port: "export_plan".into(),
+            },
+            PortRef {
+                node: NodeId(0),
                 port: "fidelity_receipt".into(),
             },
         ],
@@ -381,7 +385,11 @@ fn run_restore(
     registry: &KernelRegistry,
     case: &Case,
     dataset: lamquant_nodes::AbirDatasetValue,
-) -> (ForeignObject, abir_adapter::FidelityReceipt) {
+) -> (
+    ForeignObject,
+    abir_adapter::ExportPlan,
+    abir_adapter::FidelityReceipt,
+) {
     let plan = Compiler::new(registry, ExecutionRealm::HostStream)
         .compile(&graph(case.restore_type, case.profile, true))
         .unwrap();
@@ -402,16 +410,20 @@ fn run_restore(
         )
         .unwrap();
     let mut values = result.terminal_values.remove(&NodeId(0)).unwrap();
-    assert_eq!(values.len(), 2);
+    assert_eq!(values.len(), 3);
     let receipt = match values.pop().unwrap() {
         LamQuantNodeValue::FidelityReceipt(receipt) => receipt,
         other => panic!("unexpected restore receipt: {other:?}"),
+    };
+    let export_plan = match values.pop().unwrap() {
+        LamQuantNodeValue::ExportPlan(plan) => plan,
+        other => panic!("unexpected export plan: {other:?}"),
     };
     let foreign = match values.pop().unwrap() {
         LamQuantNodeValue::ForeignObject(foreign) => foreign,
         other => panic!("unexpected restored source: {other:?}"),
     };
-    (foreign, receipt)
+    (foreign, export_plan, receipt)
 }
 
 #[cfg(feature = "standard-nwb")]
@@ -632,14 +644,19 @@ fn registers_all_enabled_profile_specific_host_nodes() {
         assert_ne!(import.type_name, restore.type_name);
         assert_ne!(sink.type_name, import.type_name);
         assert_eq!(sink.outputs, vec![]);
-        assert_eq!(sink.inputs.len(), 2);
+        assert_eq!(sink.inputs.len(), 3);
         assert_eq!(sink.inputs[0].name, "source");
         assert_eq!(
             sink.inputs[0].semantic_type,
             format!("abir.foreign-object.{}", case.profile)
         );
-        assert_eq!(sink.inputs[1].name, "fidelity_receipt");
-        assert_eq!(sink.inputs[1].semantic_type, "abir.fidelity_receipt");
+        assert_eq!(sink.inputs[1].name, "export_plan");
+        assert_eq!(
+            sink.inputs[1].semantic_type,
+            format!("abir.export-plan.{}", case.profile)
+        );
+        assert_eq!(sink.inputs[2].name, "fidelity_receipt");
+        assert_eq!(sink.inputs[2].semantic_type, "abir.fidelity_receipt");
         assert_eq!(
             sink.proof.requires,
             [lamquant_nodes::EXACT_SOURCE_RESTORATION_PROOF]
@@ -739,7 +756,7 @@ fn five_node_imports_match_adapters_and_restore_exact_sources() {
             let view = dataset.opened().block_view(atom.id()).unwrap();
             assert!(!view.bytes().is_empty());
         }
-        let (restored, receipt) = run_restore(&registry, &case, dataset);
+        let (restored, export_plan, receipt) = run_restore(&registry, &case, dataset);
         assert_eq!(
             restored.profile, case.source.profile,
             "profile {}",
@@ -750,6 +767,7 @@ fn five_node_imports_match_adapters_and_restore_exact_sources() {
         restored_entries.sort_by(|left, right| left.path.cmp(&right.path));
         source_entries.sort_by(|left, right| left.path.cmp(&right.path));
         assert_eq!(restored_entries, source_entries, "profile {}", case.profile);
+        assert_eq!(receipt.plan_id, export_plan.plan_id);
         assert!(receipt.exact_source_restoration);
         assert!(!receipt.output_content_ids.is_empty());
     }
@@ -785,7 +803,7 @@ fn resource_limits_and_cross_profile_restore_fail_closed() {
         .is_err());
 
     let hostile_profile = ForeignObject {
-        profile: ProfileId("x".repeat(1024 * 1024)),
+        profile: ProfileId("x".repeat(17 * 1024 * 1024)),
         entries: vec![ForeignEntry {
             path: "x".into(),
             media_type: None,
