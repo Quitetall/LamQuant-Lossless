@@ -9,10 +9,10 @@ use abir_adapter::{Adapter, AdapterError, PayloadResolver};
 use blut_graph_core::{
     AbirRootType, AbirSemanticType, AbirViewType, Capability, CompileError, CompiledNode,
     ConfigField, ConfigSchema, ConfigType, ConfigValue, Determinism, Effect, ExecutionError,
-    ExtentContract, FailureContract, FidelityContract, KernelDescriptor, KernelId, KernelRegistry,
-    Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor, NodeTypeRef, Partiality,
-    PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope, StateContract, StateScope,
-    StructuredFailure, Target,
+    ExtentContract, FailureContract, FidelityContract, ImplementationId, KernelDescriptor,
+    KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor,
+    NodeTypeRef, Partiality, PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope,
+    StateContract, StateScope, StructuredFailure, Target,
 };
 #[cfg(feature = "standard-nwb")]
 use lamquant_standard_adapters::NwbAdapter;
@@ -35,9 +35,17 @@ pub const DICOM_RESTORE_NODE_TYPE: &str = "org.quitetall.lamquant.standard.dicom
 pub const NWB_RESTORE_NODE_TYPE: &str = "org.quitetall.lamquant.standard.nwb.restore";
 pub const XDF_RESTORE_NODE_TYPE: &str = "org.quitetall.lamquant.standard.xdf.restore";
 
+pub const EDFPLUS_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.edfplus.sink";
+pub const BIDS_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.bids.sink";
+pub const DICOM_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.dicom.sink";
+#[cfg(feature = "standard-nwb")]
+pub const NWB_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.nwb.sink";
+pub const XDF_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.xdf.sink";
+
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_SOURCE_CAPSULE: &str = "abir.source-capsule.identity-bound-v1";
 const SOURCE_CAPSULE_PROOF: &str = "org.quitetall.abir.proof.identity-bound-source-capsule-v1";
+const CAP_DURABLE_FILE_SINK: &str = "org.quitetall.lamquant.sink.durable-file-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.standard";
 // Current adapters materialize decoded host values before ABIR payloads.
 // Keep source cap conservative until streaming decoders replace those copies.
@@ -53,6 +61,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     StandardSpec {
         import_type: EDFPLUS_IMPORT_NODE_TYPE,
         restore_type: EDFPLUS_RESTORE_NODE_TYPE,
+        sink_type: EDFPLUS_SINK_NODE_TYPE,
         profile: "edfplus.1",
         kernel_base: 0x5354_0100,
         adapter: AdapterKind::EdfPlus,
@@ -60,6 +69,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     StandardSpec {
         import_type: BIDS_IMPORT_NODE_TYPE,
         restore_type: BIDS_RESTORE_NODE_TYPE,
+        sink_type: BIDS_SINK_NODE_TYPE,
         profile: "bids.1.11.1",
         kernel_base: 0x5354_0200,
         adapter: AdapterKind::Bids,
@@ -67,6 +77,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     StandardSpec {
         import_type: DICOM_IMPORT_NODE_TYPE,
         restore_type: DICOM_RESTORE_NODE_TYPE,
+        sink_type: DICOM_SINK_NODE_TYPE,
         profile: "dicom.ps3.2026c",
         kernel_base: 0x5354_0300,
         adapter: AdapterKind::Dicom,
@@ -75,6 +86,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     StandardSpec {
         import_type: NWB_IMPORT_NODE_TYPE,
         restore_type: NWB_RESTORE_NODE_TYPE,
+        sink_type: NWB_SINK_NODE_TYPE,
         profile: "nwb.2.10.0",
         kernel_base: 0x5354_0400,
         adapter: AdapterKind::Nwb,
@@ -82,6 +94,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     StandardSpec {
         import_type: XDF_IMPORT_NODE_TYPE,
         restore_type: XDF_RESTORE_NODE_TYPE,
+        sink_type: XDF_SINK_NODE_TYPE,
         profile: "xdf.1.0",
         kernel_base: 0x5354_0500,
         adapter: AdapterKind::Xdf,
@@ -92,6 +105,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
 struct StandardSpec {
     import_type: &'static str,
     restore_type: &'static str,
+    sink_type: &'static str,
     profile: &'static str,
     kernel_base: u32,
     adapter: AdapterKind,
@@ -114,6 +128,8 @@ impl StandardSpec {
                 Some((spec, Operation::Import))
             } else if type_name == spec.restore_type {
                 Some((spec, Operation::Restore))
+            } else if type_name == spec.sink_type {
+                Some((spec, Operation::Sink))
             } else {
                 None
             }
@@ -139,6 +155,7 @@ impl StandardSpec {
 enum Operation {
     Import,
     Restore,
+    Sink,
 }
 
 impl PayloadResolver for NodePayloadStore {
@@ -151,7 +168,15 @@ impl PayloadResolver for NodePayloadStore {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StandardNodeConfigError {
+    DestinationResourceInvalid,
     MaxSourceBytesOutOfRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardSinkContract {
+    pub profile: &'static str,
+    pub destination_resource: String,
+    pub max_source_bytes: u64,
 }
 
 impl core::fmt::Display for StandardNodeConfigError {
@@ -174,6 +199,28 @@ pub fn standard_node_config(
     )]))
 }
 
+pub fn standard_sink_node_config(
+    destination_resource: &str,
+    max_source_bytes: u64,
+) -> Result<BTreeMap<String, ConfigValue>, StandardNodeConfigError> {
+    if !valid_resource_id(destination_resource) {
+        return Err(StandardNodeConfigError::DestinationResourceInvalid);
+    }
+    if !(1..=MAX_SOURCE_BYTES).contains(&max_source_bytes) {
+        return Err(StandardNodeConfigError::MaxSourceBytesOutOfRange);
+    }
+    Ok(BTreeMap::from([
+        (
+            "destination_resource".into(),
+            ConfigValue::Text(destination_resource.to_owned()),
+        ),
+        (
+            "max_source_bytes".into(),
+            ConfigValue::U64(max_source_bytes),
+        ),
+    ]))
+}
+
 pub fn is_standard_node(type_name: &str) -> bool {
     StandardSpec::for_type(type_name).is_some()
 }
@@ -190,6 +237,14 @@ pub fn execute_standard<'a>(
     match operation {
         Operation::Import => execute_import(node, adapter.as_ref(), max_source_bytes, inputs),
         Operation::Restore => execute_restore(node, adapter.as_ref(), max_source_bytes, inputs),
+        Operation::Sink => {
+            let _ = parse_standard_sink_contract(node)?;
+            Err(kernel_failure(
+                node,
+                "not-implemented",
+                "durable sink execution is not implemented in this build",
+            ))
+        }
     }
 }
 
@@ -320,6 +375,64 @@ fn parse_max_source_bytes(node: &CompiledNode) -> Result<u64, ExecutionError> {
     }
 }
 
+pub fn parse_standard_sink_contract(
+    node: &CompiledNode,
+) -> Result<StandardSinkContract, ExecutionError> {
+    let type_name = node
+        .semantic_types
+        .first()
+        .map(|node_type| node_type.type_name.as_str())
+        .ok_or_else(|| kernel_failure(node, "invalid-plan", "missing standard sink node type"))?;
+    let (spec, operation) = StandardSpec::for_type(type_name)
+        .ok_or_else(|| kernel_failure(node, "invalid-plan", "unknown standard sink node type"))?;
+    if !matches!(operation, Operation::Sink) {
+        return Err(kernel_failure(
+            node,
+            "invalid-plan",
+            "compiled node is not a standard sink",
+        ));
+    }
+    let config = node
+        .semantic_configs
+        .first()
+        .ok_or_else(|| kernel_failure(node, "invalid-plan", "missing standard node config"))?;
+    let destination_resource = match config.get("destination_resource") {
+        Some(ConfigValue::Text(destination_resource))
+            if valid_resource_id(destination_resource) =>
+        {
+            destination_resource.clone()
+        }
+        Some(_) => {
+            return Err(kernel_failure(
+                node,
+                "invalid-config",
+                "destination_resource is missing or invalid",
+            ))
+        }
+        None => {
+            return Err(kernel_failure(
+                node,
+                "invalid-config",
+                "destination_resource is missing or invalid",
+            ))
+        }
+    };
+    let max_source_bytes = parse_max_source_bytes(node)?;
+    Ok(StandardSinkContract {
+        profile: spec.profile,
+        destination_resource,
+        max_source_bytes,
+    })
+}
+
+fn valid_resource_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+}
+
 fn adapter_failure(node: &CompiledNode, error: AdapterError) -> ExecutionError {
     kernel_failure(node, adapter_error_code(&error), &error.to_string())
 }
@@ -410,7 +523,7 @@ fn fidelity_receipt_fits(receipt: &abir_adapter::FidelityReceipt) -> bool {
 
 pub fn register_standard_nodes(registry: &mut KernelRegistry) -> Result<(), CompileError> {
     for spec in STANDARD_SPECS {
-        for operation in [Operation::Import, Operation::Restore] {
+        for operation in [Operation::Import, Operation::Restore, Operation::Sink] {
             let descriptor = descriptor(*spec, operation);
             let type_name = descriptor.type_name.clone();
             registry.register_descriptor(descriptor)?;
@@ -420,6 +533,7 @@ pub fn register_standard_nodes(registry: &mut KernelRegistry) -> Result<(), Comp
                         + match operation {
                             Operation::Import => 1,
                             Operation::Restore => 2,
+                            Operation::Sink => 3,
                         },
                 ),
                 &type_name,
@@ -446,9 +560,30 @@ pub fn standard_restore_descriptor(profile: &str) -> Option<NodeDescriptor> {
         .map(|spec| descriptor(spec, Operation::Restore))
 }
 
+pub fn standard_sink_descriptor(profile: &str) -> Option<NodeDescriptor> {
+    STANDARD_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.profile == profile)
+        .map(|spec| descriptor(spec, Operation::Sink))
+}
+
+pub fn standard_sink_kernel_binding(profile: &str) -> Option<(KernelId, ImplementationId)> {
+    STANDARD_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.profile == profile)
+        .map(|spec| {
+            (
+                KernelId(spec.kernel_base + 3),
+                implementation_id(spec.sink_type, Target::Host),
+            )
+        })
+}
+
 fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
     let source_proof = source_capsule_proof(spec.profile);
-    let (type_name, inputs, outputs, proof) = match operation {
+    let (type_name, inputs, outputs, proof, config, capabilities, effect) = match operation {
         Operation::Import => (
             spec.import_type,
             vec![foreign_port("source", spec.profile)],
@@ -461,6 +596,13 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
                 provides: vec![source_proof.clone()],
                 invalidates: vec![],
             },
+            config_schema(),
+            vec![
+                Capability(CAP_ABIR.into()),
+                Capability(CAP_SOURCE_CAPSULE.into()),
+                Capability(format!("abir.adapter.{}", spec.profile)),
+            ],
+            Effect::Pure,
         ),
         Operation::Restore => (
             spec.restore_type,
@@ -474,6 +616,29 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
                 provides: vec!["org.quitetall.abir.proof.exact-source-restoration-v1".into()],
                 invalidates: vec![],
             },
+            config_schema(),
+            vec![
+                Capability(CAP_ABIR.into()),
+                Capability(CAP_SOURCE_CAPSULE.into()),
+                Capability(format!("abir.adapter.{}", spec.profile)),
+            ],
+            Effect::Pure,
+        ),
+        Operation::Sink => (
+            spec.sink_type,
+            vec![foreign_port("source", spec.profile)],
+            vec![],
+            ProofContract {
+                requires: vec![],
+                provides: vec![],
+                invalidates: vec![],
+            },
+            sink_config_schema(),
+            vec![
+                Capability(format!("abir.foreign-tree.{}", spec.profile)),
+                Capability(CAP_DURABLE_FILE_SINK.into()),
+            ],
+            Effect::Transactional,
         ),
     };
     NodeDescriptor {
@@ -481,15 +646,11 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
         version: 1,
         inputs,
         outputs,
-        capabilities: vec![
-            Capability(CAP_ABIR.into()),
-            Capability(CAP_SOURCE_CAPSULE.into()),
-            Capability(format!("abir.adapter.{}", spec.profile)),
-        ],
+        capabilities,
         targets: vec![Target::Host],
         resources: ResourceEnvelope::bounded(MAX_PEAK_BYTES, MAX_SOURCE_BYTES, 1),
         determinism: Determinism::BitExact,
-        config: config_schema(),
+        config,
         state: StateContract {
             scope: StateScope::Stateless,
             max_bytes: 0,
@@ -513,7 +674,7 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
         failure: FailureContract {
             domains: vec![FAILURE_DOMAIN.into()],
         },
-        effect: Effect::Pure,
+        effect,
         retry_limit: 0,
     }
 }
@@ -529,6 +690,28 @@ fn config_schema() -> ConfigSchema {
             required: true,
             default: None,
         }],
+    }
+}
+
+fn sink_config_schema() -> ConfigSchema {
+    ConfigSchema {
+        fields: vec![
+            ConfigField {
+                name: "destination_resource".into(),
+                value_type: ConfigType::Text { max_bytes: 256 },
+                required: true,
+                default: None,
+            },
+            ConfigField {
+                name: "max_source_bytes".into(),
+                value_type: ConfigType::U64 {
+                    minimum: 1,
+                    maximum: MAX_SOURCE_BYTES,
+                },
+                required: true,
+                default: None,
+            },
+        ],
     }
 }
 
@@ -622,6 +805,11 @@ fn standard_kernel(id: KernelId, type_name: &str, operation: Operation) -> Kerne
             vec![Layout::Packed, Layout::Opaque],
             "adapter:plan-export+exact-source-export:v1",
         ),
+        Operation::Sink => (
+            vec![Layout::Packed],
+            vec![],
+            "adapter:authorized-durable-tree-sink:v1",
+        ),
     };
     KernelDescriptor {
         id,
@@ -693,7 +881,7 @@ fn read_lease(zero_copy_permitted: bool) -> LeaseContract {
 
 #[cfg(test)]
 mod tests {
-    use super::adapter_error_code;
+    use super::{adapter_error_code, standard_sink_node_config, StandardNodeConfigError};
     use abir_adapter::{AdapterError, ProfileId};
     use semantic_abir::ContentId;
 
@@ -735,5 +923,20 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(adapter_error_code(&error), expected);
         }
+    }
+
+    #[test]
+    fn sink_resource_ids_are_bounded_opaque_names() {
+        assert!(standard_sink_node_config("archive:clinical-01", 1).is_ok());
+        for invalid in ["", "../escape", "path/escape", "white space", "nul\0byte"] {
+            assert_eq!(
+                standard_sink_node_config(invalid, 1),
+                Err(StandardNodeConfigError::DestinationResourceInvalid)
+            );
+        }
+        assert_eq!(
+            standard_sink_node_config(&"x".repeat(257), 1),
+            Err(StandardNodeConfigError::DestinationResourceInvalid)
+        );
     }
 }

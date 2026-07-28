@@ -13,13 +13,18 @@ pub use abir_value::{AbirDatasetValue, AbirDatasetValueError, NodePayloadStore};
 pub use lml_reference::{
     LmlPackets, ReferenceEntropy, ReferencePredicted, ReferenceQuantized, ReferenceSubbands,
 };
+#[cfg(all(feature = "standard-adapters", feature = "standard-nwb"))]
+pub use standard_nodes::NWB_SINK_NODE_TYPE;
 #[cfg(feature = "standard-adapters")]
 pub use standard_nodes::{
-    register_standard_nodes, standard_import_descriptor, standard_node_config,
-    standard_restore_descriptor, StandardNodeConfigError, BIDS_IMPORT_NODE_TYPE,
-    BIDS_RESTORE_NODE_TYPE, DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE,
-    EDFPLUS_IMPORT_NODE_TYPE, EDFPLUS_RESTORE_NODE_TYPE, NWB_IMPORT_NODE_TYPE,
-    NWB_RESTORE_NODE_TYPE, XDF_IMPORT_NODE_TYPE, XDF_RESTORE_NODE_TYPE,
+    parse_standard_sink_contract, register_standard_nodes, standard_import_descriptor,
+    standard_node_config, standard_restore_descriptor, standard_sink_descriptor,
+    standard_sink_kernel_binding, standard_sink_node_config, StandardNodeConfigError,
+    StandardSinkContract, BIDS_IMPORT_NODE_TYPE, BIDS_RESTORE_NODE_TYPE, BIDS_SINK_NODE_TYPE,
+    DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE, DICOM_SINK_NODE_TYPE,
+    EDFPLUS_IMPORT_NODE_TYPE, EDFPLUS_RESTORE_NODE_TYPE, EDFPLUS_SINK_NODE_TYPE,
+    NWB_IMPORT_NODE_TYPE, NWB_RESTORE_NODE_TYPE, XDF_IMPORT_NODE_TYPE, XDF_RESTORE_NODE_TYPE,
+    XDF_SINK_NODE_TYPE,
 };
 
 pub const LML_TRANSFORM_NODE_TYPE: &str = lml_reference::LML_TRANSFORM_NODE_TYPE;

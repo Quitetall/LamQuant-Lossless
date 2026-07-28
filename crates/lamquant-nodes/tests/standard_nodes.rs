@@ -5,18 +5,19 @@ use std::collections::BTreeMap;
 use abir_adapter::Adapter;
 use abir_adapter::{ForeignEntry, ForeignObject, ProfileId};
 use blut_graph_core::{
-    Compiler, Edge, ExecutionRealm, Graph, KernelRegistry, NodeId, NodeInstance, PlanExecutor,
-    PortRef,
+    Compiler, Determinism, Edge, Effect, ExecutionRealm, Graph, KernelRegistry, NodeId,
+    NodeInstance, Partiality, PlanExecutor, PortRef, StateScope, Target,
 };
 use lamquant_nodes::{
     register_standard_nodes, standard_import_descriptor, standard_node_config,
-    standard_restore_descriptor, LamQuantKernelExecutor, LamQuantNodeValue, NoopTransactionalSink,
-    BIDS_IMPORT_NODE_TYPE, BIDS_RESTORE_NODE_TYPE, DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE,
-    EDFPLUS_IMPORT_NODE_TYPE, EDFPLUS_RESTORE_NODE_TYPE, XDF_IMPORT_NODE_TYPE,
-    XDF_RESTORE_NODE_TYPE,
+    standard_restore_descriptor, standard_sink_descriptor, LamQuantKernelExecutor,
+    LamQuantNodeValue, NoopTransactionalSink, BIDS_IMPORT_NODE_TYPE, BIDS_RESTORE_NODE_TYPE,
+    BIDS_SINK_NODE_TYPE, DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE, DICOM_SINK_NODE_TYPE,
+    EDFPLUS_IMPORT_NODE_TYPE, EDFPLUS_RESTORE_NODE_TYPE, EDFPLUS_SINK_NODE_TYPE,
+    XDF_IMPORT_NODE_TYPE, XDF_RESTORE_NODE_TYPE, XDF_SINK_NODE_TYPE,
 };
 #[cfg(feature = "standard-nwb")]
-use lamquant_nodes::{NWB_IMPORT_NODE_TYPE, NWB_RESTORE_NODE_TYPE};
+use lamquant_nodes::{NWB_IMPORT_NODE_TYPE, NWB_RESTORE_NODE_TYPE, NWB_SINK_NODE_TYPE};
 #[cfg(feature = "standard-nwb")]
 use lamquant_standard_adapters::NwbAdapter;
 use lamquant_standard_adapters::XdfAdapter;
@@ -37,6 +38,7 @@ struct Case {
     profile: &'static str,
     import_type: &'static str,
     restore_type: &'static str,
+    sink_type: &'static str,
     source: ForeignObject,
 }
 
@@ -54,6 +56,7 @@ fn cases() -> Vec<Case> {
             profile: "edfplus.1",
             import_type: EDFPLUS_IMPORT_NODE_TYPE,
             restore_type: EDFPLUS_RESTORE_NODE_TYPE,
+            sink_type: EDFPLUS_SINK_NODE_TYPE,
             source: ForeignObject {
                 profile: ProfileId("edfplus.1".to_owned()),
                 entries: vec![entry(
@@ -69,12 +72,14 @@ fn cases() -> Vec<Case> {
             profile: "bids.1.11.1",
             import_type: BIDS_IMPORT_NODE_TYPE,
             restore_type: BIDS_RESTORE_NODE_TYPE,
+            sink_type: BIDS_SINK_NODE_TYPE,
             source: bids_source(),
         },
         Case {
             profile: "dicom.ps3.2026c",
             import_type: DICOM_IMPORT_NODE_TYPE,
             restore_type: DICOM_RESTORE_NODE_TYPE,
+            sink_type: DICOM_SINK_NODE_TYPE,
             source: ForeignObject {
                 profile: ProfileId("dicom.ps3.2026c".to_owned()),
                 entries: vec![entry(
@@ -91,6 +96,7 @@ fn cases() -> Vec<Case> {
             profile: "nwb.2.10.0",
             import_type: NWB_IMPORT_NODE_TYPE,
             restore_type: NWB_RESTORE_NODE_TYPE,
+            sink_type: NWB_SINK_NODE_TYPE,
             source: ForeignObject {
                 profile: ProfileId("nwb.2.10.0".to_owned()),
                 entries: vec![entry(
@@ -106,6 +112,7 @@ fn cases() -> Vec<Case> {
             profile: "xdf.1.0",
             import_type: XDF_IMPORT_NODE_TYPE,
             restore_type: XDF_RESTORE_NODE_TYPE,
+            sink_type: XDF_SINK_NODE_TYPE,
             source: ForeignObject {
                 profile: ProfileId("xdf.1.0".to_owned()),
                 entries: vec![entry(
@@ -293,6 +300,31 @@ fn graph(type_name: &str, profile: &str, restore: bool) -> Graph {
         } else {
             vec![]
         },
+        policy: vec![],
+        minimum_fidelity: u16::MAX,
+        session: None,
+    }
+}
+
+fn sink_graph(sink_type: &str, profile: &str, destination_resource: &str) -> Graph {
+    let descriptor = standard_sink_descriptor(profile).unwrap();
+    Graph {
+        version: 3,
+        nodes: vec![NodeInstance {
+            id: NodeId(0),
+            descriptor: sink_type.into(),
+            descriptor_version: 1,
+            config: lamquant_nodes::standard_sink_node_config(destination_resource, TEST_LIMIT)
+                .unwrap(),
+        }],
+        edges: vec![],
+        feedback: vec![],
+        invocation_inputs: vec![PortRef {
+            node: NodeId(0),
+            port: "source".into(),
+        }],
+        required_capabilities: descriptor.capabilities,
+        required_proofs: vec![],
         policy: vec![],
         minimum_fidelity: u16::MAX,
         session: None,
@@ -580,14 +612,42 @@ fn dataset_value_rejects_missing_clock_relation_provenance() {
 fn registers_all_enabled_profile_specific_host_nodes() {
     let mut registry = KernelRegistry::default();
     register_standard_nodes(&mut registry).unwrap();
+    let mut prior_profile_sink_plan = None;
     for case in cases() {
         let import = standard_import_descriptor(case.profile).unwrap();
         let restore = standard_restore_descriptor(case.profile).unwrap();
+        let sink = standard_sink_descriptor(case.profile).unwrap();
         assert_eq!(import.type_name, case.import_type);
         assert_eq!(restore.type_name, case.restore_type);
+        assert_eq!(sink.type_name, case.sink_type);
         assert_eq!(import.targets, vec![blut_graph_core::Target::Host]);
         assert_eq!(restore.targets, vec![blut_graph_core::Target::Host]);
+        assert_eq!(sink.targets, vec![Target::Host]);
         assert_ne!(import.type_name, restore.type_name);
+        assert_ne!(sink.type_name, import.type_name);
+        assert_eq!(sink.outputs, vec![]);
+        assert_eq!(sink.inputs.len(), 1);
+        assert_eq!(sink.inputs[0].name, "source");
+        assert_eq!(
+            sink.inputs[0].semantic_type,
+            format!("abir.foreign-object.{}", case.profile)
+        );
+        assert_eq!(sink.determinism, Determinism::BitExact);
+        assert_eq!(sink.retry_limit, 0);
+        assert_eq!(sink.effect, Effect::Transactional);
+        assert_eq!(sink.partiality, Partiality::Atomic);
+        assert_eq!(sink.state.scope, StateScope::Stateless);
+        assert_eq!(sink.fidelity.minimum_input, u16::MAX);
+        assert_eq!(sink.fidelity.maximum_loss, 0);
+        assert!(sink
+            .capabilities
+            .iter()
+            .any(|capability| capability.0 == format!("abir.foreign-tree.{}", case.profile)));
+        assert!(sink
+            .capabilities
+            .iter()
+            .any(|capability| capability.0 == "org.quitetall.lamquant.sink.durable-file-v1"));
+        let expected_binding = lamquant_nodes::standard_sink_kernel_binding(case.profile).unwrap();
         assert_ne!(
             Compiler::new(&registry, ExecutionRealm::HostStream)
                 .compile(&graph(case.import_type, case.profile, false))
@@ -600,11 +660,50 @@ fn registers_all_enabled_profile_specific_host_nodes() {
                 .as_plan()
                 .plan_id
         );
+        assert_ne!(
+            Compiler::new(&registry, ExecutionRealm::HostStream)
+                .compile(&sink_graph(case.sink_type, case.profile, "archive:profile"))
+                .unwrap()
+                .as_plan()
+                .plan_id,
+            Compiler::new(&registry, ExecutionRealm::HostStream)
+                .compile(&sink_graph(
+                    case.sink_type,
+                    case.profile,
+                    "archive:profile2"
+                ))
+                .unwrap()
+                .as_plan()
+                .plan_id
+        );
+        let sink_plan = Compiler::new(&registry, ExecutionRealm::HostStream)
+            .compile(&sink_graph(case.sink_type, case.profile, "archive:profile"))
+            .unwrap();
+        let sink_step = &sink_plan.as_plan().nodes[0];
+        assert_eq!(
+            (sink_step.kernel, sink_step.implementation_id),
+            expected_binding
+        );
+        let contract = lamquant_nodes::parse_standard_sink_contract(sink_step).unwrap();
+        assert_eq!(contract.profile, case.profile);
+        assert_eq!(contract.destination_resource, "archive:profile");
+        assert_eq!(contract.max_source_bytes, TEST_LIMIT);
+        let sink_plan_id = sink_plan.as_plan().plan_id;
+        if let Some(prior) = prior_profile_sink_plan {
+            assert_ne!(prior, sink_plan_id);
+        }
+        prior_profile_sink_plan = Some(sink_plan_id);
         assert!(Compiler::new(&registry, ExecutionRealm::McuAot)
             .compile(&graph(case.import_type, case.profile, false))
             .is_err());
         assert!(Compiler::new(&registry, ExecutionRealm::BlutDurable)
             .compile(&graph(case.import_type, case.profile, false))
+            .is_err());
+        assert!(Compiler::new(&registry, ExecutionRealm::McuAot)
+            .compile(&sink_graph(case.sink_type, case.profile, "archive:profile"))
+            .is_err());
+        assert!(Compiler::new(&registry, ExecutionRealm::BlutDurable)
+            .compile(&sink_graph(case.sink_type, case.profile, "archive:profile"))
             .is_err());
     }
 }
