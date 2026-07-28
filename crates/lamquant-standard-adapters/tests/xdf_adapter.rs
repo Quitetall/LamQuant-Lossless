@@ -173,6 +173,22 @@ fn xdf_import_maps_every_stream_clock_and_boundary() {
         .filter(|atom| matches!(atom, semantic_abir::Atom::SignalBlock(_)))
         .count();
     assert_eq!(signal_atoms, 1, "only the EEG stream is a signal block");
+    let eeg_axis = dataset
+        .atoms()
+        .iter()
+        .find_map(|atom| match atom {
+            semantic_abir::Atom::SignalBlock(block) => Some(block.time_axis()),
+            _ => None,
+        })
+        .expect("the EEG signal has a time axis");
+    let semantic_abir::TimeAxis::Regular(segment) = eeg_axis else {
+        panic!("fully deduced positive-rate timestamps form a regular axis");
+    };
+    assert_eq!(
+        segment.start().parts(),
+        (1, 500),
+        "XDF deduction advances one interval before sample zero"
+    );
     let marker_table = dataset
         .atoms()
         .iter()
@@ -540,7 +556,7 @@ fn xdf_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
         "<channel_count>65536</channel_count><nominal_srate>1</nominal_srate>",
         "<channel_format>int16</channel_format></info>"
     );
-    for stream_id in 1..=22 {
+    for stream_id in 1..=43 {
         excessive_stream_bookkeeping.extend_from_slice(&stream_header(stream_id, wide_header));
     }
     assert!(matches!(

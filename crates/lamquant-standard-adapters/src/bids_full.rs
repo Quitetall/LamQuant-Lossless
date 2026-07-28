@@ -690,7 +690,7 @@ fn parse_bids(
             retained_signal_bytes = retained_signal_bytes
                 .checked_add(
                     values
-                        .checked_mul(core::mem::size_of::<i64>() as u64)
+                        .checked_mul(core::mem::size_of::<f64>() as u64)
                         .ok_or(AdapterError::SourceTooLarge)?,
                 )
                 .ok_or(AdapterError::SourceTooLarge)?;

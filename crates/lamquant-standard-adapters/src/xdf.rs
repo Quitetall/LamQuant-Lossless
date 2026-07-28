@@ -377,12 +377,25 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
                         "XDF stream declares zero channels".to_owned(),
                     ));
                 }
-                let bookkeeping_bytes = channel_count
-                    .checked_mul(
+                let format = ChannelFormat::parse(
+                    &element_text(&xml, "channel_format").ok_or_else(|| {
+                        AdapterError::InvalidSource(
+                            "XDF stream header declares no channel_format".to_owned(),
+                        )
+                    })?,
+                )?;
+                let channel_slot_bytes = match format {
+                    ChannelFormat::Int8
+                    | ChannelFormat::Int16
+                    | ChannelFormat::Int32
+                    | ChannelFormat::Int64 => core::mem::size_of::<Vec<i64>>(),
+                    ChannelFormat::Float32 | ChannelFormat::Double64 => {
                         core::mem::size_of::<Vec<f64>>()
-                            .checked_add(core::mem::size_of::<Vec<String>>())
-                            .ok_or(AdapterError::SourceTooLarge)?,
-                    )
+                    }
+                    ChannelFormat::StringValues => core::mem::size_of::<Vec<String>>(),
+                };
+                let bookkeeping_bytes = channel_count
+                    .checked_mul(channel_slot_bytes)
                     .ok_or(AdapterError::SourceTooLarge)?;
                 if channel_count > MAX_CHANNELS || bookkeeping_bytes > MAX_CHANNEL_BOOKKEEPING_BYTES
                 {
@@ -396,13 +409,6 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
                 {
                     return Err(AdapterError::SourceTooLarge);
                 }
-                let format = ChannelFormat::parse(
-                    &element_text(&xml, "channel_format").ok_or_else(|| {
-                        AdapterError::InvalidSource(
-                            "XDF stream header declares no channel_format".to_owned(),
-                        )
-                    })?,
-                )?;
                 if streams.contains_key(&stream_id) {
                     return Err(AdapterError::InvalidSource(format!(
                         "XDF file declares stream {stream_id} twice"
