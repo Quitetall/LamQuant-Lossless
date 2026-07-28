@@ -8,6 +8,18 @@ use alloc::vec::Vec;
 
 const Q_LPC: i64 = 27;
 
+#[inline(always)]
+fn abs_f64(value: f64) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        value.abs()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::fabs(value)
+    }
+}
+
 /// Per-subband fixed LPC order schedule for the fast-path encoder.
 ///
 /// Matches the legacy hardcoded ladder that shipped before adaptive
@@ -350,7 +362,7 @@ pub fn analyze(subband: &[i64], order: usize, ctx_len: usize) -> (Vec<i32>, Vec<
     let seg_len = (t / 2).clamp(1, 256);
     let r = autocorr(subband, order, seg_len);
 
-    if r[0].abs() <= 1e-12 {
+    if abs_f64(r[0]) <= 1e-12 {
         let mut residual = subband.to_vec();
         bias_cancel(&mut residual, ctx_len);
         return (vec![0i32; order], residual);
@@ -369,7 +381,7 @@ pub fn analyze(subband: &[i64], order: usize, ctx_len: usize) -> (Vec<i32>, Vec<
         for j in 0..m {
             lam += a[j] * r[m - j];
         }
-        if e.abs() <= 1e-12 {
+        if abs_f64(e) <= 1e-12 {
             break;
         }
         let k = -lam / e;
@@ -457,7 +469,7 @@ pub fn analyze_adaptive(
     // length-(max_order+1) `r` with the identical per-lag accumulation order.
     let r = autocorr(subband, max_order, seg_len);
 
-    if r[0].abs() <= 1e-12 {
+    if abs_f64(r[0]) <= 1e-12 {
         let mut residual = subband.to_vec();
         bias_cancel(&mut residual, ctx_len);
         return (Vec::new(), residual, 0);
@@ -503,7 +515,7 @@ pub fn analyze_adaptive(
         for j in 0..m {
             lam += a_prev[j] * r[m - j];
         }
-        if e.abs() <= 1e-12 {
+        if abs_f64(e) <= 1e-12 {
             break;
         }
         let k = -lam / e;
