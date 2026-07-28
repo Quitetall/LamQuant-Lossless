@@ -8,6 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  LAMQUANT_META_REV: 3debb0269c69ba5860461416a5b9916de0cc3509
+
+defaults:
+  run:
+    working-directory: meta/codec-lossless
 
 jobs:
   rust-host:
@@ -15,7 +20,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout meta repository
+        uses: actions/checkout@v4
+        with:
+          repository: Quitetall/LamQuant
+          ref: ${{ env.LAMQUANT_META_REV }}
+          path: meta
+          sparse-checkout: |
+            Cargo.toml
+            crates
+      - name: Checkout current codec repo
+        uses: actions/checkout@v4
+        with:
+          path: meta/codec-lossless
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -26,8 +43,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: rust-host-${{ hashFiles('Cargo.lock') }}
+            meta/codec-lossless/target
+          key: rust-host-${{ hashFiles('meta/codec-lossless/Cargo.lock') }}
       # NOTE: not --all-features. lamquant-weights enforces exactly-one
       # architecture feature via compile_error! (subband_v1 / subband_v2 /
       # legacy_v7_0), so --all-features is intentionally a build error.
@@ -99,7 +116,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout meta repository
+        uses: actions/checkout@v4
+        with:
+          repository: Quitetall/LamQuant
+          ref: ${{ env.LAMQUANT_META_REV }}
+          path: meta
+          sparse-checkout: |
+            Cargo.toml
+            crates
+      - name: Checkout current codec repo
+        uses: actions/checkout@v4
+        with:
+          path: meta/codec-lossless
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: riscv32imac-unknown-none-elf
@@ -109,8 +138,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: core-no_std-${{ hashFiles('Cargo.lock') }}
+            meta/codec-lossless/target
+          key: core-no_std-${{ hashFiles('meta/codec-lossless/Cargo.lock') }}
       - name: cargo build -p lamquant-lml-mcu --no-default-features
         run: cargo build -p lamquant-lml-mcu --no-default-features --target riscv32imac-unknown-none-elf
       - name: cargo build -p lamquant-abir-codec --no-default-features
@@ -126,19 +155,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout meta repository
+        uses: actions/checkout@v4
+        with:
+          repository: Quitetall/LamQuant
+          ref: ${{ env.LAMQUANT_META_REV }}
+          path: meta
+          sparse-checkout: |
+            Cargo.toml
+            crates
+      - name: Checkout current codec repo
+        uses: actions/checkout@v4
+        with:
+          path: meta/codec-lossless
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Python deps
+      - name: Install Python codec and test dependencies
         run: |
           pip install --upgrade pip
-          pip install pytest numpy pyedflib mne
-      - name: Build Python codec wheel
-        run: |
-          pip install maturin
-          cd reference_implementations/python_codec && pip install -e .
+          pip install -e ".[test,fast,mne]"
       - name: Run fast tier diagnostics
         run: python3 tests/run_diagnostics.py fast
 
@@ -147,12 +184,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout meta repository
+        uses: actions/checkout@v4
+        with:
+          repository: Quitetall/LamQuant
+          ref: ${{ env.LAMQUANT_META_REV }}
+          path: meta
+          sparse-checkout: |
+            Cargo.toml
+            crates
+      - name: Checkout current codec repo
+        uses: actions/checkout@v4
+        with:
+          path: meta/codec-lossless
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+        run: |
+          mapfile -t packages < <(
+            cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[].name' |
+              sort -u
+          )
+          args=()
+          for package in "${packages[@]}"; do
+            args+=(-p "$package")
+          done
+          cargo fmt "${args[@]}" -- --check
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
 
@@ -167,12 +226,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout meta repository
+        uses: actions/checkout@v4
+        with:
+          repository: Quitetall/LamQuant
+          ref: ${{ env.LAMQUANT_META_REV }}
+          path: meta
+          sparse-checkout: |
+            Cargo.toml
+            crates
+      - name: Checkout current codec repo
+        uses: actions/checkout@v4
+        with:
+          path: meta/codec-lossless
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version "^0.12" --locked
+        run: cargo +nightly install cargo-fuzz --version "^0.12" --locked
       - name: Smoke each fuzz target
-        working-directory: lamquant-lossless
+        working-directory: meta/codec-lossless/lamquant-lossless
         run: |
           for t in decompress roundtrip container_header lma_manifest; do
             echo "::group::fuzz $t"
@@ -188,12 +259,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout meta repository
+        uses: actions/checkout@v4
+        with:
+          repository: Quitetall/LamQuant
+          ref: ${{ env.LAMQUANT_META_REV }}
+          path: meta
+          sparse-checkout: |
+            Cargo.toml
+            crates
+      - name: Checkout current codec repo
+        uses: actions/checkout@v4
+        with:
+          path: meta/codec-lossless
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cbindgen
         run: cargo install cbindgen --locked
       - name: Regenerate + diff include/lml.h
-        working-directory: lamquant-lossless
+        working-directory: meta/codec-lossless/lamquant-lossless
         run: |
           cbindgen --config cbindgen.toml --crate lamquant-lossless --output include/lml.h
           git diff --exit-code include/lml.h
@@ -207,7 +290,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout meta repository
+        uses: actions/checkout@v4
+        with:
+          repository: Quitetall/LamQuant
+          ref: ${{ env.LAMQUANT_META_REV }}
+          path: meta
+          sparse-checkout: |
+            Cargo.toml
+            crates
+      - name: Checkout current codec repo
+        uses: actions/checkout@v4
+        with:
+          path: meta/codec-lossless
       # h5py/numpy via apt (python3-*) rather than pip — robust against the
       # PEP 668 externally-managed-environment error on newer ubuntu images.
       - name: Install libhdf5 + h5py
@@ -221,7 +316,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: nwb-hdf5-${{ hashFiles('Cargo.lock') }}
+            meta/codec-lossless/target
+          key: nwb-hdf5-${{ hashFiles('meta/codec-lossless/Cargo.lock') }}
       - name: cargo test --features nwb (nwb_reader)
         run: cargo test -p lamquant-lml --features nwb --test nwb_reader

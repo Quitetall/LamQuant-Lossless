@@ -42,6 +42,11 @@
 //! Retirement is a later phase and is gated on this path first being measured
 //! superior.
 
+// `Method` is non-exhaustive for downstream users. Internal matches retain
+// wildcard arms so future variants fail closed or remain explicitly classified.
+// Current compiler sees those defensive arms as unreachable.
+#![allow(unreachable_patterns)]
+
 use crate::lma::{encode_archive_entry, ArchiveSummary, EncodedEntry, Method, SyntheticFromInfo};
 use semantic_abir_bcs::{
     encode_forensic_tree, raw_content_id, ForensicContentTransform, ForensicEntry,
