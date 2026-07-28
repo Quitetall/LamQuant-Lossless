@@ -36,9 +36,13 @@
 use lamquant_lml_desktop::backend::{
     compress_with_backend, decompress_with_backend, ComputeBackend,
 };
-use lamquant_lml_desktop::compress_with_mode_parallel_views;
-use lamquant_lml_desktop::lml::{compress_with_mode, compress_with_mode_views};
+use lamquant_lml_desktop::lml::{
+    compress_with_mode, compress_with_mode_views, compress_with_mode_views_explicit, EncodeFeatures,
+};
 use lamquant_lml_desktop::lpc::LpcMode;
+use lamquant_lml_desktop::{
+    compress_with_mode_parallel_views, compress_with_mode_parallel_views_explicit,
+};
 use sha2::{Digest, Sha256};
 
 /// xorshift64 — deterministic across machines + architectures.
@@ -324,5 +328,69 @@ fn views_match_vecs_serial_and_parallel() {
         failures.is_empty(),
         "views entry points diverged from compress_with_mode(vecs):\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+#[cfg(feature = "fast")]
+fn explicit_baseline_is_golden_and_parallel_byte_equal() {
+    for vector in GOLDEN_VECTORS {
+        let signal = synth_signal(vector.n_ch, vector.t, vector.seed);
+        let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let features = EncodeFeatures::default();
+        let serial =
+            compress_with_mode_views_explicit(&views, vector.noise_bits, vector.lpc_mode, features)
+                .expect("explicit serial");
+        let parallel = compress_with_mode_parallel_views_explicit(
+            &views,
+            vector.noise_bits,
+            vector.lpc_mode,
+            features,
+        )
+        .expect("explicit parallel");
+
+        assert_eq!(serial, parallel, "vector `{}` diverged", vector.name);
+        assert_eq!(
+            sha256_hex(&serial),
+            vector.sha256_firmware,
+            "vector `{}` explicit baseline drifted",
+            vector.name
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "fast", feature = "experimental_arithmetic"))]
+fn explicit_arithmetic_candidate_is_parallel_byte_equal() {
+    let features = EncodeFeatures {
+        arithmetic: true,
+        ..EncodeFeatures::default()
+    };
+    let mut selected_arithmetic = false;
+    for vector in GOLDEN_VECTORS {
+        let signal = synth_signal(vector.n_ch, vector.t, vector.seed);
+        let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let serial =
+            compress_with_mode_views_explicit(&views, vector.noise_bits, vector.lpc_mode, features)
+                .expect("explicit serial");
+        let parallel = compress_with_mode_parallel_views_explicit(
+            &views,
+            vector.noise_bits,
+            vector.lpc_mode,
+            features,
+        )
+        .expect("explicit parallel");
+
+        assert_eq!(serial, parallel, "vector `{}` diverged", vector.name);
+        selected_arithmetic |= lamquant_lml_desktop::lml::requires_arithmetic_coders(&serial);
+    }
+    let zero_signal = [vec![0_i64; 4096]];
+    let zero_views = zero_signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let zero_packet = compress_with_mode_views_explicit(&zero_views, 0, LpcMode::Fixed, features)
+        .expect("explicit zero-signal arithmetic candidate");
+    selected_arithmetic |= lamquant_lml_desktop::lml::requires_arithmetic_coders(&zero_packet);
+    assert!(
+        selected_arithmetic,
+        "fixture set never selected an arithmetic coder"
     );
 }

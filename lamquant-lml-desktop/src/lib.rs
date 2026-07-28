@@ -36,7 +36,8 @@ pub use backend::ComputeBackend;
 /// identical to the scalar MCU path.
 #[cfg(feature = "fast")]
 pub use parallel::{
-    compress_with_mode_parallel, compress_with_mode_parallel_views, decompress_parallel,
+    compress_with_mode_parallel, compress_with_mode_parallel_views,
+    compress_with_mode_parallel_views_explicit, decompress_parallel,
 };
 
 #[cfg(all(test, feature = "fast"))]

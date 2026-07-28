@@ -22,7 +22,6 @@ pub use lmqc_bundle::{
     LmqcPayloadKind, OpenedLmqcBcs2, LMQC_READER_CAPABILITIES,
 };
 
-#[cfg(feature = "optimum")]
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::ToString;
@@ -34,12 +33,10 @@ use semantic_abir::{
     canonical_debug_json, verify_payload_content, AbirDataset, Atom, ByteOrder, ContentId,
     ElementType, Layout, PayloadAccess, PayloadDescriptor, PayloadLease, Presence,
 };
-#[cfg(feature = "optimum")]
-use semantic_abir_bcs::Bcs2View;
 use semantic_abir_bcs::{
-    encode_codec_bundle, CodecBundleError, CodecBundleInput, CodecBundleView, CodecFidelity,
-    CodecFidelityKind, CodecImplementation, CodecParameter, CodecParameterValue, CodecProfile,
-    ResourceBounds,
+    encode_codec_bundle, Bcs2View, CodecBundleError, CodecBundleInput, CodecBundleView,
+    CodecFidelity, CodecFidelityKind, CodecImplementation, CodecParameter, CodecParameterValue,
+    CodecProfile, ResourceBounds, CAP_LML_ARITHMETIC_V1,
 };
 
 /// Stable algorithm identity. Build-specific identity is recorded separately.
@@ -78,6 +75,11 @@ pub const MAX_PACKET_CHANNELS: usize = 1024;
 /// logical data than the encoded packet frames occupy, so the trust envelope
 /// must reject that expansion before reserving the output matrix.
 const MAX_DECODED_BUNDLE_BYTES: usize = 1024 * 1024 * 1024;
+/// Maximum encoded BCS2 bundle produced by graph-facing explicit encoders.
+pub const MAX_ENCODED_BUNDLE_BYTES: usize = 1024 * 1024 * 1024;
+const BCS2_HEADER_BYTES: usize = 128;
+const BCS2_INDEX_HEADER_BYTES: usize = 48;
+const BCS2_INDEX_ENTRY_BYTES: usize = 128;
 /// Conservative logical-output ceiling for Optimum bundles.
 ///
 /// Optimum transform-2 decode retains residual/reconstruction scratch in
@@ -201,11 +203,13 @@ pub fn encode_lml_bundle_with_window_size<A: PayloadAccess>(
             .map_err(|_| LmlBundleError::PayloadIdentityMismatch)?;
         signal.push(decode_integer_payload(descriptor, lease.bytes())?);
     }
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
     encode_lml_bundle_from_verified_signal(
         dataset,
-        &signal,
+        &views,
         window_size,
         lamquant_lml_mcu::lpc::LpcMode::default(),
+        EncoderSelection::Ambient,
         bounds,
     )
 }
@@ -236,39 +240,145 @@ pub fn encode_lml_bundle_from_signal_with_mode(
     mode: lamquant_lml_mcu::lpc::LpcMode,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
-    verify_signal_closure(dataset, signal)?;
-    encode_lml_bundle_from_verified_signal(dataset, signal, window_size, mode, bounds)
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    encode_lml_bundle_from_views_with_mode(dataset, &views, window_size, mode, bounds)
+}
+
+/// Encode borrowed channel views without copying their sample matrices.
+///
+/// Descriptor closure is proved before the first packet is produced. Only the
+/// small outer slice table and bounded packet buffers allocate.
+pub fn encode_lml_bundle_from_views_with_mode(
+    dataset: &AbirDataset,
+    signal: &[&[i64]],
+    window_size: usize,
+    mode: lamquant_lml_mcu::lpc::LpcMode,
+    bounds: ResourceBounds,
+) -> Result<Vec<u8>, LmlBundleError> {
+    verify_signal_views_closure(dataset, signal)?;
+    encode_lml_bundle_from_verified_signal(
+        dataset,
+        signal,
+        window_size,
+        mode,
+        EncoderSelection::Ambient,
+        bounds,
+    )
+}
+
+/// Encode borrowed views with explicit experimental encoder choices.
+///
+/// This is the deterministic graph-runtime seam: no process environment
+/// variable can alter packet selection.
+pub fn encode_lml_bundle_from_views_explicit(
+    dataset: &AbirDataset,
+    signal: &[&[i64]],
+    window_size: usize,
+    mode: lamquant_lml_mcu::lpc::LpcMode,
+    features: lamquant_lml_mcu::lml::EncodeFeatures,
+    bounds: ResourceBounds,
+) -> Result<Vec<u8>, LmlBundleError> {
+    verify_signal_views_closure(dataset, signal)?;
+    encode_lml_bundle_from_verified_signal(
+        dataset,
+        signal,
+        window_size,
+        mode,
+        EncoderSelection::Explicit(features),
+        bounds,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum EncoderSelection {
+    Ambient,
+    Explicit(lamquant_lml_mcu::lml::EncodeFeatures),
 }
 
 fn encode_lml_bundle_from_verified_signal(
     dataset: &AbirDataset,
-    signal: &[Vec<i64>],
+    signal: &[&[i64]],
     window_size: usize,
     mode: lamquant_lml_mcu::lpc::LpcMode,
+    selection: EncoderSelection,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
     let packet_samples = window_size.min(MAX_PACKET_SAMPLES);
     if packet_samples == 0 {
         return Err(LmlBundleError::PacketExtent);
     }
-    let total_samples = signal.first().map_or(0, Vec::len);
-    let mut packets = Vec::with_capacity(total_samples.div_ceil(packet_samples));
+    let total_samples = signal.first().map_or(0, |channel| channel.len());
+    let packet_count = total_samples.div_ceil(packet_samples);
+    let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
+    let packet_budget = encoded_packet_budget(semantics.len(), packet_count, bounds)?;
+    let per_packet_budget = packet_budget
+        .checked_div(packet_count.max(1))
+        .map(|budget| budget.min(bounds.max_frame_bytes as usize))
+        .filter(|budget| *budget > 0)
+        .ok_or(LmlBundleError::EncodedResourceLimit)?;
+    let bounded_selection = match selection {
+        EncoderSelection::Ambient => EncoderSelection::Ambient,
+        EncoderSelection::Explicit(mut features) => {
+            features.max_packet_bytes = Some(
+                features
+                    .max_packet_bytes
+                    .map_or(per_packet_budget, |limit| limit.min(per_packet_budget)),
+            );
+            EncoderSelection::Explicit(features)
+        }
+    };
+    let mut encoded_packet_bytes = 0usize;
+    let mut packets = Vec::with_capacity(packet_count);
     for start in (0..total_samples).step_by(packet_samples) {
         let end = start.saturating_add(packet_samples).min(total_samples);
         let window = signal
             .iter()
             .map(|channel| &channel[start..end])
             .collect::<Vec<_>>();
-        packets.push(compress_views(&window, mode)?);
+        let packet = compress_views(&window, mode, bounded_selection)?;
+        encoded_packet_bytes = encoded_packet_bytes
+            .checked_add(packet.len())
+            .filter(|length| *length <= packet_budget)
+            .ok_or(LmlBundleError::EncodedResourceLimit)?;
+        packets.push(packet);
     }
     let packet_refs = packets.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    encode_verified_packets(dataset, &packet_refs, bounds)
+    encode_verified_packets_with_semantics(&semantics, &packet_refs, bounds)
+}
+
+fn encoded_packet_budget(
+    semantics_bytes: usize,
+    packet_count: usize,
+    bounds: ResourceBounds,
+) -> Result<usize, LmlBundleError> {
+    if semantics_bytes > bounds.max_frame_bytes as usize {
+        return Err(LmlBundleError::EncodedResourceLimit);
+    }
+    let frame_count = packet_count
+        .checked_add(1)
+        .filter(|count| *count <= bounds.max_index_entries as usize)
+        .ok_or(LmlBundleError::EncodedResourceLimit)?;
+    let catalog_reserve = usize::try_from(bounds.max_catalog_bytes)
+        .map_err(|_| LmlBundleError::EncodedResourceLimit)?;
+    let index_reserve = frame_count
+        .checked_mul(BCS2_INDEX_ENTRY_BYTES)
+        .and_then(|entries| entries.checked_add(BCS2_INDEX_HEADER_BYTES))
+        .ok_or(LmlBundleError::EncodedResourceLimit)?;
+    let nonpacket_reserve = BCS2_HEADER_BYTES
+        .checked_add(catalog_reserve)
+        .and_then(|value| value.checked_add(semantics_bytes))
+        .and_then(|value| value.checked_add(index_reserve))
+        .ok_or(LmlBundleError::EncodedResourceLimit)?;
+    MAX_ENCODED_BUNDLE_BYTES
+        .checked_sub(nonpacket_reserve)
+        .ok_or(LmlBundleError::EncodedResourceLimit)
 }
 
 #[cfg(feature = "std")]
 fn compress_views(
     signal: &[&[i64]],
     mode: lamquant_lml_mcu::lpc::LpcMode,
+    selection: EncoderSelection,
 ) -> Result<Vec<u8>, LmlBundleError> {
     use lamquant_lml_desktop::backend::{global_backend, ComputeBackend};
 
@@ -283,17 +393,36 @@ fn compress_views(
             ..
         }
     ) {
-        return lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode)
-            .map_err(LmlBundleError::Lml);
+        let result = match selection {
+            EncoderSelection::Ambient => {
+                lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode)
+            }
+            EncoderSelection::Explicit(features) => {
+                lamquant_lml_mcu::lml::compress_with_mode_views_explicit(signal, 0, mode, features)
+            }
+        };
+        return result.map_err(LmlBundleError::Lml);
     }
 
     let result = match global_backend() {
-        ComputeBackend::Firmware => {
-            lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode)
-        }
-        ComputeBackend::Desktop => {
-            lamquant_lml_desktop::compress_with_mode_parallel_views(signal, 0, mode)
-        }
+        ComputeBackend::Firmware => match selection {
+            EncoderSelection::Ambient => {
+                lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode)
+            }
+            EncoderSelection::Explicit(features) => {
+                lamquant_lml_mcu::lml::compress_with_mode_views_explicit(signal, 0, mode, features)
+            }
+        },
+        ComputeBackend::Desktop => match selection {
+            EncoderSelection::Ambient => {
+                lamquant_lml_desktop::compress_with_mode_parallel_views(signal, 0, mode)
+            }
+            EncoderSelection::Explicit(features) => {
+                lamquant_lml_desktop::compress_with_mode_parallel_views_explicit(
+                    signal, 0, mode, features,
+                )
+            }
+        },
     };
     result.map_err(LmlBundleError::Lml)
 }
@@ -302,8 +431,17 @@ fn compress_views(
 fn compress_views(
     signal: &[&[i64]],
     mode: lamquant_lml_mcu::lpc::LpcMode,
+    selection: EncoderSelection,
 ) -> Result<Vec<u8>, LmlBundleError> {
-    lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode).map_err(LmlBundleError::Lml)
+    match selection {
+        EncoderSelection::Ambient => {
+            lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode)
+        }
+        EncoderSelection::Explicit(features) => {
+            lamquant_lml_mcu::lml::compress_with_mode_views_explicit(signal, 0, mode, features)
+        }
+    }
+    .map_err(LmlBundleError::Lml)
 }
 
 /// Seal one pre-existing LML1 packet after proving that its exact decoded
@@ -336,15 +474,31 @@ fn encode_verified_packets(
     packets: &[&[u8]],
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
+    let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
+    encode_verified_packets_with_semantics(&semantics, packets, bounds)
+}
+
+fn encode_verified_packets_with_semantics(
+    semantics: &[u8],
+    packets: &[&[u8]],
+    bounds: ResourceBounds,
+) -> Result<Vec<u8>, LmlBundleError> {
     for packet in packets {
         validate_strict_lossless_packet(packet)?;
     }
-    let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
-    encode_codec_bundle(
+    let required_capabilities = if packets
+        .iter()
+        .any(|packet| lamquant_lml_mcu::lml::requires_arithmetic_coders(packet))
+    {
+        CAP_LML_ARITHMETIC_V1
+    } else {
+        0
+    };
+    let encoded = encode_codec_bundle(
         CodecBundleInput {
-            // Baseline kernels: any reader of the profile can decode these packets.
-            required_capabilities: 0,
-            canonical_semantics: &semantics,
+            // Capability follows packet bytes, not producer build features.
+            required_capabilities,
+            canonical_semantics: semantics,
             fidelity: exact_fidelity(),
             implementation: implementation_identity(),
             model_provenance: None,
@@ -354,7 +508,11 @@ fn encode_verified_packets(
         },
         bounds,
     )
-    .map_err(LmlBundleError::Bundle)
+    .map_err(LmlBundleError::Bundle)?;
+    if encoded.len() > MAX_ENCODED_BUNDLE_BYTES {
+        return Err(LmlBundleError::EncodedResourceLimit);
+    }
+    Ok(encoded)
 }
 
 /// Open, authenticate, decode, and prove semantic closure before returning a
@@ -363,8 +521,10 @@ pub fn open_lml_bundle(
     bytes: &[u8],
     bounds: ResourceBounds,
 ) -> Result<OpenedLmlBundle<'_>, LmlBundleError> {
-    let bundle = CodecBundleView::open(bytes, bounds).map_err(LmlBundleError::Bundle)?;
+    let bundle = CodecBundleView::open_with_capabilities(bytes, lml_reader_capabilities(), bounds)
+        .map_err(LmlBundleError::Bundle)?;
     validate_catalog(&bundle)?;
+    validate_packet_capabilities(bytes, &bundle, bounds)?;
     let (signal, packet_sample_counts) =
         decode_packet_sequence(bundle.dataset(), bundle.packets())?;
     verify_signal_closure(bundle.dataset(), &signal)?;
@@ -373,6 +533,50 @@ pub fn open_lml_bundle(
         packet_sample_counts,
         signal,
     })
+}
+
+fn validate_packet_capabilities(
+    bytes: &[u8],
+    bundle: &CodecBundleView<'_>,
+    bounds: ResourceBounds,
+) -> Result<(), LmlBundleError> {
+    let required = if bundle
+        .packets()
+        .any(lamquant_lml_mcu::lml::requires_arithmetic_coders)
+    {
+        CAP_LML_ARITHMETIC_V1
+    } else {
+        0
+    };
+    let wire = Bcs2View::parse(bytes, lml_reader_capabilities(), bounds)
+        .map_err(|error| LmlBundleError::Bundle(CodecBundleError::Bcs2(error)))?;
+    let packet_ids = (0..bundle.catalog().packet_count())
+        .map(|ordinal| {
+            bundle
+                .catalog()
+                .packet_content_id(ordinal)
+                .ok_or(LmlBundleError::CatalogContract)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    for frame in wire.frames() {
+        let packet_frame = packet_ids.contains(&frame.content_id());
+        let expected = if packet_frame { required } else { 0 };
+        if frame.required_capabilities() != expected {
+            return Err(LmlBundleError::CatalogContract);
+        }
+    }
+    Ok(())
+}
+
+const fn lml_reader_capabilities() -> u64 {
+    #[cfg(feature = "experimental-arithmetic")]
+    {
+        CAP_LML_ARITHMETIC_V1
+    }
+    #[cfg(not(feature = "experimental-arithmetic"))]
+    {
+        0
+    }
 }
 
 fn validate_catalog(bundle: &CodecBundleView<'_>) -> Result<(), LmlBundleError> {
@@ -809,6 +1013,14 @@ fn validate_descriptor(descriptor: &PayloadDescriptor) -> Result<(), LmlBundleEr
 }
 
 fn verify_signal_closure(dataset: &AbirDataset, signal: &[Vec<i64>]) -> Result<(), LmlBundleError> {
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    verify_signal_views_closure(dataset, &views)
+}
+
+fn verify_signal_views_closure(
+    dataset: &AbirDataset,
+    signal: &[&[i64]],
+) -> Result<(), LmlBundleError> {
     let descriptors = ordered_descriptors(dataset)?;
     if descriptors.len() != signal.len() {
         return Err(LmlBundleError::SignalShapeMismatch);
@@ -1034,6 +1246,7 @@ pub enum LmlBundleError {
     Bundle(CodecBundleError),
     CatalogContract,
     DecodedResourceLimit,
+    EncodedResourceLimit,
     Lml(lamquant_lml_mcu::error::LmlError),
     NotExactLossless,
     NotLml1,
@@ -1091,6 +1304,18 @@ mod tests {
                 vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
             ),
         ])
+    }
+
+    #[test]
+    fn encoded_budget_reserves_every_bcs2_index_entry() {
+        let bounds = ResourceBounds::default();
+        let one_packet = encoded_packet_budget(1024, 1, bounds).unwrap();
+        let many_packets = encoded_packet_budget(1024, 131_072, bounds).unwrap();
+
+        assert_eq!(
+            one_packet - many_packets,
+            (131_072 - 1) * BCS2_INDEX_ENTRY_BYTES
+        );
     }
 
     fn fixture_from_signal(
@@ -1301,6 +1526,67 @@ mod tests {
             canonical_debug_json(mapped.dataset()).unwrap()
         );
         assert!(core::ptr::eq(opened.dataset(), opened.bundle().dataset()));
+    }
+
+    #[cfg(feature = "experimental-arithmetic")]
+    #[test]
+    fn baseline_packet_rejects_overdeclared_arithmetic_capability() {
+        let mapped = fixture();
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7, -8],
+            vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+            vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+        ];
+        let packet = lamquant_lml_mcu::lml::compress(&signal, 0).expect("LML packet");
+        let semantics = canonical_debug_json(mapped.dataset()).expect("canonical semantics");
+        let bytes = encode_codec_bundle(
+            CodecBundleInput {
+                required_capabilities: CAP_LML_ARITHMETIC_V1,
+                canonical_semantics: &semantics,
+                fidelity: exact_fidelity(),
+                implementation: implementation_identity(),
+                model_provenance: None,
+                packets: &[packet.as_slice()],
+                parameters: canonical_parameters(),
+                profile: CodecProfile::LmlLossless,
+            },
+            ResourceBounds::default(),
+        )
+        .expect("syntactically valid overdeclared bundle");
+
+        assert!(matches!(
+            open_lml_bundle(&bytes, ResourceBounds::default()),
+            Err(LmlBundleError::CatalogContract)
+        ));
+    }
+
+    #[cfg(feature = "experimental-arithmetic")]
+    #[test]
+    fn selected_arithmetic_packet_declares_capability_and_baseline_reader_refuses_it() {
+        let signal = vec![0_i64; 4096];
+        let mapped = fixture_from_signal(&[(ElementType::I64, signal.clone())]);
+        let views = [signal.as_slice()];
+        let bytes = encode_lml_bundle_from_views_explicit(
+            mapped.dataset(),
+            &views,
+            u16::MAX as usize,
+            lamquant_lml_mcu::lpc::LpcMode::Fixed,
+            lamquant_lml_mcu::lml::EncodeFeatures {
+                arithmetic: true,
+                ..lamquant_lml_mcu::lml::EncodeFeatures::default()
+            },
+            ResourceBounds::default(),
+        )
+        .expect("arithmetic bundle");
+        let opened =
+            open_lml_bundle(&bytes, ResourceBounds::default()).expect("capable reader opens");
+
+        assert!(opened
+            .packets()
+            .any(lamquant_lml_mcu::lml::requires_arithmetic_coders));
+        assert!(
+            CodecBundleView::open_with_capabilities(&bytes, 0, ResourceBounds::default()).is_err()
+        );
     }
 
     #[test]

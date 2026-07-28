@@ -1,0 +1,35 @@
+[package]
+name = "lamquant-nodes"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+description = "Production ABIR Node catalog and fused LamQuant kernel adapters."
+publish = false
+build = "build.rs"
+
+[features]
+default = ["std"]
+std = [
+    "blut-graph-core/std",
+    "lamquant-abir-codec/std",
+    "lamquant-lml-mcu/std",
+    "semantic-abir/std",
+    "semantic-abir-bcs/std",
+]
+experimental-arithmetic = [
+    "std",
+    "lamquant-abir-codec/experimental-arithmetic",
+    "lamquant-lml-mcu/experimental_arithmetic",
+]
+
+[dependencies]
+blake3 = { version = "=1.5.5", default-features = false }
+blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "704d3b3542150e91fa9767a0d286983940ca3788", default-features = false }
+lamquant-abir-codec = { version = "0.1.0", path = "../lamquant-abir-codec", default-features = false }
+lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
+
+[build-dependencies]
+blake3 = { version = "=1.5.5" }

@@ -3561,6 +3561,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lamquant-nodes"
+version = "0.1.0"
+dependencies = [
+ "abir",
+ "abir-bcs",
+ "blake3",
+ "blut-graph-core",
+ "lamquant-abir-codec",
+ "lamquant-lml-mcu",
+]
+
+[[package]]
 name = "lamquant-ops"
 version = "0.1.0"
 dependencies = [

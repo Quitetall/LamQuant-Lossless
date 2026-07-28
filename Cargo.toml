@@ -18,6 +18,7 @@ members = [
     "crates/lamquant-standard-adapters",
     "crates/lamquant-abir-graph",
     "crates/lamquant-abir-montage",
+    "crates/lamquant-nodes",
 ]
 # Firmware + weights moved to the LamQuant-Firmware submodule (ADR 0026
 # phase B.1, 2026-05-30). lamquant-lsl moved to the Vision submodule

@@ -474,6 +474,53 @@ pub struct EncodeShape {
     pub flags: (bool, bool, bool),
 }
 
+/// Explicit experimental encoder choices for deterministic graph execution.
+///
+/// Legacy entry points retain their environment-controlled behavior. Graph
+/// runtimes use this value so packet bytes depend only on declared inputs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EncodeFeatures {
+    pub arithmetic: bool,
+    pub bit_pack: bool,
+    pub extended_lpc: bool,
+    pub transform_skip: bool,
+    /// Hard ceiling for the complete encoded packet. `None` preserves the
+    /// legacy unbounded API contract.
+    pub max_packet_bytes: Option<usize>,
+}
+
+impl EncodeFeatures {
+    #[doc(hidden)]
+    pub fn resolve(self) -> LmlResult<((bool, bool, bool), bool, Option<usize>)> {
+        if self.arithmetic && !cfg!(feature = "experimental_arithmetic") {
+            return Err(LmlError::InvalidHeader(
+                "arithmetic encoder feature was requested but not compiled".into(),
+            ));
+        }
+        if self.bit_pack && !cfg!(feature = "experimental_bit_pack") {
+            return Err(LmlError::InvalidHeader(
+                "bit-pack encoder feature was requested but not compiled".into(),
+            ));
+        }
+        if self.extended_lpc && !cfg!(feature = "std") {
+            return Err(LmlError::InvalidHeader(
+                "extended LPC encoder feature requires std".into(),
+            ));
+        }
+        Ok((
+            (self.arithmetic, self.bit_pack, self.extended_lpc),
+            self.transform_skip,
+            self.max_packet_bytes,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EncodePolicy {
+    flags: (bool, bool, bool),
+    max_packet_bytes: Option<usize>,
+}
+
 /// Validate `n_ch`/`t`/`noise_bits` ranges and resolve level depth + the
 /// experimental encoder flags. Pulled out of [`prepare_encode`] so the
 /// zero-copy views entry points (`compress_with_mode_views` and the Desktop
@@ -739,19 +786,87 @@ fn encode_channels_core(
     t: usize,
     n_levels: u8,
     noise_bits: u8,
-    flags: (bool, bool, bool),
+    policy: EncodePolicy,
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
+    let per_channel_limit = channel_payload_limit(policy.max_packet_bytes, n_ch, t, n_levels)?;
     let mut per_channel = Vec::with_capacity(n_ch);
     for &ch in channels.iter() {
-        per_channel.push(encode_one_channel(
-            ch, n_levels, mode, flags.0, flags.1, flags.2,
-        )?);
+        let encoded = if policy.max_packet_bytes.is_some() {
+            encode_one_channel_bounded(
+                ch,
+                n_levels,
+                mode,
+                policy.flags.0,
+                policy.flags.1,
+                policy.flags.2,
+                per_channel_limit,
+            )?
+        } else {
+            encode_one_channel(
+                ch,
+                n_levels,
+                mode,
+                policy.flags.0,
+                policy.flags.1,
+                policy.flags.2,
+            )?
+        };
+        per_channel.push(encoded);
     }
     let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
-    Ok(assemble_lml_packet(
-        n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload,
-    ))
+    let packet = assemble_lml_packet(n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload);
+    if let Some(limit) = policy.max_packet_bytes {
+        if packet.len() > limit {
+            return Err(LmlError::InvalidHeader(alloc::format!(
+                "encoded packet requires {} bytes, limit is {}",
+                packet.len(),
+                limit
+            )));
+        }
+    }
+    Ok(packet)
+}
+
+/// Conservative per-channel entropy budget used before any large payload
+/// allocation. Metadata and packet framing are reserved up front; selected
+/// experimental candidates never exceed their Golomb fallback.
+#[doc(hidden)]
+pub fn channel_payload_limit(
+    max_packet_bytes: Option<usize>,
+    n_ch: usize,
+    t: usize,
+    n_levels: u8,
+) -> LmlResult<usize> {
+    if n_ch == 0 {
+        return Err(LmlError::InvalidHeader(
+            "encoded packet requires at least one channel".into(),
+        ));
+    }
+    let Some(max_packet_bytes) = max_packet_bytes else {
+        return Ok(usize::MAX);
+    };
+    let n_subbands = subband_lengths(t, n_levels).len();
+    // 128 covers variable ASCII prefix + fixed header + CRC. Each subband
+    // reserves one winner tag and worst-case 64 i32 LPC coefficients plus
+    // the order byte.
+    let per_subband_overhead = 1usize + 1 + 64 * core::mem::size_of::<i32>();
+    let channel_overhead = n_subbands
+        .checked_mul(per_subband_overhead)
+        .ok_or_else(|| LmlError::InvalidHeader("encoded packet limit overflow".into()))?;
+    let total_overhead = n_ch
+        .checked_mul(channel_overhead)
+        .and_then(|value| value.checked_add(128))
+        .ok_or_else(|| LmlError::InvalidHeader("encoded packet limit overflow".into()))?;
+    let payload_budget = max_packet_bytes
+        .checked_sub(total_overhead)
+        .ok_or_else(|| {
+            LmlError::InvalidHeader(alloc::format!(
+                "encoded packet metadata requires at least {total_overhead} bytes, limit is \
+             {max_packet_bytes}"
+            ))
+        })?;
+    Ok(payload_budget / n_ch)
 }
 
 /// ADR 0023 Track B7 — adaptive transform-skip. Read at compress entry to decide whether the
@@ -797,9 +912,44 @@ fn encode_maybe_skip(
     flags: (bool, bool, bool),
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
-    let full = encode_channels_core(channels, n_ch, t, full_levels, noise_bits, flags, mode)?;
-    if transform_skip_enabled() && full_levels > 0 {
-        let skip = encode_channels_core(channels, n_ch, t, 0, noise_bits, flags, mode)?;
+    encode_maybe_skip_explicit(
+        channels,
+        EncodeShape {
+            n_ch,
+            t,
+            n_levels: full_levels,
+            flags,
+        },
+        noise_bits,
+        EncodePolicy {
+            flags,
+            max_packet_bytes: None,
+        },
+        transform_skip_enabled(),
+        mode,
+    )
+}
+
+fn encode_maybe_skip_explicit(
+    channels: &[&[i64]],
+    shape: EncodeShape,
+    noise_bits: u8,
+    policy: EncodePolicy,
+    try_transform_skip: bool,
+    mode: lpc::LpcMode,
+) -> LmlResult<Vec<u8>> {
+    let full = encode_channels_core(
+        channels,
+        shape.n_ch,
+        shape.t,
+        shape.n_levels,
+        noise_bits,
+        policy,
+        mode,
+    )?;
+    if try_transform_skip && shape.n_levels > 0 {
+        let skip =
+            encode_channels_core(channels, shape.n_ch, shape.t, 0, noise_bits, policy, mode)?;
         if skip.len() < full.len() {
             return Ok(skip);
         }
@@ -866,29 +1016,68 @@ pub fn compress_with_mode_views(
     let n_ch = windows.len();
     let t = windows.first().map(|w| w.len()).unwrap_or(0);
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
+    compress_validated_views(
+        windows,
+        noise_bits,
+        mode,
+        shape,
+        EncodePolicy {
+            flags: shape.flags,
+            max_packet_bytes: None,
+        },
+        transform_skip_enabled(),
+    )
+}
+
+/// Zero-copy compression with every experimental choice explicit.
+///
+/// Unlike [`compress_with_mode_views`], this entry point never uses process
+/// environment variables to select packet bytes.
+pub fn compress_with_mode_views_explicit(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: lpc::LpcMode,
+    features: EncodeFeatures,
+) -> LmlResult<Vec<u8>> {
+    let n_ch = windows.len();
+    let t = windows.first().map(|w| w.len()).unwrap_or(0);
+    let shape = validate_and_levels(n_ch, t, noise_bits)?;
+    let (flags, try_transform_skip, max_packet_bytes) = features.resolve()?;
+    compress_validated_views(
+        windows,
+        noise_bits,
+        mode,
+        shape,
+        EncodePolicy {
+            flags,
+            max_packet_bytes,
+        },
+        try_transform_skip,
+    )
+}
+
+fn compress_validated_views(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: lpc::LpcMode,
+    shape: EncodeShape,
+    policy: EncodePolicy,
+    try_transform_skip: bool,
+) -> LmlResult<Vec<u8>> {
     if noise_bits == 0 {
-        encode_maybe_skip(
-            windows,
-            shape.n_ch,
-            shape.t,
-            shape.n_levels,
-            noise_bits,
-            shape.flags,
-            mode,
-        )
+        encode_maybe_skip_explicit(windows, shape, noise_bits, policy, try_transform_skip, mode)
     } else {
         let shifted: Vec<Vec<i64>> = windows
             .iter()
             .map(|w| w.iter().map(|&v| v >> noise_bits).collect())
             .collect();
         let shifted_views: Vec<&[i64]> = shifted.iter().map(|v| v.as_slice()).collect();
-        encode_maybe_skip(
+        encode_maybe_skip_explicit(
             &shifted_views,
-            shape.n_ch,
-            shape.t,
-            shape.n_levels,
+            shape,
             noise_bits,
-            shape.flags,
+            policy,
+            try_transform_skip,
             mode,
         )
     }
@@ -1610,6 +1799,49 @@ pub fn encode_one_channel(
     try_bit_pack: bool,
     try_extended_lpc: bool,
 ) -> LmlResult<ChannelEncodeOutput> {
+    encode_one_channel_impl(
+        signal_ch,
+        n_levels,
+        mode,
+        try_arithmetic,
+        try_bit_pack,
+        try_extended_lpc,
+        None,
+    )
+}
+
+/// Bounded variant used by graph runtimes. Refuses an oversized Golomb
+/// fallback before allocating its payload.
+#[doc(hidden)]
+pub fn encode_one_channel_bounded(
+    signal_ch: &[i64],
+    n_levels: u8,
+    mode: lpc::LpcMode,
+    try_arithmetic: bool,
+    try_bit_pack: bool,
+    try_extended_lpc: bool,
+    max_payload_bytes: usize,
+) -> LmlResult<ChannelEncodeOutput> {
+    encode_one_channel_impl(
+        signal_ch,
+        n_levels,
+        mode,
+        try_arithmetic,
+        try_bit_pack,
+        try_extended_lpc,
+        Some(max_payload_bytes),
+    )
+}
+
+fn encode_one_channel_impl(
+    signal_ch: &[i64],
+    n_levels: u8,
+    mode: lpc::LpcMode,
+    try_arithmetic: bool,
+    try_bit_pack: bool,
+    try_extended_lpc: bool,
+    max_payload_bytes: Option<usize>,
+) -> LmlResult<ChannelEncodeOutput> {
     // Same split as the lossy target-BPS path (MiMo #10 dedup — `forward_subbands`
     // was extracted from this very match, its doc notes it "Mirrors
     // encode_one_channel's split"; now this calls it instead of re-inlining).
@@ -1624,6 +1856,7 @@ pub fn encode_one_channel(
     let mut bp_savings: usize = 0;
     #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
     let n_subbands = subbands.len();
+    let mut remaining_payload = max_payload_bytes;
 
     for (sb_idx, sub) in subbands.iter().enumerate() {
         // Per-subband AIC ceiling (Burg's N/8 rule). The mode wrapper
@@ -1663,7 +1896,11 @@ pub fn encode_one_channel(
             local_meta.extend_from_slice(&c.to_le_bytes());
         }
 
-        let golomb_bytes = golomb::encode_dense(&residual)?;
+        let golomb_bytes = if let Some(limit) = remaining_payload {
+            golomb::encode_dense_bounded(&residual, limit)?
+        } else {
+            golomb::encode_dense(&residual)?
+        };
 
         // ADR 0023 Track B1/B5+: experimental per-subband candidate
         // selection. Cfg-gated so default builds (no experimental
@@ -1675,6 +1912,13 @@ pub fn encode_one_channel(
         {
             let _ = try_arithmetic;
             let _ = try_bit_pack;
+            if let Some(remaining) = &mut remaining_payload {
+                *remaining = remaining.checked_sub(golomb_bytes.len()).ok_or_else(|| {
+                    LmlError::InvalidHeader(
+                        "encoded channel payload exceeded declared limit".into(),
+                    )
+                })?;
+            }
             local_payload.extend_from_slice(&golomb_bytes);
             continue;
         }
@@ -1754,6 +1998,16 @@ pub fn encode_one_channel(
         #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
         {
             bp_savings += savings;
+            let selected_len = winner_bytes
+                .as_ref()
+                .map_or(golomb_bytes.len(), alloc::vec::Vec::len);
+            if let Some(remaining) = &mut remaining_payload {
+                *remaining = remaining.checked_sub(selected_len).ok_or_else(|| {
+                    LmlError::InvalidHeader(
+                        "encoded channel payload exceeded declared limit".into(),
+                    )
+                })?;
+            }
             sb_results.push(SubbandResult {
                 golomb_bytes,
                 winner_tag,
@@ -2220,76 +2474,230 @@ fn find_magic_offset(data: &[u8]) -> LmlResult<usize> {
 /// win, and declaring a requirement those packets do not have would lock
 /// baseline readers out of data they could read perfectly well.
 ///
-/// Exact for every packet shape that can appear in an LML bundle or an archive
-/// entry: those are strict-lossless (track-1) packets, which carry no per-subband
-/// tags at all, so the flag test below is conclusive.
-///
-/// Conservative in one case, stated rather than hidden: a packet that is both
-/// track-2 AND per-subband-tagged reports `true` without walking its subbands.
-/// Such packets are lossy and no current producer places one in a bundle or an
-/// archive, so this over-declares nothing in practice — but it would rather
-/// over-declare than under-declare, because under-declaring is the failure that
-/// hands a reader bytes it cannot decode.
+/// Exact for strict-lossless and track-2 packets. Tagged streams are walked
+/// without invoking arithmetic decoders: finding `0x02` or `0x03` is enough to
+/// declare the capability, while baseline tags are decoded only far enough to
+/// find the next subband boundary.
 pub fn requires_arithmetic_coders(packet: &[u8]) -> bool {
-    let Some(offset) = packet
-        .windows(4)
-        .take(129)
-        .position(|window| window == b"LML1")
-    else {
+    let Ok(offset) = find_magic_offset(packet) else {
         return false;
     };
-    let Some(flags) = packet.get(offset + 9) else {
+    let data = &packet[offset..];
+    if data.len() < HEADER_SIZE {
+        return false;
+    }
+    let n_ch = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let t = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let n_levels = data[8];
+    let flags = data[9];
+    let lpc_len = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
+    let payload_len = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
+    let Some(payload_start) = HEADER_SIZE.checked_add(lpc_len) else {
         return false;
     };
-    // Per-subband tags exist only when BOTH flags are set; either alone cannot
-    // carry a coder tag, so neither alone can require the range coders.
-    flags & FLAG_BIT_TRACK2_MODE != 0 && flags & FLAG_BIT_PER_SUBBAND_TAG != 0
+    let Some(payload_end) = payload_start.checked_add(payload_len) else {
+        return false;
+    };
+    if payload_end > data.len() || n_ch == 0 || t == 0 || n_levels > 3 {
+        return false;
+    }
+    let payload = &data[payload_start..payload_end];
+
+    if flags & FLAG_BIT_TRACK2_MODE != 0 {
+        let lpc_data = &data[HEADER_SIZE..payload_start];
+        let n_subbands = match lpc_data {
+            [MODE_BOUNDED_MAE, ..] => 1,
+            [MODE_TARGET_BPS, n_subbands, ..] if *n_subbands != 0 => *n_subbands as usize,
+            _ => return false,
+        };
+        return tagged_payload_requires_arithmetic(payload, n_ch, n_subbands, None);
+    }
+    if flags & FLAG_BIT_PER_SUBBAND_TAG == 0 {
+        return false;
+    }
+    let lengths = subband_lengths(t, n_levels);
+    tagged_payload_requires_arithmetic(payload, n_ch, lengths.len(), Some(&lengths))
+}
+
+fn tagged_payload_requires_arithmetic(
+    payload: &[u8],
+    channels: usize,
+    subbands: usize,
+    sample_counts: Option<&[usize]>,
+) -> bool {
+    let mut offset = 0usize;
+    for _channel in 0..channels {
+        for subband in 0..subbands {
+            let Some(&tag) = payload.get(offset) else {
+                return false;
+            };
+            if matches!(tag, PAYLOAD_CODER_ARITHMETIC | PAYLOAD_CODER_ARITH_CTX) {
+                return true;
+            }
+            let data = &payload[offset + 1..];
+            let consumed = match tag {
+                PAYLOAD_CODER_GOLOMB => scan_golomb_len(data),
+                PAYLOAD_CODER_ZRLE if sample_counts.is_none() => scan_zrle_len(data),
+                SUBBAND_TAG_BIT_PACK => sample_counts
+                    .and_then(|counts| counts.get(subband))
+                    .and_then(|samples| scan_bit_pack_len(data, *samples)),
+                _ => None,
+            };
+            let Some(consumed) = consumed else {
+                return false;
+            };
+            let Some(next) = offset
+                .checked_add(1)
+                .and_then(|position| position.checked_add(consumed))
+            else {
+                return false;
+            };
+            if next > payload.len() {
+                return false;
+            }
+            offset = next;
+        }
+    }
+    false
+}
+
+/// Validate one Golomb stream and return its encoded length without decoding
+/// values or allocating from attacker-controlled headers.
+fn scan_golomb_len(data: &[u8]) -> Option<usize> {
+    let (&k, rest) = data.split_first()?;
+    if k > 31 || rest.len() < 2 {
+        return None;
+    }
+    let n_total = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+    if n_total == 0 {
+        return Some(3);
+    }
+    let payload = &rest[2..];
+    let mut bit = 0usize;
+    for _ in 0..n_total {
+        loop {
+            let byte = *payload.get(bit / 8)?;
+            let present = byte & (1 << (7 - (bit % 8))) != 0;
+            bit = bit.checked_add(1)?;
+            if present {
+                break;
+            }
+        }
+        bit = bit.checked_add(k as usize)?;
+        if bit > payload.len().checked_mul(8)? {
+            return None;
+        }
+    }
+    3usize.checked_add(bit.div_ceil(8))
+}
+
+/// Validate one track-2 ZRLE stream without materializing its declared output.
+fn scan_zrle_len(data: &[u8]) -> Option<usize> {
+    data.get(..4)?;
+    let runs = scan_golomb_len(&data[4..])?;
+    let values_start = 4usize.checked_add(runs)?;
+    let values = scan_golomb_len(data.get(values_start..)?)?;
+    values_start.checked_add(values)
+}
+
+fn scan_bit_pack_len(data: &[u8], samples: usize) -> Option<usize> {
+    let bits = *data.first()?;
+    if !(bit_pack::MIN_BIT_PACK_BITS..=bit_pack::MAX_BIT_PACK_BITS).contains(&bits) {
+        return None;
+    }
+    let payload_bits = samples.checked_mul(bits as usize)?;
+    let consumed = 1usize.checked_add(payload_bits.div_ceil(8))?;
+    (consumed <= data.len()).then_some(consumed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::requires_arithmetic_coders;
 
-    /// Minimal packet header: magic at 0, flags at byte 9.
-    fn packet_with_flags(flags: u8) -> alloc::vec::Vec<u8> {
-        let mut bytes = alloc::vec![0_u8; 32];
-        bytes[..4].copy_from_slice(b"LML1");
-        bytes[9] = flags;
-        bytes
-    }
-
     #[test]
     fn strict_lossless_packets_never_require_the_range_coders() {
-        // The conclusive case: every packet an LML bundle or an archive entry
-        // can contain is track-1, which carries no per-subband tags at all. If
-        // this regressed, those containers would start declaring a capability
-        // their data does not need and lock out baseline readers.
-        assert!(!requires_arithmetic_coders(&packet_with_flags(0)));
+        let signal = alloc::vec![(0..128).map(|value| value * 17 - 300).collect()];
+        let packet = compress(&signal, 0).expect("baseline packet");
+        assert!(!requires_arithmetic_coders(&packet));
     }
 
     #[test]
-    fn either_flag_alone_cannot_carry_a_coder_tag() {
-        // Per-subband tags exist only when BOTH are set. Treating either alone
-        // as requiring the coders would over-declare on ordinary packets.
-        assert!(!requires_arithmetic_coders(&packet_with_flags(
-            super::FLAG_BIT_TRACK2_MODE
-        )));
-        assert!(!requires_arithmetic_coders(&packet_with_flags(
-            super::FLAG_BIT_PER_SUBBAND_TAG
-        )));
+    fn tagged_payload_scanner_distinguishes_arithmetic_tags() {
+        let golomb = golomb::encode_dense(&[0, 1, -1, 2]).expect("golomb");
+        let mut baseline = alloc::vec![PAYLOAD_CODER_GOLOMB];
+        baseline.extend_from_slice(&golomb);
+        assert!(!tagged_payload_requires_arithmetic(&baseline, 1, 1, None));
+        assert!(tagged_payload_requires_arithmetic(
+            &[PAYLOAD_CODER_ARITHMETIC],
+            1,
+            1,
+            None
+        ));
     }
 
     #[test]
-    fn a_per_subband_tagged_track2_packet_requires_them() {
-        assert!(requires_arithmetic_coders(&packet_with_flags(
-            super::FLAG_BIT_TRACK2_MODE | super::FLAG_BIT_PER_SUBBAND_TAG
-        )));
+    fn tagged_packet_declares_arithmetic_requirement() {
+        let mut packet = alloc::vec![0_u8; HEADER_SIZE + 1];
+        packet[..4].copy_from_slice(b"LML1");
+        packet[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        packet[6..8].copy_from_slice(&1_u16.to_le_bytes());
+        packet[9] = FLAG_BIT_PER_SUBBAND_TAG;
+        packet[14..18].copy_from_slice(&1_u32.to_le_bytes());
+        packet[HEADER_SIZE] = PAYLOAD_CODER_ARITHMETIC;
+        assert!(requires_arithmetic_coders(&packet));
+    }
+
+    #[cfg(feature = "experimental_arithmetic")]
+    #[test]
+    fn capability_scan_uses_same_validated_prefix_as_decoder() {
+        let signal = [alloc::vec![0_i64; 4096]];
+        let views = [signal[0].as_slice()];
+        let packet = compress_with_mode_views_explicit(
+            &views,
+            0,
+            lpc::LpcMode::Fixed,
+            EncodeFeatures {
+                arithmetic: true,
+                ..EncodeFeatures::default()
+            },
+        )
+        .expect("arithmetic packet");
+        assert!(requires_arithmetic_coders(&packet));
+        let magic = find_magic_offset(&packet).expect("canonical prefix");
+        let mut disguised = b"X LML1\n".to_vec();
+        disguised.extend_from_slice(&packet[magic..]);
+
+        assert_eq!(
+            decompress(&disguised).expect("valid alternate prefix"),
+            signal
+        );
+        assert!(requires_arithmetic_coders(&disguised));
+    }
+
+    #[test]
+    fn channel_payload_limit_rejects_zero_channels() {
+        assert!(channel_payload_limit(Some(1024), 0, 1, 0).is_err());
     }
 
     #[test]
     fn a_packet_without_the_magic_is_not_claimed() {
         // Never assert a requirement about bytes that are not an LML packet.
         assert!(!requires_arithmetic_coders(b"not an lml packet at all"));
+    }
+
+    #[test]
+    fn capability_scan_does_not_trust_zrle_declared_extent() {
+        let mut packet = alloc::vec![0_u8; HEADER_SIZE];
+        packet[..4].copy_from_slice(MAGIC);
+        packet[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        packet[6..8].copy_from_slice(&1_u16.to_le_bytes());
+        packet[9] = FLAG_BIT_TRACK2_MODE;
+        packet[10..14].copy_from_slice(&2_u32.to_le_bytes());
+        packet[14..18].copy_from_slice(&5_u32.to_le_bytes());
+        packet.extend_from_slice(&[MODE_TARGET_BPS, 1]);
+        packet.extend_from_slice(&[PAYLOAD_CODER_ZRLE, 0xff, 0xff, 0xff, 0x7f]);
+
+        assert!(!requires_arithmetic_coders(&packet));
     }
 
     use super::*;
@@ -2330,8 +2738,12 @@ mod tests {
         let (n_ch, t) = (signal.len(), signal[0].len());
         let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
         let flags = (false, false, false);
+        let policy = EncodePolicy {
+            flags,
+            max_packet_bytes: None,
+        };
         let skip_pkt =
-            encode_channels_core(&views, n_ch, t, 0, 0, flags, lpc::LpcMode::default()).unwrap();
+            encode_channels_core(&views, n_ch, t, 0, 0, policy, lpc::LpcMode::default()).unwrap();
         // Header n_levels field must read 0 (the decoder branches on it), and the packet must decode.
         assert_eq!(decompress(&skip_pkt).unwrap(), signal);
         // Sanity: the full-transform packet also round-trips (the other keep-best candidate).
@@ -2342,7 +2754,7 @@ mod tests {
             t,
             full_levels,
             0,
-            flags,
+            policy,
             lpc::LpcMode::default(),
         )
         .unwrap();
@@ -2364,6 +2776,10 @@ mod tests {
         let (n_ch, t) = (signal.len(), signal[0].len());
         let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
         let flags = (false, false, false);
+        let policy = EncodePolicy {
+            flags,
+            max_packet_bytes: None,
+        };
         let full_levels = compute_n_levels(t);
         let baseline = encode_channels_core(
             &views,
@@ -2371,7 +2787,7 @@ mod tests {
             t,
             full_levels,
             0,
-            flags,
+            policy,
             lpc::LpcMode::default(),
         )
         .unwrap();

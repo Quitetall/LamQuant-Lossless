@@ -51,15 +51,25 @@ fn compute_k(zz: &[u64]) -> u8 {
     if count == 0 {
         return 0;
     }
-    let mean = sum as f64 / count as f64;
-    if mean < 1.0 {
-        return 0;
+    compute_k_from_mean(sum as f64 / count as f64)
+}
+
+fn compute_k_bounded(zz: &[u64]) -> u8 {
+    let mut sum = 0_u128;
+    let mut count = 0_u128;
+    for &value in zz {
+        if value != 0 {
+            sum += u128::from(value);
+            count += 1;
+        }
     }
-    // floor(log2(mean)) via bit manipulation
-    let mut k: u8 = 0;
-    let mut tmp = mean;
-    while tmp >= 2.0 && k < 31 {
-        tmp *= 0.5;
+    compute_k_from_mean(sum as f64 / count as f64)
+}
+
+fn compute_k_from_mean(mut mean: f64) -> u8 {
+    let mut k = 0_u8;
+    while mean >= 2.0 && k < MAX_K {
+        mean *= 0.5;
         k += 1;
     }
     k
@@ -76,8 +86,24 @@ fn compute_k(zz: &[u64]) -> u8 {
 ///   - q > MAX_Q after `v >> k` (legitimately-huge residual that
 ///     silent saturation would replace with a wrong value).
 pub fn encode_dense(coeffs: &[i64]) -> Result<Vec<u8>, GolombError> {
+    encode_dense_impl(coeffs, None)
+}
+
+/// Encode while refusing the exact output size before allocation if it exceeds
+/// `max_bytes`.
+pub fn encode_dense_bounded(coeffs: &[i64], max_bytes: usize) -> Result<Vec<u8>, GolombError> {
+    encode_dense_impl(coeffs, Some(max_bytes))
+}
+
+fn encode_dense_impl(coeffs: &[i64], max_bytes: Option<usize>) -> Result<Vec<u8>, GolombError> {
     let n_total = coeffs.len();
     if n_total == 0 {
+        if max_bytes.is_some_and(|limit| limit < 3) {
+            return Err(GolombError::OutputLimitExceeded {
+                encoded_bytes: 3,
+                limit: max_bytes.unwrap_or(0),
+            });
+        }
         return Ok(vec![0, 0, 0]);
     }
     if n_total > u16::MAX as usize {
@@ -103,13 +129,28 @@ pub fn encode_dense(coeffs: &[i64]) -> Result<Vec<u8>, GolombError> {
     // Zigzag all values. After the i64::MIN early-return above no
     // value can reach `u64::MAX`.
     let zz: Vec<u64> = coeffs.iter().map(|&v| zigzag_encode(v)).collect();
-    let k = compute_k(&zz);
+    let k = if max_bytes.is_some() {
+        compute_k_bounded(&zz)
+    } else {
+        compute_k(&zz)
+    };
+    let capacity = if let Some(limit) = max_bytes {
+        let encoded_bytes = encoded_byte_len_for(&zz, k)?;
+        if encoded_bytes > limit {
+            return Err(GolombError::OutputLimitExceeded {
+                encoded_bytes,
+                limit,
+            });
+        }
+        encoded_bytes
+    } else {
+        3 + n_total * 16
+    };
     let k_u64 = k as u64;
     let k_i32 = k as i32;
     let k_mask: u64 = if k > 0 { (1u64 << k_u64) - 1 } else { 0 };
 
-    // Pre-allocate worst case: header + ~16 bytes per value
-    let mut out = Vec::with_capacity(3 + n_total * 16);
+    let mut out = Vec::with_capacity(capacity);
     out.push(k);
     out.push((n_total & 0xFF) as u8);
     out.push(((n_total >> 8) & 0xFF) as u8);
@@ -183,7 +224,40 @@ pub fn encode_dense(coeffs: &[i64]) -> Result<Vec<u8>, GolombError> {
         out.push(((bitbuf << (8 - bitpos) as u64) & 0xFF) as u8);
     }
 
+    if max_bytes.is_some() {
+        debug_assert_eq!(out.len(), capacity);
+    }
     Ok(out)
+}
+
+fn encoded_byte_len_for(zz: &[u64], k: u8) -> Result<usize, GolombError> {
+    let mut bits = 0_u128;
+    for (index, &value) in zz.iter().enumerate() {
+        let q = value >> k;
+        if q > MAX_Q {
+            return Err(GolombError::OversizeQ {
+                index,
+                q_estimate: q,
+            });
+        }
+        bits = bits.checked_add(u128::from(q) + 1 + u128::from(k)).ok_or(
+            GolombError::OutputLimitExceeded {
+                encoded_bytes: usize::MAX,
+                limit: usize::MAX,
+            },
+        )?;
+    }
+    let payload_bytes = bits.div_ceil(8);
+    let total = payload_bytes
+        .checked_add(3)
+        .ok_or(GolombError::OutputLimitExceeded {
+            encoded_bytes: usize::MAX,
+            limit: usize::MAX,
+        })?;
+    usize::try_from(total).map_err(|_| GolombError::OutputLimitExceeded {
+        encoded_bytes: usize::MAX,
+        limit: usize::MAX,
+    })
 }
 
 /// Decode dense Golomb-Rice bitstream.
@@ -482,6 +556,18 @@ mod tests {
             Err(GolombError::HeaderOverflow { n_total, .. })
                 if n_total == (u16::MAX as usize) + 1 => {}
             other => panic!("expected HeaderOverflow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bounded_encoder_rejects_huge_unary_output_before_allocation() {
+        let result = encode_dense_bounded(&[i64::MAX], 1024);
+        match result {
+            Err(GolombError::OutputLimitExceeded {
+                encoded_bytes,
+                limit: 1024,
+            }) if encoded_bytes > 1024 => {}
+            other => panic!("expected bounded output rejection, got {other:?}"),
         }
     }
 }

@@ -17,10 +17,17 @@ use rayon::prelude::*;
 
 use lamquant_lml_mcu::error::LmlResult;
 use lamquant_lml_mcu::lml::{
-    self, encode_one_channel, finalize_channels, parse_lml_channels, prepare_encode,
-    synthesize_channel_signal, validate_and_levels, DecodePlan,
+    self, channel_payload_limit, encode_one_channel, encode_one_channel_bounded, finalize_channels,
+    parse_lml_channels, prepare_encode, synthesize_channel_signal, validate_and_levels, DecodePlan,
+    EncodeFeatures, EncodeShape,
 };
 use lamquant_lml_mcu::lpc::LpcMode;
+
+#[derive(Clone, Copy)]
+struct ParallelEncodePolicy {
+    flags: (bool, bool, bool),
+    max_packet_bytes: Option<usize>,
+}
 
 /// Assemble one LML packet at a fixed `n_levels` via rayon-parallel per-channel encode. Byte-identical
 /// to the MCU serial `encode_channels_core` at the same `n_levels` (same primitives, order-preserving
@@ -33,17 +40,47 @@ fn assemble_at_levels_parallel(
     t: usize,
     n_levels: u8,
     noise_bits: u8,
-    flags: (bool, bool, bool),
+    policy: ParallelEncodePolicy,
     mode: LpcMode,
 ) -> LmlResult<Vec<u8>> {
+    let per_channel_limit = channel_payload_limit(policy.max_packet_bytes, n_ch, t, n_levels)?;
     let per_channel = channels
         .par_iter()
-        .map(|&ch| encode_one_channel(ch, n_levels, mode, flags.0, flags.1, flags.2))
+        .map(|&ch| {
+            if policy.max_packet_bytes.is_some() {
+                encode_one_channel_bounded(
+                    ch,
+                    n_levels,
+                    mode,
+                    policy.flags.0,
+                    policy.flags.1,
+                    policy.flags.2,
+                    per_channel_limit,
+                )
+            } else {
+                encode_one_channel(
+                    ch,
+                    n_levels,
+                    mode,
+                    policy.flags.0,
+                    policy.flags.1,
+                    policy.flags.2,
+                )
+            }
+        })
         .collect::<LmlResult<Vec<_>>>()?;
     let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
-    Ok(lml::assemble_lml_packet(
-        n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload,
-    ))
+    let packet = lml::assemble_lml_packet(n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload);
+    if let Some(limit) = policy.max_packet_bytes {
+        if packet.len() > limit {
+            return Err(lamquant_lml_mcu::error::LmlError::InvalidHeader(format!(
+                "encoded packet requires {} bytes, limit is {}",
+                packet.len(),
+                limit
+            )));
+        }
+    }
+    Ok(packet)
 }
 
 /// Adaptive transform-skip keep-best (parallel mirror of `lml::encode_maybe_skip`): encode at
@@ -54,17 +91,25 @@ fn assemble_at_levels_parallel(
 /// selection rule added there MUST be added here in lockstep, or `byte_equal_backends` diverges.
 fn keep_best_levels_parallel(
     channels: &[&[i64]],
-    n_ch: usize,
-    t: usize,
-    full_levels: u8,
+    shape: EncodeShape,
     noise_bits: u8,
-    flags: (bool, bool, bool),
+    policy: ParallelEncodePolicy,
+    try_transform_skip: bool,
     mode: LpcMode,
 ) -> LmlResult<Vec<u8>> {
-    let full =
-        assemble_at_levels_parallel(channels, n_ch, t, full_levels, noise_bits, flags, mode)?;
-    if lml::transform_skip_enabled() && full_levels > 0 {
-        let skip = assemble_at_levels_parallel(channels, n_ch, t, 0, noise_bits, flags, mode)?;
+    let full = assemble_at_levels_parallel(
+        channels,
+        shape.n_ch,
+        shape.t,
+        shape.n_levels,
+        noise_bits,
+        policy,
+        mode,
+    )?;
+    if try_transform_skip && shape.n_levels > 0 {
+        let skip = assemble_at_levels_parallel(
+            channels, shape.n_ch, shape.t, 0, noise_bits, policy, mode,
+        )?;
         if skip.len() < full.len() {
             return Ok(skip);
         }
@@ -85,11 +130,18 @@ pub fn compress_with_mode_parallel(
     let views: Vec<&[i64]> = prep.signal.iter().map(|v| v.as_slice()).collect();
     keep_best_levels_parallel(
         &views,
-        prep.n_ch,
-        prep.t,
-        prep.n_levels,
+        EncodeShape {
+            n_ch: prep.n_ch,
+            t: prep.t,
+            n_levels: prep.n_levels,
+            flags: prep.flags,
+        },
         noise_bits,
-        prep.flags,
+        ParallelEncodePolicy {
+            flags: prep.flags,
+            max_packet_bytes: None,
+        },
+        lml::transform_skip_enabled(),
         mode,
     )
 }
@@ -142,16 +194,55 @@ pub fn compress_with_mode_parallel_views(
     let n_ch = windows.len();
     let t = windows.first().map(|w| w.len()).unwrap_or(0);
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
+    compress_validated_views(
+        windows,
+        noise_bits,
+        mode,
+        shape,
+        ParallelEncodePolicy {
+            flags: shape.flags,
+            max_packet_bytes: None,
+        },
+        lml::transform_skip_enabled(),
+    )
+}
+
+/// Parallel zero-copy compression with explicit experimental choices.
+///
+/// Packet selection does not consult process environment variables.
+pub fn compress_with_mode_parallel_views_explicit(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: LpcMode,
+    features: EncodeFeatures,
+) -> LmlResult<Vec<u8>> {
+    let n_ch = windows.len();
+    let t = windows.first().map(|w| w.len()).unwrap_or(0);
+    let shape = validate_and_levels(n_ch, t, noise_bits)?;
+    let (flags, try_transform_skip, max_packet_bytes) = features.resolve()?;
+    compress_validated_views(
+        windows,
+        noise_bits,
+        mode,
+        shape,
+        ParallelEncodePolicy {
+            flags,
+            max_packet_bytes,
+        },
+        try_transform_skip,
+    )
+}
+
+fn compress_validated_views(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: LpcMode,
+    shape: EncodeShape,
+    policy: ParallelEncodePolicy,
+    try_transform_skip: bool,
+) -> LmlResult<Vec<u8>> {
     if noise_bits == 0 {
-        keep_best_levels_parallel(
-            windows,
-            shape.n_ch,
-            shape.t,
-            shape.n_levels,
-            noise_bits,
-            shape.flags,
-            mode,
-        )
+        keep_best_levels_parallel(windows, shape, noise_bits, policy, try_transform_skip, mode)
     } else {
         let shifted: Vec<Vec<i64>> = windows
             .iter()
@@ -160,11 +251,10 @@ pub fn compress_with_mode_parallel_views(
         let shifted_views: Vec<&[i64]> = shifted.iter().map(|v| v.as_slice()).collect();
         keep_best_levels_parallel(
             &shifted_views,
-            shape.n_ch,
-            shape.t,
-            shape.n_levels,
+            shape,
             noise_bits,
-            shape.flags,
+            policy,
+            try_transform_skip,
             mode,
         )
     }

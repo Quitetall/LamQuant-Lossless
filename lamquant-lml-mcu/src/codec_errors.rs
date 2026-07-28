@@ -38,6 +38,8 @@ pub enum GolombError {
     /// Encoder rejects; downstream would silently saturate and
     /// the decoder would emit different samples than the input.
     OversizeQ { index: usize, q_estimate: u64 },
+    /// Exact encoded output would exceed a caller-provided allocation bound.
+    OutputLimitExceeded { encoded_bytes: usize, limit: usize },
     /// Decoder header declared k outside the supported range
     /// (k > MAX_K = 31). Refuses rather than silently zero-
     /// filling the subband.
@@ -82,6 +84,13 @@ impl fmt::Display for GolombError {
                 "golomb: encoder refused q ≈ {} at index {} (exceeds MAX_Q); silent saturation \
                  would desync the bitstream",
                 q_estimate, index
+            ),
+            Self::OutputLimitExceeded {
+                encoded_bytes,
+                limit,
+            } => write!(
+                f,
+                "golomb: encoded output requires {encoded_bytes} bytes, limit is {limit}"
             ),
             Self::OversizeK { k } => {
                 write!(f, "golomb: decoder header declares k = {} (MAX_K = 31)", k)

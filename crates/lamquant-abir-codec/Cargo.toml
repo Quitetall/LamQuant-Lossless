@@ -12,6 +12,7 @@ default = ["std"]
 # ever handles baseline LML should not link a second decoder, and firmware does
 # not depend on this crate at all.
 optimum = ["dep:lamquant-lml-optimum"]
+experimental-arithmetic = ["std", "lamquant-lml-mcu/experimental_arithmetic"]
 
 std = [
     "semantic-abir/std",
