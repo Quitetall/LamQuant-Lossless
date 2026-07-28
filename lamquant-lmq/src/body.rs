@@ -24,6 +24,7 @@ pub const LMQ_BODY_VERSION: u8 = 1;
 
 /// Failure encoding/decoding a neural body.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BodyError {
     /// Ran out of bytes parsing the body.
     Truncated,
@@ -37,6 +38,25 @@ pub enum BodyError {
     BadModel,
     /// The entropy coder rejected the stream/model.
     Rans,
+    /// A caller- or implementation-defined resource ceiling was exceeded.
+    ResourceLimit {
+        resource: BodyResource,
+        actual: u64,
+        limit: u64,
+    },
+}
+
+/// Heap or wire resource governed by [`BodyBounds`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BodyResource {
+    Symbols,
+    ScheduleBytes,
+    RansBytes,
+    Alphabet,
+    ModelTotal,
+    WorkingBytes,
+    BodyBytes,
 }
 
 /// Upper bound on the rANS total (Σ counts). The real FSQ model normalizes to
@@ -45,16 +65,162 @@ pub enum BodyError {
 /// `i32::MAX`, so the `start` table can never wrap.
 pub const MAX_MODEL_TOTAL: u64 = 1 << 20;
 
+/// Explicit allocation ceilings for an LMQ body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BodyBounds {
+    pub max_symbols: u32,
+    pub max_schedule_bytes: u32,
+    pub max_rans_bytes: u32,
+    pub max_alphabet: u16,
+    pub max_model_total: u32,
+    pub max_working_bytes: u64,
+    pub max_body_bytes: u32,
+}
+
+impl Default for BodyBounds {
+    fn default() -> Self {
+        Self {
+            max_symbols: lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32,
+            max_schedule_bytes: 64 * 1024 * 1024,
+            max_rans_bytes: 64 * 1024 * 1024,
+            max_alphabet: u16::MAX,
+            max_model_total: MAX_MODEL_TOTAL as u32,
+            // Worst permitted schedule + symbols + model tables under the
+            // defaults, rounded up to a stable whole-MiB ceiling.
+            max_working_bytes: 81 * 1024 * 1024,
+            max_body_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
 /// Frame FSQ `tokens` (symbols in `[0, counts.len())`), the per-timestep
 /// `schedule`, and the frequency `counts` (the rANS model) into a self-describing
 /// body. `decode_body(encode_body(..)) == (tokens, schedule)`.
 pub fn encode_body(tokens: &[i64], schedule: &[u8], counts: &[i32]) -> Result<Vec<u8>, BodyError> {
+    encode_body_bounded(tokens, schedule, counts, BodyBounds::default())
+}
+
+/// [`encode_body`] with caller-supplied allocation ceilings.
+pub fn encode_body_bounded(
+    tokens: &[i64],
+    schedule: &[u8],
+    counts: &[i32],
+    bounds: BodyBounds,
+) -> Result<Vec<u8>, BodyError> {
+    enforce_limit(
+        BodyResource::Symbols,
+        tokens.len() as u64,
+        u64::from(
+            bounds
+                .max_symbols
+                .min(lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32),
+        ),
+    )?;
+    enforce_limit(
+        BodyResource::ScheduleBytes,
+        schedule.len() as u64,
+        u64::from(bounds.max_schedule_bytes),
+    )?;
+    enforce_limit(
+        BodyResource::Alphabet,
+        counts.len() as u64,
+        u64::from(bounds.max_alphabet),
+    )?;
+    let rans_capacity = tokens
+        .len()
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(16))
+        .ok_or(BodyError::ResourceLimit {
+            resource: BodyResource::RansBytes,
+            actual: u64::MAX,
+            limit: u64::from(bounds.max_rans_bytes),
+        })?;
+    enforce_limit(
+        BodyResource::RansBytes,
+        rans_capacity as u64,
+        u64::from(bounds.max_rans_bytes),
+    )?;
+    let mut model_total = 0_u64;
+    for &count in counts {
+        if count < 0 {
+            return Err(BodyError::BadModel);
+        }
+        model_total = model_total
+            .checked_add(count as u64)
+            .ok_or(BodyError::BadModel)?;
+    }
+    if model_total == 0 {
+        return Err(BodyError::EmptyModel);
+    }
+    if model_total > MAX_MODEL_TOTAL {
+        return Err(BodyError::BadModel);
+    }
+    enforce_limit(
+        BodyResource::ModelTotal,
+        model_total,
+        u64::from(bounds.max_model_total),
+    )?;
+    let minimum_working_bytes = (counts.len() as u64)
+        .checked_mul(8)
+        .and_then(|bytes| bytes.checked_add(rans_capacity as u64))
+        .ok_or(BodyError::ResourceLimit {
+            resource: BodyResource::WorkingBytes,
+            actual: u64::MAX,
+            limit: bounds.max_working_bytes,
+        })?;
+    enforce_limit(
+        BodyResource::WorkingBytes,
+        minimum_working_bytes,
+        bounds.max_working_bytes,
+    )?;
     let (freq, start, m) = build_tables(counts)?;
     let rans_bytes = rans::encode(tokens, &freq, &start, m).map_err(|_| BodyError::Rans)?;
+    enforce_limit(
+        BodyResource::RansBytes,
+        rans_bytes.len() as u64,
+        u64::from(bounds.max_rans_bytes),
+    )?;
 
     // Fixed prefix is 15 bytes (version 1 + n_symbols 4 + alphabet 2 + sched_len
     // 4 + rans_len 4) + the counts + schedule + rANS.
-    let mut out = Vec::with_capacity(15 + counts.len() * 4 + schedule.len() + rans_bytes.len());
+    let body_bytes = 15_usize
+        .checked_add(
+            counts
+                .len()
+                .checked_mul(4)
+                .ok_or(BodyError::ResourceLimit {
+                    resource: BodyResource::BodyBytes,
+                    actual: u64::MAX,
+                    limit: u64::from(bounds.max_body_bytes),
+                })?,
+        )
+        .and_then(|bytes| bytes.checked_add(schedule.len()))
+        .and_then(|bytes| bytes.checked_add(rans_bytes.len()))
+        .ok_or(BodyError::ResourceLimit {
+            resource: BodyResource::BodyBytes,
+            actual: u64::MAX,
+            limit: u64::from(bounds.max_body_bytes),
+        })?;
+    enforce_limit(
+        BodyResource::BodyBytes,
+        body_bytes as u64,
+        u64::from(bounds.max_body_bytes),
+    )?;
+    let working_bytes = (counts.len() as u64)
+        .checked_mul(8)
+        .and_then(|bytes| bytes.checked_add(rans_capacity as u64))
+        .and_then(|bytes| bytes.checked_add(body_bytes as u64))
+        .ok_or(BodyError::ResourceLimit {
+            resource: BodyResource::WorkingBytes,
+            actual: u64::MAX,
+            limit: bounds.max_working_bytes,
+        })?;
+    enforce_limit(
+        BodyResource::WorkingBytes,
+        working_bytes,
+        bounds.max_working_bytes,
+    )?;
+    let mut out = Vec::with_capacity(body_bytes);
     out.push(LMQ_BODY_VERSION);
     out.extend_from_slice(&(tokens.len() as u32).to_le_bytes());
     out.extend_from_slice(&(counts.len() as u16).to_le_bytes());
@@ -73,28 +239,118 @@ pub fn encode_body(tokens: &[i64], schedule: &[u8], counts: &[i32]) -> Result<Ve
 /// the shell needs to reconstruct `NeuralTokens`). Every length field is
 /// bounds-checked (no panic on a crafted body).
 pub fn decode_body(buf: &[u8]) -> Result<(Vec<i64>, Vec<u8>, u16), BodyError> {
+    decode_body_bounded(buf, BodyBounds::default())
+}
+
+/// [`decode_body`] with caller-supplied allocation ceilings. Length fields are
+/// rejected before their corresponding heap allocation.
+pub fn decode_body_bounded(
+    buf: &[u8],
+    bounds: BodyBounds,
+) -> Result<(Vec<i64>, Vec<u8>, u16), BodyError> {
     let mut off = 0usize;
     let version = *buf.get(off).ok_or(BodyError::Truncated)?;
     off += 1;
     if version != LMQ_BODY_VERSION {
         return Err(BodyError::BadVersion(version));
     }
+    enforce_limit(
+        BodyResource::BodyBytes,
+        buf.len() as u64,
+        u64::from(bounds.max_body_bytes),
+    )?;
     let n_symbols = read_u32(buf, &mut off)? as usize;
+    enforce_limit(
+        BodyResource::Symbols,
+        n_symbols as u64,
+        u64::from(
+            bounds
+                .max_symbols
+                .min(lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32),
+        ),
+    )?;
     let alphabet = read_u16(buf, &mut off)? as usize;
-    let mut counts = vec![0i32; alphabet];
-    for c in counts.iter_mut() {
-        *c = read_u32(buf, &mut off)? as i32;
+    enforce_limit(
+        BodyResource::Alphabet,
+        alphabet as u64,
+        u64::from(bounds.max_alphabet),
+    )?;
+    let counts_start = off;
+    let mut model_total = 0_u64;
+    for _ in 0..alphabet {
+        let count = read_u32(buf, &mut off)?;
+        if count > i32::MAX as u32 {
+            return Err(BodyError::BadModel);
+        }
+        model_total = model_total
+            .checked_add(u64::from(count))
+            .ok_or(BodyError::BadModel)?;
     }
+    if model_total > MAX_MODEL_TOTAL {
+        return Err(BodyError::BadModel);
+    }
+    if model_total == 0 {
+        return Err(BodyError::EmptyModel);
+    }
+    enforce_limit(
+        BodyResource::ModelTotal,
+        model_total,
+        u64::from(bounds.max_model_total),
+    )?;
     let sched_len = read_u32(buf, &mut off)? as usize;
-    let schedule = read_bytes(buf, &mut off, sched_len)?.to_vec();
+    enforce_limit(
+        BodyResource::ScheduleBytes,
+        sched_len as u64,
+        u64::from(bounds.max_schedule_bytes),
+    )?;
+    let schedule_bytes = read_bytes(buf, &mut off, sched_len)?;
     let rans_len = read_u32(buf, &mut off)? as usize;
+    enforce_limit(
+        BodyResource::RansBytes,
+        rans_len as u64,
+        u64::from(bounds.max_rans_bytes),
+    )?;
     let rans_data = read_bytes(buf, &mut off, rans_len)?;
 
+    let working_bytes = (alphabet as u64)
+        .checked_mul(12)
+        .and_then(|bytes| bytes.checked_add(model_total.checked_mul(4)?))
+        .and_then(|bytes| bytes.checked_add((n_symbols as u64).checked_mul(8)?))
+        .and_then(|bytes| bytes.checked_add(sched_len as u64))
+        .ok_or(BodyError::ResourceLimit {
+            resource: BodyResource::WorkingBytes,
+            actual: u64::MAX,
+            limit: bounds.max_working_bytes,
+        })?;
+    enforce_limit(
+        BodyResource::WorkingBytes,
+        working_bytes,
+        bounds.max_working_bytes,
+    )?;
+
+    let mut counts_off = counts_start;
+    let mut counts = Vec::with_capacity(alphabet);
+    for _ in 0..alphabet {
+        counts.push(read_u32(buf, &mut counts_off)? as i32);
+    }
+    let schedule = schedule_bytes.to_vec();
     let (freq, start, m) = build_tables(&counts)?;
     let cum2sym = build_cum2sym(&freq, &start, m);
     let tokens = rans::decode(rans_data, &freq, &start, &cum2sym, m, n_symbols)
         .map_err(|_| BodyError::Rans)?;
     Ok((tokens, schedule, alphabet as u16))
+}
+
+fn enforce_limit(resource: BodyResource, actual: u64, limit: u64) -> Result<(), BodyError> {
+    if actual > limit {
+        Err(BodyError::ResourceLimit {
+            resource,
+            actual,
+            limit,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 // ── Model tables (the caller-supplied rANS model; `rans`'s own helpers are
@@ -198,6 +454,179 @@ mod tests {
     #[test]
     fn empty_model_is_rejected() {
         assert_eq!(encode_body(&[0], &[], &[]), Err(BodyError::EmptyModel));
+    }
+
+    #[test]
+    fn body_bounds_fail_before_large_field_allocations() {
+        let bounds = BodyBounds {
+            max_symbols: 2,
+            max_schedule_bytes: 1,
+            max_rans_bytes: 3,
+            ..BodyBounds::default()
+        };
+        assert!(matches!(
+            encode_body_bounded(&[0, 1, 0], &[], &[1, 1], bounds),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::Symbols,
+                ..
+            })
+        ));
+        assert!(matches!(
+            encode_body_bounded(
+                &[0],
+                &[],
+                &[1],
+                BodyBounds {
+                    max_symbols: 1,
+                    max_schedule_bytes: 0,
+                    max_rans_bytes: 19,
+                    ..BodyBounds::default()
+                },
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::RansBytes,
+                ..
+            })
+        ));
+
+        let mut body = Vec::new();
+        body.push(LMQ_BODY_VERSION);
+        body.extend_from_slice(&3u32.to_le_bytes());
+        assert!(matches!(
+            decode_body_bounded(&body, bounds),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::Symbols,
+                ..
+            })
+        ));
+
+        let encoded = encode_body(&[0], &[1, 2], &[1]).unwrap();
+        assert!(matches!(
+            decode_body_bounded(
+                &encoded,
+                BodyBounds {
+                    max_symbols: 1,
+                    max_schedule_bytes: 1,
+                    max_rans_bytes: u32::MAX,
+                    ..BodyBounds::default()
+                }
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::ScheduleBytes,
+                ..
+            })
+        ));
+        assert!(matches!(
+            decode_body_bounded(
+                &encoded,
+                BodyBounds {
+                    max_rans_bytes: 3,
+                    ..BodyBounds::default()
+                }
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::RansBytes,
+                ..
+            })
+        ));
+        assert!(matches!(
+            encode_body_bounded(
+                &[0, 1],
+                &[],
+                &[8, 8],
+                BodyBounds {
+                    max_working_bytes: 1,
+                    ..BodyBounds::default()
+                }
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::WorkingBytes,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn body_bounds_cover_aggregate_and_model_working_sets() {
+        let encoded = encode_body(&[0, 1], &[], &[8, 8]).unwrap();
+        assert!(matches!(
+            decode_body_bounded(
+                &encoded,
+                BodyBounds {
+                    max_model_total: 15,
+                    ..BodyBounds::default()
+                }
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::ModelTotal,
+                actual: 16,
+                limit: 15,
+            })
+        ));
+        assert!(matches!(
+            encode_body_bounded(
+                &[0, 1],
+                &[],
+                &[8, 8],
+                BodyBounds {
+                    max_body_bytes: 1,
+                    ..BodyBounds::default()
+                }
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::BodyBytes,
+                ..
+            })
+        ));
+        assert!(matches!(
+            decode_body_bounded(
+                &encoded,
+                BodyBounds {
+                    max_working_bytes: 1,
+                    ..BodyBounds::default()
+                }
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::WorkingBytes,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn crafted_large_alphabet_is_preflighted_without_allocation() {
+        let mut body = Vec::new();
+        body.push(LMQ_BODY_VERSION);
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(decode_body(&body), Err(BodyError::Truncated));
+        assert!(matches!(
+            decode_body_bounded(
+                &body,
+                BodyBounds {
+                    max_alphabet: 16,
+                    ..BodyBounds::default()
+                }
+            ),
+            Err(BodyError::ResourceLimit {
+                resource: BodyResource::Alphabet,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_sum_large_model_fails_during_preflight() {
+        let mut body = Vec::with_capacity(15 + usize::from(u16::MAX) * 4);
+        body.push(LMQ_BODY_VERSION);
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&u16::MAX.to_le_bytes());
+        for _ in 0..u16::MAX {
+            body.extend_from_slice(&0u32.to_le_bytes());
+        }
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(decode_body(&body), Err(BodyError::EmptyModel));
     }
 
     #[test]

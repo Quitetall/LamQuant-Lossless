@@ -1,6 +1,6 @@
 [package]
 name = "lamquant-lmq"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.81"
 description = "LamQuant LMQ — a current-ABIR BCS2 neural codec shell with entropy-coded FSQ tokens and a swappable backend."

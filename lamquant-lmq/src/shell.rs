@@ -23,7 +23,7 @@ use semantic_abir_bcs::{
 };
 
 use crate::backend::{BackendError, NeuralBackend, NeuralTokens};
-use crate::body::{decode_body, encode_body, BodyError};
+use crate::body::{decode_body_bounded, encode_body_bounded, BodyBounds, BodyError};
 
 pub const LMQ_KERNEL_ID: &str = "org.quitetall.lamquant.lmq.fsq-rans-v1";
 pub const LMQ_FIDELITY_CONTRACT: &str =
@@ -34,6 +34,60 @@ const PACKET_VERSION: u8 = 1;
 const PACKET_HEADER_LEN: usize = 15;
 const LMQ_WIRE_ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
 const LINKED_ABIR_REVISION: &str = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc";
+
+/// LMQ-specific resource ceilings layered over BCS2 frame/catalog limits.
+///
+/// [`from_bundle`](Self::from_bundle) intentionally applies the BCS2 frame
+/// ceiling to decoded I64 signal materialization too. This hardens the legacy
+/// wrapper against inputs whose decoded working set dwarfs their compressed
+/// output. Callers needing independent ceilings must use the bounded APIs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LmqResourceBounds {
+    pub bundle: ResourceBounds,
+    pub max_signal_bytes: u64,
+    /// Also bounds the shell's temporary eight-byte-per-token I64 staging.
+    pub max_tokens: u32,
+    pub max_schedule_bytes: u32,
+    pub max_backend_meta_bytes: u32,
+    pub max_alphabet: u16,
+    pub max_model_total: u32,
+    /// Bounds allocations internal to the body codec. Shell token staging is
+    /// governed separately by `max_tokens`.
+    pub max_body_internal_working_bytes: u64,
+}
+
+impl LmqResourceBounds {
+    pub const fn from_bundle(bundle: ResourceBounds) -> Self {
+        Self {
+            bundle,
+            max_signal_bytes: bundle.max_frame_bytes as u64,
+            max_tokens: lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32,
+            max_schedule_bytes: bundle.max_frame_bytes,
+            max_backend_meta_bytes: bundle.max_frame_bytes,
+            max_alphabet: u16::MAX,
+            max_model_total: RANS_MODEL_TOTAL as u32,
+            max_body_internal_working_bytes: bundle.max_frame_bytes as u64 + 17 * 1024 * 1024,
+        }
+    }
+
+    fn body(self, max_body_bytes: u32) -> BodyBounds {
+        BodyBounds {
+            max_symbols: self.max_tokens,
+            max_schedule_bytes: self.max_schedule_bytes,
+            max_rans_bytes: self.bundle.max_frame_bytes,
+            max_alphabet: self.max_alphabet,
+            max_model_total: self.max_model_total,
+            max_working_bytes: self.max_body_internal_working_bytes,
+            max_body_bytes,
+        }
+    }
+}
+
+impl Default for LmqResourceBounds {
+    fn default() -> Self {
+        Self::from_bundle(ResourceBounds::default())
+    }
+}
 
 #[derive(Debug)]
 pub struct OpenedLmqBundle<'a> {
@@ -63,6 +117,7 @@ impl<'a> OpenedLmqBundle<'a> {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LmqError {
     Backend(BackendError),
     Body(BodyError),
@@ -75,7 +130,25 @@ pub enum LmqError {
     SemanticEncoding,
     SemanticValidation,
     SignalShapeMismatch,
+    ResourceLimit {
+        resource: LmqResource,
+        actual: u64,
+        limit: u64,
+    },
     UnsupportedSemantics(&'static str),
+}
+
+/// Runtime resource governed by [`LmqResourceBounds`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum LmqResource {
+    SignalBytes,
+    TokenCount,
+    Alphabet,
+    ModelTotal,
+    ScheduleBytes,
+    BackendMetadataBytes,
+    PacketBytes,
 }
 
 impl From<BodyError> for LmqError {
@@ -91,6 +164,16 @@ impl fmt::Display for LmqError {
             Self::Body(error) => write!(formatter, "LMQ token body failed: {error:?}"),
             Self::Bundle(error) => error.fmt(formatter),
             Self::PayloadAccess(error) => error.fmt(formatter),
+            Self::ResourceLimit {
+                resource,
+                actual,
+                limit,
+            } => {
+                write!(
+                    formatter,
+                    "LMQ resource limit exceeded: {resource:?} ({actual} > {limit})"
+                )
+            }
             Self::UnsupportedSemantics(reason) => {
                 write!(formatter, "unsupported LMQ ABIR semantics: {reason}")
             }
@@ -127,6 +210,9 @@ pub fn transformed_fidelity(metric: impl Into<String>) -> CodecFidelity {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Compatibility-signature wrapper. `bounds.max_frame_bytes` also caps decoded
+/// I64 signal materialization; use [`encode_bundle_bounded`] when compressed
+/// frame and decoded working-set ceilings differ.
 pub fn encode_bundle<A: PayloadAccess>(
     dataset: &AbirDataset,
     access: &A,
@@ -135,10 +221,29 @@ pub fn encode_bundle<A: PayloadAccess>(
     implementation: CodecImplementation,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmqError> {
+    encode_bundle_bounded(
+        dataset,
+        access,
+        backend,
+        fidelity,
+        implementation,
+        LmqResourceBounds::from_bundle(bounds),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_bundle_bounded<A: PayloadAccess>(
+    dataset: &AbirDataset,
+    access: &A,
+    backend: &dyn NeuralBackend,
+    fidelity: CodecFidelity,
+    implementation: CodecImplementation,
+    bounds: LmqResourceBounds,
+) -> Result<Vec<u8>, LmqError> {
     if fidelity.kind == CodecFidelityKind::Exact || implementation.kernel_id != LMQ_KERNEL_ID {
         return Err(LmqError::CatalogContract);
     }
-    let (signal, sample_rate) = read_signal(dataset, access)?;
+    let (signal, sample_rate) = read_signal(dataset, access, bounds.max_signal_bytes)?;
     let model = backend.model_provenance();
     let tokens = backend
         .encode(&signal, sample_rate)
@@ -148,7 +253,7 @@ pub fn encode_bundle<A: PayloadAccess>(
     {
         return Err(LmqError::SignalShapeMismatch);
     }
-    let packet = encode_packet(&tokens)?;
+    let packet = encode_packet_bounded(&tokens, bounds)?;
     let semantics = canonical_debug_json(dataset).map_err(|_| LmqError::SemanticEncoding)?;
     let packets = [&packet[..]];
     encode_codec_bundle(
@@ -163,7 +268,7 @@ pub fn encode_bundle<A: PayloadAccess>(
             parameters: canonical_parameters(),
             profile: CodecProfile::LmqProgressive,
         },
-        bounds,
+        bounds.bundle,
     )
     .map_err(LmqError::Bundle)
 }
@@ -173,7 +278,15 @@ pub fn open_bundle<'a>(
     backend: &dyn NeuralBackend,
     bounds: ResourceBounds,
 ) -> Result<OpenedLmqBundle<'a>, LmqError> {
-    let bundle = CodecBundleView::open(bytes, bounds).map_err(LmqError::Bundle)?;
+    open_bundle_bounded(bytes, backend, LmqResourceBounds::from_bundle(bounds))
+}
+
+pub fn open_bundle_bounded<'a>(
+    bytes: &'a [u8],
+    backend: &dyn NeuralBackend,
+    bounds: LmqResourceBounds,
+) -> Result<OpenedLmqBundle<'a>, LmqError> {
+    let bundle = CodecBundleView::open(bytes, bounds.bundle).map_err(LmqError::Bundle)?;
     let catalog = bundle.catalog();
     if catalog.profile() != CodecProfile::LmqProgressive
         || catalog.packet_count() != 1
@@ -187,16 +300,10 @@ pub fn open_bundle<'a>(
     let dataset = parse_canonical_dataset(bundle.canonical_semantics())
         .map_err(|_| LmqError::SemanticEncoding)?;
     let (expected_channels, expected_samples) = reconstruction_shape(&dataset)?;
+    enforce_signal_bound(expected_channels, expected_samples, bounds.max_signal_bytes)?;
     let packet = bundle.packet(0).ok_or(LmqError::Header)?;
-    let tokens = decode_packet(packet)?;
+    let tokens = decode_packet_bounded(packet, bounds)?;
     if tokens.n_channels != expected_channels || tokens.n_samples != expected_samples {
-        return Err(LmqError::SignalShapeMismatch);
-    }
-    let reconstruction_bytes = u64::from(expected_channels)
-        .checked_mul(u64::from(expected_samples))
-        .and_then(|samples| samples.checked_mul(8))
-        .ok_or(LmqError::SignalShapeMismatch)?;
-    if reconstruction_bytes > u64::from(bounds.max_frame_bytes) {
         return Err(LmqError::SignalShapeMismatch);
     }
     let signal = backend.decode(&tokens).map_err(LmqError::Backend)?;
@@ -412,23 +519,84 @@ fn canonical_parameters() -> Vec<CodecParameter> {
     ]
 }
 
+#[cfg(test)]
 fn encode_packet(tokens: &NeuralTokens) -> Result<Vec<u8>, LmqError> {
+    encode_packet_bounded(tokens, LmqResourceBounds::default())
+}
+
+fn encode_packet_bounded(
+    tokens: &NeuralTokens,
+    bounds: LmqResourceBounds,
+) -> Result<Vec<u8>, LmqError> {
     if tokens.n_channels == 0 || tokens.n_samples == 0 {
         return Err(LmqError::SignalShapeMismatch);
     }
+    enforce_lmq_limit(
+        LmqResource::TokenCount,
+        tokens.tokens.len() as u64,
+        u64::from(bounds.max_tokens),
+    )?;
+    enforce_lmq_limit(
+        LmqResource::ScheduleBytes,
+        tokens.schedule.len() as u64,
+        u64::from(bounds.max_schedule_bytes),
+    )?;
+    enforce_lmq_limit(
+        LmqResource::BackendMetadataBytes,
+        tokens.backend_meta.len() as u64,
+        u64::from(bounds.max_backend_meta_bytes),
+    )?;
+    enforce_lmq_limit(
+        LmqResource::Alphabet,
+        u64::from(tokens.alphabet),
+        u64::from(bounds.max_alphabet),
+    )?;
+    enforce_lmq_limit(
+        LmqResource::ModelTotal,
+        RANS_MODEL_TOTAL,
+        u64::from(bounds.max_model_total),
+    )?;
+    let packet_prefix = PACKET_HEADER_LEN
+        .checked_add(tokens.backend_meta.len())
+        .ok_or(LmqError::ResourceLimit {
+            resource: LmqResource::PacketBytes,
+            actual: u64::MAX,
+            limit: u64::from(bounds.bundle.max_frame_bytes),
+        })?;
+    let body_budget = (bounds.bundle.max_frame_bytes as usize)
+        .checked_sub(packet_prefix)
+        .ok_or(LmqError::ResourceLimit {
+            resource: LmqResource::PacketBytes,
+            actual: packet_prefix as u64,
+            limit: u64::from(bounds.bundle.max_frame_bytes),
+        })?;
     let counts = histogram(&tokens.tokens, tokens.alphabet)?;
     let symbols = tokens
         .tokens
         .iter()
         .map(|&token| i64::from(token))
         .collect::<Vec<_>>();
-    let body = encode_body(&symbols, &tokens.schedule, &counts)?;
+    let body = encode_body_bounded(
+        &symbols,
+        &tokens.schedule,
+        &counts,
+        bounds.body(body_budget as u32),
+    )?;
     let meta_len = u32::try_from(tokens.backend_meta.len()).map_err(|_| LmqError::Header)?;
-    let mut packet = Vec::with_capacity(
-        PACKET_HEADER_LEN
-            .saturating_add(tokens.backend_meta.len())
-            .saturating_add(body.len()),
-    );
+    let packet_len = PACKET_HEADER_LEN
+        .checked_add(tokens.backend_meta.len())
+        .and_then(|bytes| bytes.checked_add(body.len()))
+        .ok_or(LmqError::ResourceLimit {
+            resource: LmqResource::PacketBytes,
+            actual: u64::MAX,
+            limit: u64::from(bounds.bundle.max_frame_bytes),
+        })?;
+    enforce_lmq_limit(
+        LmqResource::PacketBytes,
+        packet_len as u64,
+        u64::from(bounds.bundle.max_frame_bytes),
+    )?;
+    let mut packet = Vec::with_capacity(packet_len);
     packet.extend_from_slice(PACKET_MAGIC);
     packet.push(PACKET_VERSION);
     packet.extend_from_slice(&tokens.n_channels.to_le_bytes());
@@ -439,7 +607,15 @@ fn encode_packet(tokens: &NeuralTokens) -> Result<Vec<u8>, LmqError> {
     Ok(packet)
 }
 
+#[cfg(test)]
 fn decode_packet(packet: &[u8]) -> Result<NeuralTokens, LmqError> {
+    decode_packet_bounded(packet, LmqResourceBounds::default())
+}
+
+fn decode_packet_bounded(
+    packet: &[u8],
+    bounds: LmqResourceBounds,
+) -> Result<NeuralTokens, LmqError> {
     if packet.get(..4) != Some(PACKET_MAGIC) || packet.get(4) != Some(&PACKET_VERSION) {
         return Err(LmqError::Header);
     }
@@ -467,13 +643,26 @@ fn decode_packet(packet: &[u8]) -> Result<NeuralTokens, LmqError> {
     if n_channels == 0 || n_samples == 0 {
         return Err(LmqError::SignalShapeMismatch);
     }
+    enforce_lmq_limit(
+        LmqResource::BackendMetadataBytes,
+        meta_len as u64,
+        u64::from(bounds.max_backend_meta_bytes),
+    )?;
     let after_header = packet.get(PACKET_HEADER_LEN..).ok_or(LmqError::Header)?;
     let backend_meta = after_header
         .get(..meta_len)
         .ok_or(LmqError::Header)?
         .to_vec();
     let body = after_header.get(meta_len..).ok_or(LmqError::Header)?;
-    let (symbols, schedule, alphabet) = decode_body(body)?;
+    let body_budget = (bounds.bundle.max_frame_bytes as usize)
+        .checked_sub(PACKET_HEADER_LEN)
+        .and_then(|bytes| bytes.checked_sub(meta_len))
+        .ok_or(LmqError::ResourceLimit {
+            resource: LmqResource::PacketBytes,
+            actual: packet.len() as u64,
+            limit: u64::from(bounds.bundle.max_frame_bytes),
+        })?;
+    let (symbols, schedule, alphabet) = decode_body_bounded(body, bounds.body(body_budget as u32))?;
     let mut tokens = Vec::with_capacity(symbols.len());
     for symbol in symbols {
         if symbol < 0 || symbol >= i64::from(alphabet) {
@@ -494,6 +683,7 @@ fn decode_packet(packet: &[u8]) -> Result<NeuralTokens, LmqError> {
 fn read_signal<A: PayloadAccess>(
     dataset: &AbirDataset,
     access: &A,
+    max_signal_bytes: u64,
 ) -> Result<(Vec<Vec<i64>>, f64), LmqError> {
     if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
         return Err(LmqError::UnsupportedSemantics(
@@ -511,7 +701,23 @@ fn read_signal<A: PayloadAccess>(
             "stream must own every atom exactly once",
         ));
     }
-    let mut signal = Vec::with_capacity(stream.atoms().len());
+    let channel_count =
+        u16::try_from(stream.atoms().len()).map_err(|_| LmqError::SignalShapeMismatch)?;
+    let minimum_signal_bytes =
+        u64::from(channel_count)
+            .checked_mul(8)
+            .ok_or(LmqError::ResourceLimit {
+                resource: LmqResource::SignalBytes,
+                actual: u64::MAX,
+                limit: max_signal_bytes,
+            })?;
+    enforce_lmq_limit(
+        LmqResource::SignalBytes,
+        minimum_signal_bytes,
+        max_signal_bytes,
+    )?;
+    let mut channels = Vec::with_capacity(usize::from(channel_count));
+    let mut decoded_bytes = 0_u64;
     let mut sample_rate = None;
     let mut sample_count = None;
     let mut start = None;
@@ -540,6 +746,7 @@ fn read_signal<A: PayloadAccess>(
                 "LMQ requires a regular time axis",
             ));
         };
+        u32::try_from(segment.samples()).map_err(|_| LmqError::SignalShapeMismatch)?;
         let rate = segment.rate();
         if sample_rate.replace(rate).is_some_and(|prior| prior != rate)
             || sample_count
@@ -553,13 +760,36 @@ fn read_signal<A: PayloadAccess>(
                 "LMQ requires aligned starts, uniform rates, and sample counts",
             ));
         }
+        if descriptor.shape().last().copied() != Some(segment.samples()) {
+            return Err(LmqError::SignalShapeMismatch);
+        }
+        decoded_bytes = decoded_bytes
+            .checked_add(
+                segment
+                    .samples()
+                    .checked_mul(8)
+                    .ok_or(LmqError::ResourceLimit {
+                        resource: LmqResource::SignalBytes,
+                        actual: u64::MAX,
+                        limit: max_signal_bytes,
+                    })?,
+            )
+            .ok_or(LmqError::ResourceLimit {
+                resource: LmqResource::SignalBytes,
+                actual: u64::MAX,
+                limit: max_signal_bytes,
+            })?;
+        channels.push((descriptor, segment.samples()));
+    }
+    enforce_lmq_limit(LmqResource::SignalBytes, decoded_bytes, max_signal_bytes)?;
+
+    let mut signal = Vec::with_capacity(channels.len());
+    for (descriptor, samples) in channels {
         let lease = access.lease(descriptor).map_err(LmqError::PayloadAccess)?;
         verify_payload_content(descriptor, lease.bytes())
             .map_err(|_| LmqError::PayloadIdentityMismatch)?;
         let channel = decode_integer_payload(descriptor, lease.bytes())?;
-        if descriptor.shape().last().copied() != Some(segment.samples())
-            || channel.len() as u64 != segment.samples()
-        {
+        if channel.len() as u64 != samples {
             return Err(LmqError::SignalShapeMismatch);
         }
         signal.push(channel);
@@ -569,10 +799,35 @@ fn read_signal<A: PayloadAccess>(
     if !rate.is_finite() || rate <= 0.0 {
         return Err(LmqError::UnsupportedSemantics("invalid sample rate"));
     }
-    if signal.len() > u16::MAX as usize || signal.first().map_or(0, Vec::len) > u32::MAX as usize {
-        return Err(LmqError::SignalShapeMismatch);
-    }
     Ok((signal, rate))
+}
+
+fn enforce_signal_bound(
+    channels: u16,
+    samples: u32,
+    max_signal_bytes: u64,
+) -> Result<(), LmqError> {
+    let decoded_bytes = u64::from(channels)
+        .checked_mul(u64::from(samples))
+        .and_then(|count| count.checked_mul(8))
+        .ok_or(LmqError::ResourceLimit {
+            resource: LmqResource::SignalBytes,
+            actual: u64::MAX,
+            limit: max_signal_bytes,
+        })?;
+    enforce_lmq_limit(LmqResource::SignalBytes, decoded_bytes, max_signal_bytes)
+}
+
+fn enforce_lmq_limit(resource: LmqResource, actual: u64, limit: u64) -> Result<(), LmqError> {
+    if actual > limit {
+        Err(LmqError::ResourceLimit {
+            resource,
+            actual,
+            limit,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_descriptor(descriptor: &PayloadDescriptor) -> Result<(), LmqError> {
@@ -934,5 +1189,170 @@ mod tests {
         };
         let packet = encode_packet(&tokens).unwrap();
         assert_eq!(decode_packet(&packet).unwrap(), tokens);
+    }
+
+    #[test]
+    fn encode_rejects_signal_before_payload_or_backend_work() {
+        struct PanicLease;
+        impl PayloadLease for PanicLease {
+            fn bytes(&self) -> &[u8] {
+                unreachable!()
+            }
+        }
+        struct PanicAccess;
+        impl PayloadAccess for PanicAccess {
+            type Lease<'a>
+                = PanicLease
+            where
+                Self: 'a;
+
+            fn lease<'a>(
+                &'a self,
+                _descriptor: &PayloadDescriptor,
+            ) -> Result<Self::Lease<'a>, semantic_abir::PayloadAccessError> {
+                panic!("payload lease must not run after failed signal preflight")
+            }
+        }
+        struct PanicBackend;
+        impl NeuralBackend for PanicBackend {
+            fn model_provenance(&self) -> ModelProvenance {
+                StubBackend::default().model_provenance()
+            }
+
+            fn encode(
+                &self,
+                _signal: &[Vec<i64>],
+                _sample_rate: f64,
+            ) -> Result<NeuralTokens, BackendError> {
+                panic!("backend must not run after failed signal preflight")
+            }
+
+            fn decode(&self, _tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+                unreachable!()
+            }
+        }
+        let opened = fixture();
+        let bounds = LmqResourceBounds {
+            max_signal_bytes: 1,
+            ..LmqResourceBounds::default()
+        };
+        assert!(matches!(
+            encode_bundle_bounded(
+                opened.dataset(),
+                &PanicAccess,
+                &PanicBackend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                bounds,
+            ),
+            Err(LmqError::ResourceLimit {
+                resource: LmqResource::SignalBytes,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn packet_limits_reject_backend_output_and_headers_before_copy() {
+        let tokens = NeuralTokens {
+            tokens: vec![1, 2, 3],
+            schedule: vec![5, 5],
+            alphabet: 5,
+            n_channels: 1,
+            n_samples: 1,
+            backend_meta: vec![9, 8],
+        };
+        let token_bounds = LmqResourceBounds {
+            max_tokens: 2,
+            ..LmqResourceBounds::default()
+        };
+        assert!(matches!(
+            encode_packet_bounded(&tokens, token_bounds),
+            Err(LmqError::ResourceLimit {
+                resource: LmqResource::TokenCount,
+                ..
+            })
+        ));
+        let alphabet_bounds = LmqResourceBounds {
+            max_alphabet: 4,
+            ..LmqResourceBounds::default()
+        };
+        assert!(matches!(
+            encode_packet_bounded(&tokens, alphabet_bounds),
+            Err(LmqError::ResourceLimit {
+                resource: LmqResource::Alphabet,
+                actual: 5,
+                limit: 4,
+            })
+        ));
+        let packet_bounds = LmqResourceBounds::from_bundle(ResourceBounds {
+            max_frame_bytes: 32,
+            ..ResourceBounds::default()
+        });
+        assert!(matches!(
+            encode_packet_bounded(&tokens, packet_bounds),
+            Err(LmqError::Body(BodyError::ResourceLimit {
+                resource: crate::body::BodyResource::BodyBytes,
+                ..
+            }))
+        ));
+
+        let packet = encode_packet(&tokens).unwrap();
+        let meta_bounds = LmqResourceBounds {
+            max_backend_meta_bytes: 1,
+            ..LmqResourceBounds::default()
+        };
+        assert!(matches!(
+            decode_packet_bounded(&packet, meta_bounds),
+            Err(LmqError::ResourceLimit {
+                resource: LmqResource::BackendMetadataBytes,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_reconstruction_before_backend_work() {
+        let opened = fixture();
+        let stub = StubBackend::default();
+        let bytes = encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &stub,
+            transformed_fidelity("test-residue"),
+            implementation_identity("test-build"),
+            ResourceBounds::default(),
+        )
+        .unwrap();
+
+        struct PanicDecodeBackend;
+        impl NeuralBackend for PanicDecodeBackend {
+            fn model_provenance(&self) -> ModelProvenance {
+                StubBackend::default().model_provenance()
+            }
+
+            fn encode(
+                &self,
+                _signal: &[Vec<i64>],
+                _sample_rate: f64,
+            ) -> Result<NeuralTokens, BackendError> {
+                unreachable!()
+            }
+
+            fn decode(&self, _tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+                panic!("backend must not run after failed reconstruction preflight")
+            }
+        }
+        let bounds = LmqResourceBounds {
+            max_signal_bytes: 1,
+            ..LmqResourceBounds::default()
+        };
+        assert!(matches!(
+            open_bundle_bounded(&bytes, &PanicDecodeBackend, bounds),
+            Err(LmqError::ResourceLimit {
+                resource: LmqResource::SignalBytes,
+                ..
+            })
+        ));
     }
 }
