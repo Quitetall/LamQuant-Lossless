@@ -134,6 +134,11 @@ fn a_helper_that_never_reads_stdin_is_killed_at_the_deadline() {
         elapsed < PATIENCE,
         "returned only after {elapsed:?}; the write path is inside the deadline too"
     );
+    assert!(
+        elapsed >= TIMEOUT,
+        "returned after {elapsed:?}, sooner than the {TIMEOUT:?} deadline, so \
+         something other than the timeout ended this call"
+    );
 }
 
 #[test]

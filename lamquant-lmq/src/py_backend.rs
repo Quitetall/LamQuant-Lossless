@@ -68,6 +68,11 @@ impl PyBackend {
     }
 
     /// Override how long one helper invocation may run before it is killed.
+    ///
+    /// Exit is detected by polling every [`EXIT_POLL_INTERVAL`], so the deadline
+    /// is accurate to about that interval and a timeout near or below it will
+    /// overshoot proportionally. That is fine for the seconds-to-minutes range
+    /// this is for; it is not a general-purpose sub-millisecond deadline.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -156,28 +161,33 @@ impl PyBackend {
                 ))
             })?;
 
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| BackendError("no child stdin".to_string()))?;
+        // All three pipes are claimed BEFORE any thread starts. Interleaving the
+        // two would leave a window where the writer thread is already running
+        // against a live child and an early return abandons both — the thread
+        // detached and the child never reaped. Failing here instead costs
+        // nothing, because nothing has been started yet.
+        let (mut stdin, stdout, stderr) = match (
+            child.stdin.take(),
+            child.stdout.take(),
+            child.stderr.take(),
+        ) {
+            (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BackendError(
+                    "helper was spawned without all three pipes".to_string(),
+                ));
+            }
+        };
         let writer = thread::spawn(move || {
-            let outcome = stdin.write_all(&payload).and_then(|()| stdin.flush());
+            let outcome = stdin.write_all(&payload);
             // Closing the pipe is how the helper learns the request has ended.
             drop(stdin);
             outcome
         });
-        let stdout = drain(
-            child
-                .stdout
-                .take()
-                .ok_or_else(|| BackendError("no child stdout".to_string()))?,
-        );
-        let stderr = drain(
-            child
-                .stderr
-                .take()
-                .ok_or_else(|| BackendError("no child stderr".to_string()))?,
-        );
+        let stdout = drain(stdout);
+        let stderr = drain(stderr);
 
         let status = self.wait_bounded(&mut child)?;
         let out_bytes = join_stream(stdout, "stdout")?;
