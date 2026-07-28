@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use abir_adapter::{Adapter, AdapterError, PayloadResolver};
+use abir_adapter::{Adapter, AdapterError, ExportPlan, FidelityReceipt, PayloadResolver};
 use blut_graph_core::{
     AbirRootType, AbirSemanticType, AbirViewType, Capability, CompileError, CompiledNode,
     ConfigField, ConfigSchema, ConfigType, ConfigValue, Determinism, Effect, ExecutionError,
@@ -264,6 +264,25 @@ pub fn execute_standard<'a>(
     }
 }
 
+pub fn restore_standard_dataset(
+    node: &CompiledNode,
+    type_name: &str,
+    source: &AbirDatasetValue,
+) -> Result<(abir_adapter::ForeignObject, ExportPlan, FidelityReceipt), ExecutionError> {
+    let (spec, operation) = StandardSpec::for_type(type_name)
+        .ok_or_else(|| kernel_failure(node, "unsupported-node", "unknown standard node"))?;
+    if !matches!(operation, Operation::Restore) {
+        return Err(kernel_failure(
+            node,
+            "invalid-plan",
+            "compiled node is not a standard restore",
+        ));
+    }
+    let max_source_bytes = parse_max_source_bytes(node)?;
+    let adapter = spec.adapter(max_source_bytes);
+    restore_dataset(node, adapter.as_ref(), max_source_bytes, source)
+}
+
 fn execute_import<'a>(
     node: &CompiledNode,
     adapter: &dyn Adapter,
@@ -350,6 +369,20 @@ fn execute_restore<'a>(
             ))
         }
     };
+    let (foreign, plan, receipt) = restore_dataset(node, adapter, max_source_bytes, source)?;
+    Ok(vec![
+        LamQuantNodeValue::ForeignObject(foreign),
+        LamQuantNodeValue::ExportPlan(plan),
+        LamQuantNodeValue::FidelityReceipt(receipt),
+    ])
+}
+
+fn restore_dataset(
+    node: &CompiledNode,
+    adapter: &dyn Adapter,
+    max_source_bytes: u64,
+    source: &AbirDatasetValue,
+) -> Result<(abir_adapter::ForeignObject, ExportPlan, FidelityReceipt), ExecutionError> {
     let plan = adapter
         .plan_export(source.dataset())
         .map_err(|error| adapter_failure(node, error))?;
@@ -358,6 +391,13 @@ fn execute_restore<'a>(
             node,
             "semantic-loss",
             "exact source restoration is unavailable for this dataset and profile",
+        ));
+    }
+    if !export_plan_fits(&plan) {
+        return Err(kernel_failure(
+            node,
+            "resource-limit",
+            "exact export plan exceeds the declared output limit",
         ));
     }
     let (foreign, receipt) = adapter
@@ -378,11 +418,7 @@ fn execute_restore<'a>(
             "restored source exceeds limits or lacks exact-source attestation",
         ));
     }
-    Ok(vec![
-        LamQuantNodeValue::ForeignObject(foreign),
-        LamQuantNodeValue::ExportPlan(plan),
-        LamQuantNodeValue::FidelityReceipt(receipt),
-    ])
+    Ok((foreign, plan, receipt))
 }
 
 fn parse_max_source_bytes(node: &CompiledNode) -> Result<u64, ExecutionError> {
@@ -564,6 +600,27 @@ fn fidelity_receipt_fits(receipt: &abir_adapter::FidelityReceipt) -> bool {
         .is_some_and(|bytes| bytes <= MAX_REPORT_BYTES)
 }
 
+fn export_plan_fits(plan: &abir_adapter::ExportPlan) -> bool {
+    plan.mappings
+        .iter()
+        .try_fold(
+            (plan.source_dataset.len() + plan.target_profile.0.len() + plan.plan_id.len()) as u64,
+            |total, mapping| {
+                total
+                    .checked_add(mapping.source_path.len() as u64)?
+                    .checked_add(mapping.target.len() as u64)?
+                    .checked_add(
+                        mapping
+                            .reason
+                            .as_ref()
+                            .map_or(0_u64, |value| value.len() as u64),
+                    )?
+                    .checked_add(64)
+            },
+        )
+        .is_some_and(|bytes| bytes <= MAX_REPORT_BYTES)
+}
+
 pub fn register_standard_nodes(registry: &mut KernelRegistry) -> Result<(), CompileError> {
     for spec in STANDARD_SPECS {
         for operation in [Operation::Import, Operation::Restore, Operation::Sink] {
@@ -620,6 +677,19 @@ pub fn standard_sink_kernel_binding(profile: &str) -> Option<(KernelId, Implemen
             (
                 KernelId(spec.kernel_base + 3),
                 implementation_id(spec.sink_type, Target::Host),
+            )
+        })
+}
+
+pub fn standard_restore_kernel_binding(profile: &str) -> Option<(KernelId, ImplementationId)> {
+    STANDARD_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.profile == profile)
+        .map(|spec| {
+            (
+                KernelId(spec.kernel_base + 2),
+                implementation_id(spec.restore_type, Target::Host),
             )
         })
 }
@@ -959,10 +1029,10 @@ fn read_lease(zero_copy_permitted: bool) -> LeaseContract {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_error_code, standard_sink_descriptor, standard_sink_node_config,
-        StandardNodeConfigError, EXACT_SOURCE_RESTORATION_PROOF,
+        adapter_error_code, export_plan_fits, standard_sink_descriptor, standard_sink_node_config,
+        StandardNodeConfigError, EXACT_SOURCE_RESTORATION_PROOF, MAX_REPORT_BYTES,
     };
-    use abir_adapter::{AdapterError, ProfileId};
+    use abir_adapter::{AdapterError, ExportPlan, MappingDisposition, MappingEntry, ProfileId};
     use semantic_abir::ContentId;
 
     #[test]
@@ -1041,5 +1111,23 @@ mod tests {
             [EXACT_SOURCE_RESTORATION_PROOF]
         );
         assert_eq!(descriptor.proof.requires, [EXACT_SOURCE_RESTORATION_PROOF]);
+    }
+
+    #[test]
+    fn restore_rejects_export_plan_over_declared_output_bound() {
+        let plan = ExportPlan {
+            source_dataset: "dataset".into(),
+            target_profile: ProfileId("bids.1.11.1".into()),
+            mappings: vec![MappingEntry {
+                source_path: "source".into(),
+                target: "target".into(),
+                disposition: MappingDisposition::Exact,
+                reason: Some("x".repeat(MAX_REPORT_BYTES as usize)),
+            }],
+            requires_user_acceptance: false,
+            unsupported: false,
+            plan_id: "plan".into(),
+        };
+        assert!(!export_plan_fits(&plan));
     }
 }

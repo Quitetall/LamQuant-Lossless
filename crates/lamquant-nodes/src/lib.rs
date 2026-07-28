@@ -15,8 +15,9 @@ pub use lml_reference::{
 };
 #[cfg(feature = "standard-adapters")]
 pub use standard_nodes::{
-    parse_standard_sink_contract, register_standard_nodes, standard_import_descriptor,
-    standard_node_config, standard_restore_descriptor, standard_sink_descriptor,
+    execute_standard, parse_standard_sink_contract, register_standard_nodes,
+    restore_standard_dataset, standard_import_descriptor, standard_node_config,
+    standard_restore_descriptor, standard_restore_kernel_binding, standard_sink_descriptor,
     standard_sink_kernel_binding, standard_sink_node_config, StandardNodeConfigError,
     StandardSinkContract, BIDS_IMPORT_NODE_TYPE, BIDS_RESTORE_NODE_TYPE, BIDS_SINK_NODE_TYPE,
     DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE, DICOM_SINK_NODE_TYPE,

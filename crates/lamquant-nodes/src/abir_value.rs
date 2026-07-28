@@ -151,6 +151,17 @@ impl AbirDatasetValue {
     pub fn into_opened(self) -> OpenedDataset<NodePayloadStore> {
         self.opened
     }
+
+    pub fn retained_bytes(&self) -> u64 {
+        let metadata = self.dataset().semantic_metadata_budget_bytes() as u64;
+        self.payloads()
+            .payloads
+            .values()
+            .try_fold(metadata, |total, bytes| {
+                total.checked_add(bytes.len() as u64)?.checked_add(64)
+            })
+            .unwrap_or(u64::MAX)
+    }
 }
 
 fn referenced_content_ids(dataset: &AbirDataset) -> BTreeSet<ContentId> {
