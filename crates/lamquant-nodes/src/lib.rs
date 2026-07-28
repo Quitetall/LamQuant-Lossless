@@ -7,11 +7,22 @@ extern crate alloc;
 mod abir_value;
 mod lml_reference;
 #[cfg(feature = "standard-adapters")]
+mod lsl_nodes;
+#[cfg(feature = "standard-adapters")]
 mod standard_nodes;
 
 pub use abir_value::{AbirDatasetValue, AbirDatasetValueError, NodePayloadStore};
 pub use lml_reference::{
     LmlPackets, ReferenceEntropy, ReferencePredicted, ReferenceQuantized, ReferenceSubbands,
+};
+#[cfg(feature = "standard-adapters")]
+pub use lsl_nodes::{
+    lsl_accept_export_descriptor, lsl_accept_export_kernel_binding, lsl_export_descriptor,
+    lsl_export_kernel_binding, lsl_inlet_descriptor, lsl_inlet_kernel_binding,
+    lsl_outlet_descriptor, lsl_outlet_kernel_binding, register_lsl_nodes,
+    LslImplementationIdentity, LSL_ACCEPT_EXPORT_KERNEL, LSL_ACCEPT_EXPORT_NODE_TYPE,
+    LSL_EXPORT_KERNEL, LSL_EXPORT_NODE_TYPE, LSL_INLET_KERNEL, LSL_INLET_NODE_TYPE,
+    LSL_OUTLET_KERNEL, LSL_OUTLET_NODE_TYPE,
 };
 #[cfg(feature = "standard-adapters")]
 pub use standard_nodes::{

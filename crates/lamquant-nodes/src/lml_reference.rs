@@ -945,6 +945,7 @@ pub(crate) fn kernel_failure(node: &CompiledNode, code: &str, message: &str) -> 
             code: code.into(),
             message: message.into(),
             retryable: false,
+            evidence: Vec::new(),
         },
     }
 }
@@ -957,6 +958,7 @@ pub(crate) fn codec_failure(node: &CompiledNode, error: LmlBundleError) -> Execu
             code: "codec-failure".into(),
             message: format!("{error:?}"),
             retryable: false,
+            evidence: Vec::new(),
         },
     }
 }
@@ -972,6 +974,7 @@ pub(crate) fn lml_failure(
             code: "lml-failure".into(),
             message: format!("{error:?}"),
             retryable: false,
+            evidence: Vec::new(),
         },
     }
 }
@@ -988,6 +991,7 @@ pub(crate) fn primitive_failure(
             code: format!("{primitive}-failure"),
             message: format!("{error:?}"),
             retryable: false,
+            evidence: Vec::new(),
         },
     }
 }

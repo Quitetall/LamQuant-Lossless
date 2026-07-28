@@ -518,6 +518,7 @@ fn kernel_failure(node: &CompiledNode, code: &str, message: &str) -> ExecutionEr
             code: code.into(),
             message: message.into(),
             retryable: false,
+            evidence: Vec::new(),
         },
     }
 }
