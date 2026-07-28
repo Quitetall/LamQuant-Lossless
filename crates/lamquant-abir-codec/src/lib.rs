@@ -62,7 +62,7 @@ const BUILD_ID: &str = env!("LAMQUANT_ABIR_CODEC_BUILD_ID");
 // Dependency updates do not rewrite it: old artifacts must remain readable.
 const LML_WIRE_ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
 // Linked source identity may advance independently from stable wire contracts.
-const LINKED_ABIR_REVISION: &str = "5f2858342ca5823d5acae225756bb8e67a0dddde";
+const LINKED_ABIR_REVISION: &str = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc";
 const HEADER_SIZE: usize = 22;
 /// Maximum sample count representable by one LML1 packet header.
 pub const MAX_PACKET_SAMPLES: usize = u16::MAX as usize;
