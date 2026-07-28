@@ -11,15 +11,31 @@
 //! Host-only (feature `python`): needs `std` (process) + `serde_json`. codec-neural
 //! is imported by the helper, never edited; weights resolve via `$LAMQUANT_WEIGHTS_DIR`.
 
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::string::{String, ToString};
+use std::thread;
+use std::time::{Duration, Instant};
 use std::vec::Vec;
 
 use semantic_abir_bcs::ModelProvenance;
 use serde_json::{json, Value};
 
 use crate::backend::{BackendError, NeuralBackend, NeuralTokens};
+
+/// How long a single helper invocation may take before it is killed.
+///
+/// Generous on purpose: loading a checkpoint onto CPU and running inference over
+/// a window is slow, and a timeout that fires during ordinary work is worse than
+/// none — it would turn a slow machine into a failing one. The value that
+/// matters here is that it is finite. A helper that stalls forever used to stall
+/// its caller forever with it.
+pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Poll interval while waiting for the helper to exit. Short enough that a kill
+/// is prompt, long enough that waiting ten minutes costs no measurable CPU.
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// A subprocess-driven Python neural backend.
 pub struct PyBackend {
@@ -31,6 +47,8 @@ pub struct PyBackend {
     /// (the real `SubbandCodec`, env-gated).
     mode: String,
     model: ModelProvenance,
+    /// Upper bound on one `call`. See [`DEFAULT_CALL_TIMEOUT`].
+    timeout: Duration,
 }
 
 impl PyBackend {
@@ -45,7 +63,15 @@ impl PyBackend {
             helper: helper.into(),
             mode: "model".to_string(),
             model,
+            timeout: DEFAULT_CALL_TIMEOUT,
         }
+    }
+
+    /// Override how long one helper invocation may run before it is killed.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
     /// Drive the helper's deterministic self-test transform (`mode = "selftest"`) —
     /// no weights, for verifying the subprocess bridge itself.
@@ -59,19 +85,64 @@ impl PyBackend {
             helper: helper.into(),
             mode: "selftest".to_string(),
             model,
+            timeout: DEFAULT_CALL_TIMEOUT,
         }
     }
 
-    // NB: `call` blocks on `wait_with_output` with NO timeout — a hung helper
-    // (model-load stall, infinite loop) blocks the caller. Acceptable for the R&D
-    // path; a watchdog-thread kill is a tracked follow-up before any unattended use.
+    /// Wait for the helper to exit, killing it if it outlasts the deadline.
+    ///
+    /// After a kill this still reaps the child. Skipping that would leave a
+    /// zombie for every timed-out call, which under a retry loop is its own
+    /// slow failure.
+    fn wait_bounded(&self, child: &mut Child) -> Result<ExitStatus, BackendError> {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => {}
+                Err(error) => return Err(BackendError(format!("wait for helper: {error}"))),
+            }
+            if Instant::now() >= deadline {
+                let killed = child.kill().and_then(|()| child.wait().map(|_| ()));
+                return Err(BackendError(format!(
+                    "helper exceeded {:?} and was killed{}",
+                    self.timeout,
+                    match killed {
+                        Ok(()) => String::new(),
+                        Err(error) => format!(" (kill/reap failed: {error})"),
+                    }
+                )));
+            }
+            thread::sleep(EXIT_POLL_INTERVAL);
+        }
+    }
+
+    /// Run one request through the helper, bounded by [`Self::timeout`].
+    ///
+    /// A hung helper used to hang the caller with it, and there are TWO ways it
+    /// could, which is why this does not simply wrap `wait_with_output` in a
+    /// watchdog:
+    ///
+    /// 1. `wait` never returns because the helper never exits (a model-load
+    ///    stall, an infinite loop).
+    /// 2. `write_all` never returns because the helper never *reads*. A pipe
+    ///    holds 64 KiB on Linux and a 21-channel window is far larger, so the
+    ///    write blocks once the buffer fills — before any wait is reached. A
+    ///    timeout guarding only the wait would never fire.
+    ///
+    /// So stdin, stdout and stderr each get a thread and the main thread does
+    /// nothing but watch the clock. Every blocking operation is off the path
+    /// that enforces the deadline; killing the child closes the pipes, which is
+    /// what lets those threads finish rather than leaking.
     fn call(&self, mut request: Value) -> Result<Value, BackendError> {
         request["mode"] = json!(self.mode);
         if self.mode == "model" {
             request["expected_checkpoint_sha256"] =
                 json!(encode_hex(&self.model.checkpoint_sha256));
         }
-        let child = Command::new(&self.python)
+        let payload = serde_json::to_vec(&request)
+            .map_err(|e| BackendError(format!("serialize request: {e}")))?;
+        let mut child = Command::new(&self.python)
             .arg(&self.helper)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -84,32 +155,55 @@ impl PyBackend {
                     self.helper.display()
                 ))
             })?;
-        {
-            use std::io::Write;
-            let mut stdin = child
-                .stdin
-                .as_ref()
-                .ok_or_else(|| BackendError("no child stdin".to_string()))?;
-            let buf = serde_json::to_vec(&request)
-                .map_err(|e| BackendError(format!("serialize request: {e}")))?;
-            stdin
-                .write_all(&buf)
-                .map_err(|e| BackendError(format!("write request: {e}")))?;
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| BackendError(format!("wait for helper: {e}")))?;
-        if !out.status.success() {
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| BackendError("no child stdin".to_string()))?;
+        let writer = thread::spawn(move || {
+            let outcome = stdin.write_all(&payload).and_then(|()| stdin.flush());
+            // Closing the pipe is how the helper learns the request has ended.
+            drop(stdin);
+            outcome
+        });
+        let stdout = drain(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| BackendError("no child stdout".to_string()))?,
+        );
+        let stderr = drain(
+            child
+                .stderr
+                .take()
+                .ok_or_else(|| BackendError("no child stderr".to_string()))?,
+        );
+
+        let status = self.wait_bounded(&mut child)?;
+        let out_bytes = join_stream(stdout, "stdout")?;
+        let err_bytes = join_stream(stderr, "stderr")?;
+        let write_outcome = writer
+            .join()
+            .map_err(|_| BackendError("helper stdin writer panicked".to_string()))?;
+
+        if !status.success() {
+            // The helper's own stderr is the real diagnosis. Report it ahead of
+            // any write error: a helper that dies on import makes our write fail
+            // with a broken pipe, and "broken pipe" would bury the traceback
+            // that actually says what went wrong.
             return Err(BackendError(format!(
                 "helper exited {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr)
+                status,
+                String::from_utf8_lossy(&err_bytes)
             )));
         }
-        let response: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
+        if let Err(error) = write_outcome {
+            return Err(BackendError(format!("write request: {error}")));
+        }
+        let response: Value = serde_json::from_slice(&out_bytes).map_err(|e| {
             BackendError(format!(
                 "parse response: {e} (stderr: {})",
-                String::from_utf8_lossy(&out.stderr)
+                String::from_utf8_lossy(&err_bytes)
             ))
         })?;
         if self.mode == "model"
@@ -122,6 +216,28 @@ impl PyBackend {
         }
         Ok(response)
     }
+}
+
+/// Read a child pipe to EOF on its own thread.
+///
+/// Not merely for the timeout: a helper writing more than a pipe-buffer of
+/// stdout while nobody drains it blocks forever, so draining concurrently is
+/// what makes the exchange safe at any size.
+fn drain(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).map(|_| bytes)
+    })
+}
+
+fn join_stream(
+    handle: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    which: &str,
+) -> Result<Vec<u8>, BackendError> {
+    handle
+        .join()
+        .map_err(|_| BackendError(format!("helper {which} reader panicked")))?
+        .map_err(|error| BackendError(format!("read helper {which}: {error}")))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
