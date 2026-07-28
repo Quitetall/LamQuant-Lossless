@@ -45,9 +45,6 @@ const MAX_INLET_HELPER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_INLET_PEAK_BYTES: u64 =
     MAX_DATASET_BYTES + MAX_INLET_PARENT_BYTES + MAX_INLET_HELPER_BYTES;
 const INLET_AVAILABLE: bool = cfg!(unix);
-// Keep sample support distinct so future Windows inlet support cannot
-// accidentally advertise liblsl's unsupported int64 transport.
-const INLET_INT64_AVAILABLE: bool = INLET_AVAILABLE && cfg!(not(windows));
 const POLICY_NETWORK_IMPORT: &str = "abir.policy.network-import-authorized";
 const POLICY_NETWORK_EXPORT: &str = "abir.policy.network-export-authorized";
 const POLICY_PROTOCOL_110_PEER: &str = "abir.policy.lsl-protocol-110-peer-attested";
@@ -367,19 +364,18 @@ fn outlet_config() -> ConfigSchema {
     }
 }
 
+/// Pinned liblsl binding exposes every LSL 1.16 sample format across targets;
+/// Node registration separately gates platform availability.
 fn supported_inlet_sample_types() -> Vec<String> {
-    let mut values = vec![
+    vec![
         "float32".into(),
         "double64".into(),
         "string".into(),
         "int32".into(),
         "int16".into(),
         "int8".into(),
-    ];
-    if INLET_INT64_AVAILABLE {
-        values.push("int64".into());
-    }
-    values
+        "int64".into(),
+    ]
 }
 
 fn text_field(name: &str, max_bytes: u32, required: bool) -> ConfigField {

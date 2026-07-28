@@ -105,8 +105,7 @@ fn isolated_inlet_capability_advertises_bounded_string_transport() {
         panic!("sample_type must be a closed choice");
     };
     assert!(values.iter().any(|value| value == "string"));
-    #[cfg(windows)]
-    assert!(!values.iter().any(|value| value == "int64"));
+    assert!(values.iter().any(|value| value == "int64"));
 }
 
 #[test]
