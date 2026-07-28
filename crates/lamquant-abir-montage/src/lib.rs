@@ -35,6 +35,11 @@
 //! preserve `NaN` numerically would be inventing a position for an electrode
 //! nobody located.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+#![forbid(unsafe_code)]
+
+extern crate alloc;
+
 use alloc::vec::Vec;
 use semantic_abir::{
     ChannelSpec, ConceptId, CoordinateFrame, CoordinateFrameTag, ExactNumber, ObjectId, Rational,
@@ -251,9 +256,42 @@ mod tests {
 
 /// Domain separator for montage object ids.
 const ID_DOMAIN: &[u8] = b"org.quitetall.lamquant.montage-v1\0";
+/// Domain separator for the shared coordinate-space root.
+const ROOT_ID_DOMAIN: &[u8] = b"org.quitetall.lamquant.montage-root-v1\0";
 
 /// Concept naming an electrode-position frame.
 const ELECTRODE_FRAME_CONCEPT: &str = "lamquant:electrode-position-frame";
+/// Concept naming the common coordinate system carried by one LMQC montage.
+const MONTAGE_ROOT_CONCEPT: &str = "lamquant:lmqc-montage-coordinate-frame-v1";
+
+/// Derive the shared coordinate-space id for one montage.
+pub fn root_frame_id_for(montage_digest: &[u8; 32]) -> ObjectId<CoordinateFrameTag> {
+    let mut hasher = Sha256::new();
+    hasher.update(ROOT_ID_DOMAIN);
+    hasher.update(montage_digest);
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    ObjectId::from_bytes(bytes)
+}
+
+/// Declare the common coordinate system against which electrode translations
+/// are expressed.
+///
+/// LMQC records no transform from its montage coordinates into another frame.
+/// The root therefore has no parent or transform. This preserves that absence
+/// while still declaring that every located electrode shares one basis.
+pub fn montage_root_frame(montage_digest: &[u8; 32]) -> Result<CoordinateFrame, MontageError> {
+    let concept = ConceptId::new(MONTAGE_ROOT_CONCEPT).map_err(|_| MontageError::NotFinite)?;
+    let zero = Rational::new(0, 1).map_err(|_| MontageError::NotFinite)?;
+    Ok(CoordinateFrame::new(
+        root_frame_id_for(montage_digest),
+        concept,
+        None,
+        None,
+        zero,
+    ))
+}
 
 /// Derive a coordinate-frame id from the montage content itself.
 ///
@@ -397,6 +435,8 @@ mod entity_tests {
             "two electrodes may share a position and still need distinct frames"
         );
         assert_ne!(frame_id_for(&digest, 3), frame_id_for(&other, 3));
+        assert_ne!(root_frame_id_for(&digest), root_frame_id_for(&other));
+        assert_ne!(root_frame_id_for(&digest), frame_id_for(&digest, 3));
     }
 
     #[test]
@@ -440,5 +480,24 @@ mod entity_tests {
         assert!(frames[0].is_some());
         assert!(frames[1].is_none(), "the NaN sentinel must stay an absence");
         assert!(frames[2].is_some());
+    }
+
+    #[test]
+    fn located_electrodes_share_declared_montage_root() {
+        let digest = [0x42_u8; 32];
+        let root = montage_root_frame(&digest).unwrap();
+        let frames = frames_for_montage(
+            &digest,
+            &[[0.081_f32, 0.0, 0.0], [0.0, 0.05, 0.0]],
+            Some(root.id()),
+            micrometre(),
+        )
+        .unwrap();
+        assert!(root.parent_id().is_none());
+        assert!(root.transform().is_none());
+        assert!(frames
+            .iter()
+            .flatten()
+            .all(|frame| frame.parent_id() == Some(root.id())));
     }
 }

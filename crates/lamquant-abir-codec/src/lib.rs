@@ -11,6 +11,12 @@
 
 extern crate alloc;
 
+pub mod lmqc_bundle;
+pub use lmqc_bundle::{
+    bcs2_to_lmqc, lmqc_to_bcs2, open_lmqc_bcs2, LmqcBundleError, LmqcBundleInput, LmqcMetadata,
+    LmqcPayloadKind, OpenedLmqcBcs2, LMQC_READER_CAPABILITIES,
+};
+
 #[cfg(feature = "optimum")]
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -50,7 +56,7 @@ pub const LML_FIDELITY_CONTRACT: &str =
     "org.quitetall.lamquant.bcs2.lml.exact-signal-block-closure-v1";
 const SOURCE_ID: &str = env!("LAMQUANT_ABIR_CODEC_SOURCE_ID");
 const BUILD_ID: &str = env!("LAMQUANT_ABIR_CODEC_BUILD_ID");
-const ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
+const ABIR_REVISION: &str = "af8a595f97f499868c2e8fca95196929f4ddec08";
 const HEADER_SIZE: usize = 22;
 /// Maximum sample count representable by one LML1 packet header.
 pub const MAX_PACKET_SAMPLES: usize = u16::MAX as usize;
