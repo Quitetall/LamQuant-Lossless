@@ -29,7 +29,7 @@ pub const LSL_OUTLET_KERNEL: KernelId = KernelId(0x4c53_0104);
 
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_LSL_ADAPTER: &str = "abir.adapter.lsl.1.16";
-const CAP_LSL_INLET: &str = "org.quitetall.lamquant.lsl.experimental-numeric-inlet-v1";
+const CAP_LSL_INLET: &str = "org.quitetall.lamquant.lsl.experimental-isolated-inlet-v1";
 const CAP_LSL_OUTLET: &str = "org.quitetall.lamquant.lsl.outlet-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.lsl";
 const MAX_DATASET_BYTES: u64 = 1024 * 1024 * 1024;
@@ -37,6 +37,10 @@ const MAX_LIVE_PLAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_REPORT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PEAK_BYTES: u64 = MAX_DATASET_BYTES + 3 * MAX_LIVE_PLAN_BYTES;
+const MAX_INLET_PARENT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_INLET_HELPER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_INLET_PEAK_BYTES: u64 =
+    MAX_DATASET_BYTES + MAX_INLET_PARENT_BYTES + MAX_INLET_HELPER_BYTES;
 const POLICY_NETWORK_IMPORT: &str = "abir.policy.network-import-authorized";
 const POLICY_NETWORK_EXPORT: &str = "abir.policy.network-export-authorized";
 const POLICY_PROTOCOL_110_PEER: &str = "abir.policy.lsl-protocol-110-peer-attested";
@@ -58,6 +62,9 @@ pub fn register_lsl_nodes(
         Operation::AcceptExport,
         Operation::Outlet,
     ] {
+        if cfg!(not(unix)) && matches!(operation, Operation::Inlet) {
+            continue;
+        }
         let descriptor = descriptor(operation);
         let type_name = descriptor.type_name.clone();
         registry.register_descriptor(descriptor)?;
@@ -354,16 +361,18 @@ fn outlet_config() -> ConfigSchema {
 }
 
 fn supported_inlet_sample_types() -> Vec<String> {
-    let mut values = vec![
+    let values = vec![
         "float32".into(),
         "double64".into(),
+        "string".into(),
         "int32".into(),
         "int16".into(),
         "int8".into(),
     ];
-    #[cfg(not(windows))]
-    values.push("int64".into());
     values
+        .into_iter()
+        .chain(core::iter::once("int64".into()).take(usize::from(cfg!(not(windows)))))
+        .collect()
 }
 
 fn text_field(name: &str, max_bytes: u32, required: bool) -> ConfigField {
@@ -523,11 +532,12 @@ fn state_contract(operation: Operation) -> StateContract {
 }
 
 fn operation_resources(operation: Operation) -> ResourceEnvelope {
-    let threads = match operation {
-        Operation::Inlet | Operation::Outlet => 3,
-        Operation::Export | Operation::AcceptExport => 1,
+    let (peak_bytes, threads) = match operation {
+        Operation::Inlet => (MAX_INLET_PEAK_BYTES, 4),
+        Operation::Outlet => (MAX_PEAK_BYTES, 3),
+        Operation::Export | Operation::AcceptExport => (MAX_PEAK_BYTES, 1),
     };
-    ResourceEnvelope::bounded(MAX_PEAK_BYTES, MAX_LIVE_PLAN_BYTES, threads)
+    ResourceEnvelope::bounded(peak_bytes, MAX_LIVE_PLAN_BYTES, threads)
 }
 
 fn exact_fidelity() -> FidelityContract {

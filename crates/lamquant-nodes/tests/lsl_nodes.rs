@@ -37,10 +37,13 @@ fn live_lsl_descriptors_are_host_only_and_effect_honest() {
     assert_eq!(inlet.state.checkpoint.mode, CheckpointMode::Disabled);
     assert_eq!(inlet.partiality, Partiality::ExplicitGaps);
     assert_eq!(inlet.fidelity.maximum_loss, u16::MAX);
-    assert_eq!(inlet.resources.threads, 3);
-    assert!(inlet.capabilities.iter().any(
-        |capability| capability.0 == "org.quitetall.lamquant.lsl.experimental-numeric-inlet-v1"
-    ));
+    assert_eq!(inlet.resources.threads, 4);
+    assert_eq!(inlet.resources.peak_bytes, 7 * 1024 * 1024 * 1024);
+    assert!(inlet
+        .capabilities
+        .iter()
+        .any(|capability| capability.0
+            == "org.quitetall.lamquant.lsl.experimental-isolated-inlet-v1"));
     assert!(!inlet
         .capabilities
         .iter()
@@ -90,7 +93,7 @@ fn live_lsl_descriptors_are_host_only_and_effect_honest() {
 }
 
 #[test]
-fn bounded_inlet_capability_does_not_advertise_string_transport() {
+fn isolated_inlet_capability_advertises_bounded_string_transport() {
     let inlet = lsl_inlet_descriptor();
     let sample_type = inlet
         .config
@@ -101,7 +104,7 @@ fn bounded_inlet_capability_does_not_advertise_string_transport() {
     let ConfigType::Choice { values } = &sample_type.value_type else {
         panic!("sample_type must be a closed choice");
     };
-    assert!(!values.iter().any(|value| value == "string"));
+    assert!(values.iter().any(|value| value == "string"));
     #[cfg(windows)]
     assert!(!values.iter().any(|value| value == "int64"));
 }
