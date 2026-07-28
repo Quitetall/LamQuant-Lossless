@@ -3565,11 +3565,14 @@ name = "lamquant-nodes"
 version = "0.1.0"
 dependencies = [
  "abir",
+ "abir-adapter",
  "abir-bcs",
  "blake3",
  "blut-graph-core",
+ "flate2",
  "lamquant-abir-codec",
  "lamquant-lml-mcu",
+ "lamquant-standard-adapters",
 ]
 
 [[package]]

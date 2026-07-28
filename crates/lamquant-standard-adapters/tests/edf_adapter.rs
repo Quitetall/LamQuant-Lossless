@@ -185,6 +185,34 @@ fn edf_import_maps_samples_and_restores_exact_source() {
 }
 
 #[test]
+fn edf_import_payload_objects_match_every_abir_descriptor_identity() {
+    let source = ForeignObject {
+        profile: ProfileId("edfplus.1".to_owned()),
+        entries: vec![ForeignEntry {
+            path: "recording.edf".to_owned(),
+            media_type: Some("application/edf".to_owned()),
+            bytes: include_bytes!("fixtures/bids-full/sub-01/eeg/sub-01_task-rest_eeg.edf")
+                .to_vec(),
+        }],
+    };
+    let outcome = EdfAdapter::new(1 << 20)
+        .import(&source, ValidationLimits::default())
+        .unwrap();
+    for atom in outcome.dataset.atoms() {
+        let Some(descriptor) = atom.payload() else {
+            continue;
+        };
+        let payload = outcome
+            .payloads
+            .iter()
+            .find(|payload| payload.content_id == descriptor.content_id())
+            .expect("descriptor payload is present");
+        semantic_abir::verify_payload_content(descriptor, &payload.bytes)
+            .unwrap_or_else(|error| panic!("atom {atom:?}: {error:?}"));
+    }
+}
+
+#[test]
 fn edf_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
     let adapter = EdfAdapter::new(1024);
     let wrong = ForeignObject {

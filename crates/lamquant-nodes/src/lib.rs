@@ -4,10 +4,22 @@
 
 extern crate alloc;
 
+mod abir_value;
 mod lml_reference;
+#[cfg(feature = "standard-adapters")]
+mod standard_nodes;
 
+pub use abir_value::{AbirDatasetValue, AbirDatasetValueError, NodePayloadStore};
 pub use lml_reference::{
     LmlPackets, ReferenceEntropy, ReferencePredicted, ReferenceQuantized, ReferenceSubbands,
+};
+#[cfg(feature = "standard-adapters")]
+pub use standard_nodes::{
+    register_standard_nodes, standard_import_descriptor, standard_node_config,
+    standard_restore_descriptor, StandardNodeConfigError, BIDS_IMPORT_NODE_TYPE,
+    BIDS_RESTORE_NODE_TYPE, DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE,
+    EDFPLUS_IMPORT_NODE_TYPE, EDFPLUS_RESTORE_NODE_TYPE, NWB_IMPORT_NODE_TYPE,
+    NWB_RESTORE_NODE_TYPE, XDF_IMPORT_NODE_TYPE, XDF_RESTORE_NODE_TYPE,
 };
 
 pub const LML_TRANSFORM_NODE_TYPE: &str = lml_reference::LML_TRANSFORM_NODE_TYPE;
@@ -17,6 +29,7 @@ pub const LML_ENTROPY_NODE_TYPE: &str = lml_reference::LML_ENTROPY_NODE_TYPE;
 pub const LML_ASSEMBLE_NODE_TYPE: &str = lml_reference::LML_ASSEMBLE_NODE_TYPE;
 pub const LML_PACKET_BASELINE_NODE_TYPE: &str = lml_reference::LML_PACKET_BASELINE_NODE_TYPE;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
@@ -134,6 +147,13 @@ pub enum LamQuantNodeValue<'a> {
     #[doc(hidden)]
     LmlPackets(LmlPackets),
     Bcs2(Vec<u8>),
+    #[cfg(feature = "standard-adapters")]
+    ForeignObject(abir_adapter::ForeignObject),
+    AbirDataset(Box<AbirDatasetValue>),
+    #[cfg(feature = "standard-adapters")]
+    MappingReport(abir_adapter::MappingReport),
+    #[cfg(feature = "standard-adapters")]
+    FidelityReceipt(abir_adapter::FidelityReceipt),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +203,10 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
         let type_name = semantic_types.first().copied().ok_or_else(|| {
             lml_reference::kernel_failure(node, "invalid-plan", "missing semantic node type")
         })?;
+        #[cfg(feature = "standard-adapters")]
+        if standard_nodes::is_standard_node(type_name) {
+            return standard_nodes::execute_standard(node, type_name, inputs);
+        }
         match type_name {
             LML_TRANSFORM_NODE_TYPE => execute_transform(node, inputs),
             LML_QUANTIZE_NODE_TYPE => execute_quantize(node, inputs),

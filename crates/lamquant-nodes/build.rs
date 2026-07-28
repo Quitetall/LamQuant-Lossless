@@ -40,6 +40,15 @@ fn main() {
         files.push(repository.join("lamquant-lml-desktop/Cargo.toml"));
         collect_files(&repository.join("lamquant-lml-desktop/src"), &mut files);
     }
+    if env::var_os("CARGO_FEATURE_STANDARD_ADAPTERS").is_some() {
+        files.push(repository.join("crates/lamquant-standard-adapters/Cargo.toml"));
+        collect_files(
+            &repository.join("crates/lamquant-standard-adapters/src"),
+            &mut files,
+        );
+        files.push(repository.join("lamquant-lossless/Cargo.toml"));
+        collect_files(&repository.join("lamquant-lossless/src"), &mut files);
+    }
     files.sort();
 
     let mut hasher = blake3::Hasher::new();

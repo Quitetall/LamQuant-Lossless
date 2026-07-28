@@ -14,6 +14,7 @@ use abir_adapter::{
 use lamquant_standard_adapters::NwbAdapter;
 use semantic_abir::{ContentId, ValidationLimits};
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
 
@@ -105,6 +106,19 @@ fn nwb_import_separates_containers_and_promotes_electrodes_and_intervals() {
         quarantined, 1,
         "the external asset is quarantined, not dropped"
     );
+    assert!(outcome.dataset.recordings()[0]
+        .source_keys()
+        .iter()
+        .any(|key| {
+            key.namespace() == "nwb.external-asset" && key.value() == "session-video.avi"
+        }));
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.target == "external-asset:session-video.avi"
+            && entry
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("frame 0"))
+    }));
 }
 
 #[test]
@@ -126,6 +140,89 @@ fn nwb_behavior_series_keeps_its_own_timestamps() {
         .filter(|axis| matches!(axis, semantic_abir::TimeAxis::Explicit { .. }))
         .count();
     assert_eq!(explicit, 1);
+}
+
+#[test]
+fn nwb_reports_submicrosecond_regular_timing_projection() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        file.dataset("acquisition/ephys/starting_time")
+            .unwrap()
+            .write_scalar(&0.000_000_4_f64)
+            .unwrap();
+    }
+    let outcome = NwbAdapter::new(1 << 26)
+        .import(
+            &foreign(std::fs::read(temporary.path()).unwrap()),
+            ValidationLimits::default(),
+        )
+        .unwrap();
+    assert!(outcome.report.timing_changed);
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.source_path == "/acquisition/ephys/data"
+            && matches!(
+                entry.disposition,
+                abir_adapter::MappingDisposition::Projected
+            )
+    }));
+}
+
+#[test]
+fn nwb_reports_submicrosecond_explicit_timestamp_projection() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        let dataset = file
+            .dataset("processing/behavior/BehavioralTimeSeries/position/timestamps")
+            .unwrap();
+        let mut timestamps = dataset.read_raw::<f64>().unwrap();
+        timestamps[0] = 0.000_000_4;
+        dataset.write(&timestamps).unwrap();
+    }
+    let outcome = NwbAdapter::new(1 << 26)
+        .import(
+            &foreign(std::fs::read(temporary.path()).unwrap()),
+            ValidationLimits::default(),
+        )
+        .unwrap();
+    assert!(outcome.report.timing_changed);
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.source_path.ends_with("/position/data")
+            && matches!(
+                entry.disposition,
+                abir_adapter::MappingDisposition::Projected
+            )
+    }));
+}
+
+#[test]
+fn nwb_reports_submicrosecond_interval_projection() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        let dataset = file.dataset("intervals/epochs/start_time").unwrap();
+        let mut starts = dataset.read_raw::<f64>().unwrap();
+        starts[0] = 0.000_000_4;
+        dataset.write(&starts).unwrap();
+    }
+    let outcome = NwbAdapter::new(1 << 26)
+        .import(
+            &foreign(std::fs::read(temporary.path()).unwrap()),
+            ValidationLimits::default(),
+        )
+        .unwrap();
+    assert!(outcome.report.timing_changed);
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.source_path == "/intervals"
+            && matches!(
+                entry.disposition,
+                abir_adapter::MappingDisposition::Projected
+            )
+    }));
 }
 
 #[test]
@@ -190,6 +287,193 @@ fn nwb_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
     assert!(NwbAdapter::new(64)
         .import(&foreign(valid), ValidationLimits::default())
         .is_err());
+}
+
+#[test]
+fn nwb_rejects_compressed_shape_bombs_before_reading_sample_payloads() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        let acquisition = file.group("acquisition").unwrap();
+        let series = acquisition.create_group("shape_bomb").unwrap();
+        series
+            .new_dataset::<i8>()
+            .shape(1_000_000_000)
+            .chunk(4096)
+            .create("data")
+            .unwrap();
+        let start = series.new_dataset::<f64>().create("starting_time").unwrap();
+        start.write_scalar(&0.0_f64).unwrap();
+        start
+            .new_attr::<f64>()
+            .create("rate")
+            .unwrap()
+            .write_scalar(&250.0_f64)
+            .unwrap();
+    }
+    let source = foreign(std::fs::read(temporary.path()).unwrap());
+    let source_limit = source.entries[0].bytes.len() as u64 + 1024;
+    let adapter = NwbAdapter::with_decoded_limit(source_limit, 64 * 1024 * 1024);
+    assert!(matches!(
+        adapter.inspect(&source),
+        Err(AdapterError::SourceTooLarge)
+    ));
+    assert!(matches!(
+        adapter.import(&source, ValidationLimits::default()),
+        Err(AdapterError::SourceTooLarge)
+    ));
+}
+
+#[test]
+fn nwb_rejects_hdf5_external_links_before_host_resolution() {
+    let target = tempfile::NamedTempFile::new().unwrap();
+    {
+        let target_file = hdf5_metno::File::create(target.path()).unwrap();
+        target_file.create_group("series").unwrap();
+    }
+    let source_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(source_file.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(source_file.path()).unwrap();
+        let acquisition = file.group("acquisition").unwrap();
+        acquisition
+            .link_external(
+                target.path().to_str().unwrap(),
+                "/series",
+                "zzz_host_dependent",
+            )
+            .unwrap();
+        acquisition
+            .link_soft("/acquisition/zzz_host_dependent", "aaa_external_alias")
+            .unwrap();
+    }
+    drop(target);
+    let source = foreign(std::fs::read(source_file.path()).unwrap());
+    let adapter = NwbAdapter::new(source.entries[0].bytes.len() as u64 + 1024);
+    assert!(matches!(
+        adapter.inspect(&source),
+        Err(AdapterError::UnsupportedMeaning(message))
+            if message.contains("link")
+    ));
+}
+
+#[test]
+fn nwb_external_asset_indices_are_local_to_each_series() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        let second = file
+            .group("acquisition")
+            .unwrap()
+            .create_group("video_two")
+            .unwrap();
+        let external = second
+            .new_dataset_builder()
+            .with_data(&[hdf5_metno::types::VarLenUnicode::from_str("second-video.avi").unwrap()])
+            .create("external_file")
+            .unwrap();
+        external
+            .new_attr_builder()
+            .with_data(&[12_i64])
+            .create("starting_frame")
+            .unwrap();
+    }
+    let source = foreign(std::fs::read(temporary.path()).unwrap());
+    let adapter = NwbAdapter::new(source.entries[0].bytes.len() as u64 + 1024);
+    let outcome = adapter
+        .import(&source, ValidationLimits::default())
+        .unwrap();
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.source_path == "/acquisition/video/external_file[0]"
+            && entry.target == "external-asset:session-video.avi"
+    }));
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.source_path == "/acquisition/video_two/external_file[0]"
+            && entry.target == "external-asset:second-video.avi"
+    }));
+}
+
+#[test]
+fn nwb_rejects_excessive_interval_rows_before_decoding_columns() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        let table = file
+            .group("intervals")
+            .unwrap()
+            .create_group("too_many")
+            .unwrap();
+        for name in ["start_time", "stop_time"] {
+            table
+                .new_dataset::<f64>()
+                .shape(262_145)
+                .chunk(4096)
+                .create(name)
+                .unwrap();
+        }
+    }
+    let source = foreign(std::fs::read(temporary.path()).unwrap());
+    let source_limit = source.entries[0].bytes.len() as u64 + 1024;
+    let adapter = NwbAdapter::with_decoded_limit(source_limit, 64 * 1024 * 1024);
+    assert!(matches!(
+        adapter.inspect(&source),
+        Err(AdapterError::SourceTooLarge)
+    ));
+}
+
+#[test]
+fn nwb_rejects_excessive_electrodes_before_string_derivation() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        let electrodes = file
+            .group("general/extracellular_ephys/electrodes")
+            .unwrap();
+        electrodes.unlink("id").unwrap();
+        electrodes
+            .new_dataset::<i64>()
+            .shape(65_537)
+            .chunk(4096)
+            .create("id")
+            .unwrap();
+    }
+    let source = foreign(std::fs::read(temporary.path()).unwrap());
+    let source_limit = source.entries[0].bytes.len() as u64 + 1024;
+    let adapter = NwbAdapter::with_decoded_limit(source_limit, 64 * 1024 * 1024);
+    assert!(matches!(
+        adapter.inspect(&source),
+        Err(AdapterError::SourceTooLarge)
+    ));
+}
+
+#[test]
+fn nwb_rejects_group_hard_link_cycles_before_recursive_traversal() {
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(temporary.path(), fixture()).unwrap();
+    {
+        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
+        let processing = file.group("processing").unwrap();
+        let cycle = processing.create_group("cycle").unwrap();
+        file.link_hard("/processing/cycle", "/processing/cycle/loop")
+            .unwrap();
+        drop(cycle);
+    }
+    let source = foreign(std::fs::read(temporary.path()).unwrap());
+    let adapter = NwbAdapter::new(source.entries[0].bytes.len() as u64 + 1024);
+    assert!(matches!(
+        adapter.inspect(&source),
+        Err(AdapterError::UnsupportedMeaning(message))
+            if message.contains("cycle") || message.contains("hard link")
+    ));
+    assert!(matches!(
+        adapter.import(&source, ValidationLimits::default()),
+        Err(AdapterError::UnsupportedMeaning(message))
+            if message.contains("cycle") || message.contains("hard link")
+    ));
 }
 
 #[test]

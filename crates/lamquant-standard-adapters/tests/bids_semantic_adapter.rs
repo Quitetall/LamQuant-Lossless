@@ -10,8 +10,9 @@ use abir_adapter::{
     Adapter, AdapterError, ForeignEntry, ForeignObject, PayloadResolver, ProfileId,
 };
 use lamquant_standard_adapters::BidsSemanticAdapter;
-use semantic_abir::{ContentId, ValidationLimits};
+use semantic_abir::{logical_content_id, ContentId, ElementType, ValidationLimits};
 use std::collections::BTreeMap;
+use std::io::Write;
 
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
 
@@ -35,7 +36,7 @@ macro_rules! member {
 }
 
 fn dataset() -> Vec<ForeignEntry> {
-    vec![
+    let mut entries = vec![
         member!("dataset_description.json", "application/json"),
         member!("participants.tsv", "text/tab-separated-values"),
         member!("README", "text/plain"),
@@ -58,12 +59,28 @@ fn dataset() -> Vec<ForeignEntry> {
             "sub-01/eeg/sub-01_task-rest_physio.tsv.gz",
             "application/gzip"
         ),
+        member!(
+            "sub-01/eeg/sub-01_task-rest_physio.json",
+            "application/json"
+        ),
         member!("sub-01/ieeg/sub-01_task-rest_ieeg.edf", "application/edf"),
         member!(
             "derivatives/cleaned/sub-01/eeg/sub-01_task-rest_desc-clean_eeg.edf",
             "application/edf"
         ),
-    ]
+    ];
+    replace_physio(&mut entries, "0.5\t1.5\n0.7\t1.4\n0.6\t1.6\n");
+    entries
+}
+
+fn replace_physio(entries: &mut [ForeignEntry], text: &str) {
+    let physio = entries
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("_physio.tsv.gz"))
+        .unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(text.as_bytes()).unwrap();
+    physio.bytes = encoder.finish().unwrap();
 }
 
 fn foreign(entries: Vec<ForeignEntry>) -> ForeignObject {
@@ -113,6 +130,29 @@ fn bids_reads_the_layout_as_the_semantic_it_is() {
     assert_eq!(abir.coordinate_frames().len(), 1);
 
     assert_eq!(abir.events().len(), 1);
+
+    let physio = abir
+        .streams()
+        .iter()
+        .find(|stream| stream.modality().as_str() == "bids:modality/physio")
+        .unwrap();
+    let block = abir
+        .atoms()
+        .iter()
+        .find_map(|atom| {
+            (atom.id() == physio.atoms()[0])
+                .then_some(atom)
+                .and_then(|atom| match atom {
+                    semantic_abir::Atom::SignalBlock(block) => Some(block),
+                    _ => None,
+                })
+        })
+        .unwrap();
+    let semantic_abir::TimeAxis::Regular(segment) = block.time_axis() else {
+        panic!("BIDS physio sidecar declares a regular axis");
+    };
+    assert_eq!(segment.start().parts(), (-1, 2));
+    assert_eq!(segment.rate().parts(), (250, 1));
 
     let inspect = adapter.inspect(&source).expect("the dataset inspects");
     assert_eq!(inspect.required_resources["recordings"], 3);
@@ -225,6 +265,224 @@ fn bids_rejects_wrong_profile_duplicates_and_incomplete_datasets() {
     assert!(BidsSemanticAdapter::new(64)
         .import(&foreign(dataset()), ValidationLimits::default())
         .is_err());
+}
+
+#[test]
+fn bids_rejects_gzip_expansion_before_materializing_physio_samples() {
+    let mut entries = dataset();
+    let physio = entries
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("_physio.tsv.gz"))
+        .unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(b"cardiac\n").unwrap();
+    for _ in 0..2_000_000 {
+        encoder.write_all(b"0\n").unwrap();
+    }
+    physio.bytes = encoder.finish().unwrap();
+    let source = foreign(entries);
+    let compressed_bytes = source
+        .entries
+        .iter()
+        .map(|entry| entry.bytes.len() as u64)
+        .sum::<u64>();
+    let adapter = BidsSemanticAdapter::new(compressed_bytes + 1024);
+    assert!(matches!(
+        adapter.inspect(&source),
+        Err(AdapterError::SourceTooLarge)
+    ));
+    assert!(matches!(
+        adapter.import(&source, ValidationLimits::default()),
+        Err(AdapterError::SourceTooLarge)
+    ));
+}
+
+#[test]
+fn bids_rejects_wide_tsv_headers_and_rows_before_collecting_fields() {
+    let adapter = BidsSemanticAdapter::new(1 << 24);
+
+    let mut wide_header = dataset();
+    let events = wide_header
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("_events.tsv"))
+        .unwrap();
+    events.bytes = std::iter::repeat("column")
+        .take(16_385)
+        .collect::<Vec<_>>()
+        .join("\t")
+        .into_bytes();
+    assert!(matches!(
+        adapter.inspect(&foreign(wide_header)),
+        Err(AdapterError::SourceTooLarge)
+    ));
+
+    let mut wide_row = dataset();
+    let events = wide_row
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("_events.tsv"))
+        .unwrap();
+    events.bytes = format!(
+        "onset\n{}",
+        std::iter::repeat("0")
+            .take(16_385)
+            .collect::<Vec<_>>()
+            .join("\t")
+    )
+    .into_bytes();
+    assert!(matches!(
+        adapter.inspect(&foreign(wide_row)),
+        Err(AdapterError::SourceTooLarge)
+    ));
+}
+
+#[test]
+fn bids_caps_event_rows_across_all_tables() {
+    let mut entries = dataset();
+    let rows = std::iter::repeat("0")
+        .take(262_144)
+        .collect::<Vec<_>>()
+        .join("\n");
+    entries.push(ForeignEntry {
+        path: "sub-01/eeg/sub-01_task-rest_run-02_events.tsv".to_owned(),
+        media_type: Some("text/tab-separated-values".to_owned()),
+        bytes: format!("onset\n{rows}").into_bytes(),
+    });
+    let adapter = BidsSemanticAdapter::new(1 << 24);
+    assert!(matches!(
+        adapter.inspect(&foreign(entries)),
+        Err(AdapterError::SourceTooLarge)
+    ));
+}
+
+#[test]
+fn bids_physio_preserves_fractional_samples_and_rejects_nonfinite_values() {
+    let adapter = BidsSemanticAdapter::new(1 << 24);
+    let mut entries = dataset();
+    let sidecar = entries
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("_physio.json"))
+        .unwrap();
+    sidecar.bytes =
+        br#"{"Columns":["cardiac"],"SamplingFrequency":2.5e2,"StartTime":-0.5}"#.to_vec();
+    replace_physio(&mut entries, "0.5\n-1.25\n");
+    let outcome = adapter
+        .import(&foreign(entries), ValidationLimits::default())
+        .unwrap();
+    let stream = outcome
+        .dataset
+        .streams()
+        .iter()
+        .find(|stream| stream.modality().as_str() == "bids:modality/physio")
+        .unwrap();
+    let atom = outcome
+        .dataset
+        .atoms()
+        .iter()
+        .find(|atom| atom.id() == stream.atoms()[0])
+        .unwrap();
+    let descriptor = atom.payload().unwrap();
+    assert_eq!(descriptor.element(), ElementType::F64);
+    let payload = outcome
+        .payloads
+        .iter()
+        .find(|payload| payload.content_id == descriptor.content_id())
+        .unwrap();
+    let expected = [0.5_f64, -1.25_f64]
+        .into_iter()
+        .flat_map(f64::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(payload.bytes, expected);
+
+    for value in ["NaN", "inf", "-inf"] {
+        let mut entries = dataset();
+        replace_physio(&mut entries, &format!("{value}\t1\n"));
+        assert!(matches!(
+            adapter.import(&foreign(entries), ValidationLimits::default()),
+            Err(AdapterError::InvalidSource(message)) if message.contains("not finite")
+        ));
+    }
+}
+
+#[test]
+fn bids_physio_requires_sidecar_metadata_and_applies_inheritance() {
+    let adapter = BidsSemanticAdapter::new(1 << 24);
+    let mut inherited = dataset();
+    let sidecar = inherited
+        .iter_mut()
+        .find(|entry| entry.path.ends_with("_physio.json"))
+        .unwrap();
+    sidecar.bytes = br#"{"StartTime":-0.5}"#.to_vec();
+    inherited.push(ForeignEntry {
+        path: "task-rest_physio.json".to_owned(),
+        media_type: Some("application/json".to_owned()),
+        bytes: br#"{"Columns":["cardiac","respiratory"],"SamplingFrequency":100}"#.to_vec(),
+    });
+    let outcome = adapter
+        .import(&foreign(inherited), ValidationLimits::default())
+        .expect("partial sidecars merge from root to leaf");
+    let physio = outcome
+        .dataset
+        .streams()
+        .iter()
+        .find(|stream| stream.modality().as_str() == "bids:modality/physio")
+        .unwrap();
+    let block = outcome
+        .dataset
+        .atoms()
+        .iter()
+        .find_map(|atom| match atom {
+            semantic_abir::Atom::SignalBlock(block) if atom.id() == physio.atoms()[0] => {
+                Some(block)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let semantic_abir::TimeAxis::Regular(segment) = block.time_axis() else {
+        panic!("merged physio metadata declares a regular axis");
+    };
+    assert_eq!(segment.rate().parts(), (100, 1));
+
+    let missing = dataset()
+        .into_iter()
+        .filter(|entry| !entry.path.ends_with("_physio.json"))
+        .collect();
+    assert!(matches!(
+        adapter.import(&foreign(missing), ValidationLimits::default()),
+        Err(AdapterError::InvalidSource(message)) if message.contains("no applicable")
+    ));
+}
+
+#[test]
+fn bids_semantics_are_invariant_to_foreign_entry_order() {
+    let adapter = BidsSemanticAdapter::new(1 << 24);
+    let forward = adapter
+        .import(&foreign(dataset()), ValidationLimits::default())
+        .unwrap();
+    let mut reversed = dataset();
+    reversed.reverse();
+    let reversed = adapter
+        .import(&foreign(reversed), ValidationLimits::default())
+        .unwrap();
+    assert_eq!(
+        logical_content_id(&forward.dataset).unwrap(),
+        logical_content_id(&reversed.dataset).unwrap()
+    );
+}
+
+#[test]
+fn bids_rejects_multiple_applicable_physio_sidecars_at_one_level() {
+    let adapter = BidsSemanticAdapter::new(1 << 24);
+    let mut entries = dataset();
+    entries.push(ForeignEntry {
+        path: "sub-01/eeg/task-rest_physio.json".to_owned(),
+        media_type: Some("application/json".to_owned()),
+        bytes: br#"{"Columns":["cardiac","respiratory"]}"#.to_vec(),
+    });
+    assert!(matches!(
+        adapter.import(&foreign(entries), ValidationLimits::default()),
+        Err(AdapterError::InvalidSource(message))
+            if message.contains("multiple applicable physio sidecars")
+    ));
 }
 
 #[test]

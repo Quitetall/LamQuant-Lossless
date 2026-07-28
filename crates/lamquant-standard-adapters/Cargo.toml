@@ -6,6 +6,10 @@ rust-version = "1.81"
 license = "AGPL-3.0-or-later"
 publish = false
 
+[features]
+default = ["nwb"]
+nwb = ["dep:hdf5-metno", "lamquant-lml/nwb"]
+
 [dependencies]
 abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "5f2858342ca5823d5acae225756bb8e67a0dddde" }
 blake3 = "=1.5.5"
@@ -15,11 +19,19 @@ dicom-core = "0.8"
 # BIDS mandates gzipped continuous-recording tables.
 flate2 = "1"
 dicom-object = "0.8"
-hdf5-metno = "0.12"
-lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom", "nwb"] }
+hdf5-metno = { version = "0.12", optional = true }
+lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom"] }
 semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "5f2858342ca5823d5acae225756bb8e67a0dddde" }
 serde_json = "1"
 tempfile = "3"
 
 [dev-dependencies]
 lamquant-common = { path = "../lamquant-common" }
+
+[[example]]
+name = "nwb_semantic_probe"
+required-features = ["nwb"]
+
+[[test]]
+name = "nwb_semantic_adapter"
+required-features = ["nwb"]

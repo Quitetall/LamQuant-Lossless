@@ -9,7 +9,7 @@ use abir_adapter::{
     Adapter, AdapterError, ForeignEntry, ForeignObject, PayloadResolver, ProfileId,
 };
 use lamquant_standard_adapters::XdfAdapter;
-use semantic_abir::{ContentId, ValidationLimits};
+use semantic_abir::{ContentId, ElementType, ValidationLimits};
 use std::collections::BTreeMap;
 
 const BOUNDARY_UUID: [u8; 16] = [
@@ -173,6 +173,42 @@ fn xdf_import_maps_every_stream_clock_and_boundary() {
         .filter(|atom| matches!(atom, semantic_abir::Atom::SignalBlock(_)))
         .count();
     assert_eq!(signal_atoms, 1, "only the EEG stream is a signal block");
+    let marker_table = dataset
+        .atoms()
+        .iter()
+        .find_map(|atom| match atom {
+            semantic_abir::Atom::TemporalTable(table) => Some(table),
+            _ => None,
+        })
+        .expect("marker values and timestamps form one temporal table");
+    assert_eq!(marker_table.columns().len(), 2);
+    assert_eq!(
+        marker_table.columns()[0].semantic().as_str(),
+        "xdf:column/time-exact-seconds"
+    );
+    let descriptor = dataset
+        .atoms()
+        .iter()
+        .find(|atom| matches!(atom, semantic_abir::Atom::TemporalTable(_)))
+        .and_then(semantic_abir::Atom::payload)
+        .unwrap();
+    let semantic_abir::Layout::Ragged { rows, offsets } = descriptor.layout() else {
+        panic!("string table rows need explicit boundaries");
+    };
+    assert_eq!(*rows, 2);
+    assert!(dataset
+        .atoms()
+        .iter()
+        .filter_map(semantic_abir::Atom::payload)
+        .any(|payload| payload.content_id() == *offsets));
+    let row_payload = outcome
+        .payloads
+        .iter()
+        .find(|payload| payload.content_id == descriptor.content_id())
+        .unwrap();
+    let rows = std::str::from_utf8(&row_payload.bytes).unwrap();
+    assert!(rows.contains(r#"["1/2","start"]"#));
+    assert!(rows.contains(r#"["5/4","stop"]"#));
 
     let inspect = adapter.inspect(&source).expect("fixture inspects");
     assert_eq!(inspect.required_resources["streams"], 2);
@@ -208,6 +244,112 @@ fn irregular_numeric_fixture() -> Vec<u8> {
     file
 }
 
+fn mixed_timestamp_marker_fixture(first_timestamp: f64) -> Vec<u8> {
+    let xml = concat!(
+        "<?xml version=\"1.0\"?><info><name>Markers</name><type>Markers</type>",
+        "<channel_count>1</channel_count><nominal_srate>100</nominal_srate>",
+        "<channel_format>string</channel_format></info>"
+    );
+    let mut file = b"XDF:".to_vec();
+    file.extend_from_slice(&chunk(
+        1,
+        b"<?xml version=\"1.0\"?><info><version>1.0</version></info>",
+    ));
+    file.extend_from_slice(&stream_header(1, xml));
+    let mut samples = 1_u32.to_le_bytes().to_vec();
+    samples.push(1);
+    samples.push(2);
+    samples.push(8);
+    samples.extend_from_slice(&first_timestamp.to_le_bytes());
+    samples.extend_from_slice(&[1, 1, b'a']);
+    samples.push(0);
+    samples.extend_from_slice(&[1, 1, b'b']);
+    file.extend_from_slice(&chunk(3, &samples));
+    file
+}
+
+#[test]
+fn xdf_deduced_string_timestamps_continue_from_explicit_anchor() {
+    let outcome = XdfAdapter::new(1 << 20)
+        .import(
+            &foreign(mixed_timestamp_marker_fixture(42.0)),
+            ValidationLimits::default(),
+        )
+        .unwrap();
+    let descriptor = outcome
+        .dataset
+        .atoms()
+        .iter()
+        .find_map(|atom| match atom {
+            semantic_abir::Atom::TemporalTable(_) => atom.payload(),
+            _ => None,
+        })
+        .unwrap();
+    let payload = outcome
+        .payloads
+        .iter()
+        .find(|payload| payload.content_id == descriptor.content_id())
+        .unwrap();
+    let rows = std::str::from_utf8(&payload.bytes).unwrap();
+    assert!(rows.contains(r#"["42/1","a"]"#));
+    assert!(rows.contains(r#"["4201/100","b"]"#));
+    assert!(!outcome.report.timing_changed);
+}
+
+#[test]
+fn xdf_reports_submicrosecond_timestamp_projection() {
+    let outcome = XdfAdapter::new(1 << 20)
+        .import(
+            &foreign(mixed_timestamp_marker_fixture(0.000_000_4)),
+            ValidationLimits::default(),
+        )
+        .unwrap();
+    let descriptor = outcome
+        .dataset
+        .atoms()
+        .iter()
+        .find_map(|atom| match atom {
+            semantic_abir::Atom::TemporalTable(_) => atom.payload(),
+            _ => None,
+        })
+        .unwrap();
+    let payload = outcome
+        .payloads
+        .iter()
+        .find(|payload| payload.content_id == descriptor.content_id())
+        .unwrap();
+    let rows = std::str::from_utf8(&payload.bytes).unwrap();
+    assert!(rows.contains(r#"["0/1","a"]"#));
+    assert!(outcome.report.timing_changed);
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.source_path == "stream[1].samples"
+            && matches!(
+                entry.disposition,
+                abir_adapter::MappingDisposition::Projected
+            )
+    }));
+}
+
+#[test]
+fn xdf_reports_submicrosecond_clock_relation_projection() {
+    let mut bytes = mixed_timestamp_marker_fixture(42.0);
+    let mut offset = 1_u32.to_le_bytes().to_vec();
+    offset.extend_from_slice(&10.000_000_4_f64.to_le_bytes());
+    offset.extend_from_slice(&0.000_000_4_f64.to_le_bytes());
+    bytes.extend_from_slice(&chunk(4, &offset));
+    let outcome = XdfAdapter::new(1 << 20)
+        .import(&foreign(bytes), ValidationLimits::default())
+        .unwrap();
+    assert!(outcome.report.timing_changed);
+    assert!(outcome.report.entries.iter().any(|entry| {
+        entry.source_path == "stream[1].clock-offsets"
+            && matches!(
+                entry.disposition,
+                abir_adapter::MappingDisposition::Projected
+            )
+    }));
+}
+
 #[test]
 fn xdf_irregular_numeric_stream_carries_its_own_timestamps() {
     let adapter = XdfAdapter::new(1 << 20);
@@ -239,6 +381,48 @@ fn xdf_irregular_numeric_stream_carries_its_own_timestamps() {
         .iter()
         .filter_map(semantic_abir::Atom::payload)
         .any(|payload| payload.content_id() == *timestamps));
+}
+
+#[test]
+fn xdf_int64_samples_never_cross_f64() {
+    let value = 9_007_199_254_740_993_i64;
+    let mut file = b"XDF:".to_vec();
+    file.extend_from_slice(&chunk(
+        1,
+        b"<?xml version=\"1.0\"?><info><version>1.0</version></info>",
+    ));
+    file.extend_from_slice(&stream_header(
+        1,
+        concat!(
+            "<?xml version=\"1.0\"?><info><name>exact</name><type>EEG</type>",
+            "<channel_count>1</channel_count><nominal_srate>1</nominal_srate>",
+            "<channel_format>int64</channel_format></info>"
+        ),
+    ));
+    let mut samples = 1_u32.to_le_bytes().to_vec();
+    samples.extend_from_slice(&[1, 1, 0]);
+    samples.extend_from_slice(&value.to_le_bytes());
+    file.extend_from_slice(&chunk(3, &samples));
+
+    let outcome = XdfAdapter::new(1 << 20)
+        .import(&foreign(file), ValidationLimits::default())
+        .unwrap();
+    let stream = &outcome.dataset.streams()[0];
+    let atom = outcome
+        .dataset
+        .atoms()
+        .iter()
+        .find(|atom| atom.id() == stream.atoms()[0])
+        .unwrap();
+    let descriptor = atom.payload().unwrap();
+    assert_eq!(descriptor.element(), ElementType::I64);
+    let payload = outcome
+        .payloads
+        .iter()
+        .find(|payload| payload.content_id == descriptor.content_id())
+        .unwrap();
+    assert_eq!(payload.bytes, value.to_le_bytes());
+    assert!(!outcome.report.sample_values_changed);
 }
 
 #[test]
@@ -325,6 +509,44 @@ fn xdf_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
     assert!(adapter
         .import(&foreign(wrong_boundary), ValidationLimits::default())
         .is_err());
+
+    // One tiny XML scalar must not allocate one outer vector per claimed
+    // channel before the file has supplied a single sample.
+    let mut excessive_channels = b"XDF:".to_vec();
+    excessive_channels.extend_from_slice(&chunk(
+        1,
+        b"<?xml version=\"1.0\"?><info><version>1.0</version></info>",
+    ));
+    excessive_channels.extend_from_slice(&stream_header(
+        1,
+        concat!(
+            "<?xml version=\"1.0\"?><info><name>wide</name><type>EEG</type>",
+            "<channel_count>1000000</channel_count><nominal_srate>1</nominal_srate>",
+            "<channel_format>int16</channel_format></info>"
+        ),
+    ));
+    assert!(matches!(
+        adapter.inspect(&foreign(excessive_channels)),
+        Err(AdapterError::SourceTooLarge)
+    ));
+
+    let mut excessive_stream_bookkeeping = b"XDF:".to_vec();
+    excessive_stream_bookkeeping.extend_from_slice(&chunk(
+        1,
+        b"<?xml version=\"1.0\"?><info><version>1.0</version></info>",
+    ));
+    let wide_header = concat!(
+        "<?xml version=\"1.0\"?><info><name>wide</name><type>EEG</type>",
+        "<channel_count>65536</channel_count><nominal_srate>1</nominal_srate>",
+        "<channel_format>int16</channel_format></info>"
+    );
+    for stream_id in 1..=22 {
+        excessive_stream_bookkeeping.extend_from_slice(&stream_header(stream_id, wide_header));
+    }
+    assert!(matches!(
+        adapter.inspect(&foreign(excessive_stream_bookkeeping)),
+        Err(AdapterError::SourceTooLarge)
+    ));
 }
 
 #[test]

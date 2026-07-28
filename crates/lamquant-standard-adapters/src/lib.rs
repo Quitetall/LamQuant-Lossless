@@ -6,10 +6,13 @@ use abir_adapter::{
     MappingReport, PayloadObject, PayloadResolver, ProfileId, ProfileStatus, SemanticCoverage,
     ValidationArtifact,
 };
+#[cfg(feature = "nwb")]
 use hdf5_metno::types::{IntSize, TypeDescriptor};
+#[cfg(feature = "nwb")]
+use lamquant_core::source::SourceMetadata;
 use lamquant_core::source::{
     from_signal_bundle_with_interchange_bound_sources, DicomWaveformReader, EdfReader,
-    SemanticSourceObject, SemanticTimedEvent, SignalBundle, SignalSourceReader, SourceMetadata,
+    SemanticSourceObject, SemanticTimedEvent, SignalBundle, SignalSourceReader,
 };
 use semantic_abir::{AbirDataset, ContentId, PayloadAccess, PayloadLease, ValidationLimits};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,11 +21,13 @@ use std::fs;
 mod bids_full;
 mod dicom_full;
 mod edf_full;
+#[cfg(feature = "nwb")]
 mod nwb_full;
 mod xdf;
 pub use bids_full::BidsSemanticAdapter;
 pub use dicom_full::DicomSemanticAdapter;
 pub use edf_full::EdfAdapter;
+#[cfg(feature = "nwb")]
 pub use nwb_full::NwbAdapter;
 pub use xdf::XdfAdapter;
 
@@ -30,6 +35,7 @@ pub use xdf::XdfAdapter;
 enum ParserKind {
     Edf,
     Dicom,
+    #[cfg(feature = "nwb")]
     Nwb,
 }
 
@@ -79,6 +85,7 @@ impl StandardFileAdapter {
         let extension = match self.parser {
             ParserKind::Edf => "edf",
             ParserKind::Dicom => "dcm",
+            #[cfg(feature = "nwb")]
             ParserKind::Nwb => "nwb",
         };
         let path = temporary.path().join(format!("source.{extension}"));
@@ -91,6 +98,7 @@ impl StandardFileAdapter {
             ParserKind::Dicom => DicomWaveformReader::new(&path)
                 .read_bundle()
                 .map_err(|error| AdapterError::InvalidSource(error.to_string())),
+            #[cfg(feature = "nwb")]
             ParserKind::Nwb => read_bounded_nwb_bundle(&path, self.max_source_bytes),
         }?;
         if matches!(self.parser, ParserKind::Edf) && bundle.metadata.format == "EDF+D" {
@@ -117,7 +125,9 @@ impl StandardFileAdapter {
     fn modality(&self) -> semantic_abir::ConceptId {
         let value = match self.parser {
             ParserKind::Dicom => "abir:modality/ecg",
-            ParserKind::Edf | ParserKind::Nwb => "abir:modality/unknown",
+            ParserKind::Edf => "abir:modality/unknown",
+            #[cfg(feature = "nwb")]
+            ParserKind::Nwb => "abir:modality/unknown",
         };
         semantic_abir::ConceptId::new(value).expect("static modality concept is canonical")
     }
@@ -333,8 +343,10 @@ impl DicomAdapter {
     }
 }
 
+#[cfg(feature = "nwb")]
 pub struct NwbSubsetAdapter(StandardFileAdapter);
 
+#[cfg(feature = "nwb")]
 impl NwbSubsetAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self(StandardFileAdapter::new(
@@ -553,6 +565,7 @@ macro_rules! delegate_adapter {
 }
 
 delegate_adapter!(DicomAdapter);
+#[cfg(feature = "nwb")]
 delegate_adapter!(NwbSubsetAdapter);
 
 impl Adapter for BidsAdapter {
@@ -1113,6 +1126,7 @@ fn rational_add(
         .map_err(|_| AdapterError::InvalidSource("BIDS event interval is invalid".to_owned()))
 }
 
+#[cfg(feature = "nwb")]
 fn read_bounded_nwb_bundle(
     path: &std::path::Path,
     max_expanded_bytes: u64,
@@ -1247,6 +1261,7 @@ fn read_bounded_nwb_bundle(
     })
 }
 
+#[cfg(feature = "nwb")]
 fn read_nwb_values<T>(
     data: &hdf5_metno::Dataset,
     widen: impl Fn(T) -> i64,

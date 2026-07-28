@@ -46,6 +46,12 @@ use crate::{binding_namespace, payload_content_id, plan_id, valid_relative_path}
 const PROFILE: &str = "bids.1.11.1";
 /// Ceiling on recordings per dataset before the adapter refuses.
 const MAX_RECORDINGS: usize = 4096;
+const MAX_EVENTS: usize = 262_144;
+const MAX_ELECTRODES: usize = 262_144;
+/// Reject implausibly wide rows before field vectors can dominate memory.
+const MAX_TSV_COLUMNS: usize = 16_384;
+/// Prevent tiny TSV cells from expanding into millions of heap allocations.
+const MAX_TSV_CELLS: usize = 1_000_000;
 
 pub struct BidsSemanticAdapter {
     profile: AdapterProfile,
@@ -82,11 +88,18 @@ struct Recorded {
     datatype: Datatype,
     subject: String,
     session: String,
-    /// Per-channel samples.
-    signal: Vec<Vec<i64>>,
+    /// Per-channel samples in their exact promoted numeric domain.
+    signal: RecordedSignal,
     /// Exact sampling rate text, so the rational never rounds through f64.
     rate: String,
+    /// Exact onset relative to the recording clock.
+    start: String,
     channels: Vec<String>,
+}
+
+enum RecordedSignal {
+    Integer(Vec<Vec<i64>>),
+    Real(Vec<Vec<f64>>),
 }
 
 struct TabEvent {
@@ -111,6 +124,21 @@ struct ParsedBids {
     dataset_name: String,
     bids_version: String,
     subjects: BTreeSet<String>,
+}
+
+struct PhysioSidecar {
+    path: String,
+    directory: String,
+    entities: BTreeSet<String>,
+    columns: Option<Vec<String>>,
+    sampling_frequency: Option<String>,
+    start_time: Option<String>,
+}
+
+struct PhysioMetadata {
+    columns: Vec<String>,
+    sampling_frequency: String,
+    start_time: String,
 }
 
 fn invalid(error: impl std::fmt::Display) -> AdapterError {
@@ -148,9 +176,23 @@ fn id<T>(seed: &blake3::Hash, domain: &[u8], index: u64) -> ObjectId<T> {
 /// Parse a decimal literal into an exact rational.
 fn decimal_rational(text: &str) -> Result<Rational, AdapterError> {
     let trimmed = text.trim();
-    let (sign, digits) = match trimmed.strip_prefix('-') {
+    let (sign, unsigned) = match trimmed.strip_prefix('-') {
         Some(rest) => (-1_i128, rest),
         None => (1_i128, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let (digits, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => {
+            if exponent.contains(['e', 'E']) {
+                return Err(AdapterError::InvalidSource(format!(
+                    "BIDS value is not decimal: {text:?}"
+                )));
+            }
+            let exponent = exponent.parse::<i32>().map_err(|_| {
+                AdapterError::InvalidSource(format!("BIDS value has invalid exponent: {text:?}"))
+            })?;
+            (mantissa, exponent)
+        }
+        None => (unsigned, 0),
     };
     let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
     if whole.is_empty() && fraction.is_empty() {
@@ -174,7 +216,212 @@ fn decimal_rational(text: &str) -> Result<Rational, AdapterError> {
             .checked_mul(10)
             .ok_or_else(|| AdapterError::InvalidSource("BIDS decimal overflows".to_owned()))?;
     }
+    if numerator == 0 {
+        return Rational::new(0, 1).map_err(invalid);
+    }
+    let exponent_magnitude = exponent.unsigned_abs();
+    if exponent_magnitude > 38 {
+        return Err(AdapterError::InvalidSource(
+            "BIDS decimal overflows".to_owned(),
+        ));
+    }
+    if exponent >= 0 {
+        for _ in 0..exponent_magnitude {
+            numerator = numerator
+                .checked_mul(10)
+                .ok_or_else(|| AdapterError::InvalidSource("BIDS decimal overflows".to_owned()))?;
+        }
+    } else {
+        for _ in 0..exponent_magnitude {
+            denominator = denominator
+                .checked_mul(10)
+                .ok_or_else(|| AdapterError::InvalidSource("BIDS decimal overflows".to_owned()))?;
+        }
+    }
     Rational::new(sign * numerator, denominator).map_err(invalid)
+}
+
+fn path_directory(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(directory, _)| directory)
+}
+
+fn filename_entities(path: &str, suffix: &str) -> Result<BTreeSet<String>, AdapterError> {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let stem = filename
+        .strip_suffix(suffix)
+        .ok_or_else(|| AdapterError::InvalidSource(format!("{path} does not end in {suffix}")))?;
+    let mut entities = BTreeSet::new();
+    for token in stem.split('_').filter(|token| !token.is_empty()) {
+        let Some((key, value)) = token.split_once('-') else {
+            return Err(AdapterError::InvalidSource(format!(
+                "BIDS sidecar entity {token:?} has no value"
+            )));
+        };
+        if key.is_empty() || value.is_empty() || !entities.insert(token.to_owned()) {
+            return Err(AdapterError::InvalidSource(format!(
+                "BIDS sidecar has malformed or duplicate entity {token:?}"
+            )));
+        }
+    }
+    Ok(entities)
+}
+
+fn parse_physio_sidecar(entry: &ForeignEntry) -> Result<PhysioSidecar, AdapterError> {
+    let document: serde_json::Value = serde_json::from_slice(&entry.bytes).map_err(invalid)?;
+    let columns = document
+        .get("Columns")
+        .map(|value| {
+            let columns = value
+                .as_array()
+                .ok_or_else(|| {
+                    AdapterError::InvalidSource(format!(
+                        "{} physio Columns is not an array",
+                        entry.path
+                    ))
+                })?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|column| !column.trim().is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            AdapterError::InvalidSource(format!(
+                                "{} has a non-string or empty physio column",
+                                entry.path
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if columns.is_empty() || columns.len() > MAX_TSV_COLUMNS {
+                return Err(if columns.len() > MAX_TSV_COLUMNS {
+                    AdapterError::SourceTooLarge
+                } else {
+                    AdapterError::InvalidSource(format!(
+                        "{} declares an empty physio Columns array",
+                        entry.path
+                    ))
+                });
+            }
+            let unique: BTreeSet<&str> = columns.iter().map(String::as_str).collect();
+            if unique.len() != columns.len() {
+                return Err(AdapterError::InvalidSource(format!(
+                    "{} declares duplicate physio columns",
+                    entry.path
+                )));
+            }
+            Ok(columns)
+        })
+        .transpose()?;
+    let number_text = |field: &str| -> Result<Option<String>, AdapterError> {
+        document
+            .get(field)
+            .map(|value| {
+                value.as_number().map(ToString::to_string).ok_or_else(|| {
+                    AdapterError::InvalidSource(format!(
+                        "{} declares non-numeric {field}",
+                        entry.path
+                    ))
+                })
+            })
+            .transpose()
+    };
+    let sampling_frequency = number_text("SamplingFrequency")?;
+    if let Some(value) = &sampling_frequency {
+        if !decimal_rational(value)?.is_positive() {
+            return Err(AdapterError::InvalidSource(format!(
+                "{} SamplingFrequency is not positive",
+                entry.path
+            )));
+        }
+    }
+    let start_time = number_text("StartTime")?;
+    if let Some(value) = &start_time {
+        decimal_rational(value)?;
+    }
+    Ok(PhysioSidecar {
+        path: entry.path.clone(),
+        directory: path_directory(&entry.path).to_owned(),
+        entities: filename_entities(&entry.path, "_physio.json")?,
+        columns,
+        sampling_frequency,
+        start_time,
+    })
+}
+
+fn physio_sidecar_for(
+    path: &str,
+    sidecars: &[PhysioSidecar],
+) -> Result<PhysioMetadata, AdapterError> {
+    let directory = path_directory(path);
+    let entities = filename_entities(path, "_physio.tsv.gz")?;
+    let mut matches = sidecars
+        .iter()
+        .filter(|sidecar| {
+            (sidecar.directory.is_empty()
+                || directory == sidecar.directory
+                || directory
+                    .strip_prefix(&sidecar.directory)
+                    .is_some_and(|rest| rest.starts_with('/')))
+                && sidecar.entities.is_subset(&entities)
+        })
+        .map(|sidecar| {
+            (
+                sidecar
+                    .directory
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .count(),
+                sidecar,
+            )
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.path.cmp(&right.1.path))
+    });
+    if matches.is_empty() {
+        return Err(AdapterError::InvalidSource(format!(
+            "{path} has no applicable _physio.json sidecar"
+        )));
+    }
+    if matches.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(AdapterError::InvalidSource(format!(
+            "{path} has multiple applicable physio sidecars at one inheritance level"
+        )));
+    }
+    let mut columns = None;
+    let mut sampling_frequency = None;
+    let mut start_time = None;
+    for (_, sidecar) in matches {
+        if let Some(value) = &sidecar.columns {
+            columns = Some(value.clone());
+        }
+        if let Some(value) = &sidecar.sampling_frequency {
+            sampling_frequency = Some(value.clone());
+        }
+        if let Some(value) = &sidecar.start_time {
+            start_time = Some(value.clone());
+        }
+    }
+    Ok(PhysioMetadata {
+        columns: columns.ok_or_else(|| {
+            AdapterError::InvalidSource(format!(
+                "{path} effective physio metadata declares no Columns"
+            ))
+        })?,
+        sampling_frequency: sampling_frequency.ok_or_else(|| {
+            AdapterError::InvalidSource(format!(
+                "{path} effective physio metadata declares no SamplingFrequency"
+            ))
+        })?,
+        start_time: start_time.ok_or_else(|| {
+            AdapterError::InvalidSource(format!(
+                "{path} effective physio metadata declares no StartTime"
+            ))
+        })?,
+    })
 }
 
 /// The BIDS entity a path segment declares, e.g. `sub-01` -> `("sub", "01")`.
@@ -215,19 +462,29 @@ fn read_tsv(bytes: &[u8]) -> Result<(Vec<String>, Vec<Vec<String>>), AdapterErro
     let text = std::str::from_utf8(bytes)
         .map_err(|_| AdapterError::InvalidSource("BIDS TSV is not UTF-8".to_owned()))?;
     let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-    let header: Vec<String> = lines
+    let header_line = lines
         .next()
-        .ok_or_else(|| AdapterError::InvalidSource("BIDS TSV has no header".to_owned()))?
-        .split('\t')
-        .map(|value| value.trim().to_owned())
-        .collect();
-    let rows = lines
-        .map(|line| {
-            line.split('\t')
-                .map(|value| value.trim().to_owned())
-                .collect()
-        })
-        .collect();
+        .ok_or_else(|| AdapterError::InvalidSource("BIDS TSV has no header".to_owned()))?;
+    let mut header = Vec::new();
+    for value in header_line.split('\t') {
+        if header.len() >= MAX_TSV_COLUMNS {
+            return Err(AdapterError::SourceTooLarge);
+        }
+        header.push(value.trim().to_owned());
+    }
+    let mut rows = Vec::new();
+    let mut cells = header.len();
+    for line in lines {
+        let mut row = Vec::new();
+        for value in line.split('\t') {
+            if row.len() >= MAX_TSV_COLUMNS || cells >= MAX_TSV_CELLS {
+                return Err(AdapterError::SourceTooLarge);
+            }
+            row.push(value.trim().to_owned());
+            cells += 1;
+        }
+        rows.push(row);
+    }
     Ok((header, rows))
 }
 
@@ -251,7 +508,24 @@ fn read_edf_bundle(bytes: &[u8]) -> Result<SignalBundle, AdapterError> {
     EdfReader::new(&path).read_bundle().map_err(invalid)
 }
 
-fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
+fn read_gzip_bounded(bytes: &[u8], limit: u64) -> Result<Vec<u8>, AdapterError> {
+    let read_limit = limit.checked_add(1).ok_or(AdapterError::SourceTooLarge)?;
+    let mut plain = Vec::new();
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut limited = std::io::Read::take(decoder, read_limit);
+    std::io::Read::read_to_end(&mut limited, &mut plain).map_err(|error| {
+        AdapterError::InvalidSource(format!("physio table is not gzip: {error}"))
+    })?;
+    if plain.len() as u64 > limit {
+        return Err(AdapterError::SourceTooLarge);
+    }
+    Ok(plain)
+}
+
+fn parse_bids(
+    entries: &[ForeignEntry],
+    max_decoded_bytes: u64,
+) -> Result<ParsedBids, AdapterError> {
     let mut recordings = Vec::new();
     let mut events = Vec::new();
     let mut electrodes = Vec::new();
@@ -260,8 +534,22 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
     let mut subjects = BTreeSet::new();
     let mut dataset_name = String::new();
     let mut bids_version = String::new();
+    let mut retained_signal_bytes = 0_u64;
+    let physio_sidecars = entries
+        .iter()
+        .filter(|entry| {
+            !entry
+                .path
+                .split('/')
+                .any(|segment| segment == "derivatives")
+                && entry.path.ends_with("_physio.json")
+        })
+        .map(parse_physio_sidecar)
+        .collect::<Result<Vec<_>, _>>()?;
 
-    for entry in entries {
+    let mut ordered_entries = entries.iter().collect::<Vec<_>>();
+    ordered_entries.sort_by(|left, right| left.path.cmp(&right.path));
+    for entry in ordered_entries {
         let path = entry.path.as_str();
         // A derivative is somebody's OUTPUT. It is named, never promoted into
         // the same semantic space as an observation.
@@ -297,6 +585,9 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
         if path.ends_with("_electrodes.tsv") {
             let (header, rows) = read_tsv(&entry.bytes)?;
             for row in rows {
+                if electrodes.len() >= MAX_ELECTRODES {
+                    return Err(AdapterError::SourceTooLarge);
+                }
                 let (Some(name), Some(x), Some(y), Some(z)) = (
                     column(&header, &row, "name"),
                     column(&header, &row, "x"),
@@ -319,6 +610,9 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
         if path.ends_with("_events.tsv") {
             let (header, rows) = read_tsv(&entry.bytes)?;
             for row in rows {
+                if events.len() >= MAX_EVENTS {
+                    return Err(AdapterError::SourceTooLarge);
+                }
                 let Some(onset) = column(&header, &row, "onset") else {
                     return Err(AdapterError::InvalidSource(
                         "an events table row lacks an onset".to_owned(),
@@ -341,22 +635,51 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
         if path.ends_with("_physio.tsv.gz") {
             // BIDS mandates gzip for continuous recordings, so the table is
             // decompressed rather than the naming rule being relaxed.
-            let mut plain = Vec::new();
-            std::io::Read::read_to_end(
-                &mut flate2::read::GzDecoder::new(entry.bytes.as_slice()),
-                &mut plain,
-            )
-            .map_err(|error| {
-                AdapterError::InvalidSource(format!("physio table is not gzip: {error}"))
+            let remaining = max_decoded_bytes
+                .checked_sub(retained_signal_bytes)
+                .ok_or(AdapterError::SourceTooLarge)?;
+            let plain = read_gzip_bounded(&entry.bytes, remaining)?;
+            let text = std::str::from_utf8(&plain).map_err(|_| {
+                AdapterError::InvalidSource("BIDS physio TSV is not UTF-8".to_owned())
             })?;
-            let (header, rows) = read_tsv(&plain)?;
-            let mut signal = vec![Vec::new(); header.len()];
-            for row in &rows {
-                for (index, value) in row.iter().enumerate() {
+            let metadata = physio_sidecar_for(path, &physio_sidecars)?;
+            let lines = text.lines().filter(|line| !line.trim().is_empty());
+            let signal_budget = remaining
+                .checked_sub(plain.len() as u64)
+                .ok_or(AdapterError::SourceTooLarge)?;
+            let max_values = signal_budget / core::mem::size_of::<i64>() as u64;
+            if metadata.columns.len() as u64 > max_values {
+                return Err(AdapterError::SourceTooLarge);
+            }
+            let mut signal = vec![Vec::new(); metadata.columns.len()];
+            let mut values = 0_u64;
+            for line in lines {
+                let mut width = 0_usize;
+                for (index, value) in line.split('\t').enumerate() {
+                    if index >= metadata.columns.len() {
+                        return Err(AdapterError::InvalidSource(
+                            "a physio row does not match sidecar Columns".to_owned(),
+                        ));
+                    }
+                    values = values.checked_add(1).ok_or(AdapterError::SourceTooLarge)?;
+                    if values > max_values {
+                        return Err(AdapterError::SourceTooLarge);
+                    }
                     let parsed = value.parse::<f64>().map_err(|_| {
                         AdapterError::InvalidSource("a physio sample is not a number".to_owned())
                     })?;
-                    signal[index].push(parsed.round() as i64);
+                    if !parsed.is_finite() {
+                        return Err(AdapterError::InvalidSource(
+                            "a physio sample is not finite".to_owned(),
+                        ));
+                    }
+                    signal[index].push(parsed);
+                    width += 1;
+                }
+                if width != metadata.columns.len() {
+                    return Err(AdapterError::InvalidSource(
+                        "a physio row does not match sidecar Columns".to_owned(),
+                    ));
                 }
             }
             if signal.iter().any(Vec::is_empty) {
@@ -364,17 +687,22 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
                     "a physio recording carries no samples".to_owned(),
                 ));
             }
+            retained_signal_bytes = retained_signal_bytes
+                .checked_add(
+                    values
+                        .checked_mul(core::mem::size_of::<i64>() as u64)
+                        .ok_or(AdapterError::SourceTooLarge)?,
+                )
+                .ok_or(AdapterError::SourceTooLarge)?;
             recordings.push(Recorded {
                 path: path.to_owned(),
                 datatype: Datatype::Physio,
                 subject: subject_of(path),
                 session: session_of(path),
-                signal,
-                // BIDS states a physio sampling frequency in its sidecar; the
-                // fixture-independent default keeps the axis honest at 1 Hz
-                // when no sidecar was supplied.
-                rate: "1".to_owned(),
-                channels: header,
+                signal: RecordedSignal::Real(signal),
+                rate: metadata.sampling_frequency.clone(),
+                start: metadata.start_time.clone(),
+                channels: metadata.columns.clone(),
             });
             continue;
         }
@@ -389,6 +717,21 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
                 ))
             })?;
             let bundle = read_edf_bundle(&entry.bytes)?;
+            let decoded_bytes = bundle
+                .signal
+                .iter()
+                .try_fold(0_u64, |total, channel| {
+                    total.checked_add(
+                        (channel.len() as u64).checked_mul(core::mem::size_of::<i64>() as u64)?,
+                    )
+                })
+                .ok_or(AdapterError::SourceTooLarge)?;
+            retained_signal_bytes = retained_signal_bytes
+                .checked_add(decoded_bytes)
+                .ok_or(AdapterError::SourceTooLarge)?;
+            if retained_signal_bytes > max_decoded_bytes {
+                return Err(AdapterError::SourceTooLarge);
+            }
             if recordings.len() >= MAX_RECORDINGS {
                 return Err(AdapterError::UnsupportedMeaning(
                     "dataset declares more recordings than this adapter will import".to_owned(),
@@ -401,8 +744,9 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
                 subject: subject_of(path),
                 session: session_of(path),
                 rate: format!("{}", bundle.sample_rate),
+                start: "0".to_owned(),
                 channels: bundle.channels.clone(),
-                signal: bundle.signal,
+                signal: RecordedSignal::Integer(bundle.signal),
             });
             continue;
         }
@@ -496,7 +840,11 @@ impl BidsSemanticAdapter {
         entries: &[ForeignEntry],
         limits: ValidationLimits,
     ) -> Result<ParsedDataset, AdapterError> {
-        let parsed = parse_bids(entries)?;
+        let decoded_limit = self
+            .max_source_bytes
+            .saturating_mul(2)
+            .min(limits.max_logical_payload_bytes);
+        let parsed = parse_bids(entries, decoded_limit)?;
         // The dataset identity is every file, in a stable order: a BIDS dataset
         // IS its tree, so a seed derived from one file would not name it.
         let mut hasher = blake3::Hasher::new();
@@ -571,32 +919,58 @@ impl BidsSemanticAdapter {
             let position = index as u64;
             let stream_id = id::<StreamTag>(&seed, b"stream", position);
             let atom_id = id::<AtomTag>(&seed, b"signal", position);
-            let samples = recorded.signal.first().map_or(0, Vec::len) as u64;
+            let (channel_count, samples) = match &recorded.signal {
+                RecordedSignal::Integer(signal) => {
+                    (signal.len(), signal.first().map_or(0, Vec::len) as u64)
+                }
+                RecordedSignal::Real(signal) => {
+                    (signal.len(), signal.first().map_or(0, Vec::len) as u64)
+                }
+            };
             if samples == 0 {
                 return Err(AdapterError::InvalidSource(format!(
                     "recording {} carries no samples",
                     recorded.path
                 )));
             }
-            let mut bytes = Vec::with_capacity(recorded.signal.len() * samples as usize * 8);
-            for channel in &recorded.signal {
-                if channel.len() as u64 != samples {
-                    return Err(AdapterError::UnsupportedMeaning(format!(
-                        "recording {} has channels of differing length",
-                        recorded.path
-                    )));
+            let mut bytes = Vec::with_capacity(channel_count * samples as usize * 8);
+            let element = match &recorded.signal {
+                RecordedSignal::Integer(signal) => {
+                    for channel in signal {
+                        if channel.len() as u64 != samples {
+                            return Err(AdapterError::UnsupportedMeaning(format!(
+                                "recording {} has channels of differing length",
+                                recorded.path
+                            )));
+                        }
+                        for value in channel {
+                            bytes.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                    ElementType::I64
                 }
-                for value in channel {
-                    bytes.extend_from_slice(&value.to_le_bytes());
+                RecordedSignal::Real(signal) => {
+                    for channel in signal {
+                        if channel.len() as u64 != samples {
+                            return Err(AdapterError::UnsupportedMeaning(format!(
+                                "recording {} has channels of differing length",
+                                recorded.path
+                            )));
+                        }
+                        for value in channel {
+                            bytes.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                    ElementType::F64
                 }
-            }
-            let content_id = abir_payload_id(ElementType::I64, &bytes);
+            };
+            let content_id = abir_payload_id(element, &bytes);
             let descriptor = PayloadDescriptor::new(
                 content_id,
                 bytes.len() as u64,
-                ElementType::I64,
+                element,
                 ByteOrder::Little,
-                vec![recorded.signal.len() as u64, samples],
+                vec![channel_count as u64, samples],
                 Layout::DenseRowMajor,
                 Some(concept("abir:encoding/raw")?),
                 None,
@@ -607,7 +981,7 @@ impl BidsSemanticAdapter {
                 Some(descriptor),
                 TimeAxis::Regular(
                     TimeSegment::new(
-                        Rational::new(0, 1).expect("zero is a rational"),
+                        decimal_rational(&recorded.start)?,
                         decimal_rational(&recorded.rate)?,
                         samples,
                     )
@@ -773,7 +1147,7 @@ impl Adapter for BidsSemanticAdapter {
 
     fn inspect(&self, source: &ForeignObject) -> Result<InspectReport, AdapterError> {
         let entries = self.check(source)?;
-        let parsed = parse_bids(entries)?;
+        let parsed = parse_bids(entries, self.max_source_bytes.saturating_mul(2))?;
         Ok(InspectReport {
             profile: self.profile.id.clone(),
             entry_count: entries.len(),

@@ -1,5 +1,7 @@
 use abir_adapter::{Adapter, ForeignEntry, ForeignObject, PayloadResolver, ProfileId};
-use lamquant_standard_adapters::{DicomAdapter, NwbSubsetAdapter as NwbAdapter};
+use lamquant_standard_adapters::DicomAdapter;
+#[cfg(feature = "nwb")]
+use lamquant_standard_adapters::NwbSubsetAdapter as NwbAdapter;
 use semantic_abir::{ContentId, ValidationLimits};
 use std::collections::BTreeMap;
 
@@ -66,6 +68,7 @@ fn dicom_waveform_maps_semantics_and_restores_exact_source() {
 }
 
 #[test]
+#[cfg(feature = "nwb")]
 fn nwb_integer_timeseries_maps_semantics_and_restores_exact_source() {
     let bytes = include_bytes!("fixtures/single_integer_timeseries.nwb").to_vec();
     assert_semantic_round_trip(
@@ -83,6 +86,7 @@ fn nwb_integer_timeseries_maps_semantics_and_restores_exact_source() {
 }
 
 #[test]
+#[cfg(feature = "nwb")]
 fn cross_profile_export_rejection_names_the_requested_profile() {
     let source = ForeignObject {
         profile: ProfileId("nwb.2.10.0.single-integer-timeseries".to_owned()),
@@ -110,6 +114,7 @@ fn cross_profile_export_rejection_names_the_requested_profile() {
 }
 
 #[test]
+#[cfg(feature = "nwb")]
 fn nwb_rejects_unpromoted_time_origin_and_preallocation_bomb() {
     let original = include_bytes!("fixtures/single_integer_timeseries.nwb");
     let temporary = tempfile::NamedTempFile::new().unwrap();

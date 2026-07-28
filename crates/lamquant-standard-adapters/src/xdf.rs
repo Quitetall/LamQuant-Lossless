@@ -18,8 +18,8 @@
 //!   vendor metadata this adapter does not model survives byte-exact.
 //!
 //! Sample values are promoted in the stream's own declared element type. A
-//! `string` stream is carried as an exact blob rather than reinterpreted into
-//! numbers it never held.
+//! `string` stream becomes a temporal table whose rows bind exact timestamps
+//! to the strings; it is never reinterpreted as a numeric signal.
 
 use abir_adapter::{
     Adapter, AdapterCapability, AdapterError, AdapterProfile, ExportPlan, FidelityReceipt,
@@ -32,7 +32,7 @@ use semantic_abir::{
     BlobIntegrity, BlobRef, ByteOrder, Clock, ClockRelation, ClockRelationTag, ClockTag, ConceptId,
     DatasetDraft, DatasetTag, ElementType, Event, EventTag, Layout, ObjectId, PayloadDescriptor,
     Presence, Rational, Recording, RecordingTag, SignalBlock, SourceCapsule, SourceKey, Stream,
-    StreamTag, TimeAxis, ValidationLimits,
+    StreamTag, TableColumn, TemporalTable, TimeAxis, ValidationLimits,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -54,6 +54,13 @@ const BOUNDARY_UUID: [u8; 16] = [
 /// unbounded chunk stream; refusing early keeps a bad file from becoming a
 /// memory-exhaustion vector.
 const MAX_CHUNKS: usize = 1_000_000;
+/// A biosignal stream may be wide, but an XML scalar must not drive
+/// multi-gigabyte outer-vector allocations before any samples are read.
+const MAX_CHANNELS: usize = 65_536;
+const MAX_CHANNEL_BOOKKEEPING_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STREAMS: usize = 4096;
+const MAX_TOTAL_CHANNEL_BOOKKEEPING_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 512 * 1024 * 1024;
 
 pub struct XdfAdapter {
     profile: AdapterProfile,
@@ -72,15 +79,36 @@ struct XdfStream {
     /// rounds through binary floating point.
     nominal_srate: String,
     format: ChannelFormat,
-    /// Sample values, channel-major: `values[channel][sample]`.
-    values: Vec<Vec<f64>>,
-    /// String-format payloads, kept verbatim.
-    strings: Vec<Vec<String>>,
+    /// Sample values, channel-major, kept in an exact promoted domain.
+    values: XdfValues,
     /// Explicit per-sample timestamps, where the file carried them.
     timestamps: Vec<Option<f64>>,
     /// `(collection_time, offset_value)` from every ClockOffset chunk.
     offsets: Vec<(f64, f64)>,
     channel_labels: Vec<String>,
+}
+
+enum XdfValues {
+    Integer(Vec<Vec<i64>>),
+    Real(Vec<Vec<f64>>),
+    String(Vec<Vec<String>>),
+}
+
+impl XdfValues {
+    fn samples(&self) -> usize {
+        match self {
+            Self::Integer(channels) => channels.first().map_or(0, Vec::len),
+            Self::Real(channels) => channels.first().map_or(0, Vec::len),
+            Self::String(channels) => channels.first().map_or(0, Vec::len),
+        }
+    }
+
+    fn strings(&self) -> Option<&[Vec<String>]> {
+        match self {
+            Self::String(channels) => Some(channels),
+            Self::Integer(_) | Self::Real(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -297,6 +325,8 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
     let mut streams: BTreeMap<u32, XdfStream> = BTreeMap::new();
     let mut boundaries = 0_usize;
     let mut chunks = 0_usize;
+    let mut retained_channel_bookkeeping = 0_usize;
+    let mut retained_decoded_bytes = 0_usize;
 
     while !reader.done() {
         chunks += 1;
@@ -347,6 +377,25 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
                         "XDF stream declares zero channels".to_owned(),
                     ));
                 }
+                let bookkeeping_bytes = channel_count
+                    .checked_mul(
+                        core::mem::size_of::<Vec<f64>>()
+                            .checked_add(core::mem::size_of::<Vec<String>>())
+                            .ok_or(AdapterError::SourceTooLarge)?,
+                    )
+                    .ok_or(AdapterError::SourceTooLarge)?;
+                if channel_count > MAX_CHANNELS || bookkeeping_bytes > MAX_CHANNEL_BOOKKEEPING_BYTES
+                {
+                    return Err(AdapterError::SourceTooLarge);
+                }
+                retained_channel_bookkeeping = retained_channel_bookkeeping
+                    .checked_add(bookkeeping_bytes)
+                    .ok_or(AdapterError::SourceTooLarge)?;
+                if streams.len() >= MAX_STREAMS
+                    || retained_channel_bookkeeping > MAX_TOTAL_CHANNEL_BOOKKEEPING_BYTES
+                {
+                    return Err(AdapterError::SourceTooLarge);
+                }
                 let format = ChannelFormat::parse(
                     &element_text(&xml, "channel_format").ok_or_else(|| {
                         AdapterError::InvalidSource(
@@ -372,8 +421,20 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
                         footer_xml: None,
                         channel_count,
                         format,
-                        values: vec![Vec::new(); channel_count],
-                        strings: vec![Vec::new(); channel_count],
+                        values: match format {
+                            ChannelFormat::Int8
+                            | ChannelFormat::Int16
+                            | ChannelFormat::Int32
+                            | ChannelFormat::Int64 => {
+                                XdfValues::Integer(vec![Vec::new(); channel_count])
+                            }
+                            ChannelFormat::Float32 | ChannelFormat::Double64 => {
+                                XdfValues::Real(vec![Vec::new(); channel_count])
+                            }
+                            ChannelFormat::StringValues => {
+                                XdfValues::String(vec![Vec::new(); channel_count])
+                            }
+                        },
                         timestamps: Vec::new(),
                         offsets: Vec::new(),
                     },
@@ -394,6 +455,32 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
                 let count = usize::try_from(count).map_err(|_| {
                     AdapterError::InvalidSource("XDF sample count is too large".to_owned())
                 })?;
+                let value_slot_bytes = if stream.format == ChannelFormat::StringValues {
+                    core::mem::size_of::<String>()
+                } else {
+                    core::mem::size_of::<f64>()
+                };
+                // Charge twice the live element footprint to cover geometric
+                // Vec spare capacity while samples are appended.
+                let sample_slots = count
+                    .checked_mul(
+                        core::mem::size_of::<Option<f64>>()
+                            .checked_add(
+                                stream
+                                    .channel_count
+                                    .checked_mul(value_slot_bytes)
+                                    .ok_or(AdapterError::SourceTooLarge)?,
+                            )
+                            .ok_or(AdapterError::SourceTooLarge)?,
+                    )
+                    .and_then(|bytes| bytes.checked_mul(2))
+                    .ok_or(AdapterError::SourceTooLarge)?;
+                retained_decoded_bytes = retained_decoded_bytes
+                    .checked_add(sample_slots)
+                    .ok_or(AdapterError::SourceTooLarge)?;
+                if retained_decoded_bytes > MAX_DECODED_BYTES {
+                    return Err(AdapterError::SourceTooLarge);
+                }
                 for _ in 0..count {
                     let stamp_bytes = inner.byte()?;
                     let timestamp = match stamp_bytes {
@@ -407,24 +494,37 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
                     };
                     stream.timestamps.push(timestamp);
                     for channel in 0..stream.channel_count {
-                        if stream.format == ChannelFormat::StringValues {
-                            let length = inner.variable_count()?;
-                            let length = usize::try_from(length).map_err(|_| {
-                                AdapterError::InvalidSource(
-                                    "XDF string value is too large".to_owned(),
-                                )
-                            })?;
-                            let raw = inner.take(length)?;
-                            stream.strings[channel].push(String::from_utf8(raw.to_vec()).map_err(
-                                |_| {
+                        match &mut stream.values {
+                            XdfValues::String(values) => {
+                                let length = inner.variable_count()?;
+                                let length = usize::try_from(length).map_err(|_| {
                                     AdapterError::InvalidSource(
-                                        "XDF string value is not UTF-8".to_owned(),
+                                        "XDF string value is too large".to_owned(),
                                     )
-                                },
-                            )?);
-                        } else {
-                            let raw = inner.take(stream.format.width())?;
-                            stream.values[channel].push(decode_value(stream.format, raw));
+                                })?;
+                                retained_decoded_bytes = retained_decoded_bytes
+                                    .checked_add(length)
+                                    .ok_or(AdapterError::SourceTooLarge)?;
+                                if retained_decoded_bytes > MAX_DECODED_BYTES {
+                                    return Err(AdapterError::SourceTooLarge);
+                                }
+                                let raw = inner.take(length)?;
+                                values[channel].push(String::from_utf8(raw.to_vec()).map_err(
+                                    |_| {
+                                        AdapterError::InvalidSource(
+                                            "XDF string value is not UTF-8".to_owned(),
+                                        )
+                                    },
+                                )?);
+                            }
+                            XdfValues::Integer(values) => {
+                                let raw = inner.take(stream.format.width())?;
+                                values[channel].push(decode_integer(stream.format, raw));
+                            }
+                            XdfValues::Real(values) => {
+                                let raw = inner.take(stream.format.width())?;
+                                values[channel].push(decode_real(stream.format, raw));
+                            }
                         }
                     }
                 }
@@ -492,23 +592,29 @@ fn parse_xdf(bytes: &[u8]) -> Result<ParsedXdf, AdapterError> {
     })
 }
 
-fn decode_value(format: ChannelFormat, raw: &[u8]) -> f64 {
+fn decode_integer(format: ChannelFormat, raw: &[u8]) -> i64 {
     match format {
-        ChannelFormat::Int8 => f64::from(raw[0] as i8),
-        ChannelFormat::Int16 => f64::from(i16::from_le_bytes([raw[0], raw[1]])),
-        ChannelFormat::Int32 => f64::from(i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
+        ChannelFormat::Int8 => i64::from(raw[0] as i8),
+        ChannelFormat::Int16 => i64::from(i16::from_le_bytes([raw[0], raw[1]])),
+        ChannelFormat::Int32 => i64::from(i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
         ChannelFormat::Int64 => {
             let mut buffer = [0_u8; 8];
             buffer.copy_from_slice(raw);
-            i64::from_le_bytes(buffer) as f64
+            i64::from_le_bytes(buffer)
         }
+        _ => unreachable!("integer decoder called for non-integer XDF format"),
+    }
+}
+
+fn decode_real(format: ChannelFormat, raw: &[u8]) -> f64 {
+    match format {
         ChannelFormat::Float32 => f64::from(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
         ChannelFormat::Double64 => {
             let mut buffer = [0_u8; 8];
             buffer.copy_from_slice(raw);
             f64::from_le_bytes(buffer)
         }
-        ChannelFormat::StringValues => 0.0,
+        _ => unreachable!("real decoder called for non-real XDF format"),
     }
 }
 
@@ -516,20 +622,40 @@ fn decode_value(format: ChannelFormat, raw: &[u8]) -> f64 {
 /// everything to f64 would silently widen an int64 stream past the precision
 /// the file guaranteed.
 fn encode_values(stream: &XdfStream) -> Vec<u8> {
-    let samples = stream.values.first().map_or(0, Vec::len);
+    let samples = stream.values.samples();
     let mut bytes = Vec::with_capacity(samples * stream.channel_count * stream.format.width());
-    for channel in &stream.values {
-        for value in channel {
-            match stream.format {
-                ChannelFormat::Int8 => bytes.push((*value as i8) as u8),
-                ChannelFormat::Int16 => bytes.extend_from_slice(&(*value as i16).to_le_bytes()),
-                ChannelFormat::Int32 => bytes.extend_from_slice(&(*value as i32).to_le_bytes()),
-                ChannelFormat::Int64 => bytes.extend_from_slice(&(*value as i64).to_le_bytes()),
-                ChannelFormat::Float32 => bytes.extend_from_slice(&(*value as f32).to_le_bytes()),
-                ChannelFormat::Double64 => bytes.extend_from_slice(&value.to_le_bytes()),
-                ChannelFormat::StringValues => {}
+    match &stream.values {
+        XdfValues::Integer(channels) => {
+            for channel in channels {
+                for value in channel {
+                    match stream.format {
+                        ChannelFormat::Int8 => bytes.push((*value as i8) as u8),
+                        ChannelFormat::Int16 => {
+                            bytes.extend_from_slice(&(*value as i16).to_le_bytes())
+                        }
+                        ChannelFormat::Int32 => {
+                            bytes.extend_from_slice(&(*value as i32).to_le_bytes())
+                        }
+                        ChannelFormat::Int64 => bytes.extend_from_slice(&value.to_le_bytes()),
+                        _ => unreachable!("integer values carry non-integer XDF format"),
+                    }
+                }
             }
         }
+        XdfValues::Real(channels) => {
+            for channel in channels {
+                for value in channel {
+                    match stream.format {
+                        ChannelFormat::Float32 => {
+                            bytes.extend_from_slice(&(*value as f32).to_le_bytes())
+                        }
+                        ChannelFormat::Double64 => bytes.extend_from_slice(&value.to_le_bytes()),
+                        _ => unreachable!("real values carry non-real XDF format"),
+                    }
+                }
+            }
+        }
+        XdfValues::String(_) => {}
     }
     bytes
 }
@@ -565,7 +691,7 @@ fn exact(source_path: String, target: String) -> MappingEntry {
 /// Convert an observed clock reading to an exact rational at microsecond
 /// resolution. XDF measures these in seconds as f64; rounding to a fixed grid
 /// keeps the recorded relation reproducible instead of platform-dependent.
-fn microsecond_ticks(value: f64) -> Result<i64, AdapterError> {
+fn microsecond_ticks(value: f64) -> Result<(i64, bool), AdapterError> {
     if !value.is_finite() {
         return Err(AdapterError::InvalidSource(
             "XDF timestamp is not finite".to_owned(),
@@ -577,10 +703,11 @@ fn microsecond_ticks(value: f64) -> Result<i64, AdapterError> {
             "XDF timestamp is out of range".to_owned(),
         ));
     }
-    Ok(micros as i64)
+    let ticks = micros as i64;
+    Ok((ticks, ticks as f64 / 1_000_000.0 != value))
 }
 
-fn seconds_rational(value: f64) -> Result<Rational, AdapterError> {
+fn seconds_rational(value: f64) -> Result<(Rational, bool), AdapterError> {
     if !value.is_finite() {
         return Err(AdapterError::InvalidSource(
             "XDF clock offset is not finite".to_owned(),
@@ -592,8 +719,9 @@ fn seconds_rational(value: f64) -> Result<Rational, AdapterError> {
             "XDF clock offset is out of range".to_owned(),
         ));
     }
-    Rational::new(micros as i128, 1_000_000)
-        .map_err(|error| AdapterError::InvalidSource(error.to_string()))
+    let rational = Rational::new(micros as i128, 1_000_000)
+        .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+    Ok((rational, micros / 1_000_000.0 != value))
 }
 
 struct ParsedDataset {
@@ -603,6 +731,7 @@ struct ParsedDataset {
     stream_count: u64,
     offset_count: u64,
     boundary_count: u64,
+    timing_changed: bool,
 }
 
 impl XdfAdapter {
@@ -666,6 +795,7 @@ impl XdfAdapter {
         let mut mappings = Vec::new();
         let mut stream_ids = Vec::new();
         let mut offset_total = 0_u64;
+        let mut timing_changed = false;
 
         // The recording host clock every stream clock is related TO. XDF's
         // whole synchronisation model is "each stream has its own clock and the
@@ -686,12 +816,10 @@ impl XdfAdapter {
             let atom_id = id::<AtomTag>(&seed, b"atom", position);
             let clock_id = id::<ClockTag>(&seed, b"stream-clock", position);
             let metadata_id = id::<AtomTag>(&seed, b"stream-metadata", position);
+            let offsets_atom_id = id::<AtomTag>(&seed, b"string-row-offsets", position);
+            let mut stream_timing_changed = false;
 
-            let samples = if stream.format == ChannelFormat::StringValues {
-                stream.strings.first().map_or(0, Vec::len)
-            } else {
-                stream.values.first().map_or(0, Vec::len)
-            } as u64;
+            let samples = stream.values.samples() as u64;
             if samples == 0 {
                 return Err(AdapterError::InvalidSource(format!(
                     "XDF stream {} carries no samples",
@@ -709,24 +837,38 @@ impl XdfAdapter {
                 Rational::new(0, 1).expect("zero is a rational"),
             ));
 
-            // The explicit per-sample timestamps, where the file carried them.
-            let explicit: Vec<f64> = stream.timestamps.iter().flatten().copied().collect();
-            let has_explicit = explicit.len() as u64 == samples;
             let rate = decimal_rational(&stream.nominal_srate)?;
+            let explicit_count = stream
+                .timestamps
+                .iter()
+                .filter(|timestamp| timestamp.is_some())
+                .count();
+            let mut resolved = Vec::with_capacity(samples as usize);
+            if rate.is_positive() {
+                let (rate_numerator, rate_denominator) = rate.parts();
+                let interval = rate_denominator as f64 / rate_numerator as f64;
+                let mut last_timestamp = 0.0_f64;
+                for timestamp in &stream.timestamps {
+                    last_timestamp = timestamp.unwrap_or(last_timestamp + interval);
+                    resolved.push(last_timestamp);
+                }
+            } else {
+                resolved.extend(stream.timestamps.iter().flatten().copied());
+            }
 
-            let (atom, timestamp_payload) = if rate.is_positive() && !has_explicit {
-                // A declared rate with deduced timestamps is exactly a regular axis.
-                let segment = semantic_abir::TimeSegment::new(
-                    Rational::new(0, 1).expect("zero is a rational"),
-                    rate,
-                    samples,
-                )
-                .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+            let (atom, timestamp_payload) = if rate.is_positive() && explicit_count == 0 {
+                // XDF deduction starts from last_timestamp=0 and advances one
+                // interval before the first sample.
+                let (rate_numerator, rate_denominator) = rate.parts();
+                let start = Rational::new(rate_denominator, rate_numerator)
+                    .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+                let segment = semantic_abir::TimeSegment::new(start, rate, samples)
+                    .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
                 (TimeAxis::Regular(segment), None)
             } else {
                 // Irregular, or explicitly stamped: carry the timestamps
                 // themselves rather than inventing a rate they do not have.
-                if !has_explicit {
+                if resolved.len() as u64 != samples {
                     return Err(AdapterError::UnsupportedMeaning(format!(
                         "XDF stream {} has neither a positive nominal_srate nor a timestamp for every sample",
                         stream.id
@@ -735,9 +877,11 @@ impl XdfAdapter {
                 // ABIR carries explicit timestamps as exact integer ticks, so
                 // the f64 seconds XDF records are pinned to a microsecond grid
                 // rather than handed on as binary floating point.
-                let mut bytes = Vec::with_capacity(explicit.len() * 8);
-                for value in &explicit {
-                    bytes.extend_from_slice(&microsecond_ticks(*value)?.to_le_bytes());
+                let mut bytes = Vec::with_capacity(resolved.len() * 8);
+                for value in &resolved {
+                    let (ticks, changed) = microsecond_ticks(*value)?;
+                    stream_timing_changed |= changed;
+                    bytes.extend_from_slice(&ticks.to_le_bytes());
                 }
                 let content_id = abir_payload_id(ElementType::I64, &bytes);
                 (
@@ -749,17 +893,92 @@ impl XdfAdapter {
                 )
             };
 
+            let mut string_offsets = None;
             let value_bytes = if stream.format == ChannelFormat::StringValues {
-                serde_json::to_vec(&stream.strings)
-                    .map_err(|error| AdapterError::InvalidSource(error.to_string()))?
+                let channels = stream
+                    .values
+                    .strings()
+                    .expect("string format carries string values");
+                let payload_limit = limits
+                    .max_logical_payload_bytes
+                    .min(self.max_source_bytes.saturating_mul(8));
+                let mut rows = Vec::new();
+                let mut offsets = Vec::with_capacity(samples as usize + 1);
+                offsets.push(0_u64);
+                for sample in 0..samples as usize {
+                    let timestamp = match &atom {
+                        TimeAxis::Regular(segment) => {
+                            let (start_numerator, start_denominator) = segment.start().parts();
+                            let (rate_numerator, rate_denominator) = segment.rate().parts();
+                            let delta_numerator = i128::try_from(sample)
+                                .ok()
+                                .and_then(|sample| sample.checked_mul(rate_denominator))
+                                .ok_or(AdapterError::SourceTooLarge)?;
+                            let numerator = start_numerator
+                                .checked_mul(rate_numerator)
+                                .and_then(|start| {
+                                    delta_numerator
+                                        .checked_mul(start_denominator)
+                                        .and_then(|delta| start.checked_add(delta))
+                                })
+                                .ok_or(AdapterError::SourceTooLarge)?;
+                            let denominator = start_denominator
+                                .checked_mul(rate_numerator)
+                                .ok_or(AdapterError::SourceTooLarge)?;
+                            let exact = Rational::new(numerator, denominator)
+                                .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+                            let (numerator, denominator) = exact.parts();
+                            format!("{numerator}/{denominator}")
+                        }
+                        TimeAxis::Explicit { .. } => {
+                            let (ticks, _) = microsecond_ticks(resolved[sample])?;
+                            let exact = Rational::new(i128::from(ticks), 1_000_000)
+                                .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+                            let (numerator, denominator) = exact.parts();
+                            format!("{numerator}/{denominator}")
+                        }
+                        TimeAxis::Piecewise(_) => unreachable!(
+                            "XDF adapter constructs only regular or explicit stream axes"
+                        ),
+                    };
+                    let mut row = Vec::with_capacity(channels.len() + 1);
+                    row.push(timestamp.as_str());
+                    for channel in channels {
+                        row.push(channel[sample].as_str());
+                    }
+                    let encoded = serde_json::to_vec(&row)
+                        .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
+                    let next = rows
+                        .len()
+                        .checked_add(encoded.len())
+                        .and_then(|length| length.checked_add(1))
+                        .ok_or(AdapterError::SourceTooLarge)?;
+                    if next as u64 > payload_limit {
+                        return Err(AdapterError::SourceTooLarge);
+                    }
+                    rows.extend_from_slice(&encoded);
+                    rows.push(b'\n');
+                    offsets.push(next as u64);
+                }
+                let mut offset_bytes = Vec::with_capacity(offsets.len() * 8);
+                for offset in offsets {
+                    offset_bytes.extend_from_slice(&offset.to_le_bytes());
+                }
+                string_offsets = Some(offset_bytes);
+                rows
             } else {
                 encode_values(stream)
             };
-            let content_id = abir_payload_id(stream.format.element(), &value_bytes);
+            let payload_element = if stream.format == ChannelFormat::StringValues {
+                ElementType::Bytes
+            } else {
+                stream.format.element()
+            };
+            let content_id = abir_payload_id(payload_element, &value_bytes);
             let descriptor = PayloadDescriptor::new(
                 content_id,
                 u64::try_from(value_bytes.len()).map_err(|_| AdapterError::SourceTooLarge)?,
-                stream.format.element(),
+                payload_element,
                 ByteOrder::Little,
                 vec![stream.channel_count as u64, samples],
                 Layout::DenseRowMajor,
@@ -767,9 +986,23 @@ impl XdfAdapter {
                 None,
             );
             if stream.format == ChannelFormat::StringValues {
-                // String values are not a numeric signal; carrying them as one
-                // would assert a magnitude they do not have.
-                draft.add_atom(Atom::BlobRef(BlobRef::new(
+                let offset_bytes =
+                    string_offsets.expect("string table construction produces row offsets");
+                let offsets_id = abir_payload_id(ElementType::U64, &offset_bytes);
+                let mut columns = Vec::with_capacity(stream.channel_count + 1);
+                columns.push(TableColumn::new(
+                    concept("xdf:column/time-exact-seconds")?,
+                    ElementType::Utf8,
+                    false,
+                ));
+                for channel in 0..stream.channel_count {
+                    columns.push(TableColumn::new(
+                        concept(&format!("xdf:column/string-value-{channel}"))?,
+                        ElementType::Utf8,
+                        false,
+                    ));
+                }
+                draft.add_atom(Atom::TemporalTable(TemporalTable::new(
                     atom_id,
                     Presence::Present,
                     Some(PayloadDescriptor::new(
@@ -777,14 +1010,40 @@ impl XdfAdapter {
                         value_bytes.len() as u64,
                         ElementType::Bytes,
                         ByteOrder::Little,
-                        vec![value_bytes.len() as u64],
-                        Layout::DenseRowMajor,
-                        Some(concept("xdf:encoding/string-values-json")?),
-                        Some("application/json".to_owned()),
+                        vec![samples, stream.channel_count as u64 + 1],
+                        Layout::Ragged {
+                            rows: samples,
+                            offsets: offsets_id,
+                        },
+                        Some(concept("xdf:encoding/timestamped-string-rows-jsonl")?),
+                        Some("application/x-ndjson".to_owned()),
                     )),
-                    "application/json".to_owned(),
-                    BlobIntegrity::new(concept("abir:integrity/blake3-256")?, content_id),
+                    clock_id,
+                    concept("xdf:record/string-sample")?,
+                    columns,
                 )));
+                draft.add_atom(Atom::Tensor(semantic_abir::Tensor::new(
+                    offsets_atom_id,
+                    Presence::Present,
+                    Some(PayloadDescriptor::new(
+                        offsets_id,
+                        offset_bytes.len() as u64,
+                        ElementType::U64,
+                        ByteOrder::Little,
+                        vec![samples + 1],
+                        Layout::DenseRowMajor,
+                        Some(concept("abir:encoding/raw")?),
+                        None,
+                    )),
+                    vec![semantic_abir::SemanticAxis::new(
+                        concept("abir:axis/ragged-offset")?,
+                        samples + 1,
+                    )],
+                )));
+                payloads.push(PayloadObject {
+                    content_id: offsets_id,
+                    bytes: offset_bytes,
+                });
             } else {
                 draft.add_atom(Atom::SignalBlock(SignalBlock::new(
                     atom_id,
@@ -802,7 +1061,9 @@ impl XdfAdapter {
             // requires that payload to belong to a real atom -- a dangling
             // reference is exactly the failure this prevents.
             let mut atom_ids = vec![atom_id];
-            if let Some((stamp_id, stamp_bytes)) = timestamp_payload {
+            if stream.format == ChannelFormat::StringValues {
+                atom_ids.push(offsets_atom_id);
+            } else if let Some((stamp_id, stamp_bytes)) = timestamp_payload {
                 let stamp_atom = id::<AtomTag>(&seed, b"timestamps", position);
                 draft.add_atom(Atom::Tensor(semantic_abir::Tensor::new(
                     stamp_atom,
@@ -894,16 +1155,19 @@ impl XdfAdapter {
                     .offsets
                     .last()
                     .expect("the series was checked non-empty");
-                let spread = seconds_rational(largest - smallest)?;
+                let (spread, spread_changed) = seconds_rational(largest - smallest)?;
+                let (offset, offset_changed) = seconds_rational(last_offset)?;
+                let (validity_start, validity_changed) = seconds_rational(last_collection)?;
+                let relation_timing_changed = spread_changed || offset_changed || validity_changed;
                 draft.add_clock_relation(ClockRelation::new(
                     id::<ClockRelationTag>(&seed, b"clock-relation", position),
                     clock_id,
                     host_clock_id,
-                    seconds_rational(last_offset)?,
+                    offset,
                     Rational::new(1, 1).expect("unit rate is a rational"),
                     spread,
                     concept("xdf:clock-method/measured-offset")?,
-                    seconds_rational(last_collection)?,
+                    validity_start,
                     None,
                     series_id,
                 ));
@@ -914,16 +1178,42 @@ impl XdfAdapter {
                 offset_total = offset_total
                     .checked_add(stream.offsets.len() as u64)
                     .ok_or(AdapterError::SourceTooLarge)?;
-                mappings.push(exact(
-                    format!("stream[{}].clock-offsets", stream.id),
-                    format!("clock-relation:{clock_id}->{host_clock_id}"),
-                ));
+                if relation_timing_changed {
+                    timing_changed = true;
+                    mappings.push(MappingEntry {
+                        source_path: format!("stream[{}].clock-offsets", stream.id),
+                        target: format!("clock-relation:{clock_id}->{host_clock_id}"),
+                        disposition: MappingDisposition::Projected,
+                        reason: Some(
+                            "XDF clock relation was projected to ABIR microsecond precision"
+                                .to_owned(),
+                        ),
+                    });
+                } else {
+                    mappings.push(exact(
+                        format!("stream[{}].clock-offsets", stream.id),
+                        format!("clock-relation:{clock_id}->{host_clock_id}"),
+                    ));
+                }
             }
 
-            mappings.push(exact(
-                format!("stream[{}].samples", stream.id),
-                format!("atom:{atom_id}"),
-            ));
+            if stream_timing_changed {
+                timing_changed = true;
+                mappings.push(MappingEntry {
+                    source_path: format!("stream[{}].samples", stream.id),
+                    target: format!("atom:{atom_id}"),
+                    disposition: MappingDisposition::Projected,
+                    reason: Some(
+                        "explicit XDF timestamps were projected to ABIR microsecond ticks"
+                            .to_owned(),
+                    ),
+                });
+            } else {
+                mappings.push(exact(
+                    format!("stream[{}].samples", stream.id),
+                    format!("atom:{atom_id}"),
+                ));
+            }
             mappings.push(exact(
                 format!("stream[{}].xml", stream.id),
                 format!("atom:{metadata_id}"),
@@ -1006,6 +1296,7 @@ impl XdfAdapter {
             stream_count: parsed.streams.len() as u64,
             offset_count: offset_total,
             boundary_count: parsed.boundaries as u64,
+            timing_changed,
         })
     }
 
@@ -1067,7 +1358,7 @@ impl Adapter for XdfAdapter {
                 entries: parsed.mappings,
                 preserved_unknowns: 1,
                 sample_values_changed: false,
-                timing_changed: false,
+                timing_changed: parsed.timing_changed,
             },
             payloads: parsed.payloads,
         })
