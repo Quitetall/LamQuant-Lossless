@@ -601,23 +601,27 @@ fn fidelity_receipt_fits(receipt: &abir_adapter::FidelityReceipt) -> bool {
 }
 
 fn export_plan_fits(plan: &abir_adapter::ExportPlan) -> bool {
+    let initial = u64::try_from(plan.source_dataset.len())
+        .ok()
+        .and_then(|bytes| bytes.checked_add(u64::try_from(plan.target_profile.0.len()).ok()?))
+        .and_then(|bytes| bytes.checked_add(u64::try_from(plan.plan_id.len()).ok()?));
+    let Some(initial) = initial else {
+        return false;
+    };
     plan.mappings
         .iter()
-        .try_fold(
-            (plan.source_dataset.len() + plan.target_profile.0.len() + plan.plan_id.len()) as u64,
-            |total, mapping| {
-                total
-                    .checked_add(mapping.source_path.len() as u64)?
-                    .checked_add(mapping.target.len() as u64)?
-                    .checked_add(
-                        mapping
-                            .reason
-                            .as_ref()
-                            .map_or(0_u64, |value| value.len() as u64),
-                    )?
-                    .checked_add(64)
-            },
-        )
+        .try_fold(initial, |total, mapping| {
+            total
+                .checked_add(mapping.source_path.len() as u64)?
+                .checked_add(mapping.target.len() as u64)?
+                .checked_add(
+                    mapping
+                        .reason
+                        .as_ref()
+                        .map_or(0_u64, |value| value.len() as u64),
+                )?
+                .checked_add(64)
+        })
         .is_some_and(|bytes| bytes <= MAX_REPORT_BYTES)
 }
 
