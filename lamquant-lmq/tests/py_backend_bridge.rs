@@ -7,8 +7,15 @@
 //!     backend_meta round-trip WITHOUT any model/weights. Skips only if `python3` is
 //!     absent.
 //!   * `py_backend_model_...` — the real `SubbandCodec` end-to-end. ENV-GATED: it
-//!     skips (never fails) when codec-neural / weights are absent, exactly like the
-//!     SNN PCCP gates. When weights are present it produces a real lossy round-trip.
+//!     skips when codec-neural / weights are absent, exactly like the SNN PCCP
+//!     gates. When weights are present it produces a real lossy round-trip.
+//!
+//! "Env-gated" is not the same as "cannot fail", and the second test used to
+//! conflate them: it caught every `Err` from `encode_bundle` and called it a
+//! missing environment. Only `LmqError::Backend` can mean that — the weights
+//! live behind the subprocess — so every other variant now fails the test. Read
+//! `SKIP` in this file as "the model was not exercised", never as "the model
+//! was exercised and was fine".
 
 #![cfg(feature = "python")]
 
@@ -26,6 +33,21 @@ use semantic_abir_bcs::{ModelProvenance, PccpStatus, ResourceBounds, BCS2_MAGIC}
 
 fn helper() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/lmq_infer.py")
+}
+
+/// Whether an encode failure is the environment's absence or our own defect.
+///
+/// Torch, the `codec-neural` tree and the weight files all sit behind the
+/// helper subprocess, so their absence reaches this crate only as
+/// `LmqError::Backend`. Every other variant is the shell mis-assembling a
+/// bundle, which no missing file can cause.
+///
+/// This is a function rather than a `match` arm inside the test so that the
+/// classification can be checked directly. The forgiving branch is the one that
+/// runs in CI (the weights are not there), so the strict branch would otherwise
+/// be code that never executes and never gets verified.
+fn is_absent_environment(error: &shell::LmqError) -> bool {
+    matches!(error, shell::LmqError::Backend(_))
 }
 
 fn python3_available() -> bool {
@@ -200,9 +222,52 @@ fn py_backend_model_end_to_end_is_env_gated() {
             );
             eprintln!("py_backend_model: end-to-end OK (weights present)");
         }
-        Err(e) => {
-            // Env absent (no codec-neural / torch / weights) → SKIP, never fail.
-            eprintln!("SKIP py_backend_model: environment/weights absent ({e:?})");
+        Err(error) if is_absent_environment(&error) => {
+            eprintln!("SKIP py_backend_model: environment/weights absent ({error})");
         }
+        Err(other) => {
+            // This arm used to be folded into the one above, under a blanket
+            // `Err(e) => SKIP`. That made the test incapable of failing: a wire
+            // regression, a malformed BCS2 header, a broken semantic closure --
+            // each returned `Err`, printed the word SKIP, and passed. It matters
+            // most in exactly the environment where the weights are missing,
+            // because there the assertions never run and that line was the only
+            // thing anyone saw.
+            panic!(
+                "py_backend_model: encode failed for a reason unrelated to the \
+                 environment: {other}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_a_backend_failure_counts_as_a_missing_environment() {
+    // The negative control for the skip above. Without this, the strict branch
+    // is unreachable in every environment that lacks the weights -- which is
+    // every environment that reaches the skip -- so a later edit could widen the
+    // forgiveness back to everything and no test would notice.
+    use lamquant_lmq::backend::BackendError;
+    use shell::LmqError;
+
+    assert!(is_absent_environment(&LmqError::Backend(BackendError(
+        "ModuleNotFoundError: No module named 'lamquant_neural'".to_string()
+    ))));
+
+    for ours in [
+        LmqError::CatalogContract,
+        LmqError::Header,
+        LmqError::BadTokens,
+        LmqError::PayloadIdentityMismatch,
+        LmqError::SemanticEncoding,
+        LmqError::SemanticValidation,
+        LmqError::SignalShapeMismatch,
+        LmqError::UnsupportedSemantics("whatever the reason"),
+    ] {
+        assert!(
+            !is_absent_environment(&ours),
+            "{ours:?} describes this crate mis-assembling a bundle; no missing \
+             weight file can produce it, so it must fail rather than skip"
+        );
     }
 }
