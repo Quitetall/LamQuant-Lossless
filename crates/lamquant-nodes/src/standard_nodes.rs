@@ -38,7 +38,6 @@ pub const XDF_RESTORE_NODE_TYPE: &str = "org.quitetall.lamquant.standard.xdf.res
 pub const EDFPLUS_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.edfplus.sink";
 pub const BIDS_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.bids.sink";
 pub const DICOM_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.dicom.sink";
-#[cfg(feature = "standard-nwb")]
 pub const NWB_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.nwb.sink";
 pub const XDF_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.xdf.sink";
 
@@ -181,7 +180,14 @@ pub struct StandardSinkContract {
 
 impl core::fmt::Display for StandardNodeConfigError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::DestinationResourceInvalid => {
+                formatter.write_str("destination resource identifier is invalid")
+            }
+            Self::MaxSourceBytesOutOfRange => {
+                formatter.write_str("maximum source bytes is outside the supported range")
+            }
+        }
     }
 }
 
@@ -402,14 +408,7 @@ pub fn parse_standard_sink_contract(
         {
             destination_resource.clone()
         }
-        Some(_) => {
-            return Err(kernel_failure(
-                node,
-                "invalid-config",
-                "destination_resource is missing or invalid",
-            ))
-        }
-        None => {
+        _ => {
             return Err(kernel_failure(
                 node,
                 "invalid-config",
@@ -428,6 +427,8 @@ pub fn parse_standard_sink_contract(
 fn valid_resource_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
+        && value != "."
+        && !value.contains("..")
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
@@ -928,7 +929,16 @@ mod tests {
     #[test]
     fn sink_resource_ids_are_bounded_opaque_names() {
         assert!(standard_sink_node_config("archive:clinical-01", 1).is_ok());
-        for invalid in ["", "../escape", "path/escape", "white space", "nul\0byte"] {
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "archive..escape",
+            "../escape",
+            "path/escape",
+            "white space",
+            "nul\0byte",
+        ] {
             assert_eq!(
                 standard_sink_node_config(invalid, 1),
                 Err(StandardNodeConfigError::DestinationResourceInvalid)
