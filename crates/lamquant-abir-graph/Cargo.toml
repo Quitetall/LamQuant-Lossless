@@ -17,17 +17,15 @@ name = "lamquant_abir_graph"
 
 [features]
 default = ["std"]
-std = ["semantic-abir/std", "blut-graph-core/std"]
+std = ["semantic-abir/std", "blut-graph-core/std", "lamquant-abir-montage/std"]
 
 [dependencies]
 # ADR 0139 contract 4: blut-graph-core models ABIR by string convention and takes
 # NO ABIR dependency. That independence is correct and this crate preserves it --
 # the projection lives HERE, on the LamQuant side, depending on both.
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "4fb8804c4802877ff5d36ef0e23972b8da57ca3a", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
 blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "704d3b3542150e91fa9767a0d286983940ca3788", default-features = false }
-# Deterministic montage object ids. no_std: the projection must stay usable in
-# the firmware build like the rest of this crate.
-sha2 = { version = "0.10", default-features = false }
+lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", default-features = false }
 
 [dev-dependencies]
 # Only the tests serialise; the projection itself never touches JSON.

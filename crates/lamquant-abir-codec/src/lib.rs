@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
-//! Deterministic LML packets carried as semantic ABIR BCS2 Bundles.
+//! Deterministic LamQuant codec packets carried as semantic ABIR BCS2 Bundles.
 //!
 //! This crate is deliberately an integration layer. It calls the existing
 //! `lamquant-lml-mcu` packet encoder/decoder without changing the LML1 grammar
@@ -8,8 +8,19 @@
 //! packet bytes, codec implementation identity, and the exact-fidelity
 //! contract. Opening is fail-closed: the LML packet is decoded and every
 //! channel is re-hashed as its declared ABIR payload before data is exposed.
+//!
+//! Legacy lossy LMQC containers use the same contract through
+//! [`lmqc_to_bcs2`]: neural payload bytes remain opaque and borrowed, while
+//! montage, decoded shape, fidelity, provenance, and byte-exact re-emission
+//! metadata become explicit, capability-gated ABIR semantics.
 
 extern crate alloc;
+
+pub mod lmqc_bundle;
+pub use lmqc_bundle::{
+    bcs2_to_lmqc, lmqc_to_bcs2, open_lmqc_bcs2, LmqcBundleError, LmqcBundleInput, LmqcMetadata,
+    LmqcPayloadKind, OpenedLmqcBcs2, LMQC_READER_CAPABILITIES,
+};
 
 #[cfg(feature = "optimum")]
 use alloc::collections::BTreeSet;
@@ -50,7 +61,11 @@ pub const LML_FIDELITY_CONTRACT: &str =
     "org.quitetall.lamquant.bcs2.lml.exact-signal-block-closure-v1";
 const SOURCE_ID: &str = env!("LAMQUANT_ABIR_CODEC_SOURCE_ID");
 const BUILD_ID: &str = env!("LAMQUANT_ABIR_CODEC_BUILD_ID");
-const ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
+// Existing LML/Optimum BCS2 catalogs use this as a wire-contract marker.
+// Dependency updates do not rewrite it: old artifacts must remain readable.
+const LML_WIRE_ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
+// Linked source identity may advance independently from stable wire contracts.
+const LINKED_ABIR_REVISION: &str = "af8a595f97f499868c2e8fca95196929f4ddec08";
 const HEADER_SIZE: usize = 22;
 /// Maximum sample count representable by one LML1 packet header.
 pub const MAX_PACKET_SAMPLES: usize = u16::MAX as usize;
@@ -439,7 +454,7 @@ pub fn implementation_identity() -> CodecImplementation {
     hasher.update(b"org.quitetall.lamquant.abir-codec.implementation-v1\0");
     hasher.update(SOURCE_ID.as_bytes());
     hasher.update(&[0]);
-    hasher.update(ABIR_REVISION.as_bytes());
+    hasher.update(LINKED_ABIR_REVISION.as_bytes());
     CodecImplementation {
         build_id: format!("blake3:{BUILD_ID}"),
         implementation_id: ContentId::from_bytes(*hasher.finalize().as_bytes()),
@@ -470,7 +485,7 @@ pub fn optimum_implementation_identity() -> CodecImplementation {
 /// exactly as the baseline path does, which is why the crate needs the optimum
 /// decoder at all.
 ///
-/// The resulting bundle declares [`CAP_LML_OPTIMUM_V1`], so a baseline-only
+/// The resulting bundle declares `CAP_LML_OPTIMUM_V1`, so a baseline-only
 /// reader is refused at the envelope instead of failing somewhere inside a
 /// bitstream it was never able to parse.
 #[cfg(feature = "optimum")]
@@ -681,7 +696,7 @@ fn canonical_parameters() -> Vec<CodecParameter> {
         CodecParameter {
             name: "abir.revision".to_string(),
             value: CodecParameterValue::Text {
-                value: ABIR_REVISION.to_string(),
+                value: LML_WIRE_ABIR_REVISION.to_string(),
             },
         },
         CodecParameter {
@@ -1286,6 +1301,34 @@ mod tests {
             canonical_debug_json(mapped.dataset()).unwrap()
         );
         assert!(core::ptr::eq(opened.dataset(), opened.bundle().dataset()));
+    }
+
+    #[test]
+    fn frozen_pre_p8_c101_bundle_remains_readable() {
+        let encoded = include_str!("../tests/fixtures/pre_p8_lml_bcs2.hex").trim();
+        assert_eq!(encoded.len() % 2, 0);
+        let bytes = encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = core::str::from_utf8(pair).expect("ASCII hex");
+                u8::from_str_radix(pair, 16).expect("valid hex fixture")
+            })
+            .collect::<Vec<_>>();
+        let opened =
+            open_lml_bundle(&bytes, ResourceBounds::default()).expect("pre-P8 bundle opens");
+        assert_eq!(
+            opened.signal(),
+            &[
+                vec![1, -2, 3, -4, 5, -6, 7, -8],
+                vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+                vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+            ]
+        );
+        assert_eq!(
+            opened.bundle().catalog().parameters(),
+            canonical_parameters()
+        );
     }
 
     #[cfg(feature = "optimum")]

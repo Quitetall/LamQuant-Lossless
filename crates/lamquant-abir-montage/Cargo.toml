@@ -1,0 +1,18 @@
+[package]
+name = "lamquant-abir-montage"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "AGPL-3.0-or-later"
+description = "Exact no_std projection of LamQuant electrode montages into ABIR."
+
+[lib]
+name = "lamquant_abir_montage"
+
+[features]
+default = ["std"]
+std = ["semantic-abir/std"]
+
+[dependencies]
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }

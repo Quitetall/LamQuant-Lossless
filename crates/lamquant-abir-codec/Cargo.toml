@@ -16,16 +16,18 @@ optimum = ["dep:lamquant-lml-optimum"]
 std = [
     "semantic-abir/std",
     "semantic-abir-bcs/std",
+    "lamquant-abir-montage/std",
     "lamquant-lml-mcu/std",
     "dep:lamquant-lml-desktop",
 ]
 
 [dependencies]
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "4fb8804c4802877ff5d36ef0e23972b8da57ca3a", default-features = false, features = ["alloc"] }
-semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "4fb8804c4802877ff5d36ef0e23972b8da57ca3a", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
 lamquant-lml-desktop = { version = "0.9.3", path = "../../lamquant-lml-desktop", optional = true }
+lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", default-features = false }
 # The Optimum (LMO) decoder, needed only to run the closure proof over
 # optimum-coded packets before sealing them. Optional and `decode`-only: that
 # feature is no_std-capable, so enabling it does not drag std into this crate.
@@ -38,3 +40,4 @@ blake3 = { version = "=1.5.5" }
 # Tests exercise the real transform-2 encoder. Production consumers still pull
 # only the no_std-capable decoder through the optional dependency above.
 lamquant-lml-optimum = { version = "0.0.1", path = "../../lamquant-lml-optimum", default-features = false, features = ["encode"] }
+sha2 = { version = "0.10", default-features = false }

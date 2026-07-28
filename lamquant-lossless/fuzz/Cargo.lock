@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=c101513167ad8d7cdefa6387b20c644fdaf66432#c101513167ad8d7cdefa6387b20c644fdaf66432"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=af8a595f97f499868c2e8fca95196929f4ddec08#af8a595f97f499868c2e8fca95196929f4ddec08"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=c101513167ad8d7cdefa6387b20c644fdaf66432#c101513167ad8d7cdefa6387b20c644fdaf66432"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=af8a595f97f499868c2e8fca95196929f4ddec08#af8a595f97f499868c2e8fca95196929f4ddec08"
 dependencies = [
  "abir",
  "blake3",
@@ -23,6 +23,18 @@ dependencies = [
  "serde",
  "serde_json",
  "zeroize",
+]
+
+[[package]]
+name = "abir-training"
+version = "0.1.0"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=af8a595f97f499868c2e8fca95196929f4ddec08#af8a595f97f499868c2e8fca95196929f4ddec08"
+dependencies = [
+ "abir",
+ "abir-bcs",
+ "blake3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1046,8 +1058,17 @@ dependencies = [
  "abir",
  "abir-bcs",
  "blake3",
+ "lamquant-abir-montage",
  "lamquant-lml-desktop",
  "lamquant-lml-mcu",
+]
+
+[[package]]
+name = "lamquant-abir-montage"
+version = "0.1.0"
+dependencies = [
+ "abir",
+ "sha2",
 ]
 
 [[package]]
@@ -1082,6 +1103,7 @@ version = "0.9.3"
 dependencies = [
  "abir",
  "abir-bcs",
+ "abir-training",
  "aes-gcm",
  "argon2",
  "base64",

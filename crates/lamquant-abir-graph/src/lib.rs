@@ -36,7 +36,8 @@
 
 extern crate alloc;
 
-pub mod montage;
+/// Backward-compatible path for the ABIR-only montage projection crate.
+pub use lamquant_abir_montage as montage;
 
 use blut_graph_core::{AbirRootType, AbirViewType};
 use semantic_abir::Atom;
