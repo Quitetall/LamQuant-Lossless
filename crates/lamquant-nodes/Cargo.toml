@@ -46,4 +46,9 @@ semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/
 blake3 = { version = "=1.5.5" }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["cargo_bench_support"] }
 flate2 = "1"
+
+[[bench]]
+name = "node_vs_direct"
+harness = false
