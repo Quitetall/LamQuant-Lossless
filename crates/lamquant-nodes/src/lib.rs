@@ -70,6 +70,8 @@ const SOURCE_ID: &str = env!("LAMQUANT_NODES_SOURCE_ID");
 const FEATURE_SET: &str = env!("LAMQUANT_NODES_FEATURE_SET");
 
 const BASELINE_HOST_KERNEL: KernelId = KernelId(0x4c4d_0101);
+/// The slot between host and BLUT was already reserved for it.
+const BASELINE_MCU_KERNEL: KernelId = KernelId(0x4c4d_0102);
 const BASELINE_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0103);
 #[cfg(feature = "experimental-arithmetic")]
 const ARITHMETIC_HOST_KERNEL: KernelId = KernelId(0x4c4d_0201);
@@ -438,6 +440,11 @@ pub fn register_lml_nodes(registry: &mut KernelRegistry) -> Result<(), CompileEr
 
     for (id, target) in [
         (BASELINE_HOST_KERNEL, Target::Host),
+        // The fused kernel body IS `lamquant-lml-mcu`, the no_std crate firmware
+        // links and the byte-equality gate pins. Without this registration the
+        // MCU realm had no LML kernel at all, so a cross-realm equivalence claim
+        // had no MCU side to compare against.
+        (BASELINE_MCU_KERNEL, Target::McuAot),
         (BASELINE_BLUT_KERNEL, Target::BlutDurable),
     ] {
         registry.register_kernel(lml_kernel(id, LML_BASELINE_NODE_TYPE, target))?;
@@ -463,7 +470,7 @@ fn lml_descriptor(type_name: &str, arithmetic: bool) -> NodeDescriptor {
         inputs: vec![signal_port()],
         outputs: vec![bundle_port()],
         capabilities,
-        targets: vec![Target::Host, Target::BlutDurable],
+        targets: vec![Target::Host, Target::McuAot, Target::BlutDurable],
         resources: ResourceEnvelope::bounded(
             MAX_SIGNAL_BYTES,
             MAX_PACKET_BYTES,

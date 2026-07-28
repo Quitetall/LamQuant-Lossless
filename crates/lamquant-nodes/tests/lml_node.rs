@@ -174,7 +174,13 @@ fn descriptor_identity_is_feature_specific() {
     assert_eq!(baseline.inputs[0].abir.view, AbirViewType::Root);
     assert_eq!(baseline.outputs[0].abir.root, AbirRootType::Dataset);
     assert_eq!(baseline.outputs[0].abir.view, AbirViewType::Root);
-    assert_eq!(baseline.targets, vec![Target::Host, Target::BlutDurable]);
+    // McuAot joined deliberately: the fused body is `lamquant-lml-mcu`, the
+    // no_std crate firmware links, so the MCU realm was the one target this node
+    // could most honestly claim and the only one it did not.
+    assert_eq!(
+        baseline.targets,
+        vec![Target::Host, Target::McuAot, Target::BlutDurable]
+    );
     assert_eq!(packet.type_name, LML_PACKET_BASELINE_NODE_TYPE);
     assert_eq!(packet.targets, vec![Target::Host]);
     assert!(packet.subgraph.is_some());
@@ -279,6 +285,88 @@ fn compiled_baseline_node_matches_direct_fused_bundle() {
         LamQuantNodeValue::Bcs2(bytes) => assert_eq!(bytes, &direct),
         other => panic!("unexpected node output: {other:?}"),
     }
+}
+
+/// P8.3 #22 — one graph, two realms, identical bytes.
+///
+/// The MCU and host kernels are NOT the same kernel. They carry different
+/// `KernelId`s and different `ImplementationId`s (target is hashed into it), and
+/// they are permitted different resources: the host kernel may use up to 1024
+/// parallel channels, the MCU kernel exactly one. That difference is the point.
+/// If channel parallelism could perturb the encoder, this is where it would
+/// show, and it would show as a wire fork between the device that records and
+/// the host that reads.
+///
+/// Byte equality across the two is therefore not a restatement of the existing
+/// `byte_equal_backends` gate, which compares two backend modes inside one
+/// crate. This compares two COMPILED PLANS in two execution realms.
+#[test]
+fn one_graph_encodes_identically_in_the_mcu_and_host_realms() {
+    let signal = fixture_signal();
+    let dataset = fixture_dataset(&signal);
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let bounds = ResourceBounds::default();
+
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+    let graph = single_lml_graph(
+        LML_BASELINE_NODE_TYPE,
+        baseline_lml_descriptor().capabilities,
+        lml_node_config(LpcMode::Fixed, u16::MAX as usize).unwrap(),
+    );
+
+    let encode = |realm| {
+        let plan = Compiler::new(&registry, realm)
+            .compile(&graph)
+            .expect("the graph must compile in this realm");
+        let selected: Vec<_> = plan
+            .as_plan()
+            .nodes
+            .iter()
+            .map(|node| (node.kernel, node.implementation_id))
+            .collect();
+        let mut kernels = lamquant_nodes::LamQuantKernelExecutor::default();
+        let mut sink = NoopTransactionalSink;
+        let mut executor = PlanExecutor::new(&mut kernels, &mut sink);
+        let result = executor
+            .execute(
+                &plan,
+                [9; 32],
+                BTreeMap::from([(
+                    PortRef {
+                        node: NodeId(0),
+                        port: "signal".into(),
+                    },
+                    LamQuantNodeValue::LmlSignal(
+                        LmlSignalView::new(&dataset, &views, bounds).unwrap(),
+                    ),
+                )]),
+            )
+            .expect("execute");
+        let bytes = match &result.terminal_values.get(&NodeId(0)).unwrap()[0] {
+            LamQuantNodeValue::Bcs2(bytes) => bytes.clone(),
+            other => panic!("unexpected node output: {other:?}"),
+        };
+        (selected, bytes)
+    };
+
+    let (host_kernels, host) = encode(ExecutionRealm::HostStream);
+    let (mcu_kernels, mcu) = encode(ExecutionRealm::McuAot);
+
+    // Without this the test is worthless. If the MCU realm quietly selected the
+    // host kernel, the byte comparison below would compare a thing to itself and
+    // pass no matter what. Equality of OUTPUT is only evidence when the
+    // IMPLEMENTATIONS differ.
+    assert_ne!(
+        host_kernels, mcu_kernels,
+        "the two realms selected the same kernel, so equal bytes prove nothing"
+    );
+    assert!(!host.is_empty(), "an empty encode would make equality vacuous");
+    assert_eq!(
+        host, mcu,
+        "the same graph produced different bytes in the host and MCU realms: a \
+         recording made on the device would not match one made on the host"
+    );
 }
 
 #[test]
