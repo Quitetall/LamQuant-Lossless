@@ -172,14 +172,10 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Python deps
+      - name: Install Python codec and test dependencies
         run: |
           pip install --upgrade pip
-          pip install pytest numpy pyedflib mne
-      - name: Build Python codec wheel
-        run: |
-          pip install maturin
-          cd reference_implementations/python_codec && pip install -e .
+          pip install -e ".[test,fast,mne]"
       - name: Run fast tier diagnostics
         run: python3 tests/run_diagnostics.py fast
 
