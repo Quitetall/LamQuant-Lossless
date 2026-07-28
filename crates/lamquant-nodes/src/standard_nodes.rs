@@ -44,6 +44,8 @@ pub const XDF_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.xdf.sink";
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_SOURCE_CAPSULE: &str = "abir.source-capsule.identity-bound-v1";
 const SOURCE_CAPSULE_PROOF: &str = "org.quitetall.abir.proof.identity-bound-source-capsule-v1";
+pub const EXACT_SOURCE_RESTORATION_PROOF: &str =
+    "org.quitetall.abir.proof.exact-source-restoration-v1";
 const CAP_DURABLE_FILE_SINK: &str = "org.quitetall.lamquant.sink.durable-file-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.standard";
 // Current adapters materialize decoded host values before ABIR payloads.
@@ -610,11 +612,11 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
             vec![dataset_port("dataset", &source_proof, false)],
             vec![
                 foreign_port("source", spec.profile),
-                report_port("fidelity_receipt"),
+                fidelity_receipt_port("fidelity_receipt", true),
             ],
             ProofContract {
                 requires: vec![source_proof],
-                provides: vec!["org.quitetall.abir.proof.exact-source-restoration-v1".into()],
+                provides: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
                 invalidates: vec![],
             },
             config_schema(),
@@ -627,10 +629,13 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
         ),
         Operation::Sink => (
             spec.sink_type,
-            vec![foreign_port("source", spec.profile)],
+            vec![
+                foreign_port("source", spec.profile),
+                fidelity_receipt_port("fidelity_receipt", false),
+            ],
             vec![],
             ProofContract {
-                requires: vec![],
+                requires: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
                 provides: vec![],
                 invalidates: vec![],
             },
@@ -794,6 +799,24 @@ fn report_port(name: &str) -> PortDescriptor {
     }
 }
 
+fn fidelity_receipt_port(name: &str, provides_proof: bool) -> PortDescriptor {
+    let mut port = report_port(name);
+    port.proof = if provides_proof {
+        ProofContract {
+            requires: vec![],
+            provides: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
+            invalidates: vec![],
+        }
+    } else {
+        ProofContract {
+            requires: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
+            provides: vec![],
+            invalidates: vec![],
+        }
+    };
+    port
+}
+
 fn standard_kernel(id: KernelId, type_name: &str, operation: Operation) -> KernelDescriptor {
     let (input_layouts, output_layouts, lowering) = match operation {
         Operation::Import => (
@@ -807,9 +830,9 @@ fn standard_kernel(id: KernelId, type_name: &str, operation: Operation) -> Kerne
             "adapter:plan-export+exact-source-export:v1",
         ),
         Operation::Sink => (
-            vec![Layout::Packed],
+            vec![Layout::Packed, Layout::Opaque],
             vec![],
-            "adapter:authorized-durable-tree-sink:v1",
+            "adapter:accepted-plan-durable-tree-sink:v1",
         ),
     };
     KernelDescriptor {
@@ -882,7 +905,10 @@ fn read_lease(zero_copy_permitted: bool) -> LeaseContract {
 
 #[cfg(test)]
 mod tests {
-    use super::{adapter_error_code, standard_sink_node_config, StandardNodeConfigError};
+    use super::{
+        adapter_error_code, standard_sink_descriptor, standard_sink_node_config,
+        StandardNodeConfigError, EXACT_SOURCE_RESTORATION_PROOF,
+    };
     use abir_adapter::{AdapterError, ProfileId};
     use semantic_abir::ContentId;
 
@@ -948,5 +974,18 @@ mod tests {
             standard_sink_node_config(&"x".repeat(257), 1),
             Err(StandardNodeConfigError::DestinationResourceInvalid)
         );
+    }
+
+    #[test]
+    fn sink_requires_exact_export_receipt_and_proof() {
+        let descriptor = standard_sink_descriptor("bids.1.11.1").unwrap();
+        assert_eq!(descriptor.inputs.len(), 2);
+        assert_eq!(descriptor.inputs[0].name, "source");
+        assert_eq!(descriptor.inputs[1].name, "fidelity_receipt");
+        assert_eq!(
+            descriptor.inputs[1].proof.requires,
+            [EXACT_SOURCE_RESTORATION_PROOF]
+        );
+        assert_eq!(descriptor.proof.requires, [EXACT_SOURCE_RESTORATION_PROOF]);
     }
 }

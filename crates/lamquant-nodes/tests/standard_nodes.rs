@@ -319,12 +319,18 @@ fn sink_graph(sink_type: &str, profile: &str, destination_resource: &str) -> Gra
         }],
         edges: vec![],
         feedback: vec![],
-        invocation_inputs: vec![PortRef {
-            node: NodeId(0),
-            port: "source".into(),
-        }],
+        invocation_inputs: vec![
+            PortRef {
+                node: NodeId(0),
+                port: "source".into(),
+            },
+            PortRef {
+                node: NodeId(0),
+                port: "fidelity_receipt".into(),
+            },
+        ],
         required_capabilities: descriptor.capabilities,
-        required_proofs: vec![],
+        required_proofs: vec![lamquant_nodes::EXACT_SOURCE_RESTORATION_PROOF.into()],
         policy: vec![],
         minimum_fidelity: u16::MAX,
         session: None,
@@ -626,11 +632,17 @@ fn registers_all_enabled_profile_specific_host_nodes() {
         assert_ne!(import.type_name, restore.type_name);
         assert_ne!(sink.type_name, import.type_name);
         assert_eq!(sink.outputs, vec![]);
-        assert_eq!(sink.inputs.len(), 1);
+        assert_eq!(sink.inputs.len(), 2);
         assert_eq!(sink.inputs[0].name, "source");
         assert_eq!(
             sink.inputs[0].semantic_type,
             format!("abir.foreign-object.{}", case.profile)
+        );
+        assert_eq!(sink.inputs[1].name, "fidelity_receipt");
+        assert_eq!(sink.inputs[1].semantic_type, "abir.fidelity_receipt");
+        assert_eq!(
+            sink.proof.requires,
+            [lamquant_nodes::EXACT_SOURCE_RESTORATION_PROOF]
         );
         assert_eq!(sink.determinism, Determinism::BitExact);
         assert_eq!(sink.retry_limit, 0);
