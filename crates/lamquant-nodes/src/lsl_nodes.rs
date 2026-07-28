@@ -37,10 +37,17 @@ const MAX_LIVE_PLAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_REPORT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PEAK_BYTES: u64 = MAX_DATASET_BYTES + 3 * MAX_LIVE_PLAN_BYTES;
+// Worst-case admission sums one materialized dataset, the host worker's hard
+// resident bound, and the isolated helper's RLIMIT_AS. These are simultaneous
+// safety ceilings, not measured steady-state RSS.
 const MAX_INLET_PARENT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_INLET_HELPER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_INLET_PEAK_BYTES: u64 =
     MAX_DATASET_BYTES + MAX_INLET_PARENT_BYTES + MAX_INLET_HELPER_BYTES;
+const INLET_AVAILABLE: bool = cfg!(unix);
+// Keep sample support distinct so future Windows inlet support cannot
+// accidentally advertise liblsl's unsupported int64 transport.
+const INLET_INT64_AVAILABLE: bool = INLET_AVAILABLE && cfg!(not(windows));
 const POLICY_NETWORK_IMPORT: &str = "abir.policy.network-import-authorized";
 const POLICY_NETWORK_EXPORT: &str = "abir.policy.network-export-authorized";
 const POLICY_PROTOCOL_110_PEER: &str = "abir.policy.lsl-protocol-110-peer-attested";
@@ -62,7 +69,7 @@ pub fn register_lsl_nodes(
         Operation::AcceptExport,
         Operation::Outlet,
     ] {
-        if cfg!(not(unix)) && matches!(operation, Operation::Inlet) {
+        if !INLET_AVAILABLE && matches!(operation, Operation::Inlet) {
             continue;
         }
         let descriptor = descriptor(operation);
@@ -361,7 +368,7 @@ fn outlet_config() -> ConfigSchema {
 }
 
 fn supported_inlet_sample_types() -> Vec<String> {
-    let values = vec![
+    let mut values = vec![
         "float32".into(),
         "double64".into(),
         "string".into(),
@@ -369,10 +376,10 @@ fn supported_inlet_sample_types() -> Vec<String> {
         "int16".into(),
         "int8".into(),
     ];
+    if INLET_INT64_AVAILABLE {
+        values.push("int64".into());
+    }
     values
-        .into_iter()
-        .chain(core::iter::once("int64".into()).take(usize::from(cfg!(not(windows)))))
-        .collect()
 }
 
 fn text_field(name: &str, max_bytes: u32, required: bool) -> ConfigField {
