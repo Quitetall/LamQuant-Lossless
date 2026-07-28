@@ -255,7 +255,7 @@ pub fn encode_lml_bundle_from_views_with_mode(
     mode: lamquant_lml_mcu::lpc::LpcMode,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
-    verify_signal_views_closure(dataset, signal)?;
+    verify_lml_signal_views_closure(dataset, signal)?;
     encode_lml_bundle_from_verified_signal(
         dataset,
         signal,
@@ -278,7 +278,7 @@ pub fn encode_lml_bundle_from_views_explicit(
     features: lamquant_lml_mcu::lml::EncodeFeatures,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
-    verify_signal_views_closure(dataset, signal)?;
+    verify_lml_signal_views_closure(dataset, signal)?;
     encode_lml_bundle_from_verified_signal(
         dataset,
         signal,
@@ -1014,10 +1014,12 @@ fn validate_descriptor(descriptor: &PayloadDescriptor) -> Result<(), LmlBundleEr
 
 fn verify_signal_closure(dataset: &AbirDataset, signal: &[Vec<i64>]) -> Result<(), LmlBundleError> {
     let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    verify_signal_views_closure(dataset, &views)
+    verify_lml_signal_views_closure(dataset, &views)
 }
 
-fn verify_signal_views_closure(
+/// Verify that borrowed signed-integer channel views exactly match dataset
+/// payload descriptors and logical content identities.
+pub fn verify_lml_signal_views_closure(
     dataset: &AbirDataset,
     signal: &[&[i64]],
 ) -> Result<(), LmlBundleError> {

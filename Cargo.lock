@@ -926,7 +926,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=704d3b3542150e91fa9767a0d286983940ca3788#704d3b3542150e91fa9767a0d286983940ca3788"
+source = "git+https://github.com/Quitetall/blut.git?rev=7e9dccb9dedac65eb0d6e36f5ee7f4a934168403#7e9dccb9dedac65eb0d6e36f5ee7f4a934168403"
 dependencies = [
  "blake3",
  "postcard",

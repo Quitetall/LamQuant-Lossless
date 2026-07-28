@@ -5,11 +5,17 @@ use blut_graph_core::{
     NodeId, NodeInstance, PlanExecutor, PortRef, Target,
 };
 use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
-use lamquant_lml_mcu::{lml::EncodeFeatures, lpc::LpcMode};
+use lamquant_lml_mcu::{
+    lml::{compress_with_mode_views_explicit, EncodeFeatures},
+    lpc::LpcMode,
+};
 use lamquant_nodes::{
-    arithmetic_lml_descriptor, baseline_lml_descriptor, lml_node_config, register_lml_nodes,
-    LamQuantNodeValue, LmlNodeConfigError, LmlSignalView, NoopTransactionalSink,
-    CAP_LML_ARITHMETIC_NODE, LML_ARITHMETIC_NODE_TYPE, LML_BASELINE_NODE_TYPE,
+    arithmetic_lml_descriptor, baseline_lml_descriptor, baseline_lml_packet_descriptor,
+    lml_node_config, lml_packet_node_config, register_lml_nodes, LamQuantNodeValue,
+    LmlNodeConfigError, LmlSignalView, NoopTransactionalSink, CAP_LML_ARITHMETIC_NODE,
+    LML_ARITHMETIC_NODE_TYPE, LML_ASSEMBLE_NODE_TYPE, LML_BASELINE_NODE_TYPE,
+    LML_ENTROPY_NODE_TYPE, LML_PACKET_BASELINE_NODE_TYPE, LML_PREDICT_NODE_TYPE,
+    LML_QUANTIZE_NODE_TYPE, LML_TRANSFORM_NODE_TYPE,
 };
 use semantic_abir::{
     payload_content_id, AbirDataset, Atom, AtomTag, ByteOrder, ConceptId, DatasetDraft, DatasetTag,
@@ -113,10 +119,46 @@ fn single_lml_graph(
     }
 }
 
+fn execute_packet_plan(
+    plan: &blut_graph_core::AuthorizedPlan,
+    input_port: PortRef,
+    dataset: &AbirDataset,
+    views: &[&[i64]],
+    bounds: ResourceBounds,
+) -> Vec<u8> {
+    let mut kernels = lamquant_nodes::LamQuantKernelExecutor::default();
+    let mut sink = NoopTransactionalSink;
+    let mut executor = PlanExecutor::new(&mut kernels, &mut sink);
+    let result = executor
+        .execute(
+            plan,
+            [0x42; 32],
+            BTreeMap::from([(
+                input_port,
+                LamQuantNodeValue::LmlSignal(LmlSignalView::new(dataset, views, bounds).unwrap()),
+            )]),
+        )
+        .unwrap();
+    match result
+        .terminal_values
+        .values()
+        .next()
+        .and_then(|values| values.first())
+        .expect("one terminal packet")
+    {
+        LamQuantNodeValue::LmlPackets(packets) => {
+            assert_eq!(packets.packets().len(), 1);
+            packets.packets()[0].clone()
+        }
+        other => panic!("unexpected reference output: {other:?}"),
+    }
+}
+
 #[test]
 fn descriptor_identity_is_feature_specific() {
     let baseline = baseline_lml_descriptor();
     let arithmetic = arithmetic_lml_descriptor();
+    let packet = baseline_lml_packet_descriptor();
 
     assert_eq!(baseline.type_name, LML_BASELINE_NODE_TYPE);
     assert_eq!(arithmetic.type_name, LML_ARITHMETIC_NODE_TYPE);
@@ -133,6 +175,10 @@ fn descriptor_identity_is_feature_specific() {
     assert_eq!(baseline.outputs[0].abir.root, AbirRootType::Dataset);
     assert_eq!(baseline.outputs[0].abir.view, AbirViewType::Root);
     assert_eq!(baseline.targets, vec![Target::Host, Target::BlutDurable]);
+    assert_eq!(packet.type_name, LML_PACKET_BASELINE_NODE_TYPE);
+    assert_eq!(packet.targets, vec![Target::Host]);
+    assert!(packet.subgraph.is_some());
+    assert_eq!(packet.outputs[0].abir.root, AbirRootType::EncodedBlock);
 }
 
 #[test]
@@ -236,6 +282,145 @@ fn compiled_baseline_node_matches_direct_fused_bundle() {
 }
 
 #[test]
+fn compiler_produced_reference_dag_matches_fused_lml_node() {
+    let signal = fixture_signal();
+    let dataset = fixture_dataset(&signal);
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let bounds = ResourceBounds::default();
+    let mode = LpcMode::Adaptive { max_order: 8 };
+    let config = lml_packet_node_config(mode).unwrap();
+
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+    let reference_graph = registry
+        .materialize_subgraph(&NodeInstance {
+            id: NodeId(99),
+            descriptor: LML_PACKET_BASELINE_NODE_TYPE.into(),
+            descriptor_version: 1,
+            config,
+        })
+        .unwrap();
+    assert_eq!(reference_graph.graph.nodes.len(), 5);
+    assert_eq!(
+        reference_graph
+            .graph
+            .nodes
+            .iter()
+            .map(|node| node.descriptor.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            LML_TRANSFORM_NODE_TYPE,
+            LML_QUANTIZE_NODE_TYPE,
+            LML_PREDICT_NODE_TYPE,
+            LML_ENTROPY_NODE_TYPE,
+            LML_ASSEMBLE_NODE_TYPE,
+        ]
+    );
+    let reference = Compiler::new(&registry, ExecutionRealm::HostStream)
+        .with_fusion(false)
+        .compile(&reference_graph.graph)
+        .unwrap();
+    let fused = Compiler::new(&registry, ExecutionRealm::HostStream)
+        .compile(&reference_graph.graph)
+        .unwrap();
+    assert!(Compiler::new(&registry, ExecutionRealm::BlutDurable)
+        .compile(&reference_graph.graph)
+        .is_err());
+    assert_eq!(reference.as_plan().nodes.len(), 5);
+    assert_eq!(fused.as_plan().nodes.len(), 1);
+
+    let input_port = reference_graph.inputs[0].inner.clone();
+    let reference_output =
+        execute_packet_plan(&reference, input_port.clone(), &dataset, &views, bounds);
+    let fused_output = execute_packet_plan(&fused, input_port, &dataset, &views, bounds);
+    assert_eq!(reference_output, fused_output);
+    let direct_output = compress_with_mode_views_explicit(
+        &views,
+        0,
+        mode,
+        EncodeFeatures {
+            max_packet_bytes: Some(bounds.max_frame_bytes as usize),
+            ..EncodeFeatures::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(reference_output, direct_output);
+}
+
+#[test]
+fn canonical_compiler_dag_reference_equals_fused_matrix() {
+    let shapes = [
+        (1, 4),
+        (1, 8),
+        (1, 20),
+        (1, 100),
+        (4, 313),
+        (8, 2500),
+        (32, 2500),
+    ];
+    let modes = [
+        LpcMode::Fixed,
+        LpcMode::Adaptive { max_order: 16 },
+        LpcMode::Anytime {
+            max_order: 16,
+            deadline: None,
+        },
+    ];
+    let bounds = ResourceBounds::default();
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+
+    for (channels, samples) in shapes {
+        let signal = (0..channels)
+            .map(|channel| {
+                (0..samples)
+                    .map(|sample| {
+                        let base = ((sample * 3 + channel * 7) % 512) as i64 - 256;
+                        let wobble = ((sample * sample + channel) % 97) as i64 - 48;
+                        base * 40 + wobble
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let dataset = fixture_dataset(&signal);
+        let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        for mode in modes {
+            let materialized = registry
+                .materialize_subgraph(&NodeInstance {
+                    id: NodeId(77),
+                    descriptor: LML_PACKET_BASELINE_NODE_TYPE.into(),
+                    descriptor_version: 1,
+                    config: lml_packet_node_config(mode).unwrap(),
+                })
+                .unwrap();
+            let reference = Compiler::new(&registry, ExecutionRealm::HostStream)
+                .with_fusion(false)
+                .compile(&materialized.graph)
+                .unwrap();
+            let fused = Compiler::new(&registry, ExecutionRealm::HostStream)
+                .compile(&materialized.graph)
+                .unwrap();
+            let input = materialized.inputs[0].inner.clone();
+            let reference_bytes =
+                execute_packet_plan(&reference, input.clone(), &dataset, &views, bounds);
+            let fused_bytes = execute_packet_plan(&fused, input, &dataset, &views, bounds);
+            let direct = compress_with_mode_views_explicit(
+                &views,
+                0,
+                mode,
+                EncodeFeatures {
+                    max_packet_bytes: Some(bounds.max_frame_bytes as usize),
+                    ..EncodeFeatures::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(reference_bytes, fused_bytes, "{channels}ch x {samples}");
+            assert_eq!(reference_bytes, direct, "{channels}ch x {samples}");
+        }
+    }
+}
+
+#[test]
 fn node_rejects_pathological_entropy_output_without_allocating_it() {
     let signal = vec![vec![i64::MAX]];
     let dataset = fixture_dataset(&signal);
@@ -271,6 +456,78 @@ fn node_rejects_pathological_entropy_output_without_allocating_it() {
     );
 
     assert!(result.is_err());
+}
+
+#[test]
+fn reference_packet_dag_rejects_multi_packet_input_before_transform() {
+    let signal = vec![vec![0_i64; u16::MAX as usize + 1]];
+    let dataset = fixture_dataset(&signal);
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let bounds = ResourceBounds::default();
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+    let materialized = registry
+        .materialize_subgraph(&NodeInstance {
+            id: NodeId(88),
+            descriptor: LML_PACKET_BASELINE_NODE_TYPE.into(),
+            descriptor_version: 1,
+            config: lml_packet_node_config(LpcMode::Fixed).unwrap(),
+        })
+        .unwrap();
+    let plan = Compiler::new(&registry, ExecutionRealm::HostStream)
+        .with_fusion(false)
+        .compile(&materialized.graph)
+        .unwrap();
+    let mut kernels = lamquant_nodes::LamQuantKernelExecutor::default();
+    let mut sink = NoopTransactionalSink;
+    let mut executor = PlanExecutor::new(&mut kernels, &mut sink);
+    let result = executor.execute(
+        &plan,
+        [0x55; 32],
+        BTreeMap::from([(
+            materialized.inputs[0].inner.clone(),
+            LamQuantNodeValue::LmlSignal(LmlSignalView::new(&dataset, &views, bounds).unwrap()),
+        )]),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn reference_packet_dag_rejects_dataset_payload_substitution() {
+    let declared = vec![vec![1_i64, 2, 3, 4]];
+    let substituted = [vec![9_i64, 9, 9, 9]];
+    let dataset = fixture_dataset(&declared);
+    let views = substituted.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let bounds = ResourceBounds::default();
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+    let materialized = registry
+        .materialize_subgraph(&NodeInstance {
+            id: NodeId(89),
+            descriptor: LML_PACKET_BASELINE_NODE_TYPE.into(),
+            descriptor_version: 1,
+            config: lml_packet_node_config(LpcMode::Fixed).unwrap(),
+        })
+        .unwrap();
+
+    for fusion in [false, true] {
+        let plan = Compiler::new(&registry, ExecutionRealm::HostStream)
+            .with_fusion(fusion)
+            .compile(&materialized.graph)
+            .unwrap();
+        let mut kernels = lamquant_nodes::LamQuantKernelExecutor::default();
+        let mut sink = NoopTransactionalSink;
+        let mut executor = PlanExecutor::new(&mut kernels, &mut sink);
+        let result = executor.execute(
+            &plan,
+            [0x66; 32],
+            BTreeMap::from([(
+                materialized.inputs[0].inner.clone(),
+                LamQuantNodeValue::LmlSignal(LmlSignalView::new(&dataset, &views, bounds).unwrap()),
+            )]),
+        );
+        assert!(result.is_err(), "fusion={fusion}");
+    }
 }
 
 #[cfg(feature = "experimental-arithmetic")]

@@ -4,6 +4,19 @@
 
 extern crate alloc;
 
+mod lml_reference;
+
+pub use lml_reference::{
+    LmlPackets, ReferenceEntropy, ReferencePredicted, ReferenceQuantized, ReferenceSubbands,
+};
+
+pub const LML_TRANSFORM_NODE_TYPE: &str = lml_reference::LML_TRANSFORM_NODE_TYPE;
+pub const LML_QUANTIZE_NODE_TYPE: &str = lml_reference::LML_QUANTIZE_NODE_TYPE;
+pub const LML_PREDICT_NODE_TYPE: &str = lml_reference::LML_PREDICT_NODE_TYPE;
+pub const LML_ENTROPY_NODE_TYPE: &str = lml_reference::LML_ENTROPY_NODE_TYPE;
+pub const LML_ASSEMBLE_NODE_TYPE: &str = lml_reference::LML_ASSEMBLE_NODE_TYPE;
+pub const LML_PACKET_BASELINE_NODE_TYPE: &str = lml_reference::LML_PACKET_BASELINE_NODE_TYPE;
+
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
@@ -18,10 +31,9 @@ use blut_graph_core::{
     ExecutionError, ExtentContract, FailureContract, FidelityContract, ImplementationId,
     KernelDescriptor, KernelExecutor, KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract,
     LeaseLifetime, NodeDescriptor, NodeTypeRef, Partiality, PolicyContract, PortDescriptor,
-    ProofContract, ResourceEnvelope, StateContract, StateScope, StructuredFailure, Target,
-    TransactionalSink,
+    ProofContract, ResourceEnvelope, StateContract, StateScope, Target, TransactionalSink,
 };
-use lamquant_abir_codec::{encode_lml_bundle_from_views_explicit, LmlBundleError};
+use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
 use lamquant_lml_mcu::lml::EncodeFeatures;
 use lamquant_lml_mcu::lpc::LpcMode;
 use semantic_abir::AbirDataset;
@@ -30,7 +42,6 @@ use semantic_abir_bcs::ResourceBounds;
 pub const LML_BASELINE_NODE_TYPE: &str = "org.quitetall.lamquant.lml.encode.baseline";
 pub const LML_ARITHMETIC_NODE_TYPE: &str = "org.quitetall.lamquant.lml.encode.arithmetic";
 pub const CAP_LML_ARITHMETIC_NODE: &str = "bcs2.cap.lml-arithmetic-v1";
-
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_LML: &str = "bcs.lml.lossless-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.lml.encode";
@@ -49,7 +60,9 @@ const ARITHMETIC_HOST_KERNEL: KernelId = KernelId(0x4c4d_0201);
 #[cfg(feature = "experimental-arithmetic")]
 const ARITHMETIC_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0202);
 
-/// Borrowed, closure-checked input shape accepted by LML encoder nodes.
+/// Borrowed input shape accepted by LML encoder nodes.
+///
+/// Kernels verify dataset payload closure before transforming samples.
 #[derive(Clone, Copy, Debug)]
 pub struct LmlSignalView<'a> {
     dataset: &'a AbirDataset,
@@ -110,6 +123,16 @@ impl std::error::Error for LmlSignalViewError {}
 #[derive(Debug)]
 pub enum LamQuantNodeValue<'a> {
     LmlSignal(LmlSignalView<'a>),
+    #[doc(hidden)]
+    ReferenceSubbands(ReferenceSubbands),
+    #[doc(hidden)]
+    ReferenceQuantized(ReferenceQuantized),
+    #[doc(hidden)]
+    ReferencePredicted(ReferencePredicted),
+    #[doc(hidden)]
+    ReferenceEntropy(ReferenceEntropy),
+    #[doc(hidden)]
+    LmlPackets(LmlPackets),
     Bcs2(Vec<u8>),
 }
 
@@ -149,65 +172,127 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
         node: &CompiledNode,
         inputs: &[Option<&Self::Value>],
     ) -> Result<Vec<Self::Value>, ExecutionError> {
-        let type_name = node
+        let semantic_types = node
             .semantic_types
-            .first()
+            .iter()
             .map(|node_type| node_type.type_name.as_str())
-            .ok_or_else(|| kernel_failure(node, "invalid-plan", "missing semantic node type"))?;
-        if !matches!(type_name, LML_BASELINE_NODE_TYPE | LML_ARITHMETIC_NODE_TYPE) {
-            return Err(kernel_failure(
+            .collect::<Vec<_>>();
+        if semantic_types.as_slice() == reference_stage_types() {
+            return execute_fused_reference(node, inputs);
+        }
+        let type_name = semantic_types.first().copied().ok_or_else(|| {
+            lml_reference::kernel_failure(node, "invalid-plan", "missing semantic node type")
+        })?;
+        match type_name {
+            LML_TRANSFORM_NODE_TYPE => execute_transform(node, inputs),
+            LML_QUANTIZE_NODE_TYPE => execute_quantize(node, inputs),
+            LML_PREDICT_NODE_TYPE => execute_predict(node, inputs),
+            LML_ENTROPY_NODE_TYPE => execute_entropy(node, inputs),
+            LML_ASSEMBLE_NODE_TYPE => execute_assemble(node, inputs),
+            LML_BASELINE_NODE_TYPE | LML_ARITHMETIC_NODE_TYPE => {
+                execute_fused_outer(node, type_name, inputs)
+            }
+            _ => Err(lml_reference::kernel_failure(
                 node,
                 "unsupported-node",
                 "kernel does not implement requested semantic node",
-            ));
+            )),
         }
-        #[cfg(not(feature = "experimental-arithmetic"))]
-        if type_name == LML_ARITHMETIC_NODE_TYPE {
-            return Err(kernel_failure(
-                node,
-                "missing-capability",
-                "arithmetic LML kernel not compiled into executor",
-            ));
-        }
-        let signal = match inputs {
-            [Some(LamQuantNodeValue::LmlSignal(signal))] => signal,
-            _ => {
-                return Err(kernel_failure(
-                    node,
-                    "invalid-input",
-                    "LML encoder requires one signal input",
-                ))
-            }
-        };
-        let config = node
-            .semantic_configs
-            .first()
-            .ok_or_else(|| kernel_failure(node, "invalid-plan", "missing semantic config"))?;
-        let (mode, window_size) = parse_lml_config(config)
-            .map_err(|message| kernel_failure(node, "invalid-config", message))?;
-        let features = if type_name == LML_ARITHMETIC_NODE_TYPE {
-            EncodeFeatures {
-                arithmetic: true,
-                max_packet_bytes: Some(signal.bounds.max_frame_bytes as usize),
-                ..EncodeFeatures::default()
-            }
-        } else {
-            EncodeFeatures {
-                max_packet_bytes: Some(signal.bounds.max_frame_bytes as usize),
-                ..EncodeFeatures::default()
-            }
-        };
-        let bytes = encode_lml_bundle_from_views_explicit(
-            signal.dataset,
-            signal.channels,
-            window_size,
-            mode,
-            features,
-            signal.bounds,
-        )
-        .map_err(|error| codec_failure(node, error))?;
-        Ok(vec![LamQuantNodeValue::Bcs2(bytes)])
     }
+}
+
+fn execute_fused_outer<'a>(
+    node: &CompiledNode,
+    type_name: &str,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    #[cfg(not(feature = "experimental-arithmetic"))]
+    if type_name == LML_ARITHMETIC_NODE_TYPE {
+        return Err(lml_reference::kernel_failure(
+            node,
+            "missing-capability",
+            "arithmetic LML kernel not compiled into executor",
+        ));
+    }
+    let signal = match inputs {
+        [Some(LamQuantNodeValue::LmlSignal(signal))] => signal,
+        _ => {
+            return Err(lml_reference::kernel_failure(
+                node,
+                "invalid-input",
+                "LML encoder requires one signal input",
+            ))
+        }
+    };
+    let config = node.semantic_configs.first().ok_or_else(|| {
+        lml_reference::kernel_failure(node, "invalid-plan", "missing semantic config")
+    })?;
+    let (mode, window_size) = lml_reference::parse_lml_config(config)
+        .map_err(|message| lml_reference::kernel_failure(node, "invalid-config", message))?;
+    let features = if type_name == LML_ARITHMETIC_NODE_TYPE {
+        EncodeFeatures {
+            arithmetic: true,
+            max_packet_bytes: Some(lml_reference::max_frame_bytes(node, signal.bounds)?),
+            ..EncodeFeatures::default()
+        }
+    } else {
+        EncodeFeatures {
+            max_packet_bytes: Some(lml_reference::max_frame_bytes(node, signal.bounds)?),
+            ..EncodeFeatures::default()
+        }
+    };
+    let bytes = encode_lml_bundle_from_views_explicit(
+        signal.dataset,
+        signal.channels,
+        window_size,
+        mode,
+        features,
+        signal.bounds,
+    )
+    .map_err(|error| lml_reference::codec_failure(node, error))?;
+    Ok(vec![LamQuantNodeValue::Bcs2(bytes)])
+}
+
+fn execute_fused_reference<'a>(
+    node: &CompiledNode,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    lml_reference::execute_fused_reference(node, inputs)
+}
+
+fn execute_transform<'a>(
+    node: &CompiledNode,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    lml_reference::execute_transform(node, inputs)
+}
+
+fn execute_quantize<'a>(
+    node: &CompiledNode,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    lml_reference::execute_quantize(node, inputs)
+}
+
+fn execute_predict<'a>(
+    node: &CompiledNode,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    lml_reference::execute_predict(node, inputs)
+}
+
+fn execute_entropy<'a>(
+    node: &CompiledNode,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    lml_reference::execute_entropy(node, inputs)
+}
+
+fn execute_assemble<'a>(
+    node: &CompiledNode,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    lml_reference::execute_assemble(node, inputs)
 }
 
 /// Sink for pure plans. Transaction callbacks fail closed if compiler emits one.
@@ -233,6 +318,10 @@ pub fn baseline_lml_descriptor() -> NodeDescriptor {
     lml_descriptor(LML_BASELINE_NODE_TYPE, false)
 }
 
+pub fn baseline_lml_packet_descriptor() -> NodeDescriptor {
+    lml_reference::baseline_lml_packet_descriptor()
+}
+
 pub fn arithmetic_lml_descriptor() -> NodeDescriptor {
     lml_descriptor(LML_ARITHMETIC_NODE_TYPE, true)
 }
@@ -244,6 +333,23 @@ pub fn lml_node_config(
     if !(1..=u16::MAX as usize).contains(&window_size) {
         return Err(LmlNodeConfigError::WindowSizeOutOfRange);
     }
+    let schedule = serialize_lpc_schedule(mode)?;
+    Ok(BTreeMap::from([
+        ("lpc_schedule".into(), ConfigValue::Text(schedule)),
+        ("window_size".into(), ConfigValue::U64(window_size as u64)),
+    ]))
+}
+
+pub fn lml_packet_node_config(
+    mode: LpcMode,
+) -> Result<BTreeMap<String, ConfigValue>, LmlNodeConfigError> {
+    Ok(BTreeMap::from([(
+        "lpc_schedule".into(),
+        ConfigValue::Text(serialize_lpc_schedule(mode)?),
+    )]))
+}
+
+fn serialize_lpc_schedule(mode: LpcMode) -> Result<String, LmlNodeConfigError> {
     let schedule = match mode {
         LpcMode::Fixed => "fixed".into(),
         LpcMode::Adaptive { max_order } => {
@@ -268,10 +374,7 @@ pub fn lml_node_config(
             format!("anytime-none-{max_order}")
         }
     };
-    Ok(BTreeMap::from([
-        ("lpc_schedule".into(), ConfigValue::Text(schedule)),
-        ("window_size".into(), ConfigValue::U64(window_size as u64)),
-    ]))
+    Ok(schedule)
 }
 
 fn validate_max_order(max_order: usize) -> Result<(), LmlNodeConfigError> {
@@ -284,8 +387,27 @@ fn validate_max_order(max_order: usize) -> Result<(), LmlNodeConfigError> {
 
 /// Register production LML semantic nodes and target-specific fused kernels.
 pub fn register_lml_nodes(registry: &mut KernelRegistry) -> Result<(), CompileError> {
+    for descriptor in reference_stage_descriptors() {
+        registry.register_descriptor(descriptor)?;
+    }
+    let schema = baseline_reference_subgraph();
+    registry.register_subgraph(schema)?;
+    registry.register_descriptor(baseline_lml_packet_descriptor())?;
     registry.register_descriptor(baseline_lml_descriptor())?;
     registry.register_descriptor(arithmetic_lml_descriptor())?;
+
+    for (offset, type_name) in reference_stage_types().iter().enumerate() {
+        registry.register_kernel(reference_kernel(
+            KernelId(lml_reference::REFERENCE_HOST_KERNEL_BASE + offset as u32),
+            &[*type_name],
+            Target::Host,
+        ))?;
+    }
+    registry.register_kernel(reference_kernel(
+        lml_reference::REFERENCE_FUSED_HOST_KERNEL,
+        reference_stage_types(),
+        Target::Host,
+    ))?;
 
     for (id, target) in [
         (BASELINE_HOST_KERNEL, Target::Host),
@@ -352,6 +474,18 @@ fn lml_descriptor(type_name: &str, arithmetic: bool) -> NodeDescriptor {
         effect: Effect::Pure,
         retry_limit: 0,
     }
+}
+
+fn reference_stage_types() -> &'static [&'static str] {
+    lml_reference::reference_stage_types()
+}
+
+fn baseline_reference_subgraph() -> blut_graph_core::SubgraphSchema {
+    lml_reference::baseline_reference_subgraph()
+}
+
+fn reference_stage_descriptors() -> Vec<NodeDescriptor> {
+    lml_reference::reference_stage_descriptors()
 }
 
 fn signal_port() -> PortDescriptor {
@@ -440,7 +574,7 @@ fn lml_config_schema() -> ConfigSchema {
             ConfigField {
                 name: "lpc_schedule".into(),
                 value_type: ConfigType::Choice {
-                    values: lpc_schedule_values(),
+                    values: lml_reference::lpc_schedule_values(),
                 },
                 required: true,
                 default: None,
@@ -456,16 +590,6 @@ fn lml_config_schema() -> ConfigSchema {
             },
         ],
     }
-}
-
-fn lpc_schedule_values() -> Vec<String> {
-    let mut values = Vec::with_capacity(129);
-    values.push("fixed".into());
-    for order in 1..=64 {
-        values.push(format!("adaptive-{order}"));
-        values.push(format!("anytime-none-{order}"));
-    }
-    values
 }
 
 fn lml_kernel(id: KernelId, type_name: &str, target: Target) -> KernelDescriptor {
@@ -490,6 +614,10 @@ fn lml_kernel(id: KernelId, type_name: &str, target: Target) -> KernelDescriptor
     }
 }
 
+fn reference_kernel(id: KernelId, type_names: &[&str], target: Target) -> KernelDescriptor {
+    lml_reference::reference_kernel(id, type_names, target)
+}
+
 fn implementation_id(type_name: &str, target: Target) -> ImplementationId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"org.quitetall.lamquant.nodes.implementation-v1\0");
@@ -505,77 +633,4 @@ fn implementation_id(type_name: &str, target: Target) -> ImplementationId {
         Target::BlutDurable => 2,
     }]);
     ImplementationId(*hasher.finalize().as_bytes())
-}
-
-fn parse_lml_config(
-    config: &BTreeMap<String, ConfigValue>,
-) -> Result<(LpcMode, usize), &'static str> {
-    let window_size = match config.get("window_size") {
-        Some(ConfigValue::U64(value)) => {
-            usize::try_from(*value).map_err(|_| "window_size overflow")?
-        }
-        _ => return Err("missing window_size"),
-    };
-    let schedule = match config.get("lpc_schedule") {
-        Some(ConfigValue::Text(value)) => value.as_str(),
-        _ => return Err("missing lpc_schedule"),
-    };
-    let mode = if schedule == "fixed" {
-        LpcMode::Fixed
-    } else if let Some(order) = parse_schedule_order(schedule, "adaptive-") {
-        LpcMode::Adaptive { max_order: order? }
-    } else if let Some(order) = parse_schedule_order(schedule, "anytime-none-") {
-        let max_order = order?;
-        {
-            #[cfg(feature = "std")]
-            {
-                LpcMode::Anytime {
-                    max_order,
-                    deadline: None,
-                }
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                LpcMode::Anytime { max_order }
-            }
-        }
-    } else {
-        return Err("invalid lpc_schedule");
-    };
-    Ok((mode, window_size))
-}
-
-fn parse_schedule_order(schedule: &str, prefix: &str) -> Option<Result<usize, &'static str>> {
-    schedule.strip_prefix(prefix).map(|value| {
-        let order = value.parse::<usize>().map_err(|_| "invalid max_order")?;
-        if (1..=64).contains(&order) {
-            Ok(order)
-        } else {
-            Err("max_order out of range")
-        }
-    })
-}
-
-fn kernel_failure(node: &CompiledNode, code: &str, message: &str) -> ExecutionError {
-    ExecutionError::KernelFailed {
-        kernel: node.kernel,
-        failure: StructuredFailure {
-            domain: FAILURE_DOMAIN.into(),
-            code: code.into(),
-            message: message.into(),
-            retryable: false,
-        },
-    }
-}
-
-fn codec_failure(node: &CompiledNode, error: LmlBundleError) -> ExecutionError {
-    ExecutionError::KernelFailed {
-        kernel: node.kernel,
-        failure: StructuredFailure {
-            domain: FAILURE_DOMAIN.into(),
-            code: "codec-failure".into(),
-            message: format!("{error:?}"),
-            retryable: false,
-        },
-    }
 }

@@ -55,6 +55,10 @@ jobs:
       # it silently never fires and stops guarding the migration's split.
       - name: ADR-0074 M0 DAG-reference==fused gate (archive)
         run: cargo test -p lamquant-lml --features archive --test dag_reference_equals_fused
+      # ADR 0138/P8.2: compiler materializes frozen five-stage packet DAG, then
+      # proves unfused == fused == production bytes across shape/mode matrix.
+      - name: ADR-0138 compiler-produced DAG-reference==fused gate
+        run: cargo test -p lamquant-nodes --test lml_node canonical_compiler_dag_reference_equals_fused_matrix
       # S7b normalization parity (ADR 0069): Rust normalize.rs == Python scipy
       # pipeline on committed Q31 goldens. Also archive-gated → pin by name (it was
       # added without a CI line and was silently absent).
