@@ -406,14 +406,52 @@ fn build_reconstructed_dataset(
         recording.add_source_key(source_key.clone());
     }
     draft.add_recording(recording);
+
+    // Carry the source's interpretive context instead of dropping it.
+    //
+    // The reconstructed stream used to be built with `None, None, None` for
+    // `clock_id`, `channel_basis_id` and `policy_id`. Each omission changes what
+    // the decoded dataset MEANS:
+    //
+    //   * without a channel basis it says "21 channels" and no longer says which
+    //     electrodes they are, so the reconstruction cannot be compared against
+    //     the source it came from;
+    //   * without a clock its timestamps no longer name the timebase they are
+    //     on;
+    //   * without a policy, any consent, retention or use restriction attached
+    //     to the source silently fails to travel with the decoded copy. That one
+    //     is not a fidelity question. A lossy copy that has quietly shed its
+    //     governing policy is the failure the policy exists to prevent.
+    //
+    // The collections are copied whole rather than chased through the reference
+    // graph. They are metadata, not payload, and copying all of them keeps
+    // referential closure true by construction — resolving only what looked
+    // reachable would make correctness depend on this function's model of
+    // ABIR's reference graph staying in step with ABIR's.
+    for clock in source.clocks() {
+        draft.add_clock(clock.clone());
+    }
+    for frame in source.coordinate_frames() {
+        draft.add_coordinate_frame(frame.clone());
+    }
+    for basis in source.channel_bases() {
+        draft.add_channel_basis(basis.clone());
+    }
+    for policy in source.policies() {
+        draft.add_policy(policy.clone());
+    }
+    for channel in source.channels() {
+        draft.add_channel(channel.clone());
+    }
+
     draft.add_stream(Stream::new(
         stream_id,
         recording_id,
         source_stream.modality().clone(),
         atom_ids,
-        None,
-        None,
-        None,
+        source_stream.clock_id(),
+        source_stream.channel_basis_id(),
+        source_stream.policy_id(),
     ));
     let dataset = draft
         .validate(ValidationLimits::default())
@@ -1022,6 +1060,131 @@ mod tests {
             None,
         ));
         OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
+    }
+
+    /// A governed source must not decode into an ungoverned copy.
+    ///
+    /// The reconstructed stream used to be built with `None, None, None` for
+    /// clock, channel basis and policy. Every test above passes either way,
+    /// because none of their fixtures carried any of the three -- which is
+    /// exactly how the omission survived. This one carries all three.
+    #[test]
+    fn reconstruction_carries_the_clock_basis_and_policy_of_its_source() {
+        use semantic_abir::{
+            ChannelBasis, ChannelBasisTag, ChannelSpec, Clock, ClockTag, Policy, PolicyTag,
+            ReferenceKind,
+        };
+
+        let signal: Vec<Vec<i64>> = (0..2).map(|c| vec![c as i64; 8]).collect();
+        let mut draft = DatasetDraft::new(ObjectId::<DatasetTag>::from_bytes([1; 16]));
+        let recording_id = ObjectId::<RecordingTag>::from_bytes([2; 16]);
+        let stream_id = ObjectId::<StreamTag>::from_bytes([3; 16]);
+        let clock_id = ObjectId::<ClockTag>::from_bytes([4; 16]);
+        let basis_id = ObjectId::<ChannelBasisTag>::from_bytes([5; 16]);
+        let policy_id = ObjectId::<PolicyTag>::from_bytes([6; 16]);
+        let mut access = InMemoryPayloadAccess::new();
+        let mut atom_ids = Vec::new();
+        for (index, channel) in signal.iter().enumerate() {
+            let bytes = channel
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect::<Vec<_>>();
+            let content_id = payload_content_id(ElementType::I64, &bytes);
+            access.insert(content_id, bytes);
+            let mut id = [0_u8; 16];
+            id[15] = (index + 1) as u8;
+            let atom_id = ObjectId::<AtomTag>::from_bytes(id);
+            atom_ids.push(atom_id);
+            draft.add_atom(Atom::SignalBlock(SignalBlock::new(
+                atom_id,
+                Presence::Present,
+                Some(PayloadDescriptor::new(
+                    content_id,
+                    (channel.len() * 8) as u64,
+                    ElementType::I64,
+                    ByteOrder::Little,
+                    vec![1, channel.len() as u64],
+                    Layout::DenseRowMajor,
+                    None,
+                    None,
+                )),
+                TimeAxis::Regular(
+                    TimeSegment::new(
+                        Rational::new(0, 1).unwrap(),
+                        Rational::new(250, 1).unwrap(),
+                        channel.len() as u64,
+                    )
+                    .unwrap(),
+                ),
+                None,
+            )));
+        }
+        draft.add_clock(Clock::new(
+            clock_id,
+            ConceptId::new("abir:clock/acquisition").unwrap(),
+            None,
+            Rational::new(0, 1).unwrap(),
+            Rational::new(250, 1).unwrap(),
+            Rational::new(0, 1).unwrap(),
+        ));
+        draft.add_channel_basis(ChannelBasis::new(
+            basis_id,
+            (0..signal.len())
+                .map(|_| ChannelSpec::new(ConceptId::new("abir:channel/eeg").unwrap()))
+                .collect(),
+            ReferenceKind::Unknown,
+        ));
+        // The restriction is the point: it must reach the decoded copy.
+        draft.add_policy(Policy::new(
+            policy_id,
+            None,
+            vec![ConceptId::new("abir:restriction/no-redistribution").unwrap()],
+        ));
+        draft.add_recording(Recording::new(recording_id, vec![stream_id]));
+        draft.add_stream(Stream::new(
+            stream_id,
+            recording_id,
+            ConceptId::new("abir:modality/eeg").unwrap(),
+            atom_ids,
+            Some(clock_id),
+            Some(basis_id),
+            Some(policy_id),
+        ));
+        let opened =
+            OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access);
+
+        let backend = StubBackend::default();
+        let bytes = encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &backend,
+            transformed_fidelity("test-residue"),
+            implementation_identity("test"),
+            ResourceBounds::default(),
+        )
+        .expect("encode");
+        let decoded = open_bundle(&bytes, &backend, ResourceBounds::default()).expect("decode");
+        let stream = &decoded.reconstructed().dataset().streams()[0];
+
+        assert_eq!(stream.clock_id(), Some(clock_id), "clock was dropped");
+        assert_eq!(
+            stream.channel_basis_id(),
+            Some(basis_id),
+            "channel basis was dropped: the copy no longer says which electrodes these are"
+        );
+        assert_eq!(
+            stream.policy_id(),
+            Some(policy_id),
+            "policy was dropped: a governed recording decoded into an ungoverned copy"
+        );
+        // The references must resolve, not merely be present as ids.
+        let reconstructed = decoded.reconstructed().dataset();
+        assert!(reconstructed.policies().iter().any(|p| p.id() == policy_id));
+        assert!(reconstructed.clocks().iter().any(|c| c.id() == clock_id));
+        assert!(reconstructed
+            .channel_bases()
+            .iter()
+            .any(|b| b.id() == basis_id));
     }
 
     #[test]
