@@ -40,8 +40,77 @@ pub struct NeuralTokens {
 #[derive(Debug)]
 pub struct BackendError(pub String);
 
+/// What a backend accepts, declared up front instead of discovered by failing.
+///
+/// The shell used to hand any signal to any backend and inspect the wreckage
+/// afterwards: `encode_bundle` calls `encode`, then checks the returned
+/// `n_channels` against the input. For a 4-channel recording against a
+/// 21-channel model that means spawning a subprocess and loading a checkpoint
+/// before learning the answer was never going to fit, and the failure arrives
+/// as a Python traceback rather than as a statement about shapes.
+///
+/// Deliberately NOT a description of sample rate. `PyBackend`'s model path
+/// passes `sample_rate` to the helper, and `model_encode` ignores it entirely --
+/// so a 500 Hz recording and a 250 Hz one are encoded identically by a model
+/// trained at one of them, and nothing objects. Typing a rate constraint here
+/// would assert a check that no implementation performs. The gap is real and
+/// belongs to the checkpoint provenance work, not to a field invented here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub channels: ChannelSupport,
+}
+
+/// The channel counts a backend can accept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelSupport {
+    /// Any count the wire can carry — true of model-free backends.
+    Any,
+    /// Exactly this many, as a trained architecture requires.
+    Exactly(u16),
+    /// Fixed by a checkpoint this backend has not loaded yet.
+    ///
+    /// Not a synonym for `Any`. It says the constraint exists and is not
+    /// statically knowable here, so the shell cannot pre-check it and the
+    /// backend will discover it at inference time — which is the situation
+    /// today, named rather than hidden.
+    DeclaredByCheckpoint,
+}
+
+impl BackendCapabilities {
+    /// Accepts any shape. Correct for model-free backends, and a lie for any
+    /// backend with a trained architecture.
+    #[must_use]
+    pub const fn unconstrained() -> Self {
+        Self {
+            channels: ChannelSupport::Any,
+        }
+    }
+
+    /// Whether a signal of `channels` can be offered to this backend at all.
+    ///
+    /// `DeclaredByCheckpoint` admits everything on purpose: refusing would be
+    /// claiming knowledge this type does not have, and admitting is what the
+    /// code did before. The difference is that it is now visible.
+    #[must_use]
+    pub fn admits_channels(&self, channels: u16) -> bool {
+        match self.channels {
+            ChannelSupport::Any | ChannelSupport::DeclaredByCheckpoint => true,
+            ChannelSupport::Exactly(expected) => channels == expected,
+        }
+    }
+}
+
 /// The swappable neural inference seam. Object-safe by design.
 pub trait NeuralBackend {
+    /// What signals this backend accepts. See [`BackendCapabilities`].
+    ///
+    /// Defaulted to unconstrained so adding the seam breaks no implementor, but
+    /// a backend with a trained architecture that leaves the default in place is
+    /// making a false claim.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::unconstrained()
+    }
+
     /// Immutable identity of the exact checkpoint and PCCP evidence this
     /// backend executes. The shell seals and verifies this value; callers
     /// cannot claim provenance independently of the inference implementation.

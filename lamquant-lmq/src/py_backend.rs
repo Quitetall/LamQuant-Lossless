@@ -22,7 +22,9 @@ use std::vec::Vec;
 use semantic_abir_bcs::ModelProvenance;
 use serde_json::{json, Value};
 
-use crate::backend::{BackendError, NeuralBackend, NeuralTokens};
+use crate::backend::{
+    BackendCapabilities, BackendError, ChannelSupport, NeuralBackend, NeuralTokens,
+};
 
 /// How long a single helper invocation may take before it is killed.
 ///
@@ -49,6 +51,9 @@ pub struct PyBackend {
     model: ModelProvenance,
     /// Upper bound on one `call`. See [`DEFAULT_CALL_TIMEOUT`].
     timeout: Duration,
+    /// Channel count this backend's checkpoint requires, when the caller
+    /// knows it. `None` leaves the constraint undeclared rather than absent.
+    expected_channels: Option<u16>,
 }
 
 impl PyBackend {
@@ -64,7 +69,20 @@ impl PyBackend {
             mode: "model".to_string(),
             model,
             timeout: DEFAULT_CALL_TIMEOUT,
+            expected_channels: None,
         }
+    }
+
+    /// Declare the channel count this backend's checkpoint requires.
+    ///
+    /// Turns a constraint the shell could not see into one it can enforce
+    /// before spawning anything. Nothing verifies the claim against the
+    /// checkpoint -- that needs provenance the checkpoint does not carry yet --
+    /// so a wrong value trades one late failure for one early one.
+    #[must_use]
+    pub fn expecting_channels(mut self, channels: u16) -> Self {
+        self.expected_channels = Some(channels);
+        self
     }
 
     /// Override how long one helper invocation may run before it is killed.
@@ -91,6 +109,7 @@ impl PyBackend {
             mode: "selftest".to_string(),
             model,
             timeout: DEFAULT_CALL_TIMEOUT,
+            expected_channels: None,
         }
     }
 
@@ -261,6 +280,23 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 impl NeuralBackend for PyBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            channels: match (self.mode.as_str(), self.expected_channels) {
+                // Declared by whoever knows the checkpoint. Once stated, a
+                // mismatched recording is refused before a subprocess is spawned.
+                (_, Some(expected)) => ChannelSupport::Exactly(expected),
+                // The self-test transform is `x mod 5` per sample. It genuinely
+                // does not care how many channels there are.
+                ("selftest", None) => ChannelSupport::Any,
+                // The real architecture fixes a channel count, and this process
+                // cannot see it without loading the checkpoint. Saying so is not
+                // the same as saying anything goes.
+                _ => ChannelSupport::DeclaredByCheckpoint,
+            },
+        }
+    }
+
     fn model_provenance(&self) -> ModelProvenance {
         self.model.clone()
     }

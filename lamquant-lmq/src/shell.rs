@@ -244,6 +244,14 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
         return Err(LmqError::CatalogContract);
     }
     let (signal, sample_rate) = read_signal(dataset, access, bounds.max_signal_bytes)?;
+    // Ask before spending. The shape check below inspects what the backend
+    // RETURNED; this one refuses a signal the backend already said it cannot
+    // take, before a subprocess is spawned and a checkpoint is loaded to reach
+    // the same conclusion the slow way.
+    let channels = u16::try_from(signal.len()).map_err(|_| LmqError::SignalShapeMismatch)?;
+    if !backend.capabilities().admits_channels(channels) {
+        return Err(LmqError::SignalShapeMismatch);
+    }
     let model = backend.model_provenance();
     let tokens = backend
         .encode(&signal, sample_rate)

@@ -271,3 +271,55 @@ fn only_a_backend_failure_counts_as_a_missing_environment() {
         );
     }
 }
+
+#[test]
+fn a_declared_channel_count_is_enforced_before_the_subprocess_starts() {
+    // The point is WHERE this fails, not that it fails. Without a declared
+    // capability the shell hands the signal over, a subprocess spawns, a
+    // checkpoint loads, and the answer comes back as a Python traceback. With
+    // one, the mismatch is a statement about shapes made before any of that.
+    //
+    // `python3` is deliberately not required here: if the check works, nothing
+    // is ever spawned, so the test is meaningful even where python3 is absent.
+    let sig: Vec<Vec<i64>> = (0..4).map(|_| vec![0_i64; 32]).collect();
+    let abir = eeg(sig);
+    let backend = PyBackend::model("definitely-not-a-real-interpreter", helper(), model())
+        .expecting_channels(21);
+
+    let error = shell::encode_bundle(
+        abir.dataset(),
+        abir.access(),
+        &backend,
+        shell::transformed_fidelity("model-reconstruction"),
+        shell::implementation_identity("python-model"),
+        ResourceBounds::default(),
+    )
+    .expect_err("4 channels into a 21-channel model must not be attempted");
+
+    // A spawn failure would also be an Err, and would mean the check did not
+    // run. Naming the shape is how the two are told apart.
+    assert!(
+        matches!(error, shell::LmqError::SignalShapeMismatch),
+        "expected the shape to be refused up front, got {error:?}"
+    );
+}
+
+#[test]
+fn an_undeclared_checkpoint_constraint_is_not_mistaken_for_no_constraint() {
+    use lamquant_lmq::backend::{ChannelSupport, NeuralBackend};
+
+    // `DeclaredByCheckpoint` admits every shape, exactly as before the seam
+    // existed — refusing would claim knowledge this process does not have. What
+    // must not happen is it collapsing into `Any`, which would say the model
+    // accepts anything rather than that nobody here knows what it accepts.
+    let undeclared = PyBackend::model("python3", helper(), model());
+    assert_eq!(
+        undeclared.capabilities().channels,
+        ChannelSupport::DeclaredByCheckpoint
+    );
+    assert!(undeclared.capabilities().admits_channels(4));
+
+    // The self-test transform is per-sample, so `Any` is the truth there.
+    let selftest = PyBackend::selftest("python3", helper(), model());
+    assert_eq!(selftest.capabilities().channels, ChannelSupport::Any);
+}
