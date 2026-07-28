@@ -23,8 +23,8 @@ std = [
 ]
 
 [dependencies]
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
-semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "af8a595f97f499868c2e8fca95196929f4ddec08", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "5f2858342ca5823d5acae225756bb8e67a0dddde", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "5f2858342ca5823d5acae225756bb8e67a0dddde", default-features = false, features = ["alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
 lamquant-lml-desktop = { version = "0.9.3", path = "../../lamquant-lml-desktop", optional = true }

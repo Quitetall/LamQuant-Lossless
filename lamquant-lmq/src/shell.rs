@@ -32,7 +32,8 @@ pub const RANS_MODEL_TOTAL: u64 = 4096;
 const PACKET_MAGIC: &[u8; 4] = b"LMQP";
 const PACKET_VERSION: u8 = 1;
 const PACKET_HEADER_LEN: usize = 15;
-const ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
+const LMQ_WIRE_ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
+const LINKED_ABIR_REVISION: &str = "5f2858342ca5823d5acae225756bb8e67a0dddde";
 
 #[derive(Debug)]
 pub struct OpenedLmqBundle<'a> {
@@ -104,7 +105,7 @@ impl std::error::Error for LmqError {}
 pub fn implementation_identity(build_id: impl Into<String>) -> CodecImplementation {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"org.quitetall.lamquant.lmq.implementation-v1\0");
-    hasher.update(ABIR_REVISION.as_bytes());
+    hasher.update(LINKED_ABIR_REVISION.as_bytes());
     hasher.update(LMQ_KERNEL_ID.as_bytes());
     CodecImplementation {
         build_id: build_id.into(),
@@ -393,7 +394,7 @@ fn canonical_parameters() -> Vec<CodecParameter> {
         CodecParameter {
             name: "abir.revision".to_string(),
             value: CodecParameterValue::Text {
-                value: ABIR_REVISION.to_string(),
+                value: LMQ_WIRE_ABIR_REVISION.to_string(),
             },
         },
         CodecParameter {
@@ -773,6 +774,28 @@ mod tests {
                 ResourceBounds::default(),
             ),
             Err(LmqError::UnsupportedSemantics(_))
+        ));
+    }
+
+    #[test]
+    fn implementation_identity_tracks_linked_abir_while_wire_catalog_stays_frozen() {
+        assert_ne!(LINKED_ABIR_REVISION, LMQ_WIRE_ABIR_REVISION);
+
+        let mut linked_hasher = blake3::Hasher::new();
+        linked_hasher.update(b"org.quitetall.lamquant.lmq.implementation-v1\0");
+        linked_hasher.update(LINKED_ABIR_REVISION.as_bytes());
+        linked_hasher.update(LMQ_KERNEL_ID.as_bytes());
+        let linked_id = ContentId::from_bytes(*linked_hasher.finalize().as_bytes());
+        assert_eq!(
+            implementation_identity("same-build").implementation_id,
+            linked_id
+        );
+
+        let parameters = canonical_parameters();
+        assert!(matches!(
+            &parameters[0].value,
+            CodecParameterValue::Text { value }
+                if value == LMQ_WIRE_ABIR_REVISION
         ));
     }
 

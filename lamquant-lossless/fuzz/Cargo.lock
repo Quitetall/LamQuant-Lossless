@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=af8a595f97f499868c2e8fca95196929f4ddec08#af8a595f97f499868c2e8fca95196929f4ddec08"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=5f2858342ca5823d5acae225756bb8e67a0dddde#5f2858342ca5823d5acae225756bb8e67a0dddde"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=af8a595f97f499868c2e8fca95196929f4ddec08#af8a595f97f499868c2e8fca95196929f4ddec08"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=5f2858342ca5823d5acae225756bb8e67a0dddde#5f2858342ca5823d5acae225756bb8e67a0dddde"
 dependencies = [
  "abir",
  "blake3",
@@ -28,7 +28,7 @@ dependencies = [
 [[package]]
 name = "abir-training"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=af8a595f97f499868c2e8fca95196929f4ddec08#af8a595f97f499868c2e8fca95196929f4ddec08"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=5f2858342ca5823d5acae225756bb8e67a0dddde#5f2858342ca5823d5acae225756bb8e67a0dddde"
 dependencies = [
  "abir",
  "abir-bcs",
