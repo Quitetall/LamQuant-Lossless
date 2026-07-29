@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::{from_signal_bundle, SemanticRead};
 
 const MAX_SIDECAR_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -223,6 +224,13 @@ impl RawReader {
 }
 
 impl SignalSourceReader for RawReader {
+    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
+    }
+
     fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let sidecar_path = self
             .sidecar_override

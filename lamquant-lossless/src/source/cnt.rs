@@ -32,6 +32,7 @@ use std::path::PathBuf;
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::{from_signal_bundle, SemanticRead};
 
 const SETUP_HEADER_LEN: usize = 900;
 const ELECTLOC_LEN: usize = 75;
@@ -51,6 +52,13 @@ impl CntReader {
 }
 
 impl SignalSourceReader for CntReader {
+    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
+    }
+
     fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let raw = std::fs::read(&self.path).map_err(LmlError::Io)?;
         if raw.len() < SETUP_HEADER_LEN {

@@ -18,6 +18,7 @@ use crate::error::{LmlError, LmlResult};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::{from_signal_bundle, SemanticRead};
 
 /// Reader for EDF / EDF+ / BDF files.
 ///
@@ -43,6 +44,13 @@ impl EdfReader {
 }
 
 impl SignalSourceReader for EdfReader {
+    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
+    }
+
     fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let edf = read_edf(&self.path)?;
         Ok(edf.into())

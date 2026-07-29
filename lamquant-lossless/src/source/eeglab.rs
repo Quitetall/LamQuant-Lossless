@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::{from_signal_bundle, SemanticRead};
 
 const MAX_META_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum bytes we'll buffer for the original `.set` MAT v5 file when
@@ -195,6 +196,13 @@ impl EeglabReader {
 }
 
 impl SignalSourceReader for EeglabReader {
+    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
+    }
+
     fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let meta_path = self
             .meta_override
