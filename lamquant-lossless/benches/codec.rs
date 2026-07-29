@@ -31,6 +31,7 @@ use lamquant_core::golomb;
 use lamquant_core::lifting;
 use lamquant_core::lml;
 use lamquant_core::lpc::{self, LpcMode};
+use lamquant_core::source::{from_uniform_signal_view, SemanticRead, SourceMetadata};
 
 // ─── Deterministic synthetic signal ────────────────────────────────
 
@@ -64,6 +65,35 @@ fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
         signal.push(ch);
     }
     signal
+}
+
+fn lower_uniform(signal: &[Vec<i64>], sample_rate: f64, metadata_json: &str) -> SemanticRead {
+    let n_channels = signal.len();
+    let total_samples = signal.first().map_or(0, Vec::len);
+    from_uniform_signal_view(
+        signal,
+        sample_rate,
+        (0..n_channels).map(|index| format!("ch{index}")).collect(),
+        signal
+            .iter()
+            .map(|channel| channel.iter().copied().min().unwrap_or(0) as f64)
+            .collect(),
+        signal
+            .iter()
+            .map(|channel| channel.iter().copied().max().unwrap_or(0) as f64)
+            .collect(),
+        total_samples as f64 / sample_rate,
+        SourceMetadata {
+            source_file: String::new(),
+            format: "BCS2-LML".into(),
+            patient_id: String::new(),
+            recording_info: metadata_json.into(),
+            startdate: String::new(),
+            phys_dim: "digital".into(),
+        },
+        semantic_abir::ValidationLimits::default(),
+    )
+    .expect("benchmark signal must lower into ABIR")
 }
 
 // ─── Benchmarks ────────────────────────────────────────────────────
@@ -202,6 +232,11 @@ fn bench_container_roundtrip(c: &mut Criterion) {
     let signal = synth_signal(n_ch, total, 0xF00D_BEEF);
     let bytes = n_ch * total * SAMPLE_BYTES;
     let metadata = r#"{"format":"synthetic","bench":true}"#;
+    let semantic = lower_uniform(&signal, sample_rate, metadata);
+    let options = container::LmlEncodeOptions {
+        window_size: window,
+        lpc_mode: LpcMode::default(),
+    };
 
     let mut group = c.benchmark_group("container_roundtrip_16ch_25k");
     group.throughput(Throughput::Bytes(bytes as u64));
@@ -210,34 +245,22 @@ fn bench_container_roundtrip(c: &mut Criterion) {
 
     group.bench_function("encode", |b| {
         b.iter(|| {
-            let mut sink = Vec::with_capacity(bytes / 2);
-            container::write_into(
-                &mut sink,
+            container::encode_from_signal_with_options(
+                black_box(semantic.opened.dataset()),
                 black_box(&signal),
-                sample_rate,
-                window,
-                LOSSLESS_NOISE_BITS,
-                metadata,
-                LpcMode::default(),
+                options,
             )
-            .expect("write_into");
-            sink
+            .expect("ABIR encode")
+            .into_bytes()
         });
     });
 
     // Encode once for the decode side; the cost is amortised by
     // criterion's iter count so per-iter timing is decode only.
-    let mut encoded = Vec::with_capacity(bytes / 2);
-    container::write_into(
-        &mut encoded,
-        &signal,
-        sample_rate,
-        window,
-        LOSSLESS_NOISE_BITS,
-        metadata,
-        LpcMode::default(),
-    )
-    .expect("write_into for decode setup");
+    let encoded =
+        container::encode_from_signal_with_options(semantic.opened.dataset(), &signal, options)
+            .expect("ABIR encode for decode setup")
+            .into_bytes();
     group.bench_function("decode", |b| {
         b.iter(|| {
             let _ = container::read_bytes(black_box(&encoded)).expect("read_bytes");
@@ -255,6 +278,11 @@ fn bench_container_roundtrip_32ch_100k(c: &mut Criterion) {
     let signal = synth_signal(n_ch, total, 0xABAB_CDCD_EFEF_0101);
     let bytes = n_ch * total * SAMPLE_BYTES;
     let metadata = r#"{"format":"synthetic","bench":true}"#;
+    let semantic = lower_uniform(&signal, sample_rate, metadata);
+    let options = container::LmlEncodeOptions {
+        window_size: window,
+        lpc_mode: LpcMode::default(),
+    };
 
     let mut group = c.benchmark_group("container_roundtrip_32ch_100k");
     group.throughput(Throughput::Bytes(bytes as u64));
@@ -264,35 +292,25 @@ fn bench_container_roundtrip_32ch_100k(c: &mut Criterion) {
     lamquant_core::backend::set_global_backend(ComputeBackend::Firmware);
     group.bench_function("firmware", |b| {
         b.iter(|| {
-            let mut sink = Vec::with_capacity(bytes / 2);
-            container::write_into(
-                black_box(&mut sink),
-                &signal,
-                sample_rate,
-                window,
-                LOSSLESS_NOISE_BITS,
-                metadata,
-                LpcMode::default(),
+            container::encode_from_signal_with_options(
+                semantic.opened.dataset(),
+                black_box(&signal),
+                options,
             )
-            .expect("write_into (firmware)");
-            sink
+            .expect("ABIR encode (firmware)")
+            .into_bytes()
         });
     });
     lamquant_core::backend::set_global_backend(ComputeBackend::Desktop);
     group.bench_function("desktop_parallel", |b| {
         b.iter(|| {
-            let mut sink = Vec::with_capacity(bytes / 2);
-            container::write_into(
-                black_box(&mut sink),
-                &signal,
-                sample_rate,
-                window,
-                LOSSLESS_NOISE_BITS,
-                metadata,
-                LpcMode::default(),
+            container::encode_from_signal_with_options(
+                semantic.opened.dataset(),
+                black_box(&signal),
+                options,
             )
-            .expect("write_into (desktop)");
-            sink
+            .expect("ABIR encode (desktop)")
+            .into_bytes()
         });
     });
 

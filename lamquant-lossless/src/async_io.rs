@@ -61,13 +61,14 @@ pub async fn compress_async(
     Ok(out_path)
 }
 
-/// Async wrapper around `lamquant_core::container::read_file`.
+/// Async file adapter around the byte-oriented BCS2 decoder.
 pub async fn decompress_async(path: PathBuf) -> LmlResult<(Vec<Vec<i64>>, String)> {
-    tokio::task::spawn_blocking(move || crate::container::read_file(&path))
-        .await
-        .map_err(|e| {
-            LmlError::InvalidHeader(format!("decompress_async: spawn_blocking join: {e}"))
-        })?
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(path).map_err(LmlError::Io)?;
+        crate::container::read_bytes(&bytes)
+    })
+    .await
+    .map_err(|e| LmlError::InvalidHeader(format!("decompress_async: spawn_blocking join: {e}")))?
 }
 
 /// HTTP fetch a URL into a buffer. Caller's job to write it to disk.

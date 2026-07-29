@@ -24,7 +24,7 @@ use crate::container;
 use crate::error::LmlResult;
 use crate::lpc::LpcMode;
 use crate::pipeline::Stage;
-use crate::source::SignalBundle;
+use crate::source::{from_uniform_signal_view, SignalBundle, SourceMetadata};
 
 /// Encoded LML container bytes. Distinct from raw `Vec<u8>` at the
 /// type level so a pipeline can't confuse "encoded container" with
@@ -133,18 +133,48 @@ impl Stage for CompressStage {
     fn process(&mut self, bundle: SignalBundle) -> LmlResult<EncodedContainer> {
         // Validate at the trust boundary — Bible R23.
         bundle.validate()?;
-        let mut sink: Vec<u8> = Vec::new();
-        let stats = container::write_into(
-            &mut sink,
+        let n_channels = bundle.signal.len();
+        let total_samples = bundle.signal.first().map_or(0, Vec::len);
+        let semantic = from_uniform_signal_view(
             &bundle.signal,
             self.sample_rate,
-            self.window_size,
-            self.noise_bits,
-            &self.metadata_json,
-            self.mode,
+            (0..n_channels).map(|index| format!("ch{index}")).collect(),
+            bundle
+                .signal
+                .iter()
+                .map(|channel| channel.iter().copied().min().unwrap_or(0) as f64)
+                .collect(),
+            bundle
+                .signal
+                .iter()
+                .map(|channel| channel.iter().copied().max().unwrap_or(0) as f64)
+                .collect(),
+            total_samples as f64 / self.sample_rate,
+            SourceMetadata {
+                source_file: String::new(),
+                format: "BCS2-LML".into(),
+                patient_id: String::new(),
+                recording_info: self.metadata_json.clone(),
+                startdate: String::new(),
+                phys_dim: "digital".into(),
+            },
+            semantic_abir::ValidationLimits::default(),
         )?;
-        debug_assert_eq!(stats.compressed_size, sink.len());
-        Ok(EncodedContainer(sink))
+        if self.noise_bits != 0 {
+            return Err(crate::error::LmlError::InvalidHeader(
+                "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
+                    .into(),
+            ));
+        }
+        let encoded = container::encode_from_signal_with_options(
+            semantic.opened.dataset(),
+            &bundle.signal,
+            container::LmlEncodeOptions {
+                window_size: self.window_size,
+                lpc_mode: self.mode,
+            },
+        )?;
+        Ok(EncodedContainer(encoded.into_bytes()))
     }
 }
 

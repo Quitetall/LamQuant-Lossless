@@ -19,6 +19,9 @@
 //! The test will print the new SHA-256 hashes; copy them into the
 //! constants below.
 
+mod common;
+
+use common::encode_uniform;
 use lamquant_core::container;
 use lamquant_core::lpc::LpcMode;
 use sha2::{Digest, Sha256};
@@ -51,8 +54,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn container_bytes_deterministic_smoke() {
     // 8 channels × 1024 samples, deterministic seed.
     let sig = synth_signal(8, 1024, 42);
-    let mut sink = Vec::new();
-    container::write_into(&mut sink, &sig, 250.0, 256, 0, "{}", LpcMode::default()).unwrap();
+    let sink = encode_uniform(&sig, 250.0, 256, "{}", LpcMode::default());
     let hash = sha256_hex(&sink);
     println!("SMOKE container SHA-256 = {hash}");
     // The hash itself is environment-derived (depends on
@@ -60,22 +62,19 @@ fn container_bytes_deterministic_smoke() {
     // separate writes of the same input emit byte-identical output —
     // we don't pin the absolute hash here so the test stays robust
     // across legitimate codec version bumps.
-    let mut second = Vec::new();
-    container::write_into(&mut second, &sig, 250.0, 256, 0, "{}", LpcMode::default()).unwrap();
+    let second = encode_uniform(&sig, 250.0, 256, "{}", LpcMode::default());
     assert_eq!(
         sha256_hex(&second),
         hash,
-        "container write_into must be byte-deterministic across two invocations"
+        "ABIR container encoder must be byte-deterministic across two invocations"
     );
 }
 
 #[test]
 fn container_decode_bit_exact_after_repeated_encode() {
     let sig = synth_signal(4, 512, 7);
-    let mut sink1 = Vec::new();
-    container::write_into(&mut sink1, &sig, 250.0, 128, 0, "{}", LpcMode::default()).unwrap();
-    let mut sink2 = Vec::new();
-    container::write_into(&mut sink2, &sig, 250.0, 128, 0, "{}", LpcMode::default()).unwrap();
+    let sink1 = encode_uniform(&sig, 250.0, 128, "{}", LpcMode::default());
+    let sink2 = encode_uniform(&sig, 250.0, 128, "{}", LpcMode::default());
     assert_eq!(
         sink1, sink2,
         "encode is non-deterministic — cross-platform integrity at risk"
@@ -95,12 +94,11 @@ fn container_profile_invariants() {
     // header. Semantic fields are read through the authenticated profile,
     // never through retired fixed offsets.
     let sig = synth_signal(7, 128, 11);
-    let mut sink = Vec::new();
-    container::write_into(&mut sink, &sig, 250.0, 64, 0, "{}", LpcMode::default()).unwrap();
+    let sink = encode_uniform(&sig, 250.0, 64, "{}", LpcMode::default());
     assert_eq!(
         &sink[0..4],
         b"ABIR",
-        "container::write_into must emit the current ABIR/BCS2 bundle"
+        "ABIR encoder must emit the current ABIR/BCS2 bundle"
     );
     let header = container::parse_header(&sink).expect("authenticated current header");
     assert_eq!(header.n_channels, 7);

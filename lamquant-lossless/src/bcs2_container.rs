@@ -101,15 +101,32 @@ pub fn encode_with_options<A: PayloadAccess>(
         ResourceBounds::default(),
     )
     .map_err(bundle_error)?;
-    let (n_channels, total_samples, sample_rate_hz) = profile_shape(dataset)?;
-    let stats = stats(
-        n_channels,
-        total_samples,
+    finish_encoded(dataset, packet_samples, bytes)
+}
+
+/// Encode a native channel-major matrix whose exact closure is declared by
+/// `dataset`. This is the fused host path: ABIR remains the semantic seam while
+/// the kernel consumes its efficient native form without decoding payloads.
+pub fn encode_from_signal_with_options(
+    dataset: &AbirDataset,
+    signal: &[Vec<i64>],
+    options: LmlEncodeOptions,
+) -> LmlResult<EncodedLml> {
+    if options.window_size == 0 {
+        return Err(invalid("window size must be greater than zero"));
+    }
+    let packet_samples = options
+        .window_size
+        .min(lamquant_abir_codec::MAX_PACKET_SAMPLES);
+    let bytes = lamquant_abir_codec::encode_lml_bundle_from_signal_with_mode(
+        dataset,
+        signal,
         packet_samples,
-        bytes.len(),
-        sample_rate_hz,
-    );
-    Ok(EncodedLml { bytes, stats })
+        options.lpc_mode,
+        ResourceBounds::default(),
+    )
+    .map_err(bundle_error)?;
+    finish_encoded(dataset, packet_samples, bytes)
 }
 
 /// Authenticate and decode a BCS2 LML profile.
@@ -137,17 +154,14 @@ pub fn encode_signal_bundle_with_window_size(
     .map_err(bundle_error)
 }
 
-/// Convenience entry point for callers which already hold a uniform integer
-/// matrix. New Adapter and processing seams should prefer [`encode`].
-pub fn write_into<W: Write>(
-    sink: &mut W,
+fn encode_uniform_signal(
     signal: &[Vec<i64>],
     sample_rate: f64,
     window_size: usize,
     noise_bits: u8,
     metadata_json: &str,
     lpc_mode: crate::lpc::LpcMode,
-) -> LmlResult<ContainerStats> {
+) -> LmlResult<EncodedLml> {
     if noise_bits != 0 {
         return Err(LmlError::InvalidHeader(
             "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
@@ -186,23 +200,14 @@ pub fn write_into<W: Write>(
         },
         semantic_abir::ValidationLimits::default(),
     )?;
-    let packet_samples = window_size.min(lamquant_abir_codec::MAX_PACKET_SAMPLES);
-    let bytes = lamquant_abir_codec::encode_lml_bundle_from_signal_with_mode(
+    encode_from_signal_with_options(
         semantic.opened.dataset(),
         signal,
-        packet_samples,
-        lpc_mode,
-        ResourceBounds::default(),
+        LmlEncodeOptions {
+            window_size,
+            lpc_mode,
+        },
     )
-    .map_err(bundle_error)?;
-    sink.write_all(&bytes).map_err(LmlError::Io)?;
-    Ok(stats(
-        n_channels,
-        total_samples,
-        packet_samples,
-        bytes.len(),
-        sample_rate,
-    ))
 }
 
 pub fn write_file(
@@ -239,8 +244,7 @@ pub fn write_file_with_mode(
     let temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
         .map_err(LmlError::Io)?;
     let mut file = temporary.reopen().map_err(LmlError::Io)?;
-    let result = write_into(
-        &mut file,
+    let encoded = encode_uniform_signal(
         signal,
         sample_rate,
         window_size,
@@ -248,12 +252,13 @@ pub fn write_file_with_mode(
         metadata_json,
         lpc_mode,
     )?;
+    file.write_all(encoded.bytes()).map_err(LmlError::Io)?;
     file.sync_all().map_err(LmlError::Io)?;
     drop(file);
     temporary
         .persist(path)
         .map_err(|error| LmlError::Io(error.error))?;
-    Ok(result)
+    Ok(encoded.stats)
 }
 
 pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
@@ -264,11 +269,6 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
 pub fn read_from<R: Read>(source: &mut R) -> LmlResult<(Vec<Vec<i64>>, String)> {
     let mut data = Vec::new();
     source.read_to_end(&mut data).map_err(LmlError::Io)?;
-    read_bytes(&data)
-}
-
-pub fn read_file(path: &Path) -> LmlResult<(Vec<Vec<i64>>, String)> {
-    let data = std::fs::read(path).map_err(LmlError::Io)?;
     read_bytes(&data)
 }
 
@@ -473,6 +473,22 @@ fn profile_shape(dataset: &AbirDataset) -> LmlResult<(usize, usize, f64)> {
     ))
 }
 
+fn finish_encoded(
+    dataset: &AbirDataset,
+    packet_samples: usize,
+    bytes: Vec<u8>,
+) -> LmlResult<EncodedLml> {
+    let (n_channels, total_samples, sample_rate_hz) = profile_shape(dataset)?;
+    let stats = stats(
+        n_channels,
+        total_samples,
+        packet_samples,
+        bytes.len(),
+        sample_rate_hz,
+    );
+    Ok(EncodedLml { bytes, stats })
+}
+
 fn metadata(dataset: &AbirDataset) -> String {
     dataset
         .recordings()
@@ -550,9 +566,7 @@ mod tests {
     #[test]
     fn bcs2_round_trip_preserves_samples_and_metadata() {
         let signal = vec![vec![1, -2, 3, -4], vec![5, -6, 7, -8]];
-        let mut bytes = Vec::new();
-        let result = write_into(
-            &mut bytes,
+        let encoded = encode_uniform_signal(
             &signal,
             250.0,
             4,
@@ -561,6 +575,8 @@ mod tests {
             crate::lpc::LpcMode::Fixed,
         )
         .unwrap();
+        let result = encoded.stats().clone();
+        let bytes = encoded.into_bytes();
         assert_eq!(&bytes[..4], b"ABIR");
         assert_eq!(result.n_channels, 2);
         assert_eq!(result.n_windows, 1);
@@ -570,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn abir_native_options_match_legacy_uniform_writer() {
+    fn payload_and_native_abir_encoders_are_byte_identical() {
         let signal = vec![vec![1, -2, 3, -4], vec![5, -6, 7, -8]];
         let semantic = from_uniform_signal_view(
             &signal,
@@ -590,7 +606,7 @@ mod tests {
             semantic_abir::ValidationLimits::default(),
         )
         .unwrap();
-        let encoded = encode_with_options(
+        let payload_encoded = encode_with_options(
             semantic.opened.dataset(),
             semantic.opened.access(),
             LmlEncodeOptions {
@@ -599,20 +615,17 @@ mod tests {
             },
         )
         .unwrap();
-        let mut legacy = Vec::new();
-        let legacy_stats = write_into(
-            &mut legacy,
+        let native_encoded = encode_from_signal_with_options(
+            semantic.opened.dataset(),
             &signal,
-            250.0,
-            3,
-            0,
-            "{\"source\":\"test\"}",
-            crate::lpc::LpcMode::Fixed,
+            LmlEncodeOptions {
+                window_size: 3,
+                lpc_mode: crate::lpc::LpcMode::Fixed,
+            },
         )
         .unwrap();
 
-        assert_eq!(encoded.bytes(), legacy);
-        assert_eq!(encoded.stats(), &legacy_stats);
+        assert_eq!(payload_encoded, native_encoded);
     }
 
     #[test]
@@ -621,17 +634,10 @@ mod tests {
             (0..10).map(i64::from).collect::<Vec<_>>(),
             (100..110).map(i64::from).collect::<Vec<_>>(),
         ];
-        let mut bytes = Vec::new();
-        let result = write_into(
-            &mut bytes,
-            &signal,
-            250.0,
-            4,
-            0,
-            "{}",
-            crate::lpc::LpcMode::Fixed,
-        )
-        .unwrap();
+        let encoded =
+            encode_uniform_signal(&signal, 250.0, 4, 0, "{}", crate::lpc::LpcMode::Fixed).unwrap();
+        let result = encoded.stats().clone();
+        let bytes = encoded.into_bytes();
         assert_eq!(result.n_windows, 3);
         let (decoded, _) = read_bytes(&bytes).unwrap();
         assert_eq!(decoded, signal);
@@ -662,8 +668,9 @@ mod tests {
             crate::lpc::LpcMode::Fixed,
             crate::lpc::LpcMode::Adaptive { max_order: 16 },
         ] {
-            let mut bytes = Vec::new();
-            write_into(&mut bytes, &signal, 250.0, 32, 0, "{}", mode).unwrap();
+            let bytes = encode_uniform_signal(&signal, 250.0, 32, 0, "{}", mode)
+                .unwrap()
+                .into_bytes();
             let opened = open(&bytes).unwrap();
             let actual = opened.packets().collect::<Vec<_>>();
             let expected = signal[0]
@@ -694,16 +701,9 @@ mod tests {
 
     #[test]
     fn lossy_knob_requires_a_registered_profile() {
-        let error = write_into(
-            &mut Vec::new(),
-            &[vec![1, 2]],
-            250.0,
-            2,
-            1,
-            "{}",
-            crate::lpc::LpcMode::Fixed,
-        )
-        .unwrap_err();
+        let error =
+            encode_uniform_signal(&[vec![1, 2]], 250.0, 2, 1, "{}", crate::lpc::LpcMode::Fixed)
+                .unwrap_err();
         assert!(error.to_string().contains("registered lossy profile"));
     }
 }

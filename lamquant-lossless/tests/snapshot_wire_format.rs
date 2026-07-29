@@ -17,6 +17,8 @@ use lamquant_core::lma;
 use lamquant_core::lpc::LpcMode;
 use tempfile::TempDir;
 
+mod common;
+
 /// Hex-dump first `n` bytes of a slice as "AA BB CC ..." for snapshotting.
 fn hex_prefix(bytes: &[u8], n: usize) -> String {
     let take = n.min(bytes.len());
@@ -67,8 +69,6 @@ fn lma_header_magic_version_count() {
 #[test]
 fn abir_bcs2_header_40_bytes() {
     let sig: Vec<Vec<i64>> = vec![(0..600i64).map(|t| ((t * 37) % 4001) - 2000).collect()];
-    let mut sink = Vec::new();
-    lamquant_core::container::write_into(&mut sink, &sig, 250.0, 256, 0, "{}", LpcMode::default())
-        .expect("write_into");
+    let sink = common::encode_uniform(&sig, 250.0, 256, "{}", LpcMode::default());
     insta::assert_snapshot!("abir_bcs2_header_40_bytes", hex_prefix(&sink, 40));
 }

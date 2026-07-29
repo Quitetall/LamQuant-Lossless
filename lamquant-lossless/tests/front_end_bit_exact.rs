@@ -6,7 +6,7 @@
 //!     `lml::compress` → sha256. Locks the per-window LML1 payload — the backend
 //!     invariant that must NEVER change however the front-end is rewritten.
 //!   * **container** (`--features archive`): synthetic signals →
-//!     `container::write_into(.., "{}", LpcMode::default())` → authenticated
+//!     ABIR-native container encode → authenticated
 //!     ABIR/BCS2 bundle whose enclosed LML1 packets match the frozen kernel.
 //!   * **EDF→container** (`--features archive`): a synth EDF → `edf::read_edf` →
 //!     the same `.lml` sink. Locks that the EDF front-end serializes identically.
@@ -25,6 +25,9 @@
 //! then paste the printed shas into the GOLDEN_* tables below.
 
 use sha2::{Digest, Sha256};
+
+#[cfg(feature = "archive")]
+mod common;
 
 /// sha256 over channel-major signal: count, then per-channel (len + i64-LE samples).
 #[cfg(feature = "nwb")]
@@ -174,18 +177,7 @@ mod container_full {
     /// `byte_equal_backends` contract (Firmware == Desktop), and this file never
     /// sets a backend, so there is no process-wide-`AtomicU8` ordering hazard.
     fn container_bytes(signal: &[Vec<i64>]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        lamquant_core::container::write_into(
-            &mut buf,
-            signal,
-            250.0,
-            256,
-            0,
-            "{}",
-            LpcMode::default(),
-        )
-        .expect("write_into");
-        buf
+        common::encode_uniform(signal, 250.0, 256, "{}", LpcMode::default())
     }
 
     /// Refuse to run with any byte-affecting encoder env override set. The first
@@ -250,7 +242,7 @@ mod container_full {
         // Deterministic single-channel i16 ramp. SINGLE channel + SINGLE sample-rate
         // so the EDF reader's `sr_weights` HashMap has exactly one entry — no
         // per-process `max_by_key` tie-break (edf.rs:182-199). 250 Hz matches the
-        // rate we pin into `write_into`.
+        // rate supplied to the ABIR encoder.
         let samples: Vec<i16> = (0..2000).map(|t| ((t % 257) - 128) as i16).collect();
         let edf_bytes = lamquant_core::ingest::synth_single_channel_edf(&samples, 250.0);
         let dir = tempfile::tempdir().unwrap();

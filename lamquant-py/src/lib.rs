@@ -146,8 +146,10 @@ fn container_write(
 /// Read LML container file → (signal, metadata_json).
 #[pyfunction]
 fn container_read(path: &str) -> PyResult<(Vec<Vec<i64>>, String)> {
-    lml::container::read_file(std::path::Path::new(path))
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    let bytes = std::fs::read(path)
+        .map_err(|error| pyo3::exceptions::PyIOError::new_err(error.to_string()))?;
+    lml::container::read_bytes(&bytes)
+        .map_err(|error| pyo3::exceptions::PyIOError::new_err(error.to_string()))
 }
 
 /// Read LML container from in-memory bytes → (signal, metadata_json).
