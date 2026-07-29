@@ -119,6 +119,25 @@ fn nwb_import_separates_containers_and_promotes_electrodes_and_intervals() {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("frame 0"))
     }));
+    for source_path in ["/@nwb_version", "/identifier", "/session_description"] {
+        assert!(
+            outcome.report.entries.iter().any(|entry| {
+                entry.source_path == source_path
+                    && matches!(entry.disposition, abir_adapter::MappingDisposition::Exact)
+            }),
+            "missing exact mapping for {source_path}"
+        );
+    }
+    let recording_keys = dataset.recordings()[0].source_keys();
+    assert!(recording_keys
+        .iter()
+        .any(|key| key.namespace() == "nwb.version" && !key.value().is_empty()));
+    assert!(recording_keys
+        .iter()
+        .any(|key| key.namespace() == "nwb.identifier" && !key.value().is_empty()));
+    assert!(recording_keys
+        .iter()
+        .any(|key| { key.namespace() == "nwb.session-description" && !key.value().is_empty() }));
 }
 
 #[test]

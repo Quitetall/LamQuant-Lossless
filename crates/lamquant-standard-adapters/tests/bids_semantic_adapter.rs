@@ -160,6 +160,26 @@ fn bids_reads_the_layout_as_the_semantic_it_is() {
     assert_eq!(inspect.required_resources["electrodes"], 2);
     assert_eq!(inspect.required_resources["events"], 1);
     assert_eq!(inspect.required_resources["derivatives"], 1);
+
+    for source_path in [
+        "dataset_description.json#BIDSVersion",
+        "dataset_description.json#Name",
+    ] {
+        assert!(
+            outcome.report.entries.iter().any(|entry| {
+                entry.source_path == source_path
+                    && matches!(entry.disposition, abir_adapter::MappingDisposition::Exact)
+            }),
+            "missing exact mapping for {source_path}"
+        );
+    }
+    let recording_keys = abir.recordings()[0].source_keys();
+    assert!(recording_keys
+        .iter()
+        .any(|key| key.namespace() == "bids.version" && key.value() == "1.11.1"));
+    assert!(recording_keys
+        .iter()
+        .any(|key| key.namespace() == "bids.dataset-name" && !key.value().is_empty()));
 }
 
 #[test]

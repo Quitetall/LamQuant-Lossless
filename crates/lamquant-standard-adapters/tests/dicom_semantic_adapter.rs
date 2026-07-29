@@ -71,6 +71,40 @@ fn dicom_import_keeps_the_information_model_and_promotes_annotations() {
     assert_eq!(inspect.required_resources["referenced-media"], 1);
     assert_eq!(inspect.required_resources["reports"], 1);
     assert_eq!(inspect.required_resources["private-tags"], 19);
+
+    for source_path in [
+        "(0010,0020) PatientID",
+        "(0010,0010) PatientName",
+        "(0020,000D) StudyInstanceUID",
+        "(0020,000E) SeriesInstanceUID",
+        "(0008,0060) Modality",
+        "(0008,0070) Manufacturer",
+        "(0008,1090) ManufacturerModelName",
+    ] {
+        assert!(
+            outcome.report.entries.iter().any(|entry| {
+                entry.source_path == source_path
+                    && matches!(entry.disposition, abir_adapter::MappingDisposition::Exact)
+            }),
+            "missing exact mapping for {source_path}"
+        );
+    }
+    assert!(dataset.patients()[0]
+        .source_keys()
+        .iter()
+        .any(|key| key.namespace() == "dicom.patient-name" && !key.value().is_empty()));
+    assert!(dataset.devices()[0]
+        .source_keys()
+        .iter()
+        .any(|key| key.namespace() == "dicom.manufacturer-model" && !key.value().is_empty()));
+    assert!(
+        outcome
+            .report
+            .entries
+            .iter()
+            .all(|entry| { entry.source_path != "(0018,1000) DeviceSerialNumber" }),
+        "empty DeviceSerialNumber must not claim an exact semantic mapping"
+    );
 }
 
 #[test]

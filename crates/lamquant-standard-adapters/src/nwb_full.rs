@@ -1244,6 +1244,18 @@ impl NwbAdapter {
                 recording.add_source_key(source_key(namespace, value)?);
             }
         }
+        for (source_path, value) in [
+            ("/@nwb_version", parsed.nwb_version.as_str()),
+            ("/identifier", parsed.identifier.as_str()),
+            ("/session_description", parsed.session_description.as_str()),
+        ] {
+            if !value.is_empty() {
+                mappings.push(exact(
+                    source_path.to_owned(),
+                    format!("recording:{recording_id}"),
+                ));
+            }
+        }
         if !parsed.electrode_columns.is_empty() {
             recording.add_source_key(source_key(
                 "nwb.electrode-columns",

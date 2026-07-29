@@ -1057,6 +1057,18 @@ impl BidsSemanticAdapter {
                 recording.add_source_key(source_key(namespace, value)?);
             }
         }
+        if !parsed.bids_version.is_empty() {
+            mappings.push(exact(
+                "dataset_description.json#BIDSVersion".to_owned(),
+                format!("recording:{recording_id}"),
+            ));
+        }
+        if !parsed.dataset_name.is_empty() {
+            mappings.push(exact(
+                "dataset_description.json#Name".to_owned(),
+                format!("recording:{recording_id}"),
+            ));
+        }
         for subject in &parsed.subjects {
             if !subject.is_empty() {
                 recording.add_source_key(source_key("bids.subject", subject)?);

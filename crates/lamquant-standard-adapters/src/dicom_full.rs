@@ -559,19 +559,51 @@ impl DicomSemanticAdapter {
         ] {
             draft.add_source_relationship(relationship);
         }
-        for (source_path, target) in [
-            ("(0010,0020) PatientID", format!("patient:{patient_id}")),
+        for (source_path, target, has_value) in [
+            (
+                "(0010,0020) PatientID",
+                format!("patient:{patient_id}"),
+                !parsed.patient_id.is_empty(),
+            ),
+            (
+                "(0010,0010) PatientName",
+                format!("patient:{patient_id}"),
+                !parsed.patient_name.is_empty(),
+            ),
             (
                 "(0020,000D) StudyInstanceUID",
                 format!("session:{session_id}"),
+                !parsed.study_uid.is_empty(),
             ),
             (
                 "(0020,000E) SeriesInstanceUID",
                 format!("acquisition:{acquisition_id}"),
+                !parsed.series_uid.is_empty(),
             ),
-            ("(0008,0070) Manufacturer", format!("device:{device_id}")),
+            (
+                "(0008,0060) Modality",
+                format!("acquisition:{acquisition_id}"),
+                !parsed.modality.is_empty(),
+            ),
+            (
+                "(0008,0070) Manufacturer",
+                format!("device:{device_id}"),
+                !parsed.manufacturer.is_empty(),
+            ),
+            (
+                "(0008,1090) ManufacturerModelName",
+                format!("device:{device_id}"),
+                !parsed.model.is_empty(),
+            ),
+            (
+                "(0018,1000) DeviceSerialNumber",
+                format!("device:{device_id}"),
+                !parsed.serial.is_empty(),
+            ),
         ] {
-            mappings.push(exact(source_path.to_owned(), target));
+            if has_value {
+                mappings.push(exact(source_path.to_owned(), target));
+            }
         }
 
         // One clock: every waveform group in an instance is sampled against the
