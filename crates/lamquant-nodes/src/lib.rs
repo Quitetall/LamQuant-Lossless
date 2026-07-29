@@ -17,7 +17,7 @@ pub use abir_value::{AbirDatasetValue, AbirDatasetValueError, NodePayloadStore};
 pub use lml_reference::{
     LmlPackets, ReferenceEntropy, ReferencePredicted, ReferenceQuantized, ReferenceSubbands,
     REFERENCE_FUSED_MCU_IMPLEMENTATION_ID, REFERENCE_FUSED_MCU_KERNEL, REFERENCE_MAX_PACKET_BYTES,
-    REFERENCE_MAX_SIGNAL_BYTES, REFERENCE_MCU_SCRATCH_BYTES,
+    REFERENCE_MAX_SIGNAL_BYTES, REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES, REFERENCE_MCU_SCRATCH_BYTES,
 };
 #[cfg(feature = "lmq")]
 pub use lmq_node::{

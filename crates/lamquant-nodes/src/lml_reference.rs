@@ -24,6 +24,7 @@ use lamquant_lml_mcu::lml::{
 };
 use lamquant_lml_mcu::lpc;
 use lamquant_lml_mcu::lpc::LpcMode;
+use lamquant_lml_mcu::mcu_packet::UNIFORM_I64_INVOCATION_HEADER_BYTES;
 use semantic_abir_bcs::ResourceBounds;
 
 use crate::{
@@ -43,12 +44,15 @@ const QUANTIZED_SEMANTIC_TYPE: &str = "lamquant.lml.reference.quantized-subbands
 const PREDICTED_SEMANTIC_TYPE: &str = "lamquant.lml.reference.predicted-subbands";
 const ENTROPY_SEMANTIC_TYPE: &str = "lamquant.lml.reference.entropy-segments";
 const PACKETS_SEMANTIC_TYPE: &str = "bcs.lml.packet-sequence.lossless-v1";
-pub const REFERENCE_MAX_SIGNAL_BYTES: u64 = 128 * 1024 * 1024;
+pub const REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
+pub const REFERENCE_MAX_SIGNAL_BYTES: u64 =
+    REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES + UNIFORM_I64_INVOCATION_HEADER_BYTES as u64;
 pub const REFERENCE_MAX_PACKET_BYTES: u64 = 512 * 1024 * 1024;
 const REFERENCE_PEAK_BYTES: u64 = 1024 * 1024 * 1024;
 pub const REFERENCE_MCU_SCRATCH_BYTES: u64 =
     u16::MAX as u64 * 2 * core::mem::size_of::<i64>() as u64;
-const REFERENCE_MAX_ELEMENTS: u64 = REFERENCE_MAX_SIGNAL_BYTES / core::mem::size_of::<i64>() as u64;
+const REFERENCE_MAX_ELEMENTS: u64 =
+    REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES / core::mem::size_of::<i64>() as u64;
 const REFERENCE_MAX_CHANNELS: usize = 256;
 
 pub(crate) const REFERENCE_HOST_KERNEL_BASE: u32 = 0x4c4d_1000;
@@ -928,7 +932,7 @@ fn validate_reference_signal(
         .checked_mul(samples)
         .and_then(|elements| elements.checked_mul(core::mem::size_of::<i64>()))
         .ok_or_else(|| kernel_failure(node, "resource-limit", "reference input extent overflow"))?;
-    if bytes as u64 > REFERENCE_MAX_SIGNAL_BYTES {
+    if bytes as u64 > REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES {
         return Err(kernel_failure(
             node,
             "resource-limit",

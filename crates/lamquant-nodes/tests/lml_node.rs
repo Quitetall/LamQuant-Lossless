@@ -5,6 +5,7 @@ use blut_graph_core::{
     NodeId, NodeInstance, PlanExecutor, PortRef, Target,
 };
 use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
+use lamquant_lml_mcu::mcu_packet::UNIFORM_I64_INVOCATION_HEADER_BYTES;
 use lamquant_lml_mcu::{
     lml::{compress_with_mode_views_explicit, EncodeFeatures},
     lpc::LpcMode,
@@ -16,7 +17,8 @@ use lamquant_nodes::{
     LML_ARITHMETIC_NODE_TYPE, LML_ASSEMBLE_NODE_TYPE, LML_BASELINE_NODE_TYPE,
     LML_ENTROPY_NODE_TYPE, LML_PACKET_BASELINE_NODE_TYPE, LML_PREDICT_NODE_TYPE,
     LML_QUANTIZE_NODE_TYPE, LML_TRANSFORM_NODE_TYPE, REFERENCE_FUSED_MCU_IMPLEMENTATION_ID,
-    REFERENCE_FUSED_MCU_KERNEL, REFERENCE_MCU_SCRATCH_BYTES,
+    REFERENCE_FUSED_MCU_KERNEL, REFERENCE_MAX_SIGNAL_BYTES, REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES,
+    REFERENCE_MCU_SCRATCH_BYTES,
 };
 use semantic_abir::{
     payload_content_id, AbirDataset, Atom, AtomTag, ByteOrder, ConceptId, DatasetDraft, DatasetTag,
@@ -180,6 +182,10 @@ fn descriptor_identity_is_feature_specific() {
     assert_eq!(packet.targets, vec![Target::McuAot, Target::Host]);
     assert!(packet.subgraph.is_some());
     assert_eq!(packet.outputs[0].abir.root, AbirRootType::EncodedBlock);
+    assert_eq!(
+        REFERENCE_MAX_SIGNAL_BYTES,
+        REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES + UNIFORM_I64_INVOCATION_HEADER_BYTES as u64
+    );
 }
 
 #[test]
