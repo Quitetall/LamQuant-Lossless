@@ -277,7 +277,7 @@ fn run_case(case: BenchCase, rounds: usize, target_round_ms: u64) {
     let compile_start = Instant::now();
     let mut registry = KernelRegistry::default();
     register_lml_nodes(&mut registry).expect("register LML Nodes");
-    let (graph, input_port) = match case.path {
+    let (graph, input_port, terminal_node) = match case.path {
         BenchPath::Bundle => (
             single_lml_graph(
                 baseline_lml_descriptor().capabilities,
@@ -287,6 +287,7 @@ fn run_case(case: BenchCase, rounds: usize, target_round_ms: u64) {
                 node: NodeId(0),
                 port: "signal".into(),
             },
+            NodeId(0),
         ),
         BenchPath::PacketDag => {
             let materialized = registry
@@ -298,10 +299,29 @@ fn run_case(case: BenchCase, rounds: usize, target_round_ms: u64) {
                         .expect("valid fixed packet config"),
                 })
                 .expect("materialize compiler packet DAG");
-            (materialized.graph, materialized.inputs[0].inner.clone())
+            assert_eq!(materialized.graph.nodes.len(), 5, "packet DAG node drift");
+            assert_eq!(materialized.inputs.len(), 1, "packet DAG input drift");
+            assert_eq!(materialized.outputs.len(), 1, "packet DAG output drift");
+            let input = materialized
+                .inputs
+                .iter()
+                .find(|interface| interface.name == "signal")
+                .expect("declared signal input")
+                .inner
+                .clone();
+            let output = materialized
+                .outputs
+                .iter()
+                .find(|interface| interface.name == "packet")
+                .expect("declared packet output")
+                .inner
+                .clone();
+            assert_eq!(output.port, "packets", "packet DAG output-port drift");
+            (materialized.graph, input, output.node)
         }
     };
     let plan = Compiler::new(&registry, ExecutionRealm::HostStream)
+        .with_fusion(true)
         .compile(&graph)
         .expect("compile LML Node path");
     let plan_compile_ns = compile_start.elapsed().as_nanos();
@@ -323,18 +343,17 @@ fn run_case(case: BenchCase, rounds: usize, target_round_ms: u64) {
             )]),
         )
         .expect("execute compiled baseline LML Node");
-    let terminal = match case.path {
-        BenchPath::Bundle => node_result
-            .terminal_values
-            .get(&NodeId(0))
-            .and_then(|outputs| outputs.first()),
-        BenchPath::PacketDag => node_result
-            .terminal_values
-            .values()
-            .next()
-            .and_then(|outputs| outputs.first()),
-    }
-    .expect("one terminal Node value");
+    assert_eq!(
+        node_result.terminal_values.len(),
+        1,
+        "terminal Node inventory drift"
+    );
+    let terminal_values = node_result
+        .terminal_values
+        .get(&terminal_node)
+        .expect("declared terminal Node");
+    assert_eq!(terminal_values.len(), 1, "terminal value inventory drift");
+    let terminal = &terminal_values[0];
     let node_bytes = match (case.path, terminal) {
         (BenchPath::Bundle, LamQuantNodeValue::Bcs2(bytes)) => bytes.as_slice(),
         (BenchPath::PacketDag, LamQuantNodeValue::LmlPackets(packets))
