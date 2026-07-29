@@ -190,6 +190,24 @@ pub fn encode_lml_bundle_with_window_size<A: PayloadAccess>(
     window_size: usize,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
+    encode_lml_bundle_with_window_size_and_mode(
+        dataset,
+        access,
+        window_size,
+        lamquant_lml_mcu::lpc::LpcMode::default(),
+        bounds,
+    )
+}
+
+/// Encode a uniform integer dataset with explicit packet extent and predictor
+/// mode while resolving samples exclusively through the ABIR payload contract.
+pub fn encode_lml_bundle_with_window_size_and_mode<A: PayloadAccess>(
+    dataset: &AbirDataset,
+    access: &A,
+    window_size: usize,
+    mode: lamquant_lml_mcu::lpc::LpcMode,
+    bounds: ResourceBounds,
+) -> Result<Vec<u8>, LmlBundleError> {
     if window_size == 0 {
         return Err(LmlBundleError::PacketExtent);
     }
@@ -208,7 +226,7 @@ pub fn encode_lml_bundle_with_window_size<A: PayloadAccess>(
         dataset,
         &views,
         window_size,
-        lamquant_lml_mcu::lpc::LpcMode::default(),
+        mode,
         EncoderSelection::Ambient,
         bounds,
     )
@@ -1871,6 +1889,34 @@ mod tests {
         let opened = open_lml_bundle(&bytes, ResourceBounds::default()).expect("open bundle");
         let expected = lamquant_lml_mcu::lml::compress(opened.signal(), 0).unwrap();
         assert_eq!(opened.packet(), expected);
+    }
+
+    #[test]
+    fn payload_access_encoder_preserves_explicit_window_and_mode() {
+        let mapped = fixture();
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7, -8],
+            vec![-8_388_608, -100, -1, 0, 1, 100, 8_388_606, 8_388_607],
+            vec![-1_000_000, -4, -1, 0, 1, 4, 1_000_000, 42],
+        ];
+        let expected = encode_lml_bundle_from_signal_with_mode(
+            mapped.dataset(),
+            &signal,
+            3,
+            lamquant_lml_mcu::lpc::LpcMode::Fixed,
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        let actual = encode_lml_bundle_with_window_size_and_mode(
+            mapped.dataset(),
+            mapped.access(),
+            3,
+            lamquant_lml_mcu::lpc::LpcMode::Fixed,
+            ResourceBounds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

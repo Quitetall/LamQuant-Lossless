@@ -27,6 +27,43 @@ pub struct ContainerStats {
     pub duration_s: f64,
 }
 
+/// Explicit packetization choices for one exact LML profile encoding.
+#[derive(Clone, Copy, Debug)]
+pub struct LmlEncodeOptions {
+    pub window_size: usize,
+    pub lpc_mode: crate::lpc::LpcMode,
+}
+
+impl Default for LmlEncodeOptions {
+    fn default() -> Self {
+        Self {
+            window_size: lamquant_abir_codec::MAX_PACKET_SAMPLES,
+            lpc_mode: crate::lpc::LpcMode::default(),
+        }
+    }
+}
+
+/// Encoded BCS2 LML bytes plus measurements derived from the same ABIR root.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EncodedLml {
+    bytes: Vec<u8>,
+    stats: ContainerStats,
+}
+
+impl EncodedLml {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub const fn stats(&self) -> &ContainerStats {
+        &self.stats
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 /// Semantic shape extracted from an authenticated BCS2 LML bundle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContainerHeader {
@@ -42,6 +79,37 @@ pub struct ContainerHeader {
 pub fn encode<A: PayloadAccess>(dataset: &AbirDataset, access: &A) -> LmlResult<Vec<u8>> {
     lamquant_abir_codec::encode_lml_bundle(dataset, access, ResourceBounds::default())
         .map_err(bundle_error)
+}
+
+/// Encode canonical ABIR with explicit exact-profile packetization.
+pub fn encode_with_options<A: PayloadAccess>(
+    dataset: &AbirDataset,
+    access: &A,
+    options: LmlEncodeOptions,
+) -> LmlResult<EncodedLml> {
+    if options.window_size == 0 {
+        return Err(invalid("window size must be greater than zero"));
+    }
+    let packet_samples = options
+        .window_size
+        .min(lamquant_abir_codec::MAX_PACKET_SAMPLES);
+    let bytes = lamquant_abir_codec::encode_lml_bundle_with_window_size_and_mode(
+        dataset,
+        access,
+        packet_samples,
+        options.lpc_mode,
+        ResourceBounds::default(),
+    )
+    .map_err(bundle_error)?;
+    let (n_channels, total_samples, sample_rate_hz) = profile_shape(dataset)?;
+    let stats = stats(
+        n_channels,
+        total_samples,
+        packet_samples,
+        bytes.len(),
+        sample_rate_hz,
+    );
+    Ok(EncodedLml { bytes, stats })
 }
 
 /// Authenticate and decode a BCS2 LML profile.
@@ -365,6 +433,46 @@ fn sample_rate(dataset: &AbirDataset) -> LmlResult<f64> {
     Ok(numerator as f64 / denominator as f64)
 }
 
+fn profile_shape(dataset: &AbirDataset) -> LmlResult<(usize, usize, f64)> {
+    let stream = dataset
+        .streams()
+        .first()
+        .ok_or_else(|| invalid("BCS2 LML dataset has no stream"))?;
+    let n_channels = stream.atoms().len();
+    if n_channels == 0 {
+        return Err(invalid("BCS2 LML stream has no signal atoms"));
+    }
+    let mut total_samples = None;
+    for atom_id in stream.atoms() {
+        let atom = dataset
+            .atoms()
+            .iter()
+            .find(|atom| atom.id() == *atom_id)
+            .ok_or_else(|| invalid("BCS2 LML stream atom is unresolved"))?;
+        let descriptor = atom
+            .payload()
+            .ok_or_else(|| invalid("BCS2 LML stream atom has no payload"))?;
+        let samples = descriptor
+            .shape()
+            .last()
+            .copied()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| invalid("BCS2 LML signal has no representable sample extent"))?;
+        match total_samples {
+            Some(expected) if expected != samples => {
+                return Err(invalid("BCS2 LML signal channel extents differ"));
+            }
+            None => total_samples = Some(samples),
+            _ => {}
+        }
+    }
+    Ok((
+        n_channels,
+        total_samples.expect("non-empty stream establishes sample extent"),
+        sample_rate(dataset)?,
+    ))
+}
+
 fn metadata(dataset: &AbirDataset) -> String {
     dataset
         .recordings()
@@ -459,6 +567,52 @@ mod tests {
         let (decoded, metadata) = read_bytes(&bytes).unwrap();
         assert_eq!(decoded, signal);
         assert_eq!(metadata, "{\"source\":\"test\"}");
+    }
+
+    #[test]
+    fn abir_native_options_match_legacy_uniform_writer() {
+        let signal = vec![vec![1, -2, 3, -4], vec![5, -6, 7, -8]];
+        let semantic = from_uniform_signal_view(
+            &signal,
+            250.0,
+            vec!["ch0".into(), "ch1".into()],
+            vec![-4.0, -8.0],
+            vec![3.0, 7.0],
+            4.0 / 250.0,
+            SourceMetadata {
+                source_file: String::new(),
+                format: "BCS2-LML".into(),
+                patient_id: String::new(),
+                recording_info: "{\"source\":\"test\"}".into(),
+                startdate: String::new(),
+                phys_dim: "digital".into(),
+            },
+            semantic_abir::ValidationLimits::default(),
+        )
+        .unwrap();
+        let encoded = encode_with_options(
+            semantic.opened.dataset(),
+            semantic.opened.access(),
+            LmlEncodeOptions {
+                window_size: 3,
+                lpc_mode: crate::lpc::LpcMode::Fixed,
+            },
+        )
+        .unwrap();
+        let mut legacy = Vec::new();
+        let legacy_stats = write_into(
+            &mut legacy,
+            &signal,
+            250.0,
+            3,
+            0,
+            "{\"source\":\"test\"}",
+            crate::lpc::LpcMode::Fixed,
+        )
+        .unwrap();
+
+        assert_eq!(encoded.bytes(), legacy);
+        assert_eq!(encoded.stats(), &legacy_stats);
     }
 
     #[test]
