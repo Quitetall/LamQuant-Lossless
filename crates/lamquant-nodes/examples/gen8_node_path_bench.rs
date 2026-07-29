@@ -1,10 +1,10 @@
 //! Paired Gen 8 benchmark: direct LML encoding versus compiled Node execution.
 //!
-//! This probe intentionally measures complete per-window calls. The direct arm
-//! returns its BCS2 allocation. The Node arm constructs the invocation map,
-//! executes the precompiled plan, and returns the execution receipt and
-//! terminal value. Dataset construction and plan compilation are reported but
-//! excluded from steady-state timings.
+//! This probe intentionally measures complete per-window calls for both the
+//! BCS2 wrapper seam and the compiler-materialized five-stage packet DAG. The
+//! Node arm constructs the invocation map, executes the precompiled plan, and
+//! returns the execution receipt and terminal value. Dataset construction and
+//! plan compilation are reported but excluded from steady-state timings.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -16,11 +16,15 @@ use blut_graph_core::{
     Capability, Compiler, ExecutionRealm, Graph, KernelRegistry, NodeId, NodeInstance,
     PlanExecutor, PortRef,
 };
-use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
-use lamquant_lml_mcu::{lml::EncodeFeatures, lpc::LpcMode};
+use lamquant_abir_codec::{encode_lml_bundle_from_views_explicit, verify_lml_signal_views_closure};
+use lamquant_lml_mcu::{
+    lml::{compress_with_mode_views_explicit, EncodeFeatures},
+    lpc::LpcMode,
+};
 use lamquant_nodes::{
-    baseline_lml_descriptor, lml_node_config, register_lml_nodes, LamQuantKernelExecutor,
-    LamQuantNodeValue, LmlSignalView, NoopTransactionalSink, LML_BASELINE_NODE_TYPE,
+    baseline_lml_descriptor, lml_node_config, lml_packet_node_config, register_lml_nodes,
+    LamQuantKernelExecutor, LamQuantNodeValue, LmlSignalView, NoopTransactionalSink,
+    LML_BASELINE_NODE_TYPE, LML_PACKET_BASELINE_NODE_TYPE,
 };
 use semantic_abir::{
     payload_content_id, AbirDataset, Atom, AtomTag, ByteOrder, ConceptId, DatasetDraft, DatasetTag,
@@ -35,7 +39,7 @@ const MIN_ROUNDS: usize = 9;
 const MAX_ROUNDS: usize = 101;
 const MIN_TARGET_ROUND_MS: u64 = 10;
 const MAX_TARGET_ROUND_MS: u64 = 500;
-const MAX_BATCH_ITERATIONS: usize = 64;
+const MAX_BATCH_ITERATIONS: usize = 256;
 const WARMUP_ITERATIONS: usize = 3;
 const WINDOW_SIZE: usize = u16::MAX as usize;
 
@@ -44,18 +48,39 @@ struct BenchCase {
     name: &'static str,
     channels: usize,
     samples: usize,
+    path: BenchPath,
 }
 
-const CASES: [BenchCase; 2] = [
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BenchPath {
+    Bundle,
+    PacketDag,
+}
+
+const CASES: [BenchCase; 4] = [
     BenchCase {
         name: "eeg-8x2500",
         channels: 8,
         samples: 2_500,
+        path: BenchPath::Bundle,
     },
     BenchCase {
         name: "eeg-32x2500",
         channels: 32,
         samples: 2_500,
+        path: BenchPath::Bundle,
+    },
+    BenchCase {
+        name: "packet-dag-eeg-8x2500",
+        channels: 8,
+        samples: 2_500,
+        path: BenchPath::PacketDag,
+    },
+    BenchCase {
+        name: "packet-dag-eeg-32x2500",
+        channels: 32,
+        samples: 2_500,
+        path: BenchPath::PacketDag,
     },
 ];
 
@@ -209,37 +234,79 @@ fn arguments() -> (usize, u64) {
     (rounds, target_round_ms)
 }
 
+fn direct_encode(
+    path: BenchPath,
+    dataset: &AbirDataset,
+    views: &[&[i64]],
+    bounds: ResourceBounds,
+) -> Vec<u8> {
+    match path {
+        BenchPath::Bundle => encode_lml_bundle_from_views_explicit(
+            dataset,
+            views,
+            WINDOW_SIZE,
+            LpcMode::Fixed,
+            EncodeFeatures::default(),
+            bounds,
+        )
+        .expect("direct BCS2 LML encode"),
+        BenchPath::PacketDag => {
+            let _validated_view =
+                LmlSignalView::new(dataset, views, bounds).expect("valid direct packet signal");
+            verify_lml_signal_views_closure(dataset, views)
+                .expect("direct packet signal closes over ABIR");
+            compress_with_mode_views_explicit(
+                views,
+                0,
+                LpcMode::Fixed,
+                EncodeFeatures {
+                    max_packet_bytes: Some(bounds.max_frame_bytes as usize),
+                    ..EncodeFeatures::default()
+                },
+            )
+            .expect("direct LML packet encode")
+        }
+    }
+}
+
 fn run_case(case: BenchCase, rounds: usize, target_round_ms: u64) {
     let signal = fixture_signal(case.channels, case.samples);
     let dataset = fixture_dataset(&signal);
     let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let bounds = ResourceBounds::default();
-    let input_port = PortRef {
-        node: NodeId(0),
-        port: "signal".into(),
-    };
-
     let compile_start = Instant::now();
     let mut registry = KernelRegistry::default();
     register_lml_nodes(&mut registry).expect("register LML Nodes");
-    let graph = single_lml_graph(
-        baseline_lml_descriptor().capabilities,
-        lml_node_config(LpcMode::Fixed, WINDOW_SIZE).expect("valid fixed config"),
-    );
+    let (graph, input_port) = match case.path {
+        BenchPath::Bundle => (
+            single_lml_graph(
+                baseline_lml_descriptor().capabilities,
+                lml_node_config(LpcMode::Fixed, WINDOW_SIZE).expect("valid fixed config"),
+            ),
+            PortRef {
+                node: NodeId(0),
+                port: "signal".into(),
+            },
+        ),
+        BenchPath::PacketDag => {
+            let materialized = registry
+                .materialize_subgraph(&NodeInstance {
+                    id: NodeId(0),
+                    descriptor: LML_PACKET_BASELINE_NODE_TYPE.into(),
+                    descriptor_version: 1,
+                    config: lml_packet_node_config(LpcMode::Fixed)
+                        .expect("valid fixed packet config"),
+                })
+                .expect("materialize compiler packet DAG");
+            (materialized.graph, materialized.inputs[0].inner.clone())
+        }
+    };
     let plan = Compiler::new(&registry, ExecutionRealm::HostStream)
         .compile(&graph)
-        .expect("compile baseline LML Node");
+        .expect("compile LML Node path");
     let plan_compile_ns = compile_start.elapsed().as_nanos();
 
-    let direct = encode_lml_bundle_from_views_explicit(
-        &dataset,
-        &views,
-        WINDOW_SIZE,
-        LpcMode::Fixed,
-        EncodeFeatures::default(),
-        bounds,
-    )
-    .expect("direct LML encode");
+    let direct = direct_encode(case.path, &dataset, &views, bounds);
 
     let mut kernels = LamQuantKernelExecutor::default();
     let mut sink = NoopTransactionalSink;
@@ -256,16 +323,28 @@ fn run_case(case: BenchCase, rounds: usize, target_round_ms: u64) {
             )]),
         )
         .expect("execute compiled baseline LML Node");
-    let node_bytes = match node_result
-        .terminal_values
-        .get(&NodeId(0))
-        .and_then(|outputs| outputs.first())
-        .expect("one terminal Node value")
-    {
-        LamQuantNodeValue::Bcs2(bytes) => bytes,
-        other => panic!("unexpected Node output: {other:?}"),
+    let terminal = match case.path {
+        BenchPath::Bundle => node_result
+            .terminal_values
+            .get(&NodeId(0))
+            .and_then(|outputs| outputs.first()),
+        BenchPath::PacketDag => node_result
+            .terminal_values
+            .values()
+            .next()
+            .and_then(|outputs| outputs.first()),
+    }
+    .expect("one terminal Node value");
+    let node_bytes = match (case.path, terminal) {
+        (BenchPath::Bundle, LamQuantNodeValue::Bcs2(bytes)) => bytes.as_slice(),
+        (BenchPath::PacketDag, LamQuantNodeValue::LmlPackets(packets))
+            if packets.packets().len() == 1 =>
+        {
+            packets.packets()[0].as_slice()
+        }
+        (_, other) => panic!("unexpected Node output: {other:?}"),
     };
-    assert_eq!(node_bytes, &direct, "direct and Node BCS2 bytes diverged");
+    assert_eq!(node_bytes, direct, "direct and Node bytes diverged");
 
     let output_hash = blake3::hash(&direct);
     let input_bytes = case
@@ -288,15 +367,7 @@ fn run_case(case: BenchCase, rounds: usize, target_round_ms: u64) {
 
     let measure_direct = |iterations| {
         elapsed_ns(iterations, || {
-            let output = encode_lml_bundle_from_views_explicit(
-                &dataset,
-                &views,
-                WINDOW_SIZE,
-                LpcMode::Fixed,
-                EncodeFeatures::default(),
-                bounds,
-            )
-            .expect("direct LML encode during measurement");
+            let output = direct_encode(case.path, &dataset, &views, bounds);
             black_box(output);
         })
     };
