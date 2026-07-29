@@ -755,7 +755,7 @@ pub(crate) fn reference_kernel(
         "fused:org.quitetall.lamquant.lml.reference-v1".into()
     };
     let (peak_bytes, scratch_bytes) = if target == Target::McuAot {
-        (REFERENCE_MCU_SCRATCH_BYTES, REFERENCE_MCU_SCRATCH_BYTES)
+        (0, REFERENCE_MCU_SCRATCH_BYTES)
     } else {
         (REFERENCE_PEAK_BYTES, REFERENCE_MAX_PACKET_BYTES)
     };

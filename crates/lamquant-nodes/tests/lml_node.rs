@@ -375,10 +375,12 @@ fn production_packet_graph_preserves_semantics_across_host_and_mcu_realms() {
     assert_eq!(host.as_plan().nodes.len(), 1);
     assert_eq!(mcu.as_plan().nodes.len(), 1);
     assert_eq!(mcu.as_plan().nodes[0].kernel, REFERENCE_FUSED_MCU_KERNEL);
+    assert_eq!(mcu.as_plan().nodes[0].resources.peak_bytes, 0);
     assert_eq!(
         mcu.as_plan().nodes[0].resources.scratch_bytes,
         REFERENCE_MCU_SCRATCH_BYTES
     );
+    assert_eq!(mcu.as_plan().peak_bytes, REFERENCE_MCU_SCRATCH_BYTES);
     assert_eq!(
         mcu.as_plan().nodes[0].implementation_id,
         REFERENCE_FUSED_MCU_IMPLEMENTATION_ID
