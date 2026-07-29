@@ -18,8 +18,8 @@ use alloc::string::String;
 use semantic_abir::Rational;
 
 use crate::backend::{
-    BackendError, BackendModel, BackendTarget, NeuralBackend, NeuralBackendCapabilities,
-    NeuralSignal, NeuralTokens, SignalDomain, TrainedModelArtifact,
+    BackendError, BackendErrorKind, BackendModel, BackendTarget, NeuralBackend,
+    NeuralBackendCapabilities, NeuralSignal, NeuralTokens, SignalDomain, TrainedModelArtifact,
 };
 
 /// Registry-SHA-pinned ternary weights baked into the binary. Placeholder: the
@@ -90,11 +90,17 @@ impl NeuralBackend for RustBackend {
         _signal: &NeuralSignal,
         _sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError> {
-        Err(BackendError(String::from(DEFERRED)))
+        Err(BackendError::new(
+            BackendErrorKind::Deferred,
+            String::from(DEFERRED),
+        ))
     }
 
     fn decode(&self, _tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
-        Err(BackendError(String::from(DEFERRED)))
+        Err(BackendError::new(
+            BackendErrorKind::Deferred,
+            String::from(DEFERRED),
+        ))
     }
 }
 

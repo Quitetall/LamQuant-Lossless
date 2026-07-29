@@ -19,7 +19,14 @@ std = ["lamquant-lml-mcu/std", "semantic-abir/std", "semantic-abir-bcs/std"]
 # ADR 0074 N2: the PyBackend subprocess bridge (drives the Python SubbandCodec).
 # Host-only — needs std (process) + a JSON protocol. NOT part of `default`, so a
 # bare host build / firmware never pulls in the Python path.
-python = ["std", "dep:serde", "dep:serde_json", "dep:libc", "dep:windows-sys"]
+python = [
+    "std",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:libc",
+    "dep:sha2",
+    "dep:windows-sys",
+]
 
 [dependencies]
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
@@ -28,6 +35,7 @@ semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://gi
 blake3 = { version = "=1.5.5", default-features = false }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true, features = ["raw_value"] }
+sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }

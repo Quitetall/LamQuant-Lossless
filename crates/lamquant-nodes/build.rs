@@ -49,6 +49,10 @@ fn main() {
         files.push(repository.join("lamquant-lossless/Cargo.toml"));
         collect_files(&repository.join("lamquant-lossless/src"), &mut files);
     }
+    if env::var_os("CARGO_FEATURE_LMQ").is_some() {
+        files.push(repository.join("lamquant-lmq/Cargo.toml"));
+        collect_files(&repository.join("lamquant-lmq/src"), &mut files);
+    }
     files.sort();
 
     let mut hasher = blake3::Hasher::new();

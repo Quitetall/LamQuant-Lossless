@@ -6,6 +6,8 @@ extern crate alloc;
 
 mod abir_value;
 mod lml_reference;
+#[cfg(feature = "lmq")]
+mod lmq_node;
 #[cfg(feature = "standard-adapters")]
 mod lsl_nodes;
 #[cfg(feature = "standard-adapters")]
@@ -15,6 +17,17 @@ pub use abir_value::{AbirDatasetValue, AbirDatasetValueError, NodePayloadStore};
 pub use lml_reference::{
     LmlPackets, ReferenceEntropy, ReferencePredicted, ReferenceQuantized, ReferenceSubbands,
 };
+#[cfg(feature = "lmq")]
+pub use lmq_node::{
+    lmq_descriptor, lmq_node_config, register_lmq_node, verify_pccp_gate_evidence,
+    LmqBackendSession, LmqNodeProfile, LmqNodeProfileError, LmqPccpAuthorizationEntry,
+    LmqPccpAuthorizationEpochStore, LmqPccpAuthorizationLedger, LmqPccpAuthorizationLedgerError,
+    SignedLmqPccpAuthorizationSnapshot, VerifiedPccpEvidence, LMQ_CURRENT_PCCP_POLICY,
+    LMQ_GENERATED_PROOF, LMQ_MODEL_INPUT_PROOF, LMQ_NODE_TYPE,
+    LMQ_PCCP_AUTHORIZATION_MAX_LIFETIME_SECONDS,
+};
+#[cfg(all(test, feature = "lmq"))]
+pub(crate) use lmq_node::{LmqAttestedBackend, LmqBackendDeploymentManifest};
 #[cfg(feature = "standard-adapters")]
 pub use lsl_nodes::{
     lsl_accept_export_descriptor, lsl_accept_export_kernel_binding, lsl_export_descriptor,
@@ -194,13 +207,31 @@ impl std::error::Error for LmlNodeConfigError {}
 
 pub struct LamQuantKernelExecutor<'a> {
     marker: PhantomData<&'a ()>,
+    #[cfg(feature = "lmq")]
+    lmq_runtime: Option<lmq_node::LmqRuntime<'a>>,
 }
 
 impl Default for LamQuantKernelExecutor<'_> {
     fn default() -> Self {
         Self {
             marker: PhantomData,
+            #[cfg(feature = "lmq")]
+            lmq_runtime: None,
         }
+    }
+}
+
+#[cfg(feature = "lmq")]
+impl<'a> LamQuantKernelExecutor<'a> {
+    pub fn with_lmq_session(
+        session: &'a LmqBackendSession<'a>,
+        authorizer: &'a LmqPccpAuthorizationLedger,
+        profile: &'a LmqNodeProfile,
+    ) -> Result<Self, LmqNodeProfileError> {
+        Ok(Self {
+            marker: PhantomData,
+            lmq_runtime: Some(lmq_node::LmqRuntime::new(session, authorizer, profile)?),
+        })
     }
 }
 
@@ -226,6 +257,10 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
         #[cfg(feature = "standard-adapters")]
         if standard_nodes::is_standard_node(type_name) {
             return standard_nodes::execute_standard(node, type_name, inputs);
+        }
+        #[cfg(feature = "lmq")]
+        if type_name == LMQ_NODE_TYPE {
+            return lmq_node::execute_lmq(node, inputs, self.lmq_runtime);
         }
         match type_name {
             LML_TRANSFORM_NODE_TYPE => execute_transform(node, inputs),

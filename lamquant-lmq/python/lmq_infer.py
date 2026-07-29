@@ -287,7 +287,10 @@ def main():
         import traceback
 
         traceback.print_exc()
-        sys.exit(1)
+        # EX_USAGE-style reserved code: Rust treats this as a deterministic
+        # model/helper rejection. Signals and other exit codes remain process
+        # failures and retain distinct retry/operations semantics.
+        sys.exit(64)
 
 
 if __name__ == "__main__":

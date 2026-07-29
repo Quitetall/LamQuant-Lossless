@@ -10,15 +10,18 @@
 //!
 //! Host-only (feature `python`): needs `std` (process) + `serde_json`. codec-neural
 //! is imported by the helper, never edited; weights resolve via `$LAMQUANT_WEIGHTS_DIR`.
-//! Process-lifetime and write containment uses Bubblewrap PID namespaces on
-//! Linux and Job Objects on Windows. This is not a confidentiality sandbox:
-//! the helper inherits its environment, and Linux exposes the host root
-//! read-only so Python, libraries, and weights remain discoverable. Helper code
-//! and model artifacts must therefore be trusted. Other Unix hosts fail closed
-//! until the native Rust backend replaces this temporary subprocess path.
+//! Developer-mode process/write containment uses Bubblewrap PID namespaces on
+//! Linux and Job Objects on Windows; it is not a confidentiality sandbox.
+//! [`ProductionPyBackend`] instead requires a complete read-only rootfs closure,
+//! clears its environment, hides accelerator devices, and joins an empty
+//! cgroup-v2 child before `exec`. Other Unix hosts fail closed until an equally
+//! enforceable production loader exists. Host kernel and privileged host
+//! administrators remain trusted; containment isolates unprivileged model code.
 
+use std::fs::File;
 use std::io::Read;
 use std::marker::PhantomData;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::string::{String, ToString};
@@ -34,17 +37,24 @@ use std::vec::Vec;
 use semantic_abir::Rational;
 use semantic_abir_bcs::ModelProvenance;
 use serde::de::{DeserializeSeed, Error as DeError, IgnoredAny, SeqAccess, Visitor};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use serde_json::{json, Value};
 
 use crate::backend::{
-    BackendError, BackendModel, BackendTarget, NeuralBackend, NeuralBackendCapabilities,
-    NeuralSignal, NeuralTokens, SignalDomain, TrainedModelArtifact,
+    BackendError, BackendErrorKind, BackendModel, BackendTarget, NeuralBackend,
+    NeuralBackendCapabilities, NeuralSignal, NeuralTokens, SignalDomain, TrainedModelArtifact,
+};
+
+mod production;
+
+pub use production::{
+    ProductionBackendLoadError, ProductionDeploymentAttestation, ProductionPyBackend,
+    ProductionPyBackendConfig,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+const HELPER_MODEL_REJECTION_EXIT_CODE: i32 = 64;
 const DEFAULT_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_STDOUT_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_STDERR_BYTES: u64 = 1024 * 1024;
@@ -61,6 +71,14 @@ pub struct BackendIoLimits {
     pub maximum_request_bytes: u64,
     pub maximum_stdout_bytes: u64,
     pub maximum_stderr_bytes: u64,
+}
+
+/// Enforced subprocess ceilings bound into production deployment identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackendProcessLimits {
+    pub memory_bytes: NonZeroU64,
+    pub cpu_slots: NonZeroU16,
+    pub maximum_tasks: NonZeroU16,
 }
 
 impl Default for BackendIoLimits {
@@ -104,11 +122,52 @@ pub struct PyBackend {
     cancellation: BackendCancellation,
     capabilities: NeuralBackendCapabilities,
     io_limits: BackendIoLimits,
+    execution: PyExecutionEnvironment,
+}
+
+enum PyExecutionEnvironment {
+    Developer,
+    #[cfg(target_os = "linux")]
+    ProductionLinux {
+        rootfs: PathBuf,
+        cgroup: PathBuf,
+        weights_dir: PathBuf,
+        process_limits: BackendProcessLimits,
+    },
 }
 
 enum PyBackendModel {
     ModelFree(ModelProvenance),
     Trained(Box<TrainedModelArtifact>),
+}
+
+#[derive(Serialize)]
+struct HelperRequest<'a, T> {
+    #[serde(flatten)]
+    operation: T,
+    mode: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_checkpoint_sha256: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EncodeRequest<'a> {
+    op: &'static str,
+    sample_rate: f64,
+    signal: &'a [Vec<i64>],
+    signal_domain: &'static str,
+}
+
+#[derive(Serialize)]
+struct DecodeRequest<'a> {
+    op: &'static str,
+    tokens: &'a [i32],
+    schedule: &'a [u8],
+    alphabet: u16,
+    n_channels: u16,
+    n_samples: u32,
+    backend_meta: &'a [u8],
+    signal_domain: &'static str,
 }
 
 impl PyBackendModel {
@@ -136,6 +195,7 @@ impl PyBackend {
             cancellation: BackendCancellation::default(),
             capabilities: model_capabilities(),
             io_limits: BackendIoLimits::default(),
+            execution: PyExecutionEnvironment::Developer,
         }
     }
     /// Drive the helper's deterministic self-test transform (`mode = "selftest"`) —
@@ -154,6 +214,7 @@ impl PyBackend {
             cancellation: BackendCancellation::default(),
             capabilities: selftest_capabilities(),
             io_limits: BackendIoLimits::default(),
+            execution: PyExecutionEnvironment::Developer,
         }
     }
 
@@ -175,35 +236,67 @@ impl PyBackend {
         self
     }
 
-    fn call(&self, mut request: Value) -> Result<HelperOutput, BackendError> {
+    fn call<T: Serialize>(
+        &self,
+        operation: T,
+        request_capacity: usize,
+    ) -> Result<HelperOutput, BackendError> {
         let started = Instant::now();
         self.check_active(started)?;
-        request["mode"] = json!(self.mode);
-        if self.mode == "model" {
-            request["expected_checkpoint_sha256"] =
-                json!(encode_hex(&self.model.provenance().checkpoint_sha256));
+        let request = HelperRequest {
+            operation,
+            mode: &self.mode,
+            expected_checkpoint_sha256: (self.mode == "model")
+                .then(|| encode_hex(&self.model.provenance().checkpoint_sha256)),
+        };
+        let maximum_request_bytes =
+            usize::try_from(self.io_limits.maximum_request_bytes).map_err(|_| {
+                BackendError::new(
+                    BackendErrorKind::ResourceLimit,
+                    "request limit exceeds host usize",
+                )
+            })?;
+        if request_capacity > maximum_request_bytes {
+            return Err(BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "request capacity exceeds configured byte limit".to_string(),
+            ));
         }
-        let request = serde_json::to_vec(&request)
-            .map_err(|e| BackendError(format!("serialize request: {e}")))?;
+        let mut request_bytes = Vec::new();
+        request_bytes
+            .try_reserve_exact(request_capacity)
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorKind::ResourceLimit,
+                    format!("reserve request buffer: {error}"),
+                )
+            })?;
+        serde_json::to_writer(&mut request_bytes, &request).map_err(|error| {
+            BackendError::new(
+                BackendErrorKind::Protocol,
+                format!("serialize request: {error}"),
+            )
+        })?;
         enforce_io_limit(
             "request",
-            request.len(),
+            request_bytes.len(),
             self.io_limits.maximum_request_bytes,
         )?;
         self.check_active(started)?;
-        let mut command = helper_command(&self.python, &self.helper)?;
+        let mut command = helper_command(&self.python, &self.helper, &self.execution)?;
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_process_tree(&mut command);
+        let cgroup_membership = configure_process_limits(&mut command, &self.execution)?;
         let mut child = command.spawn().map_err(|e| {
-            BackendError(format!(
-                "spawn `{} {}`: {e}",
-                self.python,
-                self.helper.display()
-            ))
+            BackendError::new(
+                BackendErrorKind::Process,
+                format!("spawn `{} {}`: {e}", self.python, self.helper.display()),
+            )
         })?;
+        drop(cgroup_membership);
         let process_tree = match ProcessTree::attach(&child) {
             Ok(process_tree) => process_tree,
             Err(error) => {
@@ -225,7 +318,7 @@ impl PyBackend {
             Some(stderr) => stderr,
             None => return terminate_with(&mut child, "no child stderr"),
         };
-        let stdin_result = match write_request(stdin, request) {
+        let stdin_result = match write_request(stdin, request_bytes) {
             Ok(receiver) => receiver,
             Err(error) => {
                 child.terminate();
@@ -255,11 +348,17 @@ impl PyBackend {
         loop {
             if self.cancellation.is_cancelled() {
                 child.terminate();
-                return Err(BackendError("helper invocation cancelled".to_string()));
+                return Err(BackendError::new(
+                    BackendErrorKind::Cancelled,
+                    "helper invocation cancelled",
+                ));
             }
             if started.elapsed() >= self.timeout {
                 child.terminate();
-                return Err(BackendError("helper invocation timed out".to_string()));
+                return Err(BackendError::new(
+                    BackendErrorKind::Timeout,
+                    "helper invocation timed out",
+                ));
             }
             if !stdin_done {
                 match stdin_result.try_recv() {
@@ -271,7 +370,10 @@ impl PyBackend {
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {
                         child.terminate();
-                        return Err(BackendError("stdin writer disconnected".to_string()));
+                        return Err(BackendError::new(
+                            BackendErrorKind::Process,
+                            "stdin writer disconnected",
+                        ));
                     }
                 }
             }
@@ -290,7 +392,10 @@ impl PyBackend {
                     Ok(status) => status,
                     Err(error) => {
                         child.terminate();
-                        return Err(BackendError(format!("poll helper: {error}")));
+                        return Err(BackendError::new(
+                            BackendErrorKind::Process,
+                            format!("poll helper: {error}"),
+                        ));
                     }
                 };
             }
@@ -308,11 +413,19 @@ impl PyBackend {
         // process-group signaling so a later Drop cannot target a reused PGID.
         child.mark_reaped();
         if !status.success() {
-            return Err(BackendError(format!(
-                "helper exited {}: {}",
-                status,
-                String::from_utf8_lossy(&stderr)
-            )));
+            let kind = if status.code() == Some(HELPER_MODEL_REJECTION_EXIT_CODE) {
+                BackendErrorKind::Model
+            } else {
+                BackendErrorKind::Process
+            };
+            return Err(BackendError::new(
+                kind,
+                format!(
+                    "helper exited {}: {}",
+                    status,
+                    String::from_utf8_lossy(&stderr)
+                ),
+            ));
         }
         Ok(HelperOutput {
             stdout,
@@ -323,10 +436,16 @@ impl PyBackend {
 
     fn check_active(&self, started: Instant) -> Result<(), BackendError> {
         if self.cancellation.is_cancelled() {
-            return Err(BackendError("helper invocation cancelled".to_string()));
+            return Err(BackendError::new(
+                BackendErrorKind::Cancelled,
+                "helper invocation cancelled",
+            ));
         }
         if started.elapsed() >= self.timeout {
-            return Err(BackendError("helper invocation timed out".to_string()));
+            return Err(BackendError::new(
+                BackendErrorKind::Timeout,
+                "helper invocation timed out",
+            ));
         }
         Ok(())
     }
@@ -335,11 +454,31 @@ impl PyBackend {
         if self.mode == "model"
             && actual != Some(encode_hex(&self.model.provenance().checkpoint_sha256).as_str())
         {
-            return Err(BackendError(
+            return Err(BackendError::new(
+                BackendErrorKind::Model,
                 "helper executed a checkpoint different from model provenance".to_string(),
             ));
         }
         Ok(())
+    }
+}
+
+impl PyBackend {
+    #[cfg(target_os = "linux")]
+    fn with_production_linux_execution(
+        mut self,
+        rootfs: PathBuf,
+        cgroup: PathBuf,
+        weights_dir: PathBuf,
+        process_limits: BackendProcessLimits,
+    ) -> Self {
+        self.execution = PyExecutionEnvironment::ProductionLinux {
+            rootfs,
+            cgroup,
+            weights_dir,
+            process_limits,
+        };
+        self
     }
 }
 
@@ -351,9 +490,10 @@ struct HelperOutput {
 
 fn enforce_io_limit(name: &str, actual: usize, limit: u64) -> Result<(), BackendError> {
     if actual as u128 > u128::from(limit) {
-        Err(BackendError(format!(
-            "helper {name} exceeds byte limit ({actual} > {limit})"
-        )))
+        Err(BackendError::new(
+            BackendErrorKind::ResourceLimit,
+            format!("helper {name} exceeds byte limit ({actual} > {limit})"),
+        ))
     } else {
         Ok(())
     }
@@ -368,12 +508,17 @@ fn write_request(
         .name("lmq-helper-stdin".to_string())
         .spawn(move || {
             use std::io::Write;
-            let result = stdin
-                .write_all(&request)
-                .map_err(|error| BackendError(format!("write request: {error}")));
+            let result = stdin.write_all(&request).map_err(|error| {
+                BackendError::new(BackendErrorKind::Process, format!("write request: {error}"))
+            });
             let _ = sender.send(result);
         })
-        .map_err(|error| BackendError(format!("spawn helper stdin writer: {error}")))?;
+        .map_err(|error| {
+            BackendError::new(
+                BackendErrorKind::Process,
+                format!("spawn helper stdin writer: {error}"),
+            )
+        })?;
     Ok(receiver)
 }
 
@@ -396,23 +541,35 @@ fn read_pipe_bounded(
                     Ok(0) => break Ok(bytes),
                     Ok(read) => {
                         let Some(total) = bytes.len().checked_add(read) else {
-                            break Err(BackendError(format!("helper {name} exceeds byte limit")));
+                            break Err(BackendError::new(
+                                BackendErrorKind::ResourceLimit,
+                                format!("helper {name} exceeds byte limit"),
+                            ));
                         };
                         if total as u128 > u128::from(limit) {
-                            break Err(BackendError(format!(
-                                "helper {name} exceeds byte limit ({total} > {limit})"
-                            )));
+                            break Err(BackendError::new(
+                                BackendErrorKind::ResourceLimit,
+                                format!("helper {name} exceeds byte limit ({total} > {limit})"),
+                            ));
                         }
                         bytes.extend_from_slice(&chunk[..read]);
                     }
                     Err(error) => {
-                        break Err(BackendError(format!("read helper {name}: {error}")));
+                        break Err(BackendError::new(
+                            BackendErrorKind::Process,
+                            format!("read helper {name}: {error}"),
+                        ));
                     }
                 }
             };
             let _ = sender.send(result);
         })
-        .map_err(|error| BackendError(format!("spawn helper {spawn_name} reader: {error}")))?;
+        .map_err(|error| {
+            BackendError::new(
+                BackendErrorKind::Process,
+                format!("spawn helper {spawn_name} reader: {error}"),
+            )
+        })?;
     Ok(receiver)
 }
 
@@ -431,42 +588,104 @@ fn poll_pipe(
         }
         Ok(Err(error)) => Err(error),
         Err(TryRecvError::Empty) => Ok(()),
-        Err(TryRecvError::Disconnected) => Err(BackendError(format!("{name} reader disconnected"))),
+        Err(TryRecvError::Disconnected) => Err(BackendError::new(
+            BackendErrorKind::Process,
+            format!("{name} reader disconnected"),
+        )),
     }
 }
 
 fn terminate_with<T>(child: &mut SupervisedChild, message: &str) -> Result<T, BackendError> {
     child.terminate();
-    Err(BackendError(message.to_string()))
+    Err(BackendError::new(
+        BackendErrorKind::Internal,
+        message.to_string(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
-fn helper_command(python: &str, helper: &PathBuf) -> Result<Command, BackendError> {
-    // PID-namespace init owns every descendant, including children that call
-    // setsid(2). When the helper exits or bwrap is killed, namespace teardown
-    // kills all remaining processes. Read-only host mount preserves Python and
-    // weight discovery; /tmp remains writable for ordinary runtime scratch.
-    // This constrains process lifetime and host writes, not confidentiality:
-    // helper code can read user-readable host files and inherits its environment.
+fn helper_command(
+    python: &str,
+    helper: &PathBuf,
+    execution: &PyExecutionEnvironment,
+) -> Result<Command, BackendError> {
     verify_linux_containment()?;
     let mut command = Command::new(BUBBLEWRAP_PATH);
-    command
-        .arg("--unshare-pid")
-        .arg("--die-with-parent")
-        .arg("--ro-bind")
-        .arg("/")
-        .arg("/")
-        .arg("--dev-bind")
-        .arg("/dev")
-        .arg("/dev")
-        .arg("--bind")
-        .arg("/tmp")
-        .arg("/tmp")
-        .arg("--proc")
-        .arg("/proc")
-        .arg("--")
-        .arg(python)
-        .arg(helper);
+    match execution {
+        PyExecutionEnvironment::Developer => {
+            // Developer bridge: process/write containment only. Host filesystem
+            // remains visible and inherited environment remains trusted.
+            command
+                .arg("--unshare-pid")
+                .arg("--die-with-parent")
+                .arg("--ro-bind")
+                .arg("/")
+                .arg("/")
+                .arg("--dev-bind")
+                .arg("/dev")
+                .arg("/dev")
+                .arg("--bind")
+                .arg("/tmp")
+                .arg("/tmp")
+                .arg("--proc")
+                .arg("/proc")
+                .arg("--")
+                .arg(python)
+                .arg(helper);
+        }
+        PyExecutionEnvironment::ProductionLinux {
+            rootfs,
+            weights_dir,
+            process_limits,
+            ..
+        } => {
+            command
+                .env_clear()
+                .env("PYTHONNOUSERSITE", "1")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .env("PYTHONHASHSEED", "0")
+                .env("CUDA_VISIBLE_DEVICES", "")
+                .env("HIP_VISIBLE_DEVICES", "")
+                .env("ROCR_VISIBLE_DEVICES", "")
+                .env("LAMQUANT_WEIGHTS_DIR", weights_dir)
+                .env(
+                    "OMP_NUM_THREADS",
+                    process_limits.cpu_slots.get().to_string(),
+                )
+                .env(
+                    "MKL_NUM_THREADS",
+                    process_limits.cpu_slots.get().to_string(),
+                )
+                .env(
+                    "OPENBLAS_NUM_THREADS",
+                    process_limits.cpu_slots.get().to_string(),
+                )
+                .env(
+                    "NUMEXPR_NUM_THREADS",
+                    process_limits.cpu_slots.get().to_string(),
+                )
+                .arg("--unshare-all")
+                .arg("--cap-drop")
+                .arg("ALL")
+                .arg("--die-with-parent")
+                .arg("--new-session")
+                .arg("--ro-bind")
+                .arg(rootfs)
+                .arg("/")
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--proc")
+                .arg("/proc")
+                .arg("--tmpfs")
+                .arg("/tmp")
+                .arg("--chdir")
+                .arg("/")
+                .arg("--")
+                .arg(python)
+                .arg("-I")
+                .arg(helper);
+        }
+    }
     Ok(command)
 }
 
@@ -511,26 +730,40 @@ fn verify_linux_containment() -> Result<(), BackendError> {
             Ok(())
         })
         .clone()
-        .map_err(BackendError)
+        .map_err(|error| BackendError::new(BackendErrorKind::Deployment, error))
 }
 
 #[cfg(windows)]
-fn helper_command(python: &str, helper: &PathBuf) -> Result<Command, BackendError> {
+fn helper_command(
+    python: &str,
+    helper: &PathBuf,
+    _execution: &PyExecutionEnvironment,
+) -> Result<Command, BackendError> {
     let mut command = Command::new(python);
     command.arg(helper);
     Ok(command)
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn helper_command(_python: &str, _helper: &PathBuf) -> Result<Command, BackendError> {
-    Err(BackendError(
+fn helper_command(
+    _python: &str,
+    _helper: &PathBuf,
+    _execution: &PyExecutionEnvironment,
+) -> Result<Command, BackendError> {
+    Err(BackendError::new(
+        BackendErrorKind::Deployment,
         "bounded helper process containment is unsupported on this Unix platform".to_string(),
     ))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn helper_command(_python: &str, _helper: &PathBuf) -> Result<Command, BackendError> {
-    Err(BackendError(
+fn helper_command(
+    _python: &str,
+    _helper: &PathBuf,
+    _execution: &PyExecutionEnvironment,
+) -> Result<Command, BackendError> {
+    Err(BackendError::new(
+        BackendErrorKind::Deployment,
         "bounded helper process containment is unsupported on this platform".to_string(),
     ))
 }
@@ -584,6 +817,69 @@ fn configure_process_tree(command: &mut Command) {
 #[cfg(not(any(unix, windows)))]
 fn configure_process_tree(_command: &mut Command) {}
 
+#[cfg(target_os = "linux")]
+fn configure_process_limits(
+    command: &mut Command,
+    execution: &PyExecutionEnvironment,
+) -> Result<Option<File>, BackendError> {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let PyExecutionEnvironment::ProductionLinux { cgroup, .. } = execution else {
+        return Ok(None);
+    };
+    let membership = OpenOptions::new()
+        .write(true)
+        .open(cgroup.join("cgroup.procs"))
+        .map_err(|error| {
+            BackendError::new(
+                BackendErrorKind::Deployment,
+                format!("open production cgroup membership: {error}"),
+            )
+        })?;
+    let membership_fd = membership.as_raw_fd();
+    // SAFETY: callback invokes only async-signal-safe libc operations and uses
+    // stack storage. The descriptor is live at fork; the child inherits its
+    // own copy. The parent closes its copy after spawn returns.
+    unsafe {
+        command.pre_exec(move || write_own_pid_to_cgroup(membership_fd));
+    }
+    Ok(Some(membership))
+}
+
+#[cfg(target_os = "linux")]
+fn write_own_pid_to_cgroup(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let pid = unsafe { libc::getpid() };
+    let mut digits = [0_u8; 32];
+    let mut cursor = digits.len();
+    let mut value = pid as u32;
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let bytes = &digits[cursor..];
+    // SAFETY: `fd` is a live cgroup.procs descriptor and `bytes` is valid.
+    let written = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+    if written == bytes.len() as isize {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_process_limits(
+    _command: &mut Command,
+    _execution: &PyExecutionEnvironment,
+) -> Result<Option<File>, BackendError> {
+    Ok(None)
+}
+
 #[cfg(unix)]
 struct ProcessTree {
     process_group: i32,
@@ -592,8 +888,12 @@ struct ProcessTree {
 #[cfg(unix)]
 impl ProcessTree {
     fn attach(child: &Child) -> Result<Self, BackendError> {
-        let process_group = i32::try_from(child.id())
-            .map_err(|_| BackendError("helper pid exceeds process-group range".to_string()))?;
+        let process_group = i32::try_from(child.id()).map_err(|_| {
+            BackendError::new(
+                BackendErrorKind::Process,
+                "helper pid exceeds process-group range".to_string(),
+            )
+        })?;
         Ok(Self { process_group })
     }
 
@@ -636,7 +936,10 @@ impl ProcessTree {
         unsafe {
             let job = CreateJobObjectW(null(), null());
             if job == null_mut() as HANDLE {
-                return Err(BackendError("create helper job object failed".to_string()));
+                return Err(BackendError::new(
+                    BackendErrorKind::Deployment,
+                    "create helper job object failed".to_string(),
+                ));
             }
             let mut information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
             information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -648,21 +951,24 @@ impl ProcessTree {
             ) == 0
             {
                 CloseHandle(job);
-                return Err(BackendError(
+                return Err(BackendError::new(
+                    BackendErrorKind::Deployment,
                     "configure helper job object failed".to_string(),
                 ));
             }
             let process = child.as_raw_handle() as HANDLE;
             if process == null_mut() as HANDLE || AssignProcessToJobObject(job, process) == 0 {
                 CloseHandle(job);
-                return Err(BackendError(
+                return Err(BackendError::new(
+                    BackendErrorKind::Deployment,
                     "assign helper to job object failed".to_string(),
                 ));
             }
             if NtResumeProcess(process) < 0 {
                 TerminateJobObject(job, 1);
                 CloseHandle(job);
-                return Err(BackendError(
+                return Err(BackendError::new(
+                    BackendErrorKind::Process,
                     "resume job-bound helper process failed".to_string(),
                 ));
             }
@@ -698,7 +1004,8 @@ struct ProcessTree;
 #[cfg(not(any(unix, windows)))]
 impl ProcessTree {
     fn attach(_child: &Child) -> Result<Self, BackendError> {
-        Err(BackendError(
+        Err(BackendError::new(
+            BackendErrorKind::Deployment,
             "bounded helper process trees are unsupported on this platform".to_string(),
         ))
     }
@@ -775,29 +1082,42 @@ impl NeuralBackend for PyBackend {
         sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError> {
         if self.cancellation.is_cancelled() {
-            return Err(BackendError("helper invocation cancelled".to_string()));
+            return Err(BackendError::new(
+                BackendErrorKind::Cancelled,
+                "helper invocation cancelled",
+            ));
         }
         let samples = signal.channels.first().map_or(0, Vec::len);
         self.capabilities
             .validate_signal(signal, sample_rate)
-            .map_err(|error| BackendError(format!("helper capability mismatch: {error:?}")))?;
-        preflight_encode_request(&signal.channels, self.io_limits.maximum_request_bytes)?;
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorKind::Capability,
+                    format!("helper capability mismatch: {error:?}"),
+                )
+            })?;
+        let request_capacity =
+            preflight_encode_request(&signal.channels, self.io_limits.maximum_request_bytes)?;
         let (rate_numerator, rate_denominator) = sample_rate.parts();
         let sample_rate = rate_numerator as f64 / rate_denominator as f64;
-        let output = self.call(json!({
-            "op": "encode",
-            "sample_rate": sample_rate,
-            "signal": &signal.channels,
-            "signal_domain": signal.domain.protocol_name(),
-        }))?;
+        let output = self.call(
+            EncodeRequest {
+                op: "encode",
+                sample_rate,
+                signal: &signal.channels,
+                signal_domain: signal.domain.protocol_name(),
+            },
+            request_capacity,
+        )?;
         self.check_active(output.started)?;
         let envelope: EncodeResponse<'_> = parse_envelope(&output)?;
         self.validate_checkpoint(envelope.checkpoint_sha256)?;
-        let input_elements = signal
-            .channels
-            .len()
-            .checked_mul(samples)
-            .ok_or_else(|| BackendError("signal response limit overflow".to_string()))?;
+        let input_elements = signal.channels.len().checked_mul(samples).ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "signal response limit overflow",
+            )
+        })?;
         let tokens = parse_bounded_array(
             envelope.tokens,
             usize::try_from(self.capabilities.maximum_tokens)
@@ -830,11 +1150,17 @@ impl NeuralBackend for PyBackend {
         };
         self.capabilities
             .validate_output(&tokens)
-            .map_err(|error| BackendError(format!("helper capability mismatch: {error:?}")))?;
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorKind::Capability,
+                    format!("helper capability mismatch: {error:?}"),
+                )
+            })?;
         if usize::from(tokens.n_channels) != signal.channels.len()
             || usize::try_from(tokens.n_samples).ok() != Some(samples)
         {
-            return Err(BackendError(
+            return Err(BackendError::new(
+                BackendErrorKind::Capability,
                 "helper response shape differs from input signal".to_string(),
             ));
         }
@@ -843,29 +1169,39 @@ impl NeuralBackend for PyBackend {
     }
 
     fn decode(&self, t: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
-        self.capabilities
-            .validate_output(t)
-            .map_err(|error| BackendError(format!("helper capability mismatch: {error:?}")))?;
-        preflight_decode_request(t, self.io_limits.maximum_request_bytes)?;
+        self.capabilities.validate_output(t).map_err(|error| {
+            BackendError::new(
+                BackendErrorKind::Capability,
+                format!("helper capability mismatch: {error:?}"),
+            )
+        })?;
+        let request_capacity = preflight_decode_request(t, self.io_limits.maximum_request_bytes)?;
         preflight_decode_response(t, self.io_limits.maximum_stdout_bytes)?;
-        let output = self.call(json!({
-            "op": "decode",
-            "tokens": t.tokens,
-            "schedule": t.schedule,
-            "alphabet": t.alphabet,
-            "n_channels": t.n_channels,
-            "n_samples": t.n_samples,
-            "backend_meta": t.backend_meta,
-            "signal_domain": self.capabilities.signal_domain.protocol_name(),
-        }))?;
+        let output = self.call(
+            DecodeRequest {
+                op: "decode",
+                tokens: &t.tokens,
+                schedule: &t.schedule,
+                alphabet: t.alphabet,
+                n_channels: t.n_channels,
+                n_samples: t.n_samples,
+                backend_meta: &t.backend_meta,
+                signal_domain: self.capabilities.signal_domain.protocol_name(),
+            },
+            request_capacity,
+        )?;
         self.check_active(output.started)?;
         let envelope: DecodeResponse<'_> = parse_envelope(&output)?;
         self.validate_checkpoint(envelope.checkpoint_sha256)?;
         let signal = parse_bounded_matrix(
             envelope.signal,
             usize::from(t.n_channels),
-            usize::try_from(t.n_samples)
-                .map_err(|_| BackendError("sample count exceeds host usize".to_string()))?,
+            usize::try_from(t.n_samples).map_err(|_| {
+                BackendError::new(
+                    BackendErrorKind::ResourceLimit,
+                    "sample count exceeds host usize",
+                )
+            })?,
             "signal",
         )?;
         self.check_active(output.started)?;
@@ -904,10 +1240,13 @@ where
     T: Deserialize<'a>,
 {
     serde_json::from_slice(&output.stdout).map_err(|error| {
-        BackendError(format!(
-            "parse response envelope: {error} (stderr: {})",
-            String::from_utf8_lossy(&output.stderr)
-        ))
+        BackendError::new(
+            BackendErrorKind::Protocol,
+            format!(
+                "parse response envelope: {error} (stderr: {})",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
     })
 }
 
@@ -958,7 +1297,7 @@ where
         A: SeqAccess<'de>,
     {
         if sequence.size_hint().is_some_and(|hint| hint > self.maximum) {
-            return Err(A::Error::custom(format_args!(
+            return Err(DeError::custom(format_args!(
                 "`{}` exceeds element limit {}",
                 self.name, self.maximum
             )));
@@ -966,7 +1305,7 @@ where
         let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.maximum));
         while let Some(value) = sequence.next_element()? {
             if values.len() == self.maximum {
-                return Err(A::Error::custom(format_args!(
+                return Err(DeError::custom(format_args!(
                     "`{}` exceeds element limit {}",
                     self.name, self.maximum
                 )));
@@ -974,7 +1313,7 @@ where
             values.push(value);
         }
         if self.exact.is_some_and(|exact| values.len() != exact) {
-            return Err(A::Error::custom(format_args!(
+            return Err(DeError::custom(format_args!(
                 "`{}` length {} differs from required {}",
                 self.name,
                 values.len(),
@@ -997,10 +1336,18 @@ where
     let mut deserializer = serde_json::Deserializer::from_str(raw.get());
     let values = BoundedArraySeed::new(maximum, exact, name)
         .deserialize(&mut deserializer)
-        .map_err(|error| BackendError(format!("parse `{name}`: {error}")))?;
-    deserializer
-        .end()
-        .map_err(|error| BackendError(format!("parse `{name}` trailing data: {error}")))?;
+        .map_err(|error| {
+            BackendError::new(
+                BackendErrorKind::Protocol,
+                format!("parse `{name}`: {error}"),
+            )
+        })?;
+    deserializer.end().map_err(|error| {
+        BackendError::new(
+            BackendErrorKind::Protocol,
+            format!("parse `{name}` trailing data: {error}"),
+        )
+    })?;
     Ok(values)
 }
 
@@ -1033,7 +1380,7 @@ impl<'de> Visitor<'de> for BoundedMatrixSeed {
         A: SeqAccess<'de>,
     {
         if sequence.size_hint().is_some_and(|hint| hint > self.rows) {
-            return Err(A::Error::custom(format_args!(
+            return Err(DeError::custom(format_args!(
                 "`{}` exceeds row limit {}",
                 self.name, self.rows
             )));
@@ -1051,13 +1398,13 @@ impl<'de> Visitor<'de> for BoundedMatrixSeed {
             rows.push(row);
         }
         if sequence.next_element::<IgnoredAny>()?.is_some() {
-            return Err(A::Error::custom(format_args!(
+            return Err(DeError::custom(format_args!(
                 "`{}` exceeds row limit {}",
                 self.name, self.rows
             )));
         }
         if rows.len() != self.rows {
-            return Err(A::Error::custom(format_args!(
+            return Err(DeError::custom(format_args!(
                 "`{}` row count {} differs from required {}",
                 self.name,
                 rows.len(),
@@ -1081,62 +1428,117 @@ fn parse_bounded_matrix(
         name,
     }
     .deserialize(&mut deserializer)
-    .map_err(|error| BackendError(format!("parse `{name}`: {error}")))?;
-    deserializer
-        .end()
-        .map_err(|error| BackendError(format!("parse `{name}` trailing data: {error}")))?;
+    .map_err(|error| {
+        BackendError::new(
+            BackendErrorKind::Protocol,
+            format!("parse `{name}`: {error}"),
+        )
+    })?;
+    deserializer.end().map_err(|error| {
+        BackendError::new(
+            BackendErrorKind::Protocol,
+            format!("parse `{name}` trailing data: {error}"),
+        )
+    })?;
     Ok(values)
 }
 
 fn preflight_encode_request(
     signal: &[Vec<i64>],
     maximum_request_bytes: u64,
-) -> Result<(), BackendError> {
+) -> Result<usize, BackendError> {
     let samples = signal.first().map_or(0, Vec::len);
     if signal.is_empty() || samples == 0 || signal.iter().any(|row| row.len() != samples) {
-        return Err(BackendError(
+        return Err(BackendError::new(
+            BackendErrorKind::Capability,
             "signal must be non-empty rectangular channels".to_string(),
         ));
     }
     let elements = (signal.len() as u128)
         .checked_mul(samples as u128)
-        .ok_or_else(|| BackendError("signal request size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "signal request size overflow".to_string(),
+            )
+        })?;
     let estimate = elements
         .checked_mul(u128::from(JSON_I64_BYTES))
         .and_then(|bytes| bytes.checked_add(u128::from(JSON_OVERHEAD_BYTES)))
-        .ok_or_else(|| BackendError("signal request size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "signal request size overflow".to_string(),
+            )
+        })?;
     if estimate > u128::from(maximum_request_bytes) {
-        return Err(BackendError(format!(
-            "helper request exceeds byte limit ({estimate} estimated > {maximum_request_bytes})"
-        )));
+        return Err(BackendError::new(
+            BackendErrorKind::ResourceLimit,
+            format!(
+                "helper request exceeds byte limit ({estimate} estimated > {maximum_request_bytes})"
+            ),
+        ));
     }
-    Ok(())
+    usize::try_from(estimate).map_err(|_| {
+        BackendError::new(
+            BackendErrorKind::ResourceLimit,
+            "signal request size exceeds host usize".to_string(),
+        )
+    })
 }
 
 fn preflight_decode_request(
     tokens: &NeuralTokens,
     maximum_request_bytes: u64,
-) -> Result<(), BackendError> {
+) -> Result<usize, BackendError> {
     let token_bytes = (tokens.tokens.len() as u128)
         .checked_mul(u128::from(JSON_I32_BYTES))
-        .ok_or_else(|| BackendError("token request size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "token request size overflow".to_string(),
+            )
+        })?;
     let schedule_bytes = (tokens.schedule.len() as u128)
         .checked_mul(u128::from(JSON_U8_BYTES))
-        .ok_or_else(|| BackendError("schedule request size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "schedule request size overflow".to_string(),
+            )
+        })?;
     let metadata_bytes = (tokens.backend_meta.len() as u128)
         .checked_mul(u128::from(JSON_U8_BYTES))
-        .ok_or_else(|| BackendError("metadata request size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "metadata request size overflow".to_string(),
+            )
+        })?;
     let estimate = token_bytes
         .checked_add(schedule_bytes)
         .and_then(|bytes| bytes.checked_add(metadata_bytes))
         .and_then(|bytes| bytes.checked_add(u128::from(JSON_OVERHEAD_BYTES)))
-        .ok_or_else(|| BackendError("decode request size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "decode request size overflow".to_string(),
+            )
+        })?;
     if estimate > u128::from(maximum_request_bytes) {
-        return Err(BackendError(format!(
-            "helper request exceeds byte limit ({estimate} estimated > {maximum_request_bytes})"
-        )));
+        return Err(BackendError::new(
+            BackendErrorKind::ResourceLimit,
+            format!(
+                "helper request exceeds byte limit ({estimate} estimated > {maximum_request_bytes})"
+            ),
+        ));
     }
-    Ok(())
+    usize::try_from(estimate).map_err(|_| {
+        BackendError::new(
+            BackendErrorKind::ResourceLimit,
+            "decode request size exceeds host usize".to_string(),
+        )
+    })
 }
 
 fn preflight_decode_response(
@@ -1145,16 +1547,29 @@ fn preflight_decode_response(
 ) -> Result<(), BackendError> {
     let elements = u128::from(tokens.n_channels)
         .checked_mul(u128::from(tokens.n_samples))
-        .ok_or_else(|| BackendError("decoded response size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "decoded response size overflow".to_string(),
+            )
+        })?;
     let estimate = elements
         .checked_mul(u128::from(JSON_I64_BYTES))
         .and_then(|bytes| bytes.checked_add(u128::from(JSON_OVERHEAD_BYTES)))
-        .ok_or_else(|| BackendError("decoded response size overflow".to_string()))?;
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourceLimit,
+                "decoded response size overflow".to_string(),
+            )
+        })?;
     if estimate > u128::from(maximum_stdout_bytes) {
-        return Err(BackendError(format!(
-            "helper decoded response exceeds stdout byte limit \
-             ({estimate} estimated > {maximum_stdout_bytes})"
-        )));
+        return Err(BackendError::new(
+            BackendErrorKind::ResourceLimit,
+            format!(
+                "helper decoded response exceeds stdout byte limit \
+                 ({estimate} estimated > {maximum_stdout_bytes})"
+            ),
+        ));
     }
     Ok(())
 }
@@ -1218,7 +1633,7 @@ mod tests {
         let error = backend
             .encode(&digital(vec![vec![1]]), rate())
             .expect_err("cancelled backend must fail");
-        assert!(error.0.contains("cancelled"));
+        assert!(error.message().contains("cancelled"));
     }
 
     #[cfg(target_os = "linux")]
@@ -1240,9 +1655,9 @@ mod tests {
             )
             .expect_err("unsupported model shape and rate must fail before spawn");
         assert!(
-            error.0.contains("ChannelCount"),
+            error.message().contains("ChannelCount"),
             "unexpected capability failure: {}",
-            error.0
+            error.message()
         );
     }
 
@@ -1264,11 +1679,56 @@ mod tests {
         let error = backend
             .encode(&digital(vec![vec![1]]), rate())
             .expect_err("zero timeout must fail before spawn");
-        assert!(error.0.contains("timed out"));
+        assert!(error.message().contains("timed out"));
         assert!(
             !marker.exists(),
             "helper performed a pre-timeout side effect"
         );
+        let _ = fs::remove_file(helper);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn helper_rejection_is_a_nonretryable_model_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!("lmq-reject-helper-{unique}.sh"));
+        fs::write(
+            &helper,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'model rejected request' >&2\nexit 64\n",
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let backend = PyBackend::selftest("sh", &helper, model());
+        let error = backend
+            .encode(&digital(vec![vec![1]]), rate())
+            .expect_err("helper rejection must fail");
+        assert_eq!(error.kind(), BackendErrorKind::Model);
+        assert!(error.message().contains("model rejected request"));
+        let _ = fs::remove_file(helper);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn helper_signal_termination_is_a_process_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!("lmq-signal-helper-{unique}.sh"));
+        fs::write(&helper, "#!/bin/sh\ncat >/dev/null\nkill -KILL $$\n").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let backend = PyBackend::selftest("sh", &helper, model());
+        let error = backend
+            .encode(&digital(vec![vec![1]]), rate())
+            .expect_err("signal termination must fail");
+        assert_eq!(error.kind(), BackendErrorKind::Process);
         let _ = fs::remove_file(helper);
     }
 
@@ -1282,7 +1742,11 @@ mod tests {
         let envelope: EncodeResponse<'_> = parse_envelope(&output).unwrap();
         let error = parse_bounded_array::<i32>(envelope.tokens, 4, None, "tokens")
             .expect_err("fifth token must be rejected at parser boundary");
-        assert!(error.0.contains("exceeds element limit 4"), "{}", error.0);
+        assert!(
+            error.message().contains("exceeds element limit 4"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]
@@ -1301,10 +1765,10 @@ mod tests {
             .expect_err("huge reconstructed shape must fail before helper spawn");
         assert!(
             error
-                .0
+                .message()
                 .contains("decoded response exceeds stdout byte limit"),
             "{}",
-            error.0
+            error.message()
         );
     }
 
@@ -1324,7 +1788,7 @@ mod tests {
             .encode(&digital(vec![vec![1; 10_000]]), rate())
             .expect_err("hung helper must time out");
         let _ = fs::remove_file(helper);
-        assert!(error.0.contains("timed out"));
+        assert!(error.message().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -1352,7 +1816,11 @@ mod tests {
             .encode(&digital(vec![vec![1]]), rate())
             .expect_err("oversized output must fail");
         let _ = fs::remove_file(helper);
-        assert!(error.0.contains("stdout exceeds byte limit"), "{}", error.0);
+        assert!(
+            error.message().contains("stdout exceeds byte limit"),
+            "{}",
+            error.message()
+        );
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -1367,7 +1835,7 @@ mod tests {
         let error = backend
             .encode(&digital(vec![vec![1]]), rate())
             .expect_err("estimated request at limit must fail before spawn");
-        assert!(error.0.contains("request exceeds byte limit"));
+        assert!(error.message().contains("request exceeds byte limit"));
     }
 
     #[cfg(target_os = "linux")]
@@ -1394,7 +1862,7 @@ mod tests {
         let error = backend
             .encode(&digital(vec![vec![1]]), rate())
             .expect_err("process tree must time out");
-        assert!(error.0.contains("timed out"));
+        assert!(error.message().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(2));
         let size_after_return = fs::metadata(&heartbeat).map_or(0, |metadata| metadata.len());
         thread::sleep(Duration::from_millis(100));
@@ -1449,6 +1917,10 @@ mod tests {
         let error = backend
             .encode(&digital(vec![vec![1]]), rate())
             .expect_err("unsupported Unix process containment must fail closed");
-        assert!(error.0.contains("Unavailable"), "{}", error.0);
+        assert!(
+            error.message().contains("Unavailable"),
+            "{}",
+            error.message()
+        );
     }
 }

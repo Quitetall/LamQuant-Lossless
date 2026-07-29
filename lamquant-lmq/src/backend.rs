@@ -10,6 +10,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+use core::fmt;
 use semantic_abir::{ConceptId, ContentId, Rational};
 use semantic_abir_bcs::{ModelProvenance, PccpStatus};
 
@@ -563,11 +564,54 @@ pub struct NeuralTokens {
     pub backend_meta: Vec<u8>,
 }
 
-/// A backend failure — a Python inference error, a shape mismatch, a missing
-/// checkpoint, etc. Textual so the seam stays decoupled from any backend's own
-/// error type.
+/// Stable failure class crossing backend implementations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BackendErrorKind {
+    Cancelled,
+    Timeout,
+    ResourceLimit,
+    Deployment,
+    Process,
+    Protocol,
+    Model,
+    Capability,
+    Deferred,
+    Internal,
+}
+
+/// Backend failure with a stable class and implementation-specific detail.
 #[derive(Debug)]
-pub struct BackendError(pub String);
+pub struct BackendError {
+    kind: BackendErrorKind,
+    message: String,
+}
+
+impl BackendError {
+    pub fn new(kind: BackendErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub const fn kind(&self) -> BackendErrorKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for BackendError {}
 
 /// The swappable neural inference seam. Object-safe by design.
 pub trait NeuralBackend {
@@ -645,27 +689,41 @@ impl NeuralBackend for StubBackend {
         sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError> {
         if signal.channels.is_empty() {
-            return Err(BackendError(String::from("stub: empty signal")));
+            return Err(BackendError::new(
+                BackendErrorKind::Capability,
+                "stub: empty signal",
+            ));
         }
         if !(2..=u16::from(u8::MAX)).contains(&self.alphabet) {
-            return Err(BackendError(String::from(
+            return Err(BackendError::new(
+                BackendErrorKind::Capability,
                 "stub: alphabet must be in 2..=255",
-            )));
+            ));
         }
-        let n_channels = u16::try_from(signal.channels.len())
-            .map_err(|_| BackendError(String::from("stub: too many channels")))?;
-        let n_samples = u32::try_from(signal.channels[0].len())
-            .map_err(|_| BackendError(String::from("stub: too many samples")))?;
+        let n_channels = u16::try_from(signal.channels.len()).map_err(|_| {
+            BackendError::new(BackendErrorKind::ResourceLimit, "stub: too many channels")
+        })?;
+        let n_samples = u32::try_from(signal.channels[0].len()).map_err(|_| {
+            BackendError::new(BackendErrorKind::ResourceLimit, "stub: too many samples")
+        })?;
         if signal
             .channels
             .iter()
             .any(|channel| u32::try_from(channel.len()) != Ok(n_samples))
         {
-            return Err(BackendError(String::from("stub: ragged channels")));
+            return Err(BackendError::new(
+                BackendErrorKind::Capability,
+                "stub: ragged channels",
+            ));
         }
         self.capabilities()
             .validate_signal(signal, sample_rate)
-            .map_err(|error| BackendError(format!("stub capability mismatch: {error:?}")))?;
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorKind::Capability,
+                    format!("stub capability mismatch: {error:?}"),
+                )
+            })?;
         let l = self.alphabet as i64;
         let tokens: Vec<i32> = signal
             .channels
@@ -684,20 +742,29 @@ impl NeuralBackend for StubBackend {
         };
         self.capabilities()
             .validate_output(&tokens)
-            .map_err(|error| BackendError(format!("stub capability mismatch: {error:?}")))?;
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorKind::Capability,
+                    format!("stub capability mismatch: {error:?}"),
+                )
+            })?;
         Ok(tokens)
     }
 
     fn decode(&self, t: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
-        self.capabilities()
-            .validate_output(t)
-            .map_err(|error| BackendError(format!("stub capability mismatch: {error:?}")))?;
+        self.capabilities().validate_output(t).map_err(|error| {
+            BackendError::new(
+                BackendErrorKind::Capability,
+                format!("stub capability mismatch: {error:?}"),
+            )
+        })?;
         let n_ch = t.n_channels as usize;
         let n_s = t.n_samples as usize;
         if t.tokens.len() != n_ch.saturating_mul(n_s) {
-            return Err(BackendError(String::from(
+            return Err(BackendError::new(
+                BackendErrorKind::Capability,
                 "stub: token count != n_channels * n_samples",
-            )));
+            ));
         }
         let mut out = Vec::with_capacity(n_ch);
         for c in 0..n_ch {

@@ -35,6 +35,12 @@ pub const LMQ_KERNEL_ID: &str = "org.quitetall.lamquant.lmq.fsq-rans-v1";
 pub const LMQ_FIDELITY_CONTRACT: &str =
     "org.quitetall.lamquant.bcs2.lmq.explicit-nonexact-reconstruction-v1";
 pub const RANS_MODEL_TOTAL: u64 = 4096;
+/// Smallest admitted BCS2 catalog budget for the required LMQ identity,
+/// fidelity, model-provenance, parameter, semantics, and packet bindings.
+pub const MIN_LMQ_CATALOG_BYTES: u32 = 512;
+/// Smallest possible LMQP1 frame: 15-byte packet header, 15-byte body prefix,
+/// one four-byte model count, and the four-byte terminal rANS state.
+pub const MIN_LMQ_PACKET_FRAME_BYTES: u32 = 38;
 const PACKET_MAGIC: &[u8; 4] = b"LMQP";
 const PACKET_VERSION: u8 = 1;
 const PACKET_HEADER_LEN: usize = 15;
@@ -84,7 +90,7 @@ impl LmqResourceBounds {
             max_tokens: lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32,
             max_schedule_bytes: bundle.max_frame_bytes,
             max_backend_meta_bytes: bundle.max_frame_bytes,
-            max_alphabet: u16::MAX,
+            max_alphabet: RANS_MODEL_TOTAL as u16,
             max_model_total: RANS_MODEL_TOTAL as u32,
             max_model_basis_channels: u16::MAX as u32,
             max_model_basis_terms: lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32,
@@ -167,6 +173,7 @@ pub enum LmqError {
     SemanticEncoding,
     SemanticValidation,
     SignalShapeMismatch,
+    InvalidResourceProfile(&'static str),
     ResourceLimit {
         resource: LmqResource,
         actual: u64,
@@ -191,6 +198,7 @@ pub enum LmqResource {
     ModelDerivationOutputEdges,
     ScheduleBytes,
     BackendMetadataBytes,
+    SemanticFrameBytes,
     PacketBytes,
 }
 
@@ -216,7 +224,7 @@ impl From<CalibrationDomainError> for LmqError {
 impl fmt::Display for LmqError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Backend(error) => write!(formatter, "LMQ backend failed: {}", error.0),
+            Self::Backend(error) => write!(formatter, "LMQ backend failed: {error}"),
             Self::BackendCapability(error) => {
                 write!(formatter, "LMQ backend capability mismatch: {error:?}")
             }
@@ -238,6 +246,9 @@ impl fmt::Display for LmqError {
             }
             Self::UnsupportedSemantics(reason) => {
                 write!(formatter, "unsupported LMQ ABIR semantics: {reason}")
+            }
+            Self::InvalidResourceProfile(reason) => {
+                write!(formatter, "invalid LMQ resource profile: {reason}")
             }
             other => write!(formatter, "LMQ BCS2 bundle error: {other:?}"),
         }
@@ -271,6 +282,151 @@ pub fn transformed_fidelity(metric: impl Into<String>) -> CodecFidelity {
     }
 }
 
+/// Validate shell-owned bounds before payload access or neural inference.
+///
+/// This checks invariants independent of any backend. It rejects profiles that
+/// cannot hold even one valid LMQP1 packet or required BCS2 catalog.
+pub fn validate_resource_bounds(bounds: LmqResourceBounds) -> Result<(), LmqError> {
+    if bounds.bundle.max_catalog_bytes < MIN_LMQ_CATALOG_BYTES {
+        return Err(LmqError::InvalidResourceProfile(
+            "catalog budget is below the LMQ structural minimum",
+        ));
+    }
+    if bounds.bundle.max_index_entries < 2 {
+        return Err(LmqError::InvalidResourceProfile(
+            "LMQ bundles require semantics and packet index entries",
+        ));
+    }
+    if bounds.bundle.max_frame_bytes < MIN_LMQ_PACKET_FRAME_BYTES {
+        return Err(LmqError::InvalidResourceProfile(
+            "frame budget is below the minimum LMQP1 packet",
+        ));
+    }
+    if bounds.bundle.max_generations == 0 || bounds.max_model_total < RANS_MODEL_TOTAL as u32 {
+        return Err(LmqError::InvalidResourceProfile(
+            "generation or fixed-model ceiling is undersized",
+        ));
+    }
+    if bounds.max_tokens > lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32 {
+        return Err(LmqError::InvalidResourceProfile(
+            "token ceiling exceeds the hard rANS symbol limit",
+        ));
+    }
+    if u64::from(bounds.max_alphabet) > RANS_MODEL_TOTAL {
+        return Err(LmqError::InvalidResourceProfile(
+            "alphabet ceiling exceeds the fixed rANS model total",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate one backend's complete production admission envelope.
+///
+/// Unlike the generic shell, a production Node promises its declared backend
+/// capability range fits the compiled resource envelope. This function keeps
+/// that contract in the shell that owns LMQ framing and hard limits.
+pub fn validate_resource_profile(
+    bounds: LmqResourceBounds,
+    capabilities: crate::backend::NeuralBackendCapabilities,
+) -> Result<(), LmqError> {
+    validate_resource_bounds(bounds)?;
+    capabilities
+        .validate_input(
+            capabilities.minimum_channels,
+            capabilities.minimum_samples,
+            capabilities.minimum_sample_rate,
+        )
+        .map_err(LmqError::BackendCapability)?;
+    capabilities
+        .validate_input(
+            capabilities.maximum_channels,
+            capabilities.maximum_samples,
+            capabilities.maximum_sample_rate,
+        )
+        .map_err(LmqError::BackendCapability)?;
+    if !matches!(
+        capabilities.target,
+        crate::backend::BackendTarget::HostNative | crate::backend::BackendTarget::HostSubprocess
+    ) {
+        return Err(LmqError::InvalidResourceProfile(
+            "production LMQ Node requires a host backend",
+        ));
+    }
+    if capabilities.maximum_tokens == 0
+        || capabilities.minimum_alphabet == 0
+        || capabilities.minimum_alphabet > capabilities.maximum_alphabet
+        || u64::from(capabilities.maximum_alphabet) > RANS_MODEL_TOTAL
+        || bounds.max_signal_bytes == 0
+        || bounds.max_signal_channels == 0
+        || bounds.max_tokens == 0
+        || bounds.max_schedule_bytes == 0
+        || bounds.max_alphabet == 0
+        || bounds.max_model_basis_channels == 0
+        || bounds.max_model_basis_terms == 0
+        || bounds.max_model_derivations == 0
+        || bounds.max_model_claims == 0
+        || bounds.max_model_derivation_output_edges == 0
+        || bounds.max_body_internal_working_bytes == 0
+        || bounds.max_signal_channels < capabilities.maximum_channels
+        || bounds.max_tokens < capabilities.maximum_tokens
+        || bounds.max_schedule_bytes < capabilities.maximum_schedule_bytes
+        || bounds.max_backend_meta_bytes < capabilities.maximum_backend_metadata_bytes
+        || bounds.max_alphabet < capabilities.maximum_alphabet
+    {
+        return Err(LmqError::InvalidResourceProfile(
+            "backend capability range exceeds LMQ resource bounds",
+        ));
+    }
+    let maximum_signal_bytes = u64::from(capabilities.maximum_channels)
+        .checked_mul(u64::from(capabilities.maximum_samples))
+        .and_then(|samples| samples.checked_mul(8))
+        .ok_or(LmqError::InvalidResourceProfile(
+            "backend signal extent overflows",
+        ))?;
+    if maximum_signal_bytes > bounds.max_signal_bytes {
+        return Err(LmqError::InvalidResourceProfile(
+            "backend maximum signal exceeds decoded-signal budget",
+        ));
+    }
+    let maximum_rans_bytes = u64::from(capabilities.maximum_tokens)
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(16))
+        .ok_or(LmqError::InvalidResourceProfile(
+            "backend rANS extent overflows",
+        ))?;
+    let maximum_body_bytes = 15_u64
+        .checked_add(u64::from(capabilities.maximum_alphabet) * 4)
+        .and_then(|bytes| bytes.checked_add(u64::from(capabilities.maximum_schedule_bytes)))
+        .and_then(|bytes| bytes.checked_add(maximum_rans_bytes))
+        .ok_or(LmqError::InvalidResourceProfile(
+            "backend body extent overflows",
+        ))?;
+    let maximum_packet_bytes = 15_u64
+        .checked_add(u64::from(capabilities.maximum_backend_metadata_bytes))
+        .and_then(|bytes| bytes.checked_add(maximum_body_bytes))
+        .ok_or(LmqError::InvalidResourceProfile(
+            "backend packet extent overflows",
+        ))?;
+    if maximum_packet_bytes > u64::from(bounds.bundle.max_frame_bytes) {
+        return Err(LmqError::InvalidResourceProfile(
+            "frame budget cannot hold maximum backend packet",
+        ));
+    }
+    let maximum_body_working_bytes = u64::from(capabilities.maximum_alphabet)
+        .checked_mul(8)
+        .and_then(|bytes| bytes.checked_add(maximum_rans_bytes))
+        .and_then(|bytes| bytes.checked_add(maximum_body_bytes))
+        .ok_or(LmqError::InvalidResourceProfile(
+            "backend body working extent overflows",
+        ))?;
+    if maximum_body_working_bytes > bounds.max_body_internal_working_bytes {
+        return Err(LmqError::InvalidResourceProfile(
+            "body working budget cannot hold maximum backend output",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Compatibility-signature wrapper. `bounds.max_frame_bytes` also caps decoded
 /// I64 signal materialization; use [`encode_bundle_bounded`] when compressed
@@ -302,6 +458,7 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
     implementation: CodecImplementation,
     bounds: LmqResourceBounds,
 ) -> Result<Vec<u8>, LmqError> {
+    validate_resource_bounds(bounds)?;
     if fidelity.kind == CodecFidelityKind::Exact || implementation.kernel_id != LMQ_KERNEL_ID {
         return Err(LmqError::CatalogContract);
     }
@@ -309,6 +466,12 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
     // ABIR before payload access or backend work. This guarantees every emitted
     // bundle can pass the decoder's fidelity projection.
     codec_fidelity_statement(dataset.id(), &fidelity)?;
+    let semantics = canonical_debug_json(dataset).map_err(|_| LmqError::SemanticEncoding)?;
+    enforce_lmq_limit(
+        LmqResource::SemanticFrameBytes,
+        semantics.len() as u64,
+        u64::from(bounds.bundle.max_frame_bytes),
+    )?;
     let capabilities = backend.capabilities();
     let expected_channels = preflight_signal_channel_count(dataset, bounds)?;
     if expected_channels < capabilities.minimum_channels
@@ -346,7 +509,6 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
         return Err(LmqError::SignalShapeMismatch);
     }
     let packet = encode_packet_bounded(&tokens, bounds)?;
-    let semantics = canonical_debug_json(dataset).map_err(|_| LmqError::SemanticEncoding)?;
     let packets = [&packet[..]];
     encode_codec_bundle(
         CodecBundleInput {
@@ -406,6 +568,7 @@ pub fn open_bundle_bounded_with_policy<'a>(
     bounds: LmqResourceBounds,
     legacy_policy: LegacyModelContractPolicy,
 ) -> Result<OpenedLmqBundle<'a>, LmqError> {
+    validate_resource_bounds(bounds)?;
     let bundle = CodecBundleView::open(bytes, bounds.bundle).map_err(LmqError::Bundle)?;
     let catalog = bundle.catalog();
     let capabilities = backend.capabilities();
