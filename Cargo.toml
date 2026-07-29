@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/lamquant-common",
+    "crates/lamquant-model-pack",
     "crates/lamquant-neg",
     "lamquant-lml-mcu",
     "lamquant-lml-desktop",

@@ -1,0 +1,11 @@
+[package]
+name = "lamquant-model-pack"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Canonical no_std LQW1 integer model-pack primitive"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/LamQuant-Lossless"
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }

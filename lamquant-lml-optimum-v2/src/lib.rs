@@ -72,6 +72,18 @@ pub enum OptimumV2Error {
     Integrity(String),
 }
 
+impl From<lamquant_model_pack::PackError> for OptimumV2Error {
+    fn from(error: lamquant_model_pack::PackError) -> Self {
+        let message = error.message().to_owned();
+        match error.kind() {
+            lamquant_model_pack::PackErrorKind::InvalidInput => Self::InvalidInput(message),
+            lamquant_model_pack::PackErrorKind::InvalidPacket => Self::InvalidPacket(message),
+            lamquant_model_pack::PackErrorKind::Integrity => Self::Integrity(message),
+            _ => Self::InvalidPacket(message),
+        }
+    }
+}
+
 impl fmt::Display for OptimumV2Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -2,6 +2,7 @@ use lamquant_lml_optimum_v2::bgf1_model_pack::{
     Bgf1ModelPack, BGF1_EXPECTED_PACK_BYTES, BGF1_LEARNED_PARAMETER_COUNT, BGF1_MODEL_ID,
 };
 use lamquant_lml_optimum_v2::model_pack::{ModelPack, ModelTensor, TensorDtype, LQW_MAGIC};
+use lamquant_lml_optimum_v2::OptimumV2Error;
 use sha2::{Digest, Sha256};
 
 fn tensors() -> Vec<ModelTensor> {
@@ -178,6 +179,24 @@ fn lqw1_round_trip_preserves_canonical_directory() {
             0xbb, 0xa9, 0x0b, 0x45,
         ]
     );
+}
+
+#[test]
+fn owned_model_pack_preserves_optimum_error_signature() {
+    fn encode(tensors: &[ModelTensor]) -> Result<Vec<u8>, OptimumV2Error> {
+        ModelPack::encode(tensors)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<ModelPack, OptimumV2Error> {
+        ModelPack::decode(bytes)
+    }
+
+    let encoded = encode(&tensors()).unwrap();
+    assert_eq!(decode(&encoded).unwrap().tensors, {
+        let mut tensors = tensors();
+        tensors.sort_by(|left, right| left.name.cmp(&right.name));
+        tensors
+    });
 }
 
 #[test]

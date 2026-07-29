@@ -16,6 +16,7 @@ name = "optimum-v2-codec"
 path = "src/bin/optimum_v2_codec.rs"
 
 [dependencies]
+lamquant-model-pack = { version = "0.1.0", path = "../crates/lamquant-model-pack" }
 libc = "0.2"
 serde_json = "1"
 sha2 = "0.10"
