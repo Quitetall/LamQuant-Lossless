@@ -110,24 +110,87 @@ impl CheckedRational {
         self.multiply(Self::new(other.denominator, other.numerator)?)
     }
 
+    #[cfg(test)]
     fn round_ties_even_i64(self) -> Result<i64, CalibrationDomainError> {
-        debug_assert!(self.denominator > 0);
-        let quotient = self.numerator / self.denominator;
-        let remainder = self.numerator % self.denominator;
-        let magnitude = remainder.unsigned_abs();
-        let complement = (self.denominator as u128)
-            .checked_sub(magnitude)
+        round_ratio_ties_even_i64(self.numerator, self.denominator)
+    }
+}
+
+fn round_ratio_ties_even_i64(
+    numerator: i128,
+    denominator: i128,
+) -> Result<i64, CalibrationDomainError> {
+    debug_assert!(denominator > 0);
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let magnitude = remainder.unsigned_abs();
+    let complement = (denominator as u128)
+        .checked_sub(magnitude)
+        .ok_or_else(calibration_range_error)?;
+    let round_away =
+        magnitude > complement || (magnitude == complement && quotient.rem_euclid(2) != 0);
+    let rounded = if round_away {
+        quotient
+            .checked_add(if numerator < 0 { -1 } else { 1 })
+            .ok_or_else(calibration_range_error)?
+    } else {
+        quotient
+    };
+    i64::try_from(rounded).map_err(|_| calibration_range_error())
+}
+
+/// Pre-reduced `sample * scale + offset` with one shared denominator.
+///
+/// Compilation performs every GCD and rational reduction. Applying the kernel
+/// to one sample needs only one checked multiply, one checked add, division,
+/// and ties-to-even rounding.
+#[derive(Clone, Copy)]
+struct CheckedAffine {
+    multiplier: i128,
+    addend: i128,
+    denominator: i128,
+}
+
+impl CheckedAffine {
+    fn compile(
+        scale: CheckedRational,
+        offset: CheckedRational,
+    ) -> Result<Self, CalibrationDomainError> {
+        let divisor = gcd_u128(scale.denominator as u128, offset.denominator as u128);
+        let divisor = i128::try_from(divisor).map_err(|_| calibration_range_error())?;
+        let scale_factor = offset.denominator / divisor;
+        let offset_factor = scale.denominator / divisor;
+        let multiplier = scale
+            .numerator
+            .checked_mul(scale_factor)
             .ok_or_else(calibration_range_error)?;
-        let round_away =
-            magnitude > complement || (magnitude == complement && quotient.rem_euclid(2) != 0);
-        let rounded = if round_away {
-            quotient
-                .checked_add(if self.numerator < 0 { -1 } else { 1 })
-                .ok_or_else(calibration_range_error)?
-        } else {
-            quotient
-        };
-        i64::try_from(rounded).map_err(|_| calibration_range_error())
+        let addend = offset
+            .numerator
+            .checked_mul(offset_factor)
+            .ok_or_else(calibration_range_error)?;
+        let denominator = scale
+            .denominator
+            .checked_mul(scale_factor)
+            .ok_or_else(calibration_range_error)?;
+        let common_divisor = gcd_u128(
+            gcd_u128(multiplier.unsigned_abs(), addend.unsigned_abs()),
+            denominator as u128,
+        );
+        let common_divisor =
+            i128::try_from(common_divisor).map_err(|_| calibration_range_error())?;
+        Ok(Self {
+            multiplier: multiplier / common_divisor,
+            addend: addend / common_divisor,
+            denominator: denominator / common_divisor,
+        })
+    }
+
+    fn apply(self, sample: i64) -> Result<i64, CalibrationDomainError> {
+        let numerator = i128::from(sample)
+            .checked_mul(self.multiplier)
+            .and_then(|scaled| scaled.checked_add(self.addend))
+            .ok_or_else(calibration_range_error)?;
+        round_ratio_ties_even_i64(numerator, self.denominator)
     }
 }
 
@@ -160,10 +223,8 @@ fn unit_to_microvolt(unit: &ConceptId) -> Result<CheckedRational, CalibrationDom
 /// Inverse: `digital = q16 * inverse_scale + inverse_offset`.
 #[derive(Clone, Copy)]
 pub(crate) struct AffineDomainTransform {
-    forward_scale: CheckedRational,
-    forward_offset: CheckedRational,
-    inverse_scale: CheckedRational,
-    inverse_offset: CheckedRational,
+    forward: CheckedAffine,
+    inverse: CheckedAffine,
 }
 
 impl AffineDomainTransform {
@@ -181,25 +242,17 @@ impl AffineDomainTransform {
             .subtract(offset)?
             .divide(scale)?;
         Ok(Self {
-            forward_scale,
-            forward_offset,
-            inverse_scale,
-            inverse_offset,
+            forward: CheckedAffine::compile(forward_scale, forward_offset)?,
+            inverse: CheckedAffine::compile(inverse_scale, inverse_offset)?,
         })
     }
 
     pub(crate) fn digital_to_model(self, sample: i64) -> Result<i64, CalibrationDomainError> {
-        CheckedRational::integer(i128::from(sample))
-            .multiply(self.forward_scale)?
-            .add(self.forward_offset)?
-            .round_ties_even_i64()
+        self.forward.apply(sample)
     }
 
     pub(crate) fn model_to_digital(self, sample: i64) -> Result<i64, CalibrationDomainError> {
-        CheckedRational::integer(i128::from(sample))
-            .multiply(self.inverse_scale)?
-            .add(self.inverse_offset)?
-            .round_ties_even_i64()
+        self.inverse.apply(sample)
     }
 }
 
@@ -265,5 +318,80 @@ mod tests {
         assert!(AffineDomainTransform::compile(&unknown).is_err());
         let oversized = calibration((i128::MAX, 1), (0, 1), "ucum:V");
         assert!(AffineDomainTransform::compile(&oversized).is_err());
+    }
+
+    #[test]
+    fn compiled_affine_matches_exact_rational_reference() {
+        let cases = [
+            calibration((3, 7), (-11, 5), "ucum:V"),
+            calibration((-5, 13), (17, 19), "ucum:mV"),
+            calibration((23, 29), (-31, 37), "ucum:uV"),
+            calibration((41, 43), (47, 53), "ucum:nV"),
+        ];
+        let samples = [
+            i32::MIN as i64,
+            -65_537,
+            -3,
+            -1,
+            0,
+            1,
+            3,
+            65_537,
+            i32::MAX as i64,
+        ];
+        for calibration in cases {
+            let scale = CheckedRational::from_abir(calibration.scale()).unwrap();
+            let offset = CheckedRational::from_abir(calibration.offset()).unwrap();
+            let model_units = unit_to_microvolt(calibration.unit())
+                .unwrap()
+                .multiply(CheckedRational::integer(65_536))
+                .unwrap();
+            let forward_scale = scale.multiply(model_units).unwrap();
+            let forward_offset = offset.multiply(model_units).unwrap();
+            let inverse_scale = CheckedRational::integer(1)
+                .divide(model_units)
+                .unwrap()
+                .divide(scale)
+                .unwrap();
+            let inverse_offset = CheckedRational::integer(0)
+                .subtract(offset)
+                .unwrap()
+                .divide(scale)
+                .unwrap();
+            let transform = AffineDomainTransform::compile(&calibration).unwrap();
+            for sample in samples {
+                let expected_forward = CheckedRational::integer(i128::from(sample))
+                    .multiply(forward_scale)
+                    .and_then(|scaled| scaled.add(forward_offset))
+                    .and_then(CheckedRational::round_ties_even_i64);
+                assert_eq!(transform.digital_to_model(sample), expected_forward);
+                let expected_inverse = CheckedRational::integer(i128::from(sample))
+                    .multiply(inverse_scale)
+                    .and_then(|scaled| scaled.add(inverse_offset))
+                    .and_then(CheckedRational::round_ties_even_i64);
+                assert_eq!(transform.model_to_digital(sample), expected_inverse);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual calibration hot-path benchmark"]
+    fn calibration_hot_path_benchmark() {
+        let transform =
+            AffineDomainTransform::compile(&calibration((3, 7), (-11, 5), "ucum:uV")).unwrap();
+        let iterations = 20_000_000_i64;
+        let started = std::time::Instant::now();
+        let mut checksum = 0_i64;
+        for sample in 0..iterations {
+            checksum ^= std::hint::black_box(transform)
+                .digital_to_model(std::hint::black_box(sample % 65_537 - 32_768))
+                .unwrap();
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "calibration_hot_path iterations={iterations} elapsed_ns={} ns_per_sample={:.3} checksum={checksum}",
+            elapsed.as_nanos(),
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
     }
 }

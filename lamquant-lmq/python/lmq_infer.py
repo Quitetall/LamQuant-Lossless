@@ -217,7 +217,7 @@ def model_encode(req):
         allow_nan=False,
     ).encode("utf-8")
     return {
-        "tokens": [int(t) for t in toks],
+        "tokens": toks.tolist(),
         "schedule": [l] * lat.shape[1],
         "alphabet": l,
         "n_channels": len(signal),
@@ -258,7 +258,7 @@ def model_decode(req):
         raise OverflowError("model reconstruction exceeds Q47.16 microvolt range")
     signal_q16 = scaled.astype(np.int64)
     return {
-        "signal": [[int(v) for v in ch] for ch in signal_q16],
+        "signal": signal_q16.tolist(),
         "checkpoint_sha256": checkpoint_sha256,
     }
 
