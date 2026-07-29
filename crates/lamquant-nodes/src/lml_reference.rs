@@ -46,7 +46,8 @@ const PACKETS_SEMANTIC_TYPE: &str = "bcs.lml.packet-sequence.lossless-v1";
 pub const REFERENCE_MAX_SIGNAL_BYTES: u64 = 128 * 1024 * 1024;
 pub const REFERENCE_MAX_PACKET_BYTES: u64 = 512 * 1024 * 1024;
 const REFERENCE_PEAK_BYTES: u64 = 1024 * 1024 * 1024;
-pub const REFERENCE_MCU_SCRATCH_BYTES: u64 = 256 * 1024;
+pub const REFERENCE_MCU_SCRATCH_BYTES: u64 =
+    u16::MAX as u64 * 2 * core::mem::size_of::<i64>() as u64;
 const REFERENCE_MAX_ELEMENTS: u64 = REFERENCE_MAX_SIGNAL_BYTES / core::mem::size_of::<i64>() as u64;
 const REFERENCE_MAX_CHANNELS: usize = 256;
 
