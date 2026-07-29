@@ -16,10 +16,12 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use semantic_abir::ContentId;
+use semantic_abir::{ContentId, Rational};
 use semantic_abir_bcs::{ModelProvenance, PccpStatus};
 
-use crate::backend::{BackendError, NeuralBackend, NeuralTokens};
+use crate::backend::{
+    BackendError, BackendTarget, NeuralBackend, NeuralBackendCapabilities, NeuralTokens,
+};
 
 /// Registry-SHA-pinned ternary weights baked into the binary. Placeholder: the
 /// real packed-ternary + Q31-alpha blob is `include_bytes!`'d here once the model
@@ -59,6 +61,24 @@ const DEFERRED: &str =
     "RustBackend forward-pass port is deferred (ADR 0074 N3) — use PyBackend for now";
 
 impl NeuralBackend for RustBackend {
+    fn capabilities(&self) -> NeuralBackendCapabilities {
+        NeuralBackendCapabilities {
+            target: BackendTarget::McuNative,
+            operational: false,
+            minimum_channels: 21,
+            maximum_channels: 21,
+            minimum_samples: 2_500,
+            maximum_samples: 2_500,
+            minimum_sample_rate: Rational::new(250, 1).expect("valid model sample rate"),
+            maximum_sample_rate: Rational::new(250, 1).expect("valid model sample rate"),
+            maximum_tokens: 32 * 79,
+            maximum_schedule_bytes: 79,
+            maximum_backend_metadata_bytes: 16 * 1024 * 1024,
+            minimum_alphabet: 32,
+            maximum_alphabet: 32,
+        }
+    }
+
     fn model_provenance(&self) -> ModelProvenance {
         ModelProvenance {
             checkpoint_content_id: ContentId::from_bytes([0x61; 32]),
@@ -72,7 +92,7 @@ impl NeuralBackend for RustBackend {
     fn encode(
         &self,
         _signal: &[Vec<i64>],
-        _sample_rate: f64,
+        _sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError> {
         Err(BackendError(String::from(DEFERRED)))
     }
@@ -91,7 +111,9 @@ mod tests {
         let b = RustBackend::new();
         // Wired behind the trait (so the swap is a drop-in), but the forward pass
         // returns a clear deferred error — never a panic.
-        assert!(b.encode(&[alloc::vec![0i64, 1]], 250.0).is_err());
+        assert!(b
+            .encode(&[alloc::vec![0i64, 1]], Rational::new(250, 1).unwrap())
+            .is_err());
         assert!(b
             .decode(&NeuralTokens {
                 tokens: alloc::vec![0],

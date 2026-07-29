@@ -36,6 +36,10 @@ fn python3_available() -> bool {
         .unwrap_or(false)
 }
 
+fn process_containment_available() -> bool {
+    cfg!(any(target_os = "linux", windows))
+}
+
 fn eeg(signal: Vec<Vec<i64>>) -> OpenedDataset<InMemoryPayloadAccess> {
     let mut draft = DatasetDraft::new(ObjectId::<DatasetTag>::from_bytes([1; 16]));
     let recording_id = ObjectId::<RecordingTag>::from_bytes([2; 16]);
@@ -118,6 +122,10 @@ fn reconstructed_signal(opened: &OpenedDataset<InMemoryPayloadAccess>) -> Vec<Ve
 
 #[test]
 fn py_backend_selftest_round_trips_through_the_subprocess_and_wire() {
+    if !process_containment_available() {
+        eprintln!("SKIP py_backend_selftest: bounded process containment unavailable");
+        return;
+    }
     if !python3_available() {
         eprintln!("SKIP py_backend_selftest: python3 not available");
         return;
@@ -162,6 +170,10 @@ fn py_backend_selftest_round_trips_through_the_subprocess_and_wire() {
 
 #[test]
 fn py_backend_model_end_to_end_is_env_gated() {
+    if !process_containment_available() {
+        eprintln!("SKIP py_backend_model: bounded process containment unavailable");
+        return;
+    }
     if !python3_available() {
         eprintln!("SKIP py_backend_model: python3 not available");
         return;

@@ -13,8 +13,8 @@ use semantic_abir::{
     canonical_debug_json, parse_canonical_dataset, payload_content_id, verify_payload_content,
     AbirDataset, Atom, AtomTag, ByteOrder, ContentId, DatasetDraft, DatasetTag, ElementType,
     InMemoryPayloadAccess, Layout, ObjectId, OpenedDataset, PayloadAccess, PayloadDescriptor,
-    PayloadLease, Presence, Recording, RecordingTag, SignalBlock, Stream, StreamTag, TimeAxis,
-    ValidationLimits,
+    PayloadLease, Presence, Rational, Recording, RecordingTag, SignalBlock, Stream, StreamTag,
+    TimeAxis, ValidationLimits,
 };
 use semantic_abir_bcs::{
     encode_codec_bundle, CodecBundleError, CodecBundleInput, CodecBundleView, CodecFidelity,
@@ -22,7 +22,7 @@ use semantic_abir_bcs::{
     ResourceBounds,
 };
 
-use crate::backend::{BackendError, NeuralBackend, NeuralTokens};
+use crate::backend::{BackendCapabilityError, BackendError, NeuralBackend, NeuralTokens};
 use crate::body::{decode_body_bounded, encode_body_bounded, BodyBounds, BodyError};
 
 pub const LMQ_KERNEL_ID: &str = "org.quitetall.lamquant.lmq.fsq-rans-v1";
@@ -120,6 +120,7 @@ impl<'a> OpenedLmqBundle<'a> {
 #[non_exhaustive]
 pub enum LmqError {
     Backend(BackendError),
+    BackendCapability(BackendCapabilityError),
     Body(BodyError),
     Bundle(CodecBundleError),
     CatalogContract,
@@ -161,6 +162,9 @@ impl fmt::Display for LmqError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Backend(error) => write!(formatter, "LMQ backend failed: {}", error.0),
+            Self::BackendCapability(error) => {
+                write!(formatter, "LMQ backend capability mismatch: {error:?}")
+            }
             Self::Body(error) => write!(formatter, "LMQ token body failed: {error:?}"),
             Self::Bundle(error) => error.fmt(formatter),
             Self::PayloadAccess(error) => error.fmt(formatter),
@@ -243,14 +247,20 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
     if fidelity.kind == CodecFidelityKind::Exact || implementation.kernel_id != LMQ_KERNEL_ID {
         return Err(LmqError::CatalogContract);
     }
-    let (signal, sample_rate) = read_signal(dataset, access, bounds.max_signal_bytes)?;
+    let (expected_channels, expected_samples, sample_rate) = reconstruction_shape(dataset)?;
+    let capabilities = backend.capabilities();
+    capabilities
+        .validate_input(expected_channels, expected_samples, sample_rate)
+        .map_err(LmqError::BackendCapability)?;
+    let signal = read_signal(dataset, access, bounds.max_signal_bytes)?;
     let model = backend.model_provenance();
     let tokens = backend
         .encode(&signal, sample_rate)
         .map_err(LmqError::Backend)?;
-    if usize::from(tokens.n_channels) != signal.len()
-        || usize::try_from(tokens.n_samples).ok() != signal.first().map(Vec::len)
-    {
+    capabilities
+        .validate_output(&tokens)
+        .map_err(LmqError::BackendCapability)?;
+    if tokens.n_channels != expected_channels || tokens.n_samples != expected_samples {
         return Err(LmqError::SignalShapeMismatch);
     }
     let packet = encode_packet_bounded(&tokens, bounds)?;
@@ -299,10 +309,17 @@ pub fn open_bundle_bounded<'a>(
     }
     let dataset = parse_canonical_dataset(bundle.canonical_semantics())
         .map_err(|_| LmqError::SemanticEncoding)?;
-    let (expected_channels, expected_samples) = reconstruction_shape(&dataset)?;
+    let (expected_channels, expected_samples, sample_rate) = reconstruction_shape(&dataset)?;
+    let capabilities = backend.capabilities();
+    capabilities
+        .validate_input(expected_channels, expected_samples, sample_rate)
+        .map_err(LmqError::BackendCapability)?;
     enforce_signal_bound(expected_channels, expected_samples, bounds.max_signal_bytes)?;
     let packet = bundle.packet(0).ok_or(LmqError::Header)?;
     let tokens = decode_packet_bounded(packet, bounds)?;
+    capabilities
+        .validate_output(&tokens)
+        .map_err(LmqError::BackendCapability)?;
     if tokens.n_channels != expected_channels || tokens.n_samples != expected_samples {
         return Err(LmqError::SignalShapeMismatch);
     }
@@ -434,7 +451,7 @@ fn derived_object_id<T>(
     ObjectId::from_bytes(bytes)
 }
 
-fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32), LmqError> {
+fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32, Rational), LmqError> {
     if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
         return Err(LmqError::UnsupportedSemantics(
             "requires exactly one recording and one stream",
@@ -455,6 +472,7 @@ fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32), LmqError> {
         u16::try_from(stream.atoms().len()).map_err(|_| LmqError::SignalShapeMismatch)?;
     let mut samples = None;
     let mut start = None;
+    let mut sample_rate = None;
     for atom_id in stream.atoms() {
         let atom = dataset
             .atoms()
@@ -484,16 +502,28 @@ fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32), LmqError> {
             || samples
                 .replace(segment.samples())
                 .is_some_and(|prior| prior != segment.samples())
-            || start
-                .replace(segment.start())
-                .is_some_and(|prior| prior != segment.start())
         {
             return Err(LmqError::SignalShapeMismatch);
+        }
+        if start
+            .replace(segment.start())
+            .is_some_and(|prior| prior != segment.start())
+            || sample_rate
+                .replace(segment.rate())
+                .is_some_and(|prior| prior != segment.rate())
+        {
+            return Err(LmqError::UnsupportedSemantics(
+                "LMQ requires aligned starts and uniform rates",
+            ));
         }
     }
     let samples = u32::try_from(samples.ok_or(LmqError::SignalShapeMismatch)?)
         .map_err(|_| LmqError::SignalShapeMismatch)?;
-    Ok((channels, samples))
+    Ok((
+        channels,
+        samples,
+        sample_rate.ok_or(LmqError::SignalShapeMismatch)?,
+    ))
 }
 
 fn canonical_parameters() -> Vec<CodecParameter> {
@@ -684,7 +714,7 @@ fn read_signal<A: PayloadAccess>(
     dataset: &AbirDataset,
     access: &A,
     max_signal_bytes: u64,
-) -> Result<(Vec<Vec<i64>>, f64), LmqError> {
+) -> Result<Vec<Vec<i64>>, LmqError> {
     if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
         return Err(LmqError::UnsupportedSemantics(
             "requires exactly one recording and one stream",
@@ -794,12 +824,8 @@ fn read_signal<A: PayloadAccess>(
         }
         signal.push(channel);
     }
-    let (numerator, denominator) = sample_rate.ok_or(LmqError::SignalShapeMismatch)?.parts();
-    let rate = numerator as f64 / denominator as f64;
-    if !rate.is_finite() || rate <= 0.0 {
-        return Err(LmqError::UnsupportedSemantics("invalid sample rate"));
-    }
-    Ok((signal, rate))
+    sample_rate.ok_or(LmqError::SignalShapeMismatch)?;
+    Ok(signal)
 }
 
 fn enforce_signal_bound(
@@ -1033,6 +1059,50 @@ mod tests {
     }
 
     #[test]
+    fn backend_input_contract_fails_before_payload_or_inference() {
+        struct ContractRejectingBackend;
+        impl NeuralBackend for ContractRejectingBackend {
+            fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+                let mut capabilities = StubBackend::default().capabilities();
+                capabilities.minimum_channels = 21;
+                capabilities.maximum_channels = 21;
+                capabilities
+            }
+
+            fn model_provenance(&self) -> ModelProvenance {
+                StubBackend::default().model_provenance()
+            }
+
+            fn encode(
+                &self,
+                _signal: &[Vec<i64>],
+                _sample_rate: Rational,
+            ) -> Result<NeuralTokens, BackendError> {
+                panic!("backend must not run after capability rejection")
+            }
+
+            fn decode(&self, _tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+                unreachable!()
+            }
+        }
+
+        let opened = fixture();
+        assert!(matches!(
+            encode_bundle(
+                opened.dataset(),
+                opened.access(),
+                &ContractRejectingBackend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::BackendCapability(
+                BackendCapabilityError::ChannelCount
+            ))
+        ));
+    }
+
+    #[test]
     fn implementation_identity_tracks_linked_abir_while_wire_catalog_stays_frozen() {
         assert_ne!(LINKED_ABIR_REVISION, LMQ_WIRE_ABIR_REVISION);
 
@@ -1120,6 +1190,10 @@ mod tests {
         .unwrap();
         struct WrongModelBackend(StubBackend);
         impl NeuralBackend for WrongModelBackend {
+            fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+                self.0.capabilities()
+            }
+
             fn model_provenance(&self) -> ModelProvenance {
                 let mut provenance = self.0.model_provenance();
                 provenance.checkpoint_sha256 = [11; 32];
@@ -1129,7 +1203,7 @@ mod tests {
             fn encode(
                 &self,
                 signal: &[Vec<i64>],
-                sample_rate: f64,
+                sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 self.0.encode(signal, sample_rate)
             }
@@ -1215,6 +1289,10 @@ mod tests {
         }
         struct PanicBackend;
         impl NeuralBackend for PanicBackend {
+            fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+                StubBackend::default().capabilities()
+            }
+
             fn model_provenance(&self) -> ModelProvenance {
                 StubBackend::default().model_provenance()
             }
@@ -1222,7 +1300,7 @@ mod tests {
             fn encode(
                 &self,
                 _signal: &[Vec<i64>],
-                _sample_rate: f64,
+                _sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 panic!("backend must not run after failed signal preflight")
             }
@@ -1327,6 +1405,10 @@ mod tests {
 
         struct PanicDecodeBackend;
         impl NeuralBackend for PanicDecodeBackend {
+            fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+                StubBackend::default().capabilities()
+            }
+
             fn model_provenance(&self) -> ModelProvenance {
                 StubBackend::default().model_provenance()
             }
@@ -1334,7 +1416,7 @@ mod tests {
             fn encode(
                 &self,
                 _signal: &[Vec<i64>],
-                _sample_rate: f64,
+                _sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 unreachable!()
             }
