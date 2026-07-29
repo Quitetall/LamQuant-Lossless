@@ -39,7 +39,8 @@ use serde_json::value::RawValue;
 use serde_json::{json, Value};
 
 use crate::backend::{
-    BackendError, BackendTarget, NeuralBackend, NeuralBackendCapabilities, NeuralTokens,
+    BackendError, BackendTarget, NeuralBackend, NeuralBackendCapabilities, NeuralSignal,
+    NeuralTokens, SignalDomain,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -95,7 +96,8 @@ pub struct PyBackend {
     /// Path to the inference helper script (`lmq_infer.py`).
     helper: PathBuf,
     /// `"selftest"` (deterministic, no weights — proves the bridge) or `"model"`
-    /// (the real `SubbandCodec`, env-gated).
+    /// (the real `SubbandCodec`; optional in developer tests, mandatory in the
+    /// package evidence gate).
     mode: String,
     model: ModelProvenance,
     timeout: Duration,
@@ -696,6 +698,7 @@ impl ProcessTree {
 fn selftest_capabilities() -> NeuralBackendCapabilities {
     NeuralBackendCapabilities {
         target: BackendTarget::HostSubprocess,
+        signal_domain: SignalDomain::DigitalInteger,
         operational: cfg!(any(target_os = "linux", windows)),
         minimum_channels: 1,
         maximum_channels: u16::MAX,
@@ -714,6 +717,7 @@ fn selftest_capabilities() -> NeuralBackendCapabilities {
 fn model_capabilities() -> NeuralBackendCapabilities {
     NeuralBackendCapabilities {
         target: BackendTarget::HostSubprocess,
+        signal_domain: SignalDomain::PhysicalMicrovoltQ16,
         operational: cfg!(any(target_os = "linux", windows)),
         minimum_channels: 21,
         maximum_channels: 21,
@@ -750,32 +754,30 @@ impl NeuralBackend for PyBackend {
 
     fn encode(
         &self,
-        signal: &[Vec<i64>],
+        signal: &NeuralSignal,
         sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError> {
         if self.cancellation.is_cancelled() {
             return Err(BackendError("helper invocation cancelled".to_string()));
         }
-        let channels = u16::try_from(signal.len())
-            .map_err(|_| BackendError("signal channel count exceeds u16".to_string()))?;
-        let samples = signal.first().map_or(0, Vec::len);
-        let samples_u32 = u32::try_from(samples)
-            .map_err(|_| BackendError("signal sample count exceeds u32".to_string()))?;
+        let samples = signal.channels.first().map_or(0, Vec::len);
         self.capabilities
-            .validate_input(channels, samples_u32, sample_rate)
+            .validate_signal(signal, sample_rate)
             .map_err(|error| BackendError(format!("helper capability mismatch: {error:?}")))?;
-        preflight_encode_request(signal, self.io_limits.maximum_request_bytes)?;
+        preflight_encode_request(&signal.channels, self.io_limits.maximum_request_bytes)?;
         let (rate_numerator, rate_denominator) = sample_rate.parts();
         let sample_rate = rate_numerator as f64 / rate_denominator as f64;
         let output = self.call(json!({
             "op": "encode",
             "sample_rate": sample_rate,
-            "signal": signal,
+            "signal": &signal.channels,
+            "signal_domain": signal.domain.protocol_name(),
         }))?;
         self.check_active(output.started)?;
         let envelope: EncodeResponse<'_> = parse_envelope(&output)?;
         self.validate_checkpoint(envelope.checkpoint_sha256)?;
         let input_elements = signal
+            .channels
             .len()
             .checked_mul(samples)
             .ok_or_else(|| BackendError("signal response limit overflow".to_string()))?;
@@ -812,7 +814,7 @@ impl NeuralBackend for PyBackend {
         self.capabilities
             .validate_output(&tokens)
             .map_err(|error| BackendError(format!("helper capability mismatch: {error:?}")))?;
-        if usize::from(tokens.n_channels) != signal.len()
+        if usize::from(tokens.n_channels) != signal.channels.len()
             || usize::try_from(tokens.n_samples).ok() != Some(samples)
         {
             return Err(BackendError(
@@ -823,7 +825,7 @@ impl NeuralBackend for PyBackend {
         Ok(tokens)
     }
 
-    fn decode(&self, t: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+    fn decode(&self, t: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
         self.capabilities
             .validate_output(t)
             .map_err(|error| BackendError(format!("helper capability mismatch: {error:?}")))?;
@@ -837,6 +839,7 @@ impl NeuralBackend for PyBackend {
             "n_channels": t.n_channels,
             "n_samples": t.n_samples,
             "backend_meta": t.backend_meta,
+            "signal_domain": self.capabilities.signal_domain.protocol_name(),
         }))?;
         self.check_active(output.started)?;
         let envelope: DecodeResponse<'_> = parse_envelope(&output)?;
@@ -849,7 +852,10 @@ impl NeuralBackend for PyBackend {
             "signal",
         )?;
         self.check_active(output.started)?;
-        Ok(signal)
+        Ok(NeuralSignal {
+            domain: self.capabilities.signal_domain,
+            channels: signal,
+        })
     }
 }
 
@@ -1158,6 +1164,10 @@ mod tests {
         Rational::new(250, 1).unwrap()
     }
 
+    fn digital(channels: Vec<Vec<i64>>) -> NeuralSignal {
+        NeuralSignal::digital(channels)
+    }
+
     #[test]
     fn pre_cancelled_helper_never_spawns() {
         let cancellation = BackendCancellation::default();
@@ -1165,7 +1175,7 @@ mod tests {
         let backend = PyBackend::selftest("missing-executable", "missing-helper", model())
             .with_cancellation(cancellation);
         let error = backend
-            .encode(&[vec![1]], rate())
+            .encode(&digital(vec![vec![1]]), rate())
             .expect_err("cancelled backend must fail");
         assert!(error.0.contains("cancelled"));
     }
@@ -1175,7 +1185,10 @@ mod tests {
     fn model_backend_enforces_exact_capabilities_before_spawn() {
         let backend = PyBackend::model("missing-executable", "missing-helper", model());
         let error = backend
-            .encode(&[vec![1]], Rational::new(1, 1).unwrap())
+            .encode(
+                &NeuralSignal::physical_microvolt_q16(vec![vec![1]]),
+                Rational::new(1, 1).unwrap(),
+            )
             .expect_err("unsupported model shape and rate must fail before spawn");
         assert!(
             error.0.contains("ChannelCount"),
@@ -1200,7 +1213,7 @@ mod tests {
         .unwrap();
         let backend = PyBackend::selftest("sh", &helper, model()).with_timeout(Duration::ZERO);
         let error = backend
-            .encode(&[vec![1]], rate())
+            .encode(&digital(vec![vec![1]]), rate())
             .expect_err("zero timeout must fail before spawn");
         assert!(error.0.contains("timed out"));
         assert!(
@@ -1259,7 +1272,7 @@ mod tests {
             PyBackend::selftest("sh", &helper, model()).with_timeout(Duration::from_millis(50));
         let started = Instant::now();
         let error = backend
-            .encode(&[vec![1; 10_000]], rate())
+            .encode(&digital(vec![vec![1; 10_000]]), rate())
             .expect_err("hung helper must time out");
         let _ = fs::remove_file(helper);
         assert!(error.0.contains("timed out"));
@@ -1287,7 +1300,7 @@ mod tests {
             });
         let started = Instant::now();
         let error = backend
-            .encode(&[vec![1]], rate())
+            .encode(&digital(vec![vec![1]]), rate())
             .expect_err("oversized output must fail");
         let _ = fs::remove_file(helper);
         assert!(error.0.contains("stdout exceeds byte limit"), "{}", error.0);
@@ -1303,7 +1316,7 @@ mod tests {
                 ..BackendIoLimits::default()
             });
         let error = backend
-            .encode(&[vec![1]], rate())
+            .encode(&digital(vec![vec![1]]), rate())
             .expect_err("estimated request at limit must fail before spawn");
         assert!(error.0.contains("request exceeds byte limit"));
     }
@@ -1330,7 +1343,7 @@ mod tests {
             PyBackend::selftest("sh", &helper, model()).with_timeout(Duration::from_millis(50));
         let started = Instant::now();
         let error = backend
-            .encode(&[vec![1]], rate())
+            .encode(&digital(vec![vec![1]]), rate())
             .expect_err("process tree must time out");
         assert!(error.0.contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -1367,7 +1380,7 @@ mod tests {
         .unwrap();
         let backend = PyBackend::selftest("sh", &helper, model());
         backend
-            .encode(&[vec![1]], rate())
+            .encode(&digital(vec![vec![1]]), rate())
             .expect("valid helper response");
         let size_after_return = fs::metadata(&heartbeat).map_or(0, |metadata| metadata.len());
         thread::sleep(Duration::from_millis(100));
@@ -1385,7 +1398,7 @@ mod tests {
     fn unsupported_unix_backend_fails_closed_before_spawn() {
         let backend = PyBackend::selftest("missing-executable", "missing-helper", model());
         let error = backend
-            .encode(&[vec![1]], rate())
+            .encode(&digital(vec![vec![1]]), rate())
             .expect_err("unsupported Unix process containment must fail closed");
         assert!(error.0.contains("Unavailable"), "{}", error.0);
     }

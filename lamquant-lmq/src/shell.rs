@@ -20,8 +20,11 @@ use semantic_abir_bcs::{
     ResourceBounds,
 };
 
-use crate::backend::{BackendCapabilityError, BackendError, NeuralBackend, NeuralTokens};
+use crate::backend::{
+    BackendCapabilityError, BackendError, NeuralBackend, NeuralSignal, NeuralTokens, SignalDomain,
+};
 use crate::body::{decode_body_bounded, encode_body_bounded, BodyBounds, BodyError};
+use crate::calibration::{AffineDomainTransform, CalibrationDomainError};
 use crate::reconstruction::{
     build_reconstructed_dataset, codec_fidelity_statement, ReconstructionContext,
 };
@@ -159,6 +162,19 @@ impl From<BodyError> for LmqError {
     }
 }
 
+impl From<CalibrationDomainError> for LmqError {
+    fn from(error: CalibrationDomainError) -> Self {
+        match error {
+            CalibrationDomainError::Range => {
+                Self::UnsupportedSemantics("calibration exceeds bounded model-domain arithmetic")
+            }
+            CalibrationDomainError::UnsupportedUnit => Self::UnsupportedSemantics(
+                "physical model domain requires a recognized voltage unit",
+            ),
+        }
+    }
+}
+
 impl fmt::Display for LmqError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -257,7 +273,8 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
     capabilities
         .validate_input(expected_channels, expected_samples, sample_rate)
         .map_err(LmqError::BackendCapability)?;
-    let signal = read_signal(dataset, access, bounds.max_signal_bytes)?;
+    let domain_plan = compile_signal_domain_plan(dataset, capabilities.signal_domain)?;
+    let signal = read_signal(dataset, access, bounds.max_signal_bytes, &domain_plan)?;
     let model = backend.model_provenance();
     let tokens = backend
         .encode(&signal, sample_rate)
@@ -280,7 +297,7 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
             implementation,
             model_provenance: Some(model),
             packets: &packets,
-            parameters: canonical_parameters(),
+            parameters: canonical_parameters(capabilities.signal_domain),
             profile: CodecProfile::LmqProgressive,
         },
         bounds.bundle,
@@ -303,22 +320,23 @@ pub fn open_bundle_bounded<'a>(
 ) -> Result<OpenedLmqBundle<'a>, LmqError> {
     let bundle = CodecBundleView::open(bytes, bounds.bundle).map_err(LmqError::Bundle)?;
     let catalog = bundle.catalog();
+    let capabilities = backend.capabilities();
     if catalog.profile() != CodecProfile::LmqProgressive
         || catalog.packet_count() != 1
         || catalog.model_provenance() != Some(&backend.model_provenance())
         || catalog.fidelity().kind == CodecFidelityKind::Exact
         || catalog.implementation().kernel_id != LMQ_KERNEL_ID
-        || catalog.parameters() != canonical_parameters()
+        || catalog.parameters() != canonical_parameters(capabilities.signal_domain)
     {
         return Err(LmqError::CatalogContract);
     }
     let dataset = parse_canonical_dataset(bundle.canonical_semantics())
         .map_err(|_| LmqError::SemanticEncoding)?;
     let (expected_channels, expected_samples, sample_rate) = reconstruction_shape(&dataset)?;
-    let capabilities = backend.capabilities();
     capabilities
         .validate_input(expected_channels, expected_samples, sample_rate)
         .map_err(LmqError::BackendCapability)?;
+    let domain_plan = compile_signal_domain_plan(&dataset, capabilities.signal_domain)?;
     enforce_signal_bound(expected_channels, expected_samples, bounds.max_signal_bytes)?;
     let packet = bundle.packet(0).ok_or(LmqError::Header)?;
     let tokens = decode_packet_bounded(packet, bounds)?;
@@ -329,13 +347,18 @@ pub fn open_bundle_bounded<'a>(
         return Err(LmqError::SignalShapeMismatch);
     }
     let signal = backend.decode(&tokens).map_err(LmqError::Backend)?;
-    if signal.len() != usize::from(tokens.n_channels)
+    capabilities
+        .validate_signal(&signal, sample_rate)
+        .map_err(LmqError::BackendCapability)?;
+    if signal.channels.len() != usize::from(tokens.n_channels)
         || signal
+            .channels
             .iter()
             .any(|channel| channel.len() != tokens.n_samples as usize)
     {
         return Err(LmqError::SignalShapeMismatch);
     }
+    let signal = model_signal_to_source_digital(signal, &domain_plan)?;
     let reconstructed = build_reconstructed_dataset(
         &dataset,
         &signal,
@@ -431,7 +454,7 @@ fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32, Rational), L
     ))
 }
 
-fn canonical_parameters() -> Vec<CodecParameter> {
+fn canonical_parameters(signal_domain: SignalDomain) -> Vec<CodecParameter> {
     vec![
         CodecParameter {
             name: "abir.revision".to_string(),
@@ -443,6 +466,12 @@ fn canonical_parameters() -> Vec<CodecParameter> {
             name: "lmq.packet_grammar".to_string(),
             value: CodecParameterValue::Text {
                 value: "LMQP1".to_string(),
+            },
+        },
+        CodecParameter {
+            name: "neural.signal-domain".to_string(),
+            value: CodecParameterValue::Text {
+                value: signal_domain.protocol_name().to_string(),
             },
         },
         CodecParameter {
@@ -619,7 +648,8 @@ fn read_signal<A: PayloadAccess>(
     dataset: &AbirDataset,
     access: &A,
     max_signal_bytes: u64,
-) -> Result<Vec<Vec<i64>>, LmqError> {
+    domain_plan: &SignalDomainPlan,
+) -> Result<NeuralSignal, LmqError> {
     if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
         return Err(LmqError::UnsupportedSemantics(
             "requires exactly one recording and one stream",
@@ -719,18 +749,95 @@ fn read_signal<A: PayloadAccess>(
     enforce_lmq_limit(LmqResource::SignalBytes, decoded_bytes, max_signal_bytes)?;
 
     let mut signal = Vec::with_capacity(channels.len());
-    for (descriptor, samples) in channels {
+    for (index, (descriptor, samples)) in channels.into_iter().enumerate() {
         let lease = access.lease(descriptor).map_err(LmqError::PayloadAccess)?;
         verify_payload_content(descriptor, lease.bytes())
             .map_err(|_| LmqError::PayloadIdentityMismatch)?;
-        let channel = decode_integer_payload(descriptor, lease.bytes())?;
+        let mut channel = decode_integer_payload(descriptor, lease.bytes())?;
         if channel.len() as u64 != samples {
             return Err(LmqError::SignalShapeMismatch);
+        }
+        if domain_plan.domain == SignalDomain::PhysicalMicrovoltQ16 {
+            let transform = *domain_plan
+                .transforms
+                .get(index)
+                .ok_or(LmqError::SignalShapeMismatch)?;
+            for sample in &mut channel {
+                *sample = transform.digital_to_model(*sample)?;
+            }
         }
         signal.push(channel);
     }
     sample_rate.ok_or(LmqError::SignalShapeMismatch)?;
-    Ok(signal)
+    Ok(NeuralSignal {
+        domain: domain_plan.domain,
+        channels: signal,
+    })
+}
+
+struct SignalDomainPlan {
+    domain: SignalDomain,
+    transforms: Vec<AffineDomainTransform>,
+}
+
+fn compile_signal_domain_plan(
+    dataset: &AbirDataset,
+    domain: SignalDomain,
+) -> Result<SignalDomainPlan, LmqError> {
+    if domain == SignalDomain::DigitalInteger {
+        return Ok(SignalDomainPlan {
+            domain,
+            transforms: Vec::new(),
+        });
+    }
+    let stream = dataset
+        .streams()
+        .first()
+        .ok_or(LmqError::SignalShapeMismatch)?;
+    let mut transforms = Vec::with_capacity(stream.atoms().len());
+    for atom_id in stream.atoms() {
+        let atom = dataset
+            .atoms()
+            .iter()
+            .find(|atom| atom.id() == *atom_id)
+            .ok_or(LmqError::UnsupportedSemantics("unresolved stream atom"))?;
+        let Atom::SignalBlock(block) = atom else {
+            return Err(LmqError::UnsupportedSemantics(
+                "only SignalBlock atoms are supported",
+            ));
+        };
+        let calibration = block.calibration().ok_or(LmqError::UnsupportedSemantics(
+            "physical model domain requires exact per-channel calibration",
+        ))?;
+        transforms.push(AffineDomainTransform::compile(calibration)?);
+    }
+    Ok(SignalDomainPlan { domain, transforms })
+}
+
+fn model_signal_to_source_digital(
+    signal: NeuralSignal,
+    domain_plan: &SignalDomainPlan,
+) -> Result<Vec<Vec<i64>>, LmqError> {
+    if signal.domain != domain_plan.domain {
+        return Err(LmqError::SignalShapeMismatch);
+    }
+    if signal.domain == SignalDomain::DigitalInteger {
+        if !domain_plan.transforms.is_empty() {
+            return Err(LmqError::SignalShapeMismatch);
+        }
+        return Ok(signal.channels);
+    }
+    if domain_plan.transforms.len() != signal.channels.len() {
+        return Err(LmqError::SignalShapeMismatch);
+    }
+    let mut output = Vec::with_capacity(signal.channels.len());
+    for (mut channel, transform) in signal.channels.into_iter().zip(&domain_plan.transforms) {
+        for sample in &mut channel {
+            *sample = (*transform).model_to_digital(*sample)?;
+        }
+        output.push(channel);
+    }
+    Ok(output)
 }
 
 fn enforce_signal_bound(
@@ -875,17 +982,18 @@ fn histogram(tokens: &[i32], alphabet: u16) -> Result<Vec<i32>, LmqError> {
 mod tests {
     use super::*;
     use crate::backend::StubBackend;
+    use alloc::format;
     use semantic_abir::{
-        payload_content_id, Acquisition, AcquisitionTag, AtomTag, Channel, ChannelBasis,
-        ChannelBasisTag, ChannelSpec, ChannelTag, Clock, ClockRelation, ClockRelationTag, ClockTag,
-        ConceptDictionary, ConceptDictionaryTag, ConceptId, CoordinateFrame, CoordinateFrameTag,
-        DatasetDraft, DatasetTag, Derivation, DerivationTag, DerivedArtifact, DerivedArtifactTag,
-        Device, DeviceTag, Event, EventTag, ExactNumber, ExecutionRecord, Fidelity, FidelityKind,
-        FrameTransform, FrameTransformTag, InMemoryPayloadAccess, ObjectId, OpenedDataset, Patient,
-        PatientTag, Policy, PolicyTag, Proof, ProofTag, Rational, Recording, RecordingTag,
-        ReferenceKind, SemanticRef, Sensor, SensorTag, Session, SessionTag, SignalBlock,
-        SourceCapsule, SourceKey, SourceRelationship, Stream, StreamTag, Subject, SubjectTag,
-        TimeSegment, ValidationLimits,
+        payload_content_id, Acquisition, AcquisitionTag, AtomTag, Calibration, Channel,
+        ChannelBasis, ChannelBasisTag, ChannelSpec, ChannelTag, Clock, ClockRelation,
+        ClockRelationTag, ClockTag, ConceptDictionary, ConceptDictionaryTag, ConceptId,
+        CoordinateFrame, CoordinateFrameTag, DatasetDraft, DatasetTag, Derivation, DerivationTag,
+        DerivedArtifact, DerivedArtifactTag, Device, DeviceTag, Event, EventTag, ExactNumber,
+        ExecutionRecord, Fidelity, FidelityKind, FrameTransform, FrameTransformTag,
+        InMemoryPayloadAccess, ObjectId, OpenedDataset, Patient, PatientTag, Policy, PolicyTag,
+        Proof, ProofTag, Rational, Recording, RecordingTag, ReferenceKind, SemanticRef, Sensor,
+        SensorTag, Session, SessionTag, SignalBlock, SourceCapsule, SourceKey, SourceRelationship,
+        Stream, StreamTag, Subject, SubjectTag, TimeSegment, ValidationLimits,
     };
     use semantic_abir_bcs::{ModelProvenance, PccpStatus, BCS2_MAGIC};
 
@@ -910,6 +1018,19 @@ mod tests {
 
     fn fixture_parts(
         starts: &[i128],
+    ) -> (
+        DatasetDraft,
+        InMemoryPayloadAccess,
+        Vec<ObjectId<AtomTag>>,
+        ObjectId<RecordingTag>,
+        ObjectId<StreamTag>,
+    ) {
+        fixture_parts_with_calibration(starts, None)
+    }
+
+    fn fixture_parts_with_calibration(
+        starts: &[i128],
+        calibration: Option<Calibration>,
     ) -> (
         DatasetDraft,
         InMemoryPayloadAccess,
@@ -961,7 +1082,7 @@ mod tests {
                     )
                     .unwrap(),
                 ),
-                None,
+                calibration.clone(),
             )));
         }
         (draft, access, atom_ids, recording_id, stream_id)
@@ -973,6 +1094,160 @@ mod tests {
 
     fn concept(value: &str) -> ConceptId {
         ConceptId::new(value).unwrap()
+    }
+
+    fn calibration(scale: (i128, i128), offset: (i128, i128), unit: &str) -> Calibration {
+        Calibration::new(
+            Rational::new(scale.0, scale.1).unwrap(),
+            Rational::new(offset.0, offset.1).unwrap(),
+            concept(unit),
+        )
+        .unwrap()
+    }
+
+    struct DomainBackend {
+        domain: SignalDomain,
+        encoded: core::cell::RefCell<Option<NeuralSignal>>,
+        decoded: NeuralSignal,
+    }
+
+    impl DomainBackend {
+        fn new(domain: SignalDomain, decoded: Vec<Vec<i64>>) -> Self {
+            Self {
+                domain,
+                encoded: core::cell::RefCell::new(None),
+                decoded: NeuralSignal {
+                    domain,
+                    channels: decoded,
+                },
+            }
+        }
+    }
+
+    impl NeuralBackend for DomainBackend {
+        fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+            let mut capabilities = StubBackend::default().capabilities();
+            capabilities.signal_domain = self.domain;
+            capabilities
+        }
+
+        fn model_provenance(&self) -> ModelProvenance {
+            StubBackend::default().model_provenance()
+        }
+
+        fn encode(
+            &self,
+            signal: &NeuralSignal,
+            _sample_rate: Rational,
+        ) -> Result<NeuralTokens, BackendError> {
+            self.encoded.replace(Some(signal.clone()));
+            let n_channels = u16::try_from(signal.channels.len()).unwrap();
+            let n_samples = u32::try_from(signal.channels[0].len()).unwrap();
+            Ok(NeuralTokens {
+                tokens: vec![0; usize::from(n_channels) * n_samples as usize],
+                schedule: vec![5; n_samples as usize],
+                alphabet: 5,
+                n_channels,
+                n_samples,
+                backend_meta: Vec::new(),
+            })
+        }
+
+        fn decode(&self, _tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
+            Ok(self.decoded.clone())
+        }
+    }
+
+    fn calibrated_fixture() -> OpenedDataset<InMemoryPayloadAccess> {
+        let calibration = calibration((2, 1), (1, 1), "ucum:uV");
+        let (mut draft, access, atom_ids, recording_id, stream_id) =
+            fixture_parts_with_calibration(&[0, 0, 0, 0], Some(calibration));
+        draft.add_recording(Recording::new(recording_id, vec![stream_id]));
+        draft.add_stream(Stream::new(
+            stream_id,
+            recording_id,
+            ConceptId::new("abir:modality/eeg").unwrap(),
+            atom_ids,
+            None,
+            None,
+            None,
+        ));
+        OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
+    }
+
+    #[test]
+    fn calibrated_model_domain_round_trips_through_public_shell() {
+        let opened = calibrated_fixture();
+        let decoded_q16 = (0..4)
+            .map(|_| {
+                (0..500)
+                    .map(|sample| if sample % 2 == 0 { 655_360 } else { 786_432 })
+                    .collect()
+            })
+            .collect();
+        let backend = DomainBackend::new(SignalDomain::PhysicalMicrovoltQ16, decoded_q16);
+
+        let bytes = encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &backend,
+            transformed_fidelity("calibrated-test"),
+            implementation_identity("calibrated-test"),
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        let encoded = backend.encoded.borrow();
+        let encoded = encoded.as_ref().unwrap();
+        assert_eq!(encoded.domain, SignalDomain::PhysicalMicrovoltQ16);
+        assert_eq!(encoded.channels[0][0], -2_555_904);
+        assert_eq!(encoded.channels[1][0], -1_638_400);
+
+        let decoded = open_bundle(&bytes, &backend, ResourceBounds::default()).unwrap();
+        for atom_id in decoded.reconstructed().dataset().streams()[0].atoms() {
+            let block = decoded.reconstructed().block_view(*atom_id).unwrap();
+            let samples = block
+                .bytes()
+                .chunks_exact(8)
+                .map(|sample| i64::from_le_bytes(sample.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(&samples[..4], &[4, 6, 4, 6]);
+            let atom = decoded
+                .reconstructed()
+                .dataset()
+                .atoms()
+                .iter()
+                .find(|atom| atom.id() == *atom_id)
+                .unwrap();
+            let Atom::SignalBlock(block) = atom else {
+                panic!("reconstruction must retain signal blocks");
+            };
+            assert_eq!(
+                block.calibration(),
+                Some(&calibration((2, 1), (1, 1), "ucum:uV"))
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_binds_backend_signal_domain() {
+        let opened = calibrated_fixture();
+        let physical =
+            DomainBackend::new(SignalDomain::PhysicalMicrovoltQ16, vec![vec![0; 500]; 4]);
+        let bytes = encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &physical,
+            transformed_fidelity("calibrated-test"),
+            implementation_identity("calibrated-test"),
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        let digital = DomainBackend::new(SignalDomain::DigitalInteger, vec![vec![0; 500]; 4]);
+
+        assert!(matches!(
+            open_bundle(&bytes, &digital, ResourceBounds::default()),
+            Err(LmqError::CatalogContract)
+        ));
     }
 
     fn rich_fixture() -> OpenedDataset<InMemoryPayloadAccess> {
@@ -1244,13 +1519,13 @@ mod tests {
 
             fn encode(
                 &self,
-                _signal: &[Vec<i64>],
+                _signal: &NeuralSignal,
                 _sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 panic!("backend must not run after capability rejection")
             }
 
-            fn decode(&self, _tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+            fn decode(&self, _tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
                 unreachable!()
             }
         }
@@ -1272,6 +1547,49 @@ mod tests {
     }
 
     #[test]
+    fn physical_model_domain_requires_calibration_before_payload_or_inference() {
+        struct PhysicalBackend;
+        impl NeuralBackend for PhysicalBackend {
+            fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+                let mut capabilities = StubBackend::default().capabilities();
+                capabilities.signal_domain = SignalDomain::PhysicalMicrovoltQ16;
+                capabilities
+            }
+
+            fn model_provenance(&self) -> ModelProvenance {
+                StubBackend::default().model_provenance()
+            }
+
+            fn encode(
+                &self,
+                _signal: &NeuralSignal,
+                _sample_rate: Rational,
+            ) -> Result<NeuralTokens, BackendError> {
+                panic!("backend must not run without calibrated input")
+            }
+
+            fn decode(&self, _tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
+                unreachable!()
+            }
+        }
+
+        let opened = fixture();
+        assert!(matches!(
+            encode_bundle(
+                opened.dataset(),
+                opened.access(),
+                &PhysicalBackend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::UnsupportedSemantics(
+                "physical model domain requires exact per-channel calibration"
+            ))
+        ));
+    }
+
+    #[test]
     fn implementation_identity_tracks_linked_abir_while_wire_catalog_stays_frozen() {
         assert_ne!(LINKED_ABIR_REVISION, LMQ_WIRE_ABIR_REVISION);
 
@@ -1285,7 +1603,7 @@ mod tests {
             linked_id
         );
 
-        let parameters = canonical_parameters();
+        let parameters = canonical_parameters(SignalDomain::DigitalInteger);
         assert!(matches!(
             &parameters[0].value,
             CodecParameterValue::Text { value }
@@ -1545,13 +1863,13 @@ mod tests {
 
             fn encode(
                 &self,
-                signal: &[Vec<i64>],
+                signal: &NeuralSignal,
                 sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 StubBackend::default().encode(signal, sample_rate)
             }
 
-            fn decode(&self, tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+            fn decode(&self, tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
                 StubBackend::default().decode(tokens)
             }
         }
@@ -1624,13 +1942,13 @@ mod tests {
 
             fn encode(
                 &self,
-                signal: &[Vec<i64>],
+                signal: &NeuralSignal,
                 sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 self.0.encode(signal, sample_rate)
             }
 
-            fn decode(&self, tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+            fn decode(&self, tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
                 self.0.decode(tokens)
             }
         }
@@ -1721,13 +2039,13 @@ mod tests {
 
             fn encode(
                 &self,
-                _signal: &[Vec<i64>],
+                _signal: &NeuralSignal,
                 _sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 panic!("backend must not run after failed signal preflight")
             }
 
-            fn decode(&self, _tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+            fn decode(&self, _tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
                 unreachable!()
             }
         }
@@ -1837,13 +2155,13 @@ mod tests {
 
             fn encode(
                 &self,
-                _signal: &[Vec<i64>],
+                _signal: &NeuralSignal,
                 _sample_rate: Rational,
             ) -> Result<NeuralTokens, BackendError> {
                 unreachable!()
             }
 
-            fn decode(&self, _tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+            fn decode(&self, _tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
                 panic!("backend must not run after failed reconstruction preflight")
             }
         }

@@ -27,6 +27,28 @@ pub enum BackendTarget {
     McuNative,
 }
 
+/// Numeric meaning of every `i64` sample crossing [`NeuralBackend`].
+///
+/// `PhysicalMicrovoltQ16` is signed Q47.16 microvolts: `65_536` represents
+/// exactly `1 µV`. ABIR calibration stays in the Rust shell; host helpers never
+/// interpret source-format digital counts or unit identifiers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SignalDomain {
+    DigitalInteger,
+    PhysicalMicrovoltQ16,
+}
+
+impl SignalDomain {
+    /// Stable identifier sealed into bundle parameters and subprocess requests.
+    pub const fn protocol_name(self) -> &'static str {
+        match self {
+            Self::DigitalInteger => "digital-integer",
+            Self::PhysicalMicrovoltQ16 => "physical-microvolt-q16",
+        }
+    }
+}
+
 /// Typed input/output envelope enforced before and after neural inference.
 ///
 /// Resource bounds on the outer shell remain independent. This contract states
@@ -35,6 +57,7 @@ pub enum BackendTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NeuralBackendCapabilities {
     pub target: BackendTarget,
+    pub signal_domain: SignalDomain,
     pub operational: bool,
     pub minimum_channels: u16,
     pub maximum_channels: u16,
@@ -54,6 +77,7 @@ pub struct NeuralBackendCapabilities {
 #[non_exhaustive]
 pub enum BackendCapabilityError {
     Unavailable,
+    SignalDomain,
     ChannelCount,
     SampleCount,
     SampleRate,
@@ -122,6 +146,28 @@ impl NeuralBackendCapabilities {
             return Err(BackendCapabilityError::TokenValue);
         }
         Ok(())
+    }
+
+    pub fn validate_signal(
+        self,
+        signal: &NeuralSignal,
+        sample_rate: Rational,
+    ) -> Result<(), BackendCapabilityError> {
+        if signal.domain != self.signal_domain {
+            return Err(BackendCapabilityError::SignalDomain);
+        }
+        let channels = u16::try_from(signal.channels.len())
+            .map_err(|_| BackendCapabilityError::ChannelCount)?;
+        let samples = signal.channels.first().map_or(0, Vec::len);
+        let samples = u32::try_from(samples).map_err(|_| BackendCapabilityError::SampleCount)?;
+        if signal
+            .channels
+            .iter()
+            .any(|channel| u32::try_from(channel.len()) != Ok(samples))
+        {
+            return Err(BackendCapabilityError::SampleCount);
+        }
+        self.validate_input(channels, samples, sample_rate)
     }
 }
 
@@ -195,7 +241,30 @@ fn compare_positive_rationals(
     }
 }
 
-/// Neural tokens + the shape/model metadata the shell needs to wire them.
+/// Rectangular signal in one backend-declared numeric domain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NeuralSignal {
+    pub domain: SignalDomain,
+    pub channels: Vec<Vec<i64>>,
+}
+
+impl NeuralSignal {
+    pub fn digital(channels: Vec<Vec<i64>>) -> Self {
+        Self {
+            domain: SignalDomain::DigitalInteger,
+            channels,
+        }
+    }
+
+    pub fn physical_microvolt_q16(channels: Vec<Vec<i64>>) -> Self {
+        Self {
+            domain: SignalDomain::PhysicalMicrovoltQ16,
+            channels,
+        }
+    }
+}
+
+/// Neural tokens + shape/model metadata needed by shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NeuralTokens {
     /// FSQ symbols, unsigned in `[0, alphabet)`, flattened in a backend-defined
@@ -234,17 +303,17 @@ pub trait NeuralBackend {
     /// cannot claim provenance independently of the inference implementation.
     fn model_provenance(&self) -> ModelProvenance;
 
-    /// Encode a modality-blind signal (`[n_channels][n_samples]`, sampled at
-    /// `sample_rate` Hz) into tokens.
+    /// Encode a rectangular signal in the exact domain declared by
+    /// [`NeuralBackendCapabilities::signal_domain`].
     fn encode(
         &self,
-        signal: &[Vec<i64>],
+        signal: &NeuralSignal,
         sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError>;
 
-    /// Reconstruct the signal (`[n_channels][n_samples]`) from tokens. LOSSY:
+    /// Reconstruct in the same declared domain. LOSSY:
     /// `decode(encode(x)) ≈ x`, never `== x`.
-    fn decode(&self, tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError>;
+    fn decode(&self, tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError>;
 }
 
 /// A deterministic, model-free reference backend for shell/DAG tests (ADR 0074
@@ -267,6 +336,7 @@ impl NeuralBackend for StubBackend {
     fn capabilities(&self) -> NeuralBackendCapabilities {
         NeuralBackendCapabilities {
             target: BackendTarget::Reference,
+            signal_domain: SignalDomain::DigitalInteger,
             operational: true,
             minimum_channels: 1,
             maximum_channels: u16::MAX,
@@ -294,10 +364,10 @@ impl NeuralBackend for StubBackend {
 
     fn encode(
         &self,
-        signal: &[Vec<i64>],
+        signal: &NeuralSignal,
         sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError> {
-        if signal.is_empty() {
+        if signal.channels.is_empty() {
             return Err(BackendError(String::from("stub: empty signal")));
         }
         if !(2..=u16::from(u8::MAX)).contains(&self.alphabet) {
@@ -305,21 +375,23 @@ impl NeuralBackend for StubBackend {
                 "stub: alphabet must be in 2..=255",
             )));
         }
-        let n_channels = u16::try_from(signal.len())
+        let n_channels = u16::try_from(signal.channels.len())
             .map_err(|_| BackendError(String::from("stub: too many channels")))?;
-        let n_samples = u32::try_from(signal[0].len())
+        let n_samples = u32::try_from(signal.channels[0].len())
             .map_err(|_| BackendError(String::from("stub: too many samples")))?;
         if signal
+            .channels
             .iter()
             .any(|channel| u32::try_from(channel.len()) != Ok(n_samples))
         {
             return Err(BackendError(String::from("stub: ragged channels")));
         }
         self.capabilities()
-            .validate_input(n_channels, n_samples, sample_rate)
+            .validate_signal(signal, sample_rate)
             .map_err(|error| BackendError(format!("stub capability mismatch: {error:?}")))?;
         let l = self.alphabet as i64;
         let tokens: Vec<i32> = signal
+            .channels
             .iter()
             .flat_map(|ch| ch.iter().map(move |&s| s.rem_euclid(l) as i32))
             .collect();
@@ -339,7 +411,7 @@ impl NeuralBackend for StubBackend {
         Ok(tokens)
     }
 
-    fn decode(&self, t: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+    fn decode(&self, t: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
         self.capabilities()
             .validate_output(t)
             .map_err(|error| BackendError(format!("stub capability mismatch: {error:?}")))?;
@@ -359,7 +431,7 @@ impl NeuralBackend for StubBackend {
                     .collect(),
             );
         }
-        Ok(out)
+        Ok(NeuralSignal::digital(out))
     }
 }
 
@@ -374,6 +446,7 @@ mod tests {
             alloc::vec![3, 3, 3, 8, 100]
         ];
         let b = StubBackend { alphabet: 5 };
+        let signal = NeuralSignal::digital(signal);
         let t = b.encode(&signal, Rational::new(250, 1).unwrap()).unwrap();
         assert_eq!(t.n_channels, 2);
         assert_eq!(t.n_samples, 5);
@@ -381,25 +454,32 @@ mod tests {
         let recon = b.decode(&t).unwrap();
         // decode(encode(x)) == x mod alphabet.
         let expect: Vec<Vec<i64>> = signal
+            .channels
             .iter()
             .map(|ch| ch.iter().map(|&s| s.rem_euclid(5)).collect())
             .collect();
-        assert_eq!(recon, expect);
+        assert_eq!(recon.domain, SignalDomain::DigitalInteger);
+        assert_eq!(recon.channels, expect);
     }
 
     #[test]
     fn stub_rejects_empty_and_ragged() {
         let b = StubBackend::default();
-        assert!(b.encode(&[], Rational::new(250, 1).unwrap()).is_err());
         assert!(b
             .encode(
-                &alloc::vec![alloc::vec![0i64, 1], alloc::vec![0i64]],
+                &NeuralSignal::digital(alloc::vec![]),
+                Rational::new(250, 1).unwrap()
+            )
+            .is_err());
+        assert!(b
+            .encode(
+                &NeuralSignal::digital(alloc::vec![alloc::vec![0i64, 1], alloc::vec![0i64]]),
                 Rational::new(250, 1).unwrap(),
             )
             .is_err());
         assert!(b
             .encode(
-                &alloc::vec![alloc::vec![0i64, 1]],
+                &NeuralSignal::digital(alloc::vec![alloc::vec![0i64, 1]]),
                 Rational::new(-250, 1).unwrap(),
             )
             .is_err());
@@ -409,6 +489,7 @@ mod tests {
     fn capabilities_reject_out_of_envelope_values() {
         let caps = NeuralBackendCapabilities {
             target: BackendTarget::HostNative,
+            signal_domain: SignalDomain::DigitalInteger,
             operational: true,
             minimum_channels: 2,
             maximum_channels: 4,
@@ -474,8 +555,19 @@ mod tests {
     fn stub_rejects_alphabet_that_cannot_fit_schedule() {
         let backend = StubBackend { alphabet: 256 };
         assert!(backend
-            .encode(&[alloc::vec![1]], Rational::new(250, 1).unwrap())
+            .encode(
+                &NeuralSignal::digital(alloc::vec![alloc::vec![1]]),
+                Rational::new(250, 1).unwrap()
+            )
             .is_err());
         assert_eq!(backend.capabilities().maximum_alphabet, 255);
+    }
+
+    #[test]
+    fn backend_capabilities_bind_sample_domain() {
+        assert_eq!(
+            StubBackend::default().capabilities().signal_domain,
+            SignalDomain::DigitalInteger
+        );
     }
 }

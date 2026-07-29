@@ -15,12 +15,12 @@
 //! pinned, `include_bytes!`'d into [`EmbeddedWeights`].
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use semantic_abir::{ContentId, Rational};
 use semantic_abir_bcs::{ModelProvenance, PccpStatus};
 
 use crate::backend::{
-    BackendError, BackendTarget, NeuralBackend, NeuralBackendCapabilities, NeuralTokens,
+    BackendError, BackendTarget, NeuralBackend, NeuralBackendCapabilities, NeuralSignal,
+    NeuralTokens, SignalDomain,
 };
 
 /// Registry-SHA-pinned ternary weights baked into the binary. Placeholder: the
@@ -64,6 +64,7 @@ impl NeuralBackend for RustBackend {
     fn capabilities(&self) -> NeuralBackendCapabilities {
         NeuralBackendCapabilities {
             target: BackendTarget::McuNative,
+            signal_domain: SignalDomain::PhysicalMicrovoltQ16,
             operational: false,
             minimum_channels: 21,
             maximum_channels: 21,
@@ -91,13 +92,13 @@ impl NeuralBackend for RustBackend {
 
     fn encode(
         &self,
-        _signal: &[Vec<i64>],
+        _signal: &NeuralSignal,
         _sample_rate: Rational,
     ) -> Result<NeuralTokens, BackendError> {
         Err(BackendError(String::from(DEFERRED)))
     }
 
-    fn decode(&self, _tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+    fn decode(&self, _tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
         Err(BackendError(String::from(DEFERRED)))
     }
 }
@@ -112,7 +113,10 @@ mod tests {
         // Wired behind the trait (so the swap is a drop-in), but the forward pass
         // returns a clear deferred error — never a panic.
         assert!(b
-            .encode(&[alloc::vec![0i64, 1]], Rational::new(250, 1).unwrap())
+            .encode(
+                &NeuralSignal::physical_microvolt_q16(alloc::vec![alloc::vec![0i64, 1]]),
+                Rational::new(250, 1).unwrap()
+            )
             .is_err());
         assert!(b
             .decode(&NeuralTokens {

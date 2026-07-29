@@ -6,9 +6,9 @@
 //!     round-trip through the subprocess. Proves the bridge + JSON protocol +
 //!     backend_meta round-trip WITHOUT any model/weights. Skips only if `python3` is
 //!     absent.
-//!   * `py_backend_model_...` — the real `SubbandCodec` end-to-end. ENV-GATED: it
-//!     skips (never fails) when codec-neural / weights are absent, exactly like the
-//!     SNN PCCP gates. When weights are present it produces a real lossy round-trip.
+//!   * `py_backend_model_...` — the real `SubbandCodec` end-to-end. Optional for
+//!     developer runs; `LAMQUANT_LMQ_REQUIRE_MODEL_TEST=1` turns every missing
+//!     dependency, checkpoint, or inference failure into a gate failure.
 
 #![cfg(feature = "python")]
 
@@ -17,10 +17,10 @@ use std::path::PathBuf;
 use lamquant_lmq::py_backend::PyBackend;
 use lamquant_lmq::shell;
 use semantic_abir::{
-    payload_content_id, Atom, AtomTag, ByteOrder, ConceptId, ContentId, DatasetDraft, DatasetTag,
-    ElementType, InMemoryPayloadAccess, Layout, ObjectId, OpenedDataset, PayloadDescriptor,
-    Presence, Rational, Recording, RecordingTag, SignalBlock, Stream, StreamTag, TimeAxis,
-    TimeSegment, ValidationLimits,
+    payload_content_id, Atom, AtomTag, ByteOrder, Calibration, ConceptId, ContentId, DatasetDraft,
+    DatasetTag, ElementType, InMemoryPayloadAccess, Layout, ObjectId, OpenedDataset,
+    PayloadDescriptor, Presence, Rational, Recording, RecordingTag, SignalBlock, Stream, StreamTag,
+    TimeAxis, TimeSegment, ValidationLimits,
 };
 use semantic_abir_bcs::{ModelProvenance, PccpStatus, ResourceBounds, BCS2_MAGIC};
 
@@ -28,16 +28,48 @@ fn helper() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/lmq_infer.py")
 }
 
-fn python3_available() -> bool {
-    std::process::Command::new("python3")
+fn python_available(python: &str) -> bool {
+    std::process::Command::new(python)
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
+fn model_dependencies_available(python: &str) -> bool {
+    std::process::Command::new(python)
+        .args(["-c", "import numpy, torch"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn process_containment_available() -> bool {
     cfg!(any(target_os = "linux", windows))
+}
+
+fn required_model_test() -> bool {
+    std::env::var("LAMQUANT_LMQ_REQUIRE_MODEL_TEST").as_deref() == Ok("1")
+}
+
+fn required_model_provenance() -> Result<ModelProvenance, String> {
+    let encoded = std::env::var("LAMQUANT_LMQ_CHECKPOINT_SHA256")
+        .map_err(|_| "LAMQUANT_LMQ_CHECKPOINT_SHA256 is required".to_owned())?;
+    if encoded.len() != 64 {
+        return Err("LAMQUANT_LMQ_CHECKPOINT_SHA256 must contain 64 hex digits".to_owned());
+    }
+    let mut checkpoint_sha256 = [0_u8; 32];
+    for (index, byte) in checkpoint_sha256.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "LAMQUANT_LMQ_CHECKPOINT_SHA256 is not hexadecimal".to_owned())?;
+    }
+    Ok(ModelProvenance {
+        checkpoint_content_id: ContentId::from_bytes([7; 32]),
+        checkpoint_sha256,
+        pccp_change_id: "LMQ-PY-REAL-MODEL-TEST".to_owned(),
+        pccp_evidence_id: ContentId::from_bytes([9; 32]),
+        pccp_status: PccpStatus::Candidate,
+    })
 }
 
 fn eeg(signal: Vec<Vec<i64>>) -> OpenedDataset<InMemoryPayloadAccess> {
@@ -78,7 +110,14 @@ fn eeg(signal: Vec<Vec<i64>>) -> OpenedDataset<InMemoryPayloadAccess> {
                 )
                 .unwrap(),
             ),
-            None,
+            Some(
+                Calibration::new(
+                    Rational::new(1, 1).unwrap(),
+                    Rational::new(0, 1).unwrap(),
+                    ConceptId::new("ucum:uV").unwrap(),
+                )
+                .unwrap(),
+            ),
         )));
     }
     draft.add_recording(Recording::new(recording_id, vec![stream_id]));
@@ -126,7 +165,7 @@ fn py_backend_selftest_round_trips_through_the_subprocess_and_wire() {
         eprintln!("SKIP py_backend_selftest: bounded process containment unavailable");
         return;
     }
-    if !python3_available() {
+    if !python_available("python3") {
         eprintln!("SKIP py_backend_selftest: python3 not available");
         return;
     }
@@ -169,22 +208,142 @@ fn py_backend_selftest_round_trips_through_the_subprocess_and_wire() {
 }
 
 #[test]
-fn py_backend_model_end_to_end_is_env_gated() {
+fn py_backend_model_rejects_invalid_numeric_results() {
+    let required = required_model_test();
+    let python = std::env::var("LAMQUANT_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+    if !python_available(&python) || !model_dependencies_available(&python) {
+        assert!(
+            !required,
+            "required model test needs Python with NumPy and PyTorch"
+        );
+        eprintln!("SKIP py_backend_nonfinite: model dependencies unavailable");
+        return;
+    }
+    let script = r#"
+import importlib.util
+import json
+import sys
+import torch
+
+spec = importlib.util.spec_from_file_location("lmq_infer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class NonFiniteCodec:
+    def encode(self, _signal):
+        return torch.full((1, 32, 79), float("nan")), []
+
+module._load_bound_model = lambda _request: (NonFiniteCodec(), "00" * 32)
+request = {
+    "signal_domain": module.MODEL_DOMAIN,
+    "signal": [[0] * 8],
+    "expected_checkpoint_sha256": "00" * 32,
+}
+try:
+    module.model_encode(request)
+except ValueError as error:
+    assert "non-finite" in str(error)
+else:
+    raise AssertionError("non-finite latent was accepted")
+
+class DecodeMustNotRun:
+    def decode(self, _latent, _metadata):
+        raise AssertionError("decode ran with non-finite metadata")
+
+module._load_bound_model = lambda _request: (DecodeMustNotRun(), "00" * 32)
+metadata = {
+    "vmin": float("nan"),
+    "vmax": 1.0,
+    "shape": [1, 1],
+    "metadata": [],
+}
+request = {
+    "signal_domain": module.MODEL_DOMAIN,
+    "tokens": [0],
+    "alphabet": 32,
+    "backend_meta": list(json.dumps(metadata).encode("utf-8")),
+}
+try:
+    module.model_decode(request)
+except ValueError as error:
+    assert "non-finite" in str(error)
+else:
+    raise AssertionError("non-finite metadata reached model inference")
+
+request["backend_meta"] = list(
+    json.dumps({"__ndarray__": [0], "dtype": "V1048576"}).encode("utf-8")
+)
+try:
+    module.model_decode(request)
+except ValueError as error:
+    assert "dtype" in str(error)
+else:
+    raise AssertionError("wire-controlled NumPy dtype was accepted")
+
+class OverflowCodec:
+    def decode(self, _latent, _metadata):
+        return torch.tensor([[[float(2**47)]]])
+
+module._load_bound_model = lambda _request: (OverflowCodec(), "00" * 32)
+metadata = {
+    "vmin": 0.0,
+    "vmax": 1.0,
+    "shape": [1, 1],
+    "metadata": [],
+}
+request["backend_meta"] = list(json.dumps(metadata).encode("utf-8"))
+try:
+    module.model_decode(request)
+except OverflowError:
+    pass
+else:
+    raise AssertionError("Q47.16 value at the i64 upper bound wrapped")
+"#;
+    let output = std::process::Command::new(&python)
+        .args(["-c", script])
+        .arg(helper())
+        .output()
+        .expect("run non-finite model regression");
+    assert!(
+        output.status.success(),
+        "non-finite regression failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn py_backend_model_end_to_end_is_optional_or_required() {
+    let required = required_model_test();
+    let python = std::env::var("LAMQUANT_PYTHON").unwrap_or_else(|_| "python3".to_owned());
     if !process_containment_available() {
+        assert!(
+            !required,
+            "required model test needs bounded process containment"
+        );
         eprintln!("SKIP py_backend_model: bounded process containment unavailable");
         return;
     }
-    if !python3_available() {
-        eprintln!("SKIP py_backend_model: python3 not available");
+    if !python_available(&python) {
+        assert!(!required, "required model test needs Python");
+        eprintln!("SKIP py_backend_model: configured Python is not available");
         return;
     }
+    let provenance = match required_model_provenance() {
+        Ok(provenance) => provenance,
+        Err(error) if required => panic!("required model test configuration invalid: {error}"),
+        Err(error) => {
+            eprintln!("SKIP py_backend_model: {error}");
+            return;
+        }
+    };
     // The real SubbandCodec expects a 21-channel window; a short synthetic window
     // is enough to prove the wire path when the env is present.
     let sig: Vec<Vec<i64>> = (0..21)
         .map(|c| (0..2500).map(|i| ((i + c) % 200) as i64 - 100).collect())
         .collect();
     let abir = eeg(sig);
-    let backend = PyBackend::model("python3", helper(), model());
+    let backend = PyBackend::model(python, helper(), provenance);
 
     match shell::encode_bundle(
         abir.dataset(),
@@ -214,7 +373,11 @@ fn py_backend_model_end_to_end_is_env_gated() {
             eprintln!("py_backend_model: end-to-end OK (weights present)");
         }
         Err(e) => {
-            // Env absent (no codec-neural / torch / weights) → SKIP, never fail.
+            assert!(
+                !required,
+                "required model test failed instead of completing: {e:?}"
+            );
+            // Optional developer run: environment absent means no model evidence.
             eprintln!("SKIP py_backend_model: environment/weights absent ({e:?})");
         }
     }
