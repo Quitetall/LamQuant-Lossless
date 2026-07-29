@@ -10,11 +10,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use semantic_abir::{
-    canonical_debug_json, parse_canonical_dataset, payload_content_id, verify_payload_content,
-    AbirDataset, Atom, AtomTag, ByteOrder, ContentId, DatasetDraft, DatasetTag, ElementType,
-    InMemoryPayloadAccess, Layout, ObjectId, OpenedDataset, PayloadAccess, PayloadDescriptor,
-    PayloadLease, Presence, Rational, Recording, RecordingTag, SignalBlock, Stream, StreamTag,
-    TimeAxis, ValidationLimits,
+    canonical_debug_json, parse_canonical_dataset, verify_payload_content, AbirDataset, Atom,
+    ByteOrder, ContentId, ElementType, InMemoryPayloadAccess, Layout, OpenedDataset, PayloadAccess,
+    PayloadDescriptor, PayloadLease, Presence, Rational, TimeAxis,
 };
 use semantic_abir_bcs::{
     encode_codec_bundle, CodecBundleError, CodecBundleInput, CodecBundleView, CodecFidelity,
@@ -24,6 +22,9 @@ use semantic_abir_bcs::{
 
 use crate::backend::{BackendCapabilityError, BackendError, NeuralBackend, NeuralTokens};
 use crate::body::{decode_body_bounded, encode_body_bounded, BodyBounds, BodyError};
+use crate::reconstruction::{
+    build_reconstructed_dataset, codec_fidelity_statement, ReconstructionContext,
+};
 
 pub const LMQ_KERNEL_ID: &str = "org.quitetall.lamquant.lmq.fsq-rans-v1";
 pub const LMQ_FIDELITY_CONTRACT: &str =
@@ -247,6 +248,10 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
     if fidelity.kind == CodecFidelityKind::Exact || implementation.kernel_id != LMQ_KERNEL_ID {
         return Err(LmqError::CatalogContract);
     }
+    // Refuse catalogs that cannot be represented truthfully in reconstructed
+    // ABIR before payload access or backend work. This guarantees every emitted
+    // bundle can pass the decoder's fidelity projection.
+    codec_fidelity_statement(dataset.id(), &fidelity)?;
     let (expected_channels, expected_samples, sample_rate) = reconstruction_shape(dataset)?;
     let capabilities = backend.capabilities();
     capabilities
@@ -331,124 +336,24 @@ pub fn open_bundle_bounded<'a>(
     {
         return Err(LmqError::SignalShapeMismatch);
     }
-    let reconstructed = build_reconstructed_dataset(&dataset, &signal)?;
+    let reconstructed = build_reconstructed_dataset(
+        &dataset,
+        &signal,
+        ReconstructionContext {
+            fidelity: catalog.fidelity(),
+            implementation: catalog.implementation(),
+            model: catalog
+                .model_provenance()
+                .ok_or(LmqError::CatalogContract)?,
+            source_semantic_id: catalog.source_semantic_id(),
+            source_interchange_id: catalog.source_interchange_id(),
+        },
+    )?;
     Ok(OpenedLmqBundle {
         bundle,
         source_dataset: dataset,
         reconstructed,
     })
-}
-
-fn build_reconstructed_dataset(
-    source: &AbirDataset,
-    signal: &[Vec<i64>],
-) -> Result<OpenedDataset<InMemoryPayloadAccess>, LmqError> {
-    let source_recording = &source.recordings()[0];
-    let source_stream = &source.streams()[0];
-    if signal.len() != source_stream.atoms().len() {
-        return Err(LmqError::SignalShapeMismatch);
-    }
-
-    let mut access = InMemoryPayloadAccess::new();
-    let mut payloads = Vec::with_capacity(signal.len());
-    for channel in signal {
-        let bytes = channel
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect::<Vec<_>>();
-        let content_id = payload_content_id(ElementType::I64, &bytes);
-        access.insert(content_id, bytes);
-        payloads.push(content_id);
-    }
-
-    let dataset_id =
-        derived_object_id::<DatasetTag>(b"dataset", source.id().as_bytes(), &payloads, 0);
-    let recording_id =
-        derived_object_id::<RecordingTag>(b"recording", source.id().as_bytes(), &payloads, 0);
-    let stream_id = derived_object_id::<StreamTag>(b"stream", source.id().as_bytes(), &payloads, 0);
-    let mut draft = DatasetDraft::new(dataset_id);
-    let mut atom_ids = Vec::with_capacity(signal.len());
-
-    for (index, ((source_atom_id, channel), content_id)) in source_stream
-        .atoms()
-        .iter()
-        .zip(signal)
-        .zip(payloads.iter().copied())
-        .enumerate()
-    {
-        let source_atom = source
-            .atoms()
-            .iter()
-            .find(|atom| atom.id() == *source_atom_id)
-            .ok_or(LmqError::UnsupportedSemantics("unresolved source atom"))?;
-        let Atom::SignalBlock(source_block) = source_atom else {
-            return Err(LmqError::UnsupportedSemantics(
-                "only SignalBlock atoms are supported",
-            ));
-        };
-        let atom_id =
-            derived_object_id::<AtomTag>(b"signal-block", source.id().as_bytes(), &payloads, index);
-        atom_ids.push(atom_id);
-        draft.add_atom(Atom::SignalBlock(SignalBlock::new(
-            atom_id,
-            Presence::Present,
-            Some(PayloadDescriptor::new(
-                content_id,
-                u64::try_from(channel.len())
-                    .ok()
-                    .and_then(|samples| samples.checked_mul(8))
-                    .ok_or(LmqError::SignalShapeMismatch)?,
-                ElementType::I64,
-                ByteOrder::Little,
-                vec![1, channel.len() as u64],
-                Layout::DenseRowMajor,
-                None,
-                None,
-            )),
-            source_block.time_axis().clone(),
-            source_block.calibration().cloned(),
-        )));
-    }
-
-    let mut recording = Recording::new(recording_id, vec![stream_id]);
-    for source_key in source_recording.source_keys() {
-        recording.add_source_key(source_key.clone());
-    }
-    draft.add_recording(recording);
-    draft.add_stream(Stream::new(
-        stream_id,
-        recording_id,
-        source_stream.modality().clone(),
-        atom_ids,
-        None,
-        None,
-        None,
-    ));
-    let dataset = draft
-        .validate(ValidationLimits::default())
-        .map_err(|_| LmqError::SemanticValidation)?;
-    Ok(OpenedDataset::new(dataset, access))
-}
-
-fn derived_object_id<T>(
-    role: &[u8],
-    source_dataset_id: &[u8; 16],
-    payloads: &[ContentId],
-    index: usize,
-) -> ObjectId<T> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"org.quitetall.lamquant.lmq.reconstruction-object-v1\0");
-    hasher.update(role);
-    hasher.update(&[0]);
-    hasher.update(source_dataset_id);
-    hasher.update(&(index as u64).to_le_bytes());
-    for payload in payloads {
-        hasher.update(payload.as_bytes());
-    }
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest.as_bytes()[..16]);
-    ObjectId::from_bytes(bytes)
 }
 
 fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32, Rational), LmqError> {
@@ -971,17 +876,47 @@ mod tests {
     use super::*;
     use crate::backend::StubBackend;
     use semantic_abir::{
-        payload_content_id, AtomTag, ConceptId, DatasetDraft, DatasetTag, InMemoryPayloadAccess,
-        ObjectId, OpenedDataset, Rational, Recording, RecordingTag, SignalBlock, Stream, StreamTag,
+        payload_content_id, Acquisition, AcquisitionTag, AtomTag, Channel, ChannelBasis,
+        ChannelBasisTag, ChannelSpec, ChannelTag, Clock, ClockRelation, ClockRelationTag, ClockTag,
+        ConceptDictionary, ConceptDictionaryTag, ConceptId, CoordinateFrame, CoordinateFrameTag,
+        DatasetDraft, DatasetTag, Derivation, DerivationTag, DerivedArtifact, DerivedArtifactTag,
+        Device, DeviceTag, Event, EventTag, ExactNumber, ExecutionRecord, Fidelity, FidelityKind,
+        FrameTransform, FrameTransformTag, InMemoryPayloadAccess, ObjectId, OpenedDataset, Patient,
+        PatientTag, Policy, PolicyTag, Proof, ProofTag, Rational, Recording, RecordingTag,
+        ReferenceKind, SemanticRef, Sensor, SensorTag, Session, SessionTag, SignalBlock,
+        SourceCapsule, SourceKey, SourceRelationship, Stream, StreamTag, Subject, SubjectTag,
         TimeSegment, ValidationLimits,
     };
-    use semantic_abir_bcs::{ModelProvenance, BCS2_MAGIC};
+    use semantic_abir_bcs::{ModelProvenance, PccpStatus, BCS2_MAGIC};
 
     fn fixture() -> OpenedDataset<InMemoryPayloadAccess> {
         fixture_with_starts(&[0, 0, 0, 0])
     }
 
     fn fixture_with_starts(starts: &[i128]) -> OpenedDataset<InMemoryPayloadAccess> {
+        let (mut draft, access, atom_ids, recording_id, stream_id) = fixture_parts(starts);
+        draft.add_recording(Recording::new(recording_id, vec![stream_id]));
+        draft.add_stream(Stream::new(
+            stream_id,
+            recording_id,
+            ConceptId::new("abir:modality/eeg").unwrap(),
+            atom_ids,
+            None,
+            None,
+            None,
+        ));
+        OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
+    }
+
+    fn fixture_parts(
+        starts: &[i128],
+    ) -> (
+        DatasetDraft,
+        InMemoryPayloadAccess,
+        Vec<ObjectId<AtomTag>>,
+        ObjectId<RecordingTag>,
+        ObjectId<StreamTag>,
+    ) {
         let signal = (0..4)
             .map(|channel| {
                 (0..500)
@@ -1029,15 +964,249 @@ mod tests {
                 None,
             )));
         }
-        draft.add_recording(Recording::new(recording_id, vec![stream_id]));
+        (draft, access, atom_ids, recording_id, stream_id)
+    }
+
+    fn id<T>(byte: u8) -> ObjectId<T> {
+        ObjectId::from_bytes([byte; 16])
+    }
+
+    fn concept(value: &str) -> ConceptId {
+        ConceptId::new(value).unwrap()
+    }
+
+    fn rich_fixture() -> OpenedDataset<InMemoryPayloadAccess> {
+        let (mut draft, access, atom_ids, recording_id, stream_id) = fixture_parts(&[0, 0, 0, 0]);
+        let subject_id = id::<SubjectTag>(20);
+        let patient_id = id::<PatientTag>(21);
+        let session_id = id::<SessionTag>(22);
+        let acquisition_id = id::<AcquisitionTag>(23);
+        let device_id = id::<DeviceTag>(24);
+        let sensor_id = id::<SensorTag>(25);
+        let channel_id = id::<ChannelTag>(26);
+        let clock_id = id::<ClockTag>(27);
+        let reference_clock_id = id::<ClockTag>(41);
+        let frame_a = id::<CoordinateFrameTag>(28);
+        let frame_b = id::<CoordinateFrameTag>(29);
+        let basis_id = id::<ChannelBasisTag>(30);
+        let policy_id = id::<PolicyTag>(31);
+        let safe_proof_id = id::<ProofTag>(32);
+        let unsafe_proof_id = id::<ProofTag>(33);
+        let safe_derivation_id = id::<DerivationTag>(34);
+        let unsafe_derivation_id = id::<DerivationTag>(35);
+        let safe_artifact_id = id::<DerivedArtifactTag>(36);
+        let unsafe_artifact_id = id::<DerivedArtifactTag>(37);
+
+        draft.add_subject(
+            Subject::new(subject_id, concept("abir:subject/human"))
+                .with_source_key(SourceKey::new("bids.subject", "sub-01").unwrap()),
+        );
+        draft.add_patient(Patient::new(patient_id, concept("abir:patient/clinical")));
+        draft.add_session(Session::new(session_id, concept("abir:session/recording")));
+        draft.add_acquisition(Acquisition::new(
+            acquisition_id,
+            concept("abir:acquisition/eeg"),
+        ));
+        draft.add_device(Device::new(device_id, concept("abir:device/amplifier")));
+        draft.add_sensor(Sensor::new(sensor_id, concept("abir:sensor/electrode")));
+        draft.add_channel(Channel::new(channel_id, concept("eeg:channel/fp1")));
+        draft.add_concept_dictionary(ConceptDictionary::new(
+            id::<ConceptDictionaryTag>(38),
+            concept("abir:dictionary/semantic-v1"),
+        ));
+        draft.add_clock(Clock::new(
+            clock_id,
+            concept("abir:clock/device"),
+            None,
+            Rational::new(0, 1).unwrap(),
+            Rational::new(1, 1).unwrap(),
+            Rational::new(1, 1_000_000).unwrap(),
+        ));
+        draft.add_clock(Clock::new(
+            reference_clock_id,
+            concept("abir:clock/reference"),
+            None,
+            Rational::new(0, 1).unwrap(),
+            Rational::new(1, 1).unwrap(),
+            Rational::new(1, 10_000_000).unwrap(),
+        ));
+        draft.add_clock_relation(ClockRelation::new(
+            id::<ClockRelationTag>(42),
+            clock_id,
+            reference_clock_id,
+            Rational::new(1, 1_000).unwrap(),
+            Rational::new(1, 1).unwrap(),
+            Rational::new(1, 1_000_000).unwrap(),
+            concept("abir:clock-relation/measured"),
+            Rational::new(0, 1).unwrap(),
+            Some(Rational::new(10, 1).unwrap()),
+            ContentId::from_bytes([46; 32]),
+        ));
+        let identity = [
+            ExactNumber::Integer(1),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(1),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(1),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(0),
+            ExactNumber::Integer(1),
+        ];
+        draft.add_coordinate_frame(CoordinateFrame::new(
+            frame_a,
+            concept("abir:frame/head"),
+            None,
+            Some(identity),
+            Rational::new(1, 1_000).unwrap(),
+        ));
+        draft.add_coordinate_frame(CoordinateFrame::new(
+            frame_b,
+            concept("abir:frame/sensor"),
+            Some(frame_a),
+            Some(identity),
+            Rational::new(1, 10_000).unwrap(),
+        ));
+        draft.add_frame_transform(FrameTransform::new(
+            id::<FrameTransformTag>(39),
+            frame_b,
+            frame_a,
+            identity,
+            Rational::new(1, 1_000).unwrap(),
+            concept("abir:frame-transform/measured"),
+        ));
+        draft.add_channel_basis(ChannelBasis::new(
+            basis_id,
+            (0..4)
+                .map(|index| {
+                    ChannelSpec::new(concept(&format!("eeg:channel/test-{index}")))
+                        .with_coordinate_frame(frame_a)
+                })
+                .collect(),
+            ReferenceKind::Differential,
+        ));
+        draft.add_policy(Policy::new(
+            policy_id,
+            None,
+            vec![concept("abir:policy/research-only")],
+        ));
+        draft.add_event(Event::new(
+            id::<EventTag>(40),
+            concept("abir:event/stimulus"),
+            clock_id,
+            Rational::new(1, 2).unwrap(),
+            Rational::new(3, 4).unwrap(),
+            Rational::new(1, 1_000).unwrap(),
+        ));
+
+        draft.add_source_relationship(SourceRelationship::PatientSubject {
+            patient_id,
+            subject_id,
+        });
+        draft.add_source_relationship(SourceRelationship::SessionPatient {
+            session_id,
+            patient_id,
+        });
+        draft.add_source_relationship(SourceRelationship::AcquisitionSession {
+            acquisition_id,
+            session_id,
+        });
+        draft.add_source_relationship(SourceRelationship::AcquisitionDevice {
+            acquisition_id,
+            device_id,
+        });
+        draft.add_source_relationship(SourceRelationship::DeviceSensor {
+            device_id,
+            sensor_id,
+        });
+        draft.add_source_relationship(SourceRelationship::SensorChannel {
+            sensor_id,
+            channel_id,
+        });
+        draft.add_source_relationship(SourceRelationship::AcquisitionRecording {
+            acquisition_id,
+            recording_id,
+        });
+        draft.add_source_relationship(SourceRelationship::ChannelBasisMember {
+            channel_id,
+            basis_id,
+            position: 0,
+        });
+
+        draft.add_proof(Proof::new(
+            safe_proof_id,
+            concept("abir:proof/policy-attestation"),
+            SemanticRef::of(policy_id),
+            ContentId::from_bytes([41; 32]),
+        ));
+        draft.add_proof(Proof::new(
+            unsafe_proof_id,
+            concept("future:proof/source-signal"),
+            SemanticRef::of(atom_ids[0]),
+            ContentId::from_bytes([42; 32]),
+        ));
+        draft.add_derivation(Derivation::new(
+            safe_derivation_id,
+            concept("future:operation/context-derive"),
+            vec![SemanticRef::of(policy_id)],
+            vec![SemanticRef::of(safe_artifact_id)],
+        ));
+        draft.add_derived_artifact(DerivedArtifact::new(
+            safe_artifact_id,
+            ContentId::from_bytes([43; 32]),
+            safe_derivation_id,
+        ));
+        draft.add_derivation(Derivation::new(
+            unsafe_derivation_id,
+            concept("future:operation/signal-derive"),
+            vec![SemanticRef::of(atom_ids[0])],
+            vec![SemanticRef::of(unsafe_artifact_id)],
+        ));
+        draft.add_derived_artifact(DerivedArtifact::new(
+            unsafe_artifact_id,
+            ContentId::from_bytes([44; 32]),
+            unsafe_derivation_id,
+        ));
+        draft.add_fidelity(Fidelity::new(
+            SemanticRef::of(policy_id),
+            FidelityKind::Exact,
+            None,
+            None,
+        ));
+        draft.add_fidelity(Fidelity::new(
+            SemanticRef::of(atom_ids[0]),
+            FidelityKind::Exact,
+            None,
+            None,
+        ));
+        draft.add_source_capsule(SourceCapsule::new(
+            SourceKey::new("nwb.object", "acquisition/eeg").unwrap(),
+            ContentId::from_bytes([45; 32]),
+            Some("application/x-hdf5"),
+        ));
+        draft.add_observed_execution(ExecutionRecord::new(
+            concept("future:operation/validate"),
+            "rich-fixture",
+        ));
+
+        let mut recording = Recording::new(recording_id, vec![stream_id]);
+        recording.add_source_key(SourceKey::new("edf.recording", "fixture").unwrap());
+        draft.add_recording(recording);
         draft.add_stream(Stream::new(
             stream_id,
             recording_id,
-            ConceptId::new("abir:modality/eeg").unwrap(),
+            concept("abir:modality/eeg"),
             atom_ids,
-            None,
-            None,
-            None,
+            Some(clock_id),
+            Some(basis_id),
+            Some(policy_id),
         ));
         OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
     }
@@ -1140,9 +1309,9 @@ mod tests {
         assert!(bytes.starts_with(&BCS2_MAGIC));
         let decoded = open_bundle(&bytes, &backend, ResourceBounds::default()).unwrap();
         let reconstructed = decoded.reconstructed();
-        assert_eq!(reconstructed.dataset().atoms().len(), 4);
-        for atom in reconstructed.dataset().atoms() {
-            let block = reconstructed.block_view(atom.id()).unwrap();
+        assert_eq!(reconstructed.dataset().atoms().len(), 5);
+        for atom_id in reconstructed.dataset().streams()[0].atoms() {
+            let block = reconstructed.block_view(*atom_id).unwrap();
             assert!(block.bytes().chunks_exact(8).all(|sample| {
                 (0..5).contains(&i64::from_le_bytes(sample.try_into().unwrap()))
             }));
@@ -1156,6 +1325,259 @@ mod tests {
             canonical_debug_json(decoded.source_dataset()).unwrap(),
             canonical_debug_json(opened.dataset()).unwrap()
         );
+    }
+
+    #[test]
+    fn reconstruction_preserves_context_and_invalidates_signal_claims() {
+        let opened = rich_fixture();
+        let backend = StubBackend { alphabet: 5 };
+        let bytes = encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &backend,
+            transformed_fidelity("test-residue"),
+            implementation_identity("test-build"),
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        let decoded = open_bundle(&bytes, &backend, ResourceBounds::default()).unwrap();
+        let source = decoded.source_dataset();
+        let reconstructed = decoded.reconstructed().dataset();
+
+        assert_eq!(reconstructed.clocks(), source.clocks());
+        assert_eq!(
+            reconstructed.coordinate_frames(),
+            source.coordinate_frames()
+        );
+        assert_eq!(reconstructed.channel_bases(), source.channel_bases());
+        assert_eq!(reconstructed.policies(), source.policies());
+        assert_eq!(reconstructed.subjects(), source.subjects());
+        assert_eq!(reconstructed.patients(), source.patients());
+        assert_eq!(reconstructed.sessions(), source.sessions());
+        assert_eq!(reconstructed.acquisitions(), source.acquisitions());
+        assert_eq!(reconstructed.devices(), source.devices());
+        assert_eq!(reconstructed.sensors(), source.sensors());
+        assert_eq!(reconstructed.channels(), source.channels());
+        assert_eq!(source.clock_relations().len(), 1);
+        assert!(reconstructed.clock_relations().is_empty());
+        assert_eq!(reconstructed.frame_transforms(), source.frame_transforms());
+        assert_eq!(reconstructed.events(), source.events());
+        assert_eq!(
+            reconstructed.concept_dictionaries(),
+            source.concept_dictionaries()
+        );
+
+        let source_stream = &source.streams()[0];
+        let reconstructed_stream = &reconstructed.streams()[0];
+        assert_eq!(reconstructed_stream.clock_id(), source_stream.clock_id());
+        assert_eq!(
+            reconstructed_stream.channel_basis_id(),
+            source_stream.channel_basis_id()
+        );
+        assert_eq!(reconstructed_stream.policy_id(), source_stream.policy_id());
+        assert_eq!(
+            reconstructed.recordings()[0].source_keys(),
+            source.recordings()[0].source_keys()
+        );
+        assert!(reconstructed
+            .source_relationships()
+            .iter()
+            .any(|relationship| matches!(
+                relationship,
+                SourceRelationship::AcquisitionRecording { recording_id, .. }
+                    if *recording_id == reconstructed.recordings()[0].id()
+            )));
+        assert!(!reconstructed
+            .source_relationships()
+            .iter()
+            .any(|relationship| matches!(
+                relationship,
+                SourceRelationship::AcquisitionRecording { recording_id, .. }
+                    if *recording_id == source.recordings()[0].id()
+            )));
+
+        assert_eq!(source.proofs().len(), 2);
+        assert!(reconstructed.proofs().is_empty());
+        assert_eq!(source.derivations().len(), 2);
+        assert!(reconstructed.derivations().is_empty());
+        assert_eq!(source.derived_artifacts().len(), 2);
+        assert!(reconstructed.derived_artifacts().is_empty());
+
+        assert_eq!(source.fidelity().len(), 2);
+        assert_eq!(reconstructed.fidelity().len(), 2);
+        assert!(reconstructed.fidelity().iter().any(|statement| {
+            statement.subject() == SemanticRef::of(id::<PolicyTag>(31))
+                && statement.kind() == FidelityKind::Exact
+        }));
+        assert!(reconstructed.fidelity().iter().any(|statement| {
+            statement.subject() == SemanticRef::of(reconstructed.id())
+                && statement.kind() == FidelityKind::Transformed
+                && statement
+                    .metric()
+                    .is_some_and(|metric| metric.as_str() == "lamquant:metric/test-residue")
+        }));
+        assert!(!reconstructed
+            .fidelity()
+            .iter()
+            .any(|statement| { statement.subject() == SemanticRef::of(source.atoms()[0].id()) }));
+
+        assert_eq!(reconstructed.source_capsules().len(), 1);
+        let receipt = &reconstructed.source_capsules()[0];
+        assert_eq!(
+            receipt.media_type(),
+            Some("application/vnd.quitetall.lamquant.lmq-reconstruction-receipt-v1")
+        );
+        let receipt_descriptor = reconstructed
+            .atoms()
+            .iter()
+            .filter_map(Atom::payload)
+            .find(|descriptor| descriptor.content_id() == receipt.content_id())
+            .unwrap();
+        let receipt_bytes = decoded
+            .reconstructed()
+            .access()
+            .lease(receipt_descriptor)
+            .unwrap();
+        let receipt_text = core::str::from_utf8(receipt_bytes.bytes()).unwrap();
+        assert!(receipt_text.starts_with("LMQ-RECONSTRUCTION-PROJECTION-V1\n"));
+        assert!(receipt_text.contains("pccp-status=candidate\n"));
+        assert!(receipt_text.contains(
+            "checkpoint-sha256=5252525252525252525252525252525252525252525252525252525252525252\n"
+        ));
+        assert!(receipt_text.contains(
+            "invalidated-proofs=20202020202020202020202020202020,21212121212121212121212121212121\n"
+        ));
+        assert!(
+            receipt_text.contains("invalidated-clock-relations=2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a\n")
+        );
+        assert!(receipt_text.contains(
+            "invalidated-derived-artifacts=24242424242424242424242424242424,25252525252525252525252525252525\n"
+        ));
+        assert!(receipt_text.contains("invalidated-fidelity-subjects=atom:"));
+        for descriptor in reconstructed.atoms().iter().filter_map(Atom::payload) {
+            assert!(decoded.reconstructed().access().lease(descriptor).is_ok());
+        }
+        assert_eq!(
+            reconstructed.observed_execution().len(),
+            source.observed_execution().len() + 1
+        );
+        let execution = reconstructed.observed_execution().last().unwrap();
+        assert_eq!(
+            execution.operation().as_str(),
+            "lamquant:operation/lmq-decode"
+        );
+        assert_eq!(
+            execution.implementation(),
+            "org.quitetall.lamquant.lmq.fsq-rans-v1@test-build"
+        );
+    }
+
+    #[test]
+    fn codec_fidelity_mapping_is_exact_and_fail_closed() {
+        let dataset_id = id::<DatasetTag>(90);
+        let bounded = CodecFidelity {
+            bound: Some(CodecParameterValue::Rational {
+                denominator: "1000".to_string(),
+                numerator: "75".to_string(),
+            }),
+            contract_id: ContentId::from_bytes([91; 32]),
+            kind: CodecFidelityKind::Bounded,
+            metric: Some("prd".to_string()),
+        };
+        let statement = codec_fidelity_statement(dataset_id, &bounded).unwrap();
+        assert_eq!(statement.subject(), SemanticRef::of(dataset_id));
+        assert_eq!(statement.kind(), FidelityKind::Bounded);
+        assert_eq!(
+            statement.metric().map(ConceptId::as_str),
+            Some("lamquant:metric/prd")
+        );
+        assert_eq!(
+            statement.bound(),
+            Some(ExactNumber::Rational(Rational::new(3, 40).unwrap()))
+        );
+
+        let invalid_bound = CodecFidelity {
+            bound: Some(CodecParameterValue::Text {
+                value: "approximately-small".to_string(),
+            }),
+            ..bounded.clone()
+        };
+        assert!(matches!(
+            codec_fidelity_statement(dataset_id, &invalid_bound),
+            Err(LmqError::CatalogContract)
+        ));
+        let opened = fixture();
+        assert!(matches!(
+            encode_bundle(
+                opened.dataset(),
+                opened.access(),
+                &StubBackend::default(),
+                invalid_bound,
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::CatalogContract)
+        ));
+        let invalid_metric = CodecFidelity {
+            metric: Some("not a canonical metric".to_string()),
+            ..bounded
+        };
+        assert!(matches!(
+            codec_fidelity_statement(dataset_id, &invalid_metric),
+            Err(LmqError::CatalogContract)
+        ));
+    }
+
+    #[test]
+    fn pccp_evidence_state_changes_reconstruction_identity() {
+        struct StatusBackend(PccpStatus);
+
+        impl NeuralBackend for StatusBackend {
+            fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+                StubBackend::default().capabilities()
+            }
+
+            fn model_provenance(&self) -> ModelProvenance {
+                let mut provenance = StubBackend::default().model_provenance();
+                provenance.pccp_status = self.0;
+                provenance
+            }
+
+            fn encode(
+                &self,
+                signal: &[Vec<i64>],
+                sample_rate: Rational,
+            ) -> Result<NeuralTokens, BackendError> {
+                StubBackend::default().encode(signal, sample_rate)
+            }
+
+            fn decode(&self, tokens: &NeuralTokens) -> Result<Vec<Vec<i64>>, BackendError> {
+                StubBackend::default().decode(tokens)
+            }
+        }
+
+        let opened = fixture();
+        let build = |backend: &StatusBackend| {
+            let bytes = encode_bundle(
+                opened.dataset(),
+                opened.access(),
+                backend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            )
+            .unwrap();
+            open_bundle(&bytes, backend, ResourceBounds::default())
+                .unwrap()
+                .reconstructed()
+                .dataset()
+                .source_capsules()[0]
+                .content_id()
+        };
+
+        let candidate = build(&StatusBackend(PccpStatus::Candidate));
+        let rejected = build(&StatusBackend(PccpStatus::Rejected));
+        assert_ne!(candidate, rejected);
     }
 
     #[test]
