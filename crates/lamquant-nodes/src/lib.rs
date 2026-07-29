@@ -468,6 +468,23 @@ fn validate_max_order(max_order: usize) -> Result<(), LmlNodeConfigError> {
 
 /// Register production LML semantic nodes and target-specific fused kernels.
 pub fn register_lml_nodes(registry: &mut KernelRegistry) -> Result<(), CompileError> {
+    register_lml_nodes_with_fused_mcu_implementation(
+        registry,
+        REFERENCE_FUSED_MCU_IMPLEMENTATION_ID,
+    )
+}
+
+/// Register production LML nodes while binding the fused MCU kernel to the
+/// exact statically linked firmware implementation.
+///
+/// Firmware wrappers must supply a content identity covering every local
+/// dispatch, configuration, failure-mapping, and runtime input that can change
+/// executable behavior. Host and unfused reference kernels retain their
+/// codec-owned identities.
+pub fn register_lml_nodes_with_fused_mcu_implementation(
+    registry: &mut KernelRegistry,
+    fused_mcu_implementation: ImplementationId,
+) -> Result<(), CompileError> {
     for descriptor in reference_stage_descriptors() {
         registry.register_descriptor(descriptor)?;
     }
@@ -494,11 +511,13 @@ pub fn register_lml_nodes(registry: &mut KernelRegistry) -> Result<(), CompileEr
         reference_stage_types(),
         Target::Host,
     ))?;
-    registry.register_kernel(reference_kernel(
+    let mut fused_mcu = reference_kernel(
         lml_reference::REFERENCE_FUSED_MCU_KERNEL,
         reference_stage_types(),
         Target::McuAot,
-    ))?;
+    );
+    fused_mcu.implementation_id = fused_mcu_implementation;
+    registry.register_kernel(fused_mcu)?;
 
     for (id, target) in [
         (BASELINE_HOST_KERNEL, Target::Host),

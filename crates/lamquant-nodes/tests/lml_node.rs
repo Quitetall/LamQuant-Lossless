@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use blut_graph_core::{
-    AbirRootType, AbirViewType, Capability, Compiler, ExecutionRealm, Graph, KernelRegistry,
-    NodeId, NodeInstance, PlanExecutor, PortRef, Target,
+    AbirRootType, AbirViewType, Capability, Compiler, ExecutionRealm, Graph, ImplementationId,
+    KernelRegistry, NodeId, NodeInstance, PlanExecutor, PortRef, Target,
 };
 use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
 use lamquant_lml_mcu::mcu_packet::UNIFORM_I64_INVOCATION_HEADER_BYTES;
@@ -12,13 +12,13 @@ use lamquant_lml_mcu::{
 };
 use lamquant_nodes::{
     arithmetic_lml_descriptor, baseline_lml_descriptor, baseline_lml_packet_descriptor,
-    lml_node_config, lml_packet_node_config, register_lml_nodes, LamQuantNodeValue,
-    LmlNodeConfigError, LmlSignalView, NoopTransactionalSink, CAP_LML_ARITHMETIC_NODE,
-    LML_ARITHMETIC_NODE_TYPE, LML_ASSEMBLE_NODE_TYPE, LML_BASELINE_NODE_TYPE,
-    LML_ENTROPY_NODE_TYPE, LML_PACKET_BASELINE_NODE_TYPE, LML_PREDICT_NODE_TYPE,
-    LML_QUANTIZE_NODE_TYPE, LML_TRANSFORM_NODE_TYPE, REFERENCE_FUSED_MCU_IMPLEMENTATION_ID,
-    REFERENCE_FUSED_MCU_KERNEL, REFERENCE_MAX_SIGNAL_BYTES, REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES,
-    REFERENCE_MCU_SCRATCH_BYTES,
+    lml_node_config, lml_packet_node_config, register_lml_nodes,
+    register_lml_nodes_with_fused_mcu_implementation, LamQuantNodeValue, LmlNodeConfigError,
+    LmlSignalView, NoopTransactionalSink, CAP_LML_ARITHMETIC_NODE, LML_ARITHMETIC_NODE_TYPE,
+    LML_ASSEMBLE_NODE_TYPE, LML_BASELINE_NODE_TYPE, LML_ENTROPY_NODE_TYPE,
+    LML_PACKET_BASELINE_NODE_TYPE, LML_PREDICT_NODE_TYPE, LML_QUANTIZE_NODE_TYPE,
+    LML_TRANSFORM_NODE_TYPE, REFERENCE_FUSED_MCU_IMPLEMENTATION_ID, REFERENCE_FUSED_MCU_KERNEL,
+    REFERENCE_MAX_SIGNAL_BYTES, REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES, REFERENCE_MCU_SCRATCH_BYTES,
 };
 use semantic_abir::{
     payload_content_id, AbirDataset, Atom, AtomTag, ByteOrder, ConceptId, DatasetDraft, DatasetTag,
@@ -411,6 +411,32 @@ fn production_packet_graph_preserves_semantics_across_host_and_mcu_realms() {
         host.as_plan().nodes[0].output_contracts,
         mcu.as_plan().nodes[0].output_contracts
     );
+}
+
+#[test]
+fn firmware_can_bind_fused_mcu_plan_to_its_linked_implementation() {
+    let linked = ImplementationId([0x5a; 32]);
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes_with_fused_mcu_implementation(&mut registry, linked).unwrap();
+    let materialized = registry
+        .materialize_subgraph(&NodeInstance {
+            id: NodeId(100),
+            descriptor: LML_PACKET_BASELINE_NODE_TYPE.into(),
+            descriptor_version: 1,
+            config: lml_packet_node_config(LpcMode::Fixed).unwrap(),
+        })
+        .unwrap();
+
+    let mcu = Compiler::new(&registry, ExecutionRealm::McuAot)
+        .compile(&materialized.graph)
+        .unwrap();
+    let host = Compiler::new(&registry, ExecutionRealm::HostStream)
+        .compile(&materialized.graph)
+        .unwrap();
+
+    assert_eq!(mcu.as_plan().nodes[0].kernel, REFERENCE_FUSED_MCU_KERNEL);
+    assert_eq!(mcu.as_plan().nodes[0].implementation_id, linked);
+    assert_ne!(host.as_plan().nodes[0].implementation_id, linked);
 }
 
 #[test]
