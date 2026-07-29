@@ -32,6 +32,7 @@ use std::path::PathBuf;
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::from_signal_bundle;
 
 const SETUP_HEADER_LEN: usize = 900;
 const ELECTLOC_LEN: usize = 75;
@@ -48,10 +49,8 @@ impl CntReader {
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         Self { path: path.into() }
     }
-}
 
-impl SignalSourceReader for CntReader {
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let raw = std::fs::read(&self.path).map_err(LmlError::Io)?;
         if raw.len() < SETUP_HEADER_LEN {
             return Err(LmlError::Truncated {
@@ -177,6 +176,15 @@ impl SignalSourceReader for CntReader {
     }
 }
 
+impl SignalSourceReader for CntReader {
+    fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +228,21 @@ mod tests {
         assert_eq!(b.metadata.format, "CNT");
         assert_eq!(b.sample_rate, 250.0);
         assert_eq!(b.channels[0], "E00");
+    }
+
+    #[test]
+    fn lower_to_abir_is_the_validated_reader_seam() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("semantic.cnt");
+        std::fs::write(&path, synth_cnt(4, 100, 250)).unwrap();
+
+        let read = CntReader::new(path).lower_to_abir().unwrap();
+
+        assert_eq!(read.opened.dataset().recordings().len(), 1);
+        assert_eq!(read.opened.dataset().streams().len(), 1);
+        assert_eq!(read.opened.dataset().atoms().len(), 4);
+        assert_eq!(read.mapping.channel_count, 4);
+        assert!(read.fidelity.sample_values_exact);
     }
 
     #[test]

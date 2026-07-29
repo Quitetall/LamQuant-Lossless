@@ -17,7 +17,7 @@
 
 #![cfg(feature = "dicom")]
 
-use lamquant_core::source::{DicomWaveformReader, SignalSourceReader};
+use lamquant_core::source::DicomWaveformReader;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {

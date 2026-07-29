@@ -29,7 +29,7 @@ use abir_adapter::{
     MappingReport, PayloadObject, PayloadResolver, ProfileId, ProfileStatus, SemanticCoverage,
     ValidationArtifact,
 };
-use lamquant_core::source::{EdfReader, SignalBundle, SignalSourceReader};
+use lamquant_core::source::{EdfReader, SignalBundle};
 use semantic_abir::{
     interchange_content_id, payload_content_id as abir_payload_id, AbirDataset, Atom, AtomTag,
     ByteOrder, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock, ClockTag, ConceptId,

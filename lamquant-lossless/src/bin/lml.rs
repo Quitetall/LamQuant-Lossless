@@ -2120,7 +2120,7 @@ fn encode_one_brainvision(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::container;
-    use lamquant_core::source::{BrainVisionReader, SignalSourceReader};
+    use lamquant_core::source::BrainVisionReader;
     let t0 = Instant::now();
     let mut reader = BrainVisionReader::new(vhdr_path);
     let bundle = reader.read_bundle()?;
@@ -2333,7 +2333,7 @@ fn encode_one_raw(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::container;
-    use lamquant_core::source::{RawReader, SignalSourceReader};
+    use lamquant_core::source::RawReader;
     let t0 = Instant::now();
     let mut reader = RawReader::new(raw_path);
     let bundle = reader.read_bundle()?;
@@ -2528,7 +2528,7 @@ fn encode_one_cnt(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::container;
-    use lamquant_core::source::{CntReader, SignalSourceReader};
+    use lamquant_core::source::CntReader;
     let t0 = Instant::now();
     let mut reader = CntReader::new(cnt_path);
     let bundle = reader.read_bundle()?;
@@ -2692,7 +2692,7 @@ fn encode_one_dicom(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::container;
-    use lamquant_core::source::{DicomWaveformReader, SignalSourceReader};
+    use lamquant_core::source::DicomWaveformReader;
     let t0 = Instant::now();
     let mut reader = DicomWaveformReader::new(dcm_path);
     let bundle = reader.read_bundle()?;
@@ -2859,7 +2859,7 @@ fn encode_one_eeglab(
     lossy_int16: bool,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::container;
-    use lamquant_core::source::{EeglabReader, SignalSourceReader};
+    use lamquant_core::source::EeglabReader;
     let t0 = Instant::now();
     let mut reader = EeglabReader::new(set_path).with_lossy_int16(lossy_int16);
     let bundle = reader.read_bundle()?;

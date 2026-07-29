@@ -12,7 +12,7 @@ use hdf5_metno::types::{IntSize, TypeDescriptor};
 use lamquant_core::source::SourceMetadata;
 use lamquant_core::source::{
     from_signal_bundle_with_interchange_bound_sources, DicomWaveformReader, EdfReader,
-    SemanticSourceObject, SemanticTimedEvent, SignalBundle, SignalSourceReader,
+    SemanticSourceObject, SemanticTimedEvent, SignalBundle,
 };
 use semantic_abir::{AbirDataset, ContentId, PayloadAccess, PayloadLease, ValidationLimits};
 use std::collections::{BTreeMap, BTreeSet};

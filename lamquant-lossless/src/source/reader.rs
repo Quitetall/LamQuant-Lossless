@@ -1,39 +1,42 @@
-//! `SignalSourceReader` — the trait every physiology reader implements.
-//!
-//! Today the only consumer is `bin/lml.rs` indirectly (via the legacy
-//! `crate::edf::read_edf`); Phase 0.4+ will migrate the codec
-//! pipeline to consume `SignalBundle` directly. Plug-in readers
-//! (BrainVision, CNT, DICOM, custom raw) arrive in Phase 4 with no
-//! changes required here.
+//! `SignalSourceReader` — ABIR seam every physiology reader implements.
 //!
 //! Bible alignment:
 //! - R1  Each impl does ONE format. Composition over inheritance.
-//! - R6  `SignalBundle` is the strongly-typed boundary contract.
-//! - R23 Validate at both ends: reader checks its input bytes, caller
-//!   checks the returned `SignalBundle` invariants.
+//! - R6  validated semantic ABIR is the strongly-typed boundary contract.
+//! - R23 Validate at both ends: reader checks source bytes and ABIR construction
+//!   validates the returned dataset before exposure.
 
-use super::bundle::SignalBundle;
-use super::semantic::{from_signal_bundle, SemanticRead};
+use super::semantic::SemanticRead;
 use crate::error::LmlResult;
 
-/// Read a physiology recording into the codec-agnostic `SignalBundle`.
+/// Read a physiology source into validated semantic ABIR.
 ///
 /// Implementations:
 ///   - own the byte source (path, stream, …) at construction time
-///   - consume that source exactly once when `read_bundle` is called
+///   - consume that source exactly once when `lower_to_abir` is called
 ///   - produce errors via `LmlResult` (no panics on malformed input)
-///
-/// Phase 0.5 will add a generic-over-`R: Read` variant; for now the
-/// per-source ownership style keeps the surface tight.
 pub trait SignalSourceReader {
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle>;
+    /// Canonical public module seam. Reader-private native layouts may remain
+    /// inside this call, but validated ABIR is the only trait-level result.
+    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead>;
+}
 
-    /// Read this source into the canonical semantic ABIR root and owned payload
-    /// resolver. This is the public module seam used by new consumers.
-    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
-        )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::LmlError;
+
+    struct SemanticOnlyReader;
+
+    impl SignalSourceReader for SemanticOnlyReader {
+        fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
+            Err(LmlError::InvalidHeader("semantic-only reader probe".into()))
+        }
+    }
+
+    #[test]
+    fn implementors_are_required_to_supply_only_the_abir_seam() {
+        let mut reader = SemanticOnlyReader;
+        assert!(reader.lower_to_abir().is_err());
     }
 }

@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::from_signal_bundle;
 
 const MAX_META_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum bytes we'll buffer for the original `.set` MAT v5 file when
@@ -192,10 +193,8 @@ impl EeglabReader {
         self.lossy_int16 = on;
         self
     }
-}
 
-impl SignalSourceReader for EeglabReader {
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let meta_path = self
             .meta_override
             .clone()
@@ -386,6 +385,15 @@ impl SignalSourceReader for EeglabReader {
     }
 }
 
+impl SignalSourceReader for EeglabReader {
+    fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,9 +493,8 @@ mod tests {
 
     // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
     //
-    // EeglabReader is the one reader that stays on `SignalSourceReader`'s
-    // DEFAULT `lower_to_legacy_recording` (see `source/reader.rs` docs) — this test
-    // exercises that shared default path, not a reader-specific override.
+    // Semantic lowering is now an explicit reader seam. Legacy bundle tests
+    // remain here until Package 26 removes the transitional carrier.
 
     #[test]
     fn missing_fdt_errors_explicitly() {

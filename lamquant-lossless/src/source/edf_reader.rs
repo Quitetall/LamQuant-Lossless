@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::edf::{read_edf, EdfFile};
 use crate::error::{LmlError, LmlResult};
+use crate::source::semantic::from_signal_bundle;
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
@@ -40,12 +41,19 @@ impl EdfReader {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+        let edf = read_edf(&self.path)?;
+        Ok(edf.into())
+    }
 }
 
 impl SignalSourceReader for EdfReader {
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
-        let edf = read_edf(&self.path)?;
-        Ok(edf.into())
+    fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 }
 

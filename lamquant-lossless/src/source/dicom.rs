@@ -41,6 +41,7 @@
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::from_signal_bundle;
 use crate::error::{LmlError, LmlResult};
 use std::path::PathBuf;
 
@@ -67,10 +68,8 @@ impl DicomWaveformReader {
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         Self { path: path.into() }
     }
-}
 
-impl SignalSourceReader for DicomWaveformReader {
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         let obj = open_file(&self.path).map_err(|e| {
             LmlError::InvalidHeader(format!("dicom: open {}: {e}", self.path.display()))
         })?;
@@ -236,6 +235,15 @@ impl SignalSourceReader for DicomWaveformReader {
         };
         bundle.validate()?;
         Ok(bundle)
+    }
+}
+
+impl SignalSourceReader for DicomWaveformReader {
+    fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 }
 

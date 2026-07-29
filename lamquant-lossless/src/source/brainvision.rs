@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
 use super::reader::SignalSourceReader;
+use super::semantic::from_signal_bundle;
 
 /// Maximum `.vhdr` size we'll trust (text headers are tiny in practice;
 /// 4 MiB is a paranoid ceiling for adversarial inputs).
@@ -269,10 +270,8 @@ impl BrainVisionReader {
             vhdr_path: vhdr_path.into(),
         }
     }
-}
 
-impl SignalSourceReader for BrainVisionReader {
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
         // 1. Read + parse the .vhdr.
         let vhdr_meta = std::fs::metadata(&self.vhdr_path).map_err(LmlError::Io)?;
         if vhdr_meta.len() > MAX_VHDR_BYTES {
@@ -470,6 +469,15 @@ impl SignalSourceReader for BrainVisionReader {
         };
         bundle.validate()?;
         Ok(bundle)
+    }
+}
+
+impl SignalSourceReader for BrainVisionReader {
+    fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
+        from_signal_bundle(
+            self.read_bundle()?,
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 }
 

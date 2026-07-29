@@ -1,6 +1,6 @@
-//! Source-format support: shared parse helpers + `SignalSourceReader`
-//! trait that EDF, BrainVision, NeuroScan CNT, and custom raw readers
-//! all implement.
+//! Source-format support: shared parse helpers plus the ABIR-first
+//! `SignalSourceReader` seam implemented by EDF, BrainVision, NeuroScan CNT,
+//! DICOM, EEGLAB, and custom raw readers.
 //!
 //! This module is the validation chassis. The intent is that adding a
 //! new reader = one new file under `source/` that reuses every
@@ -10,12 +10,10 @@
 //! Submodules:
 //! - `ascii`       — Phase 0.2: parse_usize, parse_i64, parse_float
 //! - `bitstream`   — Phase 0.2: read_i24_le
-//! - `bundle`      — Phase 0.3: `SignalBundle`, `SourceMetadata`,
-//!   `SidecarBlob` (the codec-agnostic carrier)
-//! - `reader`      — Phase 0.3: `SignalSourceReader` trait
-//! - `edf_reader`  — Phase 0.3: `EdfReader` (first impl); the legacy
-//!   free function `crate::edf::read_edf` continues to exist for
-//!   non-migrated callers
+//! - `bundle`      — transitional `SignalBundle` compatibility carrier
+//! - `reader`      — mandatory semantic-ABIR `SignalSourceReader` trait
+//! - `edf_reader`  — `EdfReader`; concrete `read_bundle` remains temporarily
+//!   available to non-migrated callers
 
 pub mod ascii;
 pub mod bitstream;
