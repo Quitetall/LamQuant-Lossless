@@ -43,9 +43,10 @@ const QUANTIZED_SEMANTIC_TYPE: &str = "lamquant.lml.reference.quantized-subbands
 const PREDICTED_SEMANTIC_TYPE: &str = "lamquant.lml.reference.predicted-subbands";
 const ENTROPY_SEMANTIC_TYPE: &str = "lamquant.lml.reference.entropy-segments";
 const PACKETS_SEMANTIC_TYPE: &str = "bcs.lml.packet-sequence.lossless-v1";
-const REFERENCE_MAX_SIGNAL_BYTES: u64 = 128 * 1024 * 1024;
-const REFERENCE_MAX_PACKET_BYTES: u64 = 512 * 1024 * 1024;
+pub const REFERENCE_MAX_SIGNAL_BYTES: u64 = 128 * 1024 * 1024;
+pub const REFERENCE_MAX_PACKET_BYTES: u64 = 512 * 1024 * 1024;
 const REFERENCE_PEAK_BYTES: u64 = 1024 * 1024 * 1024;
+pub const REFERENCE_MCU_SCRATCH_BYTES: u64 = 256 * 1024;
 const REFERENCE_MAX_ELEMENTS: u64 = REFERENCE_MAX_SIGNAL_BYTES / core::mem::size_of::<i64>() as u64;
 const REFERENCE_MAX_CHANNELS: usize = 256;
 
@@ -753,6 +754,11 @@ pub(crate) fn reference_kernel(
     } else {
         "fused:org.quitetall.lamquant.lml.reference-v1".into()
     };
+    let (peak_bytes, scratch_bytes) = if target == Target::McuAot {
+        (REFERENCE_MCU_SCRATCH_BYTES, REFERENCE_MCU_SCRATCH_BYTES)
+    } else {
+        (REFERENCE_PEAK_BYTES, REFERENCE_MAX_PACKET_BYTES)
+    };
     KernelDescriptor {
         id,
         implements: type_names
@@ -775,11 +781,7 @@ pub(crate) fn reference_kernel(
         } else {
             Layout::Opaque
         }],
-        resources: ResourceEnvelope::bounded(
-            REFERENCE_PEAK_BYTES,
-            REFERENCE_MAX_PACKET_BYTES,
-            threads,
-        ),
+        resources: ResourceEnvelope::bounded(peak_bytes, scratch_bytes, threads),
         determinism: Determinism::BitExact,
         lowering,
     }
