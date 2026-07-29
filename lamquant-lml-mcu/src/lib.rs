@@ -52,6 +52,7 @@ pub mod lifting;
 pub mod lml;
 pub mod lmqc;
 pub mod lpc;
+pub mod mcu_packet;
 pub mod quant;
 pub mod rans;
 pub mod zrle;

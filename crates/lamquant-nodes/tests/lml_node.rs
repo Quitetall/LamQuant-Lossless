@@ -15,7 +15,8 @@ use lamquant_nodes::{
     LmlNodeConfigError, LmlSignalView, NoopTransactionalSink, CAP_LML_ARITHMETIC_NODE,
     LML_ARITHMETIC_NODE_TYPE, LML_ASSEMBLE_NODE_TYPE, LML_BASELINE_NODE_TYPE,
     LML_ENTROPY_NODE_TYPE, LML_PACKET_BASELINE_NODE_TYPE, LML_PREDICT_NODE_TYPE,
-    LML_QUANTIZE_NODE_TYPE, LML_TRANSFORM_NODE_TYPE,
+    LML_QUANTIZE_NODE_TYPE, LML_TRANSFORM_NODE_TYPE, REFERENCE_FUSED_MCU_IMPLEMENTATION_ID,
+    REFERENCE_FUSED_MCU_KERNEL,
 };
 use semantic_abir::{
     payload_content_id, AbirDataset, Atom, AtomTag, ByteOrder, ConceptId, DatasetDraft, DatasetTag,
@@ -373,6 +374,11 @@ fn production_packet_graph_preserves_semantics_across_host_and_mcu_realms() {
     assert_eq!(mcu.as_plan().realm, ExecutionRealm::McuAot);
     assert_eq!(host.as_plan().nodes.len(), 1);
     assert_eq!(mcu.as_plan().nodes.len(), 1);
+    assert_eq!(mcu.as_plan().nodes[0].kernel, REFERENCE_FUSED_MCU_KERNEL);
+    assert_eq!(
+        mcu.as_plan().nodes[0].implementation_id,
+        REFERENCE_FUSED_MCU_IMPLEMENTATION_ID
+    );
     assert_eq!(
         host.as_plan().nodes[0].semantic_nodes,
         mcu.as_plan().nodes[0].semantic_nodes

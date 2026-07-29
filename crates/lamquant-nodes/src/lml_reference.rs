@@ -53,6 +53,9 @@ pub(crate) const REFERENCE_HOST_KERNEL_BASE: u32 = 0x4c4d_1000;
 pub const REFERENCE_MCU_KERNEL_BASE: u32 = 0x4c4d_1100;
 pub const REFERENCE_FUSED_MCU_KERNEL: KernelId = KernelId(0x4c4d_1200);
 pub(crate) const REFERENCE_FUSED_HOST_KERNEL: KernelId = KernelId(0x4c4d_1201);
+include!(concat!(env!("OUT_DIR"), "/mcu_implementation_ids.rs"));
+pub const REFERENCE_FUSED_MCU_IMPLEMENTATION_ID: ImplementationId =
+    ImplementationId(REFERENCE_FUSED_MCU_IMPLEMENTATION_BYTES);
 
 #[doc(hidden)]
 #[derive(Debug)]
@@ -783,11 +786,18 @@ pub(crate) fn reference_kernel(
 }
 
 fn implementation_id(type_name: &str, target: Target) -> ImplementationId {
+    const MCU_SOURCE_ID: &str = env!("LAMQUANT_NODES_MCU_SOURCE_ID");
+    const MCU_FEATURE_SET: &str = "mcu-aot-baseline";
+    let (source_id, feature_set) = if target == Target::McuAot {
+        (MCU_SOURCE_ID, MCU_FEATURE_SET)
+    } else {
+        (crate::SOURCE_ID, crate::FEATURE_SET)
+    };
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"org.quitetall.lamquant.nodes.implementation-v1\0");
-    hasher.update(crate::SOURCE_ID.as_bytes());
+    hasher.update(source_id.as_bytes());
     hasher.update(&[0]);
-    hasher.update(crate::FEATURE_SET.as_bytes());
+    hasher.update(feature_set.as_bytes());
     hasher.update(&[0]);
     hasher.update(type_name.as_bytes());
     hasher.update(&[0]);
@@ -796,7 +806,11 @@ fn implementation_id(type_name: &str, target: Target) -> ImplementationId {
         Target::Host => 1,
         Target::BlutDurable => 2,
     }]);
-    ImplementationId(*hasher.finalize().as_bytes())
+    let id = ImplementationId(*hasher.finalize().as_bytes());
+    if target == Target::McuAot && type_name == "fused:org.quitetall.lamquant.lml.reference-v1" {
+        debug_assert_eq!(id, REFERENCE_FUSED_MCU_IMPLEMENTATION_ID);
+    }
+    id
 }
 
 pub(crate) fn parse_window_size(
