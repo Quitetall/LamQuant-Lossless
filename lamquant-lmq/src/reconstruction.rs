@@ -6,7 +6,7 @@
 //! Claims whose evidence bytes are not carried by LMQ are invalidated and
 //! listed in a deterministic reconstruction receipt.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -82,6 +82,11 @@ pub(crate) fn build_reconstructed_dataset(
     };
     let mut draft = DatasetDraft::new(ids.dataset);
     let mut atom_ids = Vec::with_capacity(signal.len());
+    let source_atoms = source
+        .atoms()
+        .iter()
+        .map(|atom| (atom.id(), atom))
+        .collect::<BTreeMap<_, _>>();
 
     for (index, ((source_atom_id, channel), content_id)) in source_stream
         .atoms()
@@ -90,10 +95,11 @@ pub(crate) fn build_reconstructed_dataset(
         .zip(payloads.iter().copied())
         .enumerate()
     {
-        let source_atom = source
-            .atoms()
-            .iter()
-            .find(|atom| atom.id() == *source_atom_id)
+        let sample_count =
+            u64::try_from(channel.len()).map_err(|_| LmqError::SignalShapeMismatch)?;
+        let source_atom = source_atoms
+            .get(source_atom_id)
+            .copied()
             .ok_or(LmqError::UnsupportedSemantics("unresolved source atom"))?;
         let Atom::SignalBlock(source_block) = source_atom else {
             return Err(LmqError::UnsupportedSemantics(
@@ -108,13 +114,12 @@ pub(crate) fn build_reconstructed_dataset(
             Presence::Present,
             Some(PayloadDescriptor::new(
                 content_id,
-                u64::try_from(channel.len())
-                    .ok()
-                    .and_then(|samples| samples.checked_mul(8))
+                sample_count
+                    .checked_mul(8)
                     .ok_or(LmqError::SignalShapeMismatch)?,
                 ElementType::I64,
                 ByteOrder::Little,
-                vec![1, channel.len() as u64],
+                vec![1, sample_count],
                 Layout::DenseRowMajor,
                 None,
                 None,
@@ -218,6 +223,8 @@ fn add_context_without_external_payloads(
         };
     }
 
+    // These ABIR catalogs are value semantics: unlike proofs, clock relations,
+    // derived artifacts, and source capsules, none names external evidence bytes.
     copy_catalog!(source.clocks(), add_clock);
     copy_catalog!(source.coordinate_frames(), add_coordinate_frame);
     copy_catalog!(source.channel_bases(), add_channel_basis);

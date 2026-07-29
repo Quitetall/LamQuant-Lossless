@@ -201,10 +201,11 @@ fn py_backend_model_end_to_end_is_env_gated() {
             // Honest end-to-end: it produced a valid lossy .lmq and reconstructed a
             // same-shape signal. The R number is reported by the R harness, not here.
             let reconstructed = decoded.reconstructed();
-            assert_eq!(reconstructed.dataset().atoms().len(), 21);
+            let signal_atoms = reconstructed.dataset().streams()[0].atoms();
+            assert_eq!(signal_atoms.len(), 21);
             assert_eq!(
                 reconstructed
-                    .block_view(reconstructed.dataset().atoms()[0].id())
+                    .block_view(signal_atoms[0])
                     .unwrap()
                     .bytes()
                     .len(),
