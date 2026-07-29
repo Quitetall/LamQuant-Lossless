@@ -50,6 +50,8 @@ const REFERENCE_MAX_ELEMENTS: u64 = REFERENCE_MAX_SIGNAL_BYTES / core::mem::size
 const REFERENCE_MAX_CHANNELS: usize = 256;
 
 pub(crate) const REFERENCE_HOST_KERNEL_BASE: u32 = 0x4c4d_1000;
+pub const REFERENCE_MCU_KERNEL_BASE: u32 = 0x4c4d_1100;
+pub const REFERENCE_FUSED_MCU_KERNEL: KernelId = KernelId(0x4c4d_1200);
 pub(crate) const REFERENCE_FUSED_HOST_KERNEL: KernelId = KernelId(0x4c4d_1201);
 
 #[doc(hidden)]
@@ -416,7 +418,7 @@ pub(crate) fn baseline_lml_packet_descriptor() -> NodeDescriptor {
         inputs: vec![signal_port()],
         outputs: vec![output],
         capabilities: vec![Capability(CAP_ABIR.into()), Capability(CAP_LML.into())],
-        targets: vec![Target::Host],
+        targets: vec![Target::McuAot, Target::Host],
         resources: ResourceEnvelope::bounded(
             REFERENCE_PEAK_BYTES,
             REFERENCE_MAX_PACKET_BYTES,
@@ -558,7 +560,7 @@ fn reference_stage_descriptor(
             Capability(crate::CAP_LML.into()),
             Capability(crate::CAP_ABIR.into()),
         ],
-        targets: vec![Target::Host],
+        targets: vec![Target::McuAot, Target::Host],
         resources: ResourceEnvelope::bounded(
             REFERENCE_PEAK_BYTES,
             REFERENCE_MAX_PACKET_BYTES,
@@ -737,8 +739,12 @@ pub(crate) fn reference_kernel(
     type_names: &[&str],
     target: Target,
 ) -> KernelDescriptor {
-    debug_assert_eq!(target, Target::Host);
-    let threads = MAX_PARALLEL_CHANNELS;
+    debug_assert!(matches!(target, Target::McuAot | Target::Host));
+    let threads = if target == Target::McuAot {
+        1
+    } else {
+        MAX_PARALLEL_CHANNELS
+    };
     let lowering = if type_names.len() == 1 {
         format!("reference:{}", type_names[0])
     } else {

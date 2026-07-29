@@ -481,11 +481,21 @@ pub fn register_lml_nodes(registry: &mut KernelRegistry) -> Result<(), CompileEr
             &[*type_name],
             Target::Host,
         ))?;
+        registry.register_kernel(reference_kernel(
+            KernelId(lml_reference::REFERENCE_MCU_KERNEL_BASE + offset as u32),
+            &[*type_name],
+            Target::McuAot,
+        ))?;
     }
     registry.register_kernel(reference_kernel(
         lml_reference::REFERENCE_FUSED_HOST_KERNEL,
         reference_stage_types(),
         Target::Host,
+    ))?;
+    registry.register_kernel(reference_kernel(
+        lml_reference::REFERENCE_FUSED_MCU_KERNEL,
+        reference_stage_types(),
+        Target::McuAot,
     ))?;
 
     for (id, target) in [

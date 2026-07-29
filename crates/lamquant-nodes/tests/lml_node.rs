@@ -176,7 +176,7 @@ fn descriptor_identity_is_feature_specific() {
     assert_eq!(baseline.outputs[0].abir.view, AbirViewType::Root);
     assert_eq!(baseline.targets, vec![Target::Host, Target::BlutDurable]);
     assert_eq!(packet.type_name, LML_PACKET_BASELINE_NODE_TYPE);
-    assert_eq!(packet.targets, vec![Target::Host]);
+    assert_eq!(packet.targets, vec![Target::McuAot, Target::Host]);
     assert!(packet.subgraph.is_some());
     assert_eq!(packet.outputs[0].abir.root, AbirRootType::EncodedBlock);
 }
@@ -345,6 +345,54 @@ fn compiler_produced_reference_dag_matches_fused_lml_node() {
     )
     .unwrap();
     assert_eq!(reference_output, direct_output);
+}
+
+#[test]
+fn production_packet_graph_preserves_semantics_across_host_and_mcu_realms() {
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+    let materialized = registry
+        .materialize_subgraph(&NodeInstance {
+            id: NodeId(100),
+            descriptor: LML_PACKET_BASELINE_NODE_TYPE.into(),
+            descriptor_version: 1,
+            config: lml_packet_node_config(LpcMode::Fixed).unwrap(),
+        })
+        .unwrap();
+
+    let host = Compiler::new(&registry, ExecutionRealm::HostStream)
+        .compile(&materialized.graph)
+        .unwrap();
+    let mcu = Compiler::new(&registry, ExecutionRealm::McuAot)
+        .compile(&materialized.graph)
+        .unwrap();
+
+    assert_eq!(host.as_plan().graph_id, mcu.as_plan().graph_id);
+    assert_ne!(host.as_plan().plan_id, mcu.as_plan().plan_id);
+    assert_eq!(host.as_plan().realm, ExecutionRealm::HostStream);
+    assert_eq!(mcu.as_plan().realm, ExecutionRealm::McuAot);
+    assert_eq!(host.as_plan().nodes.len(), 1);
+    assert_eq!(mcu.as_plan().nodes.len(), 1);
+    assert_eq!(
+        host.as_plan().nodes[0].semantic_nodes,
+        mcu.as_plan().nodes[0].semantic_nodes
+    );
+    assert_eq!(
+        host.as_plan().nodes[0].semantic_types,
+        mcu.as_plan().nodes[0].semantic_types
+    );
+    assert_eq!(
+        host.as_plan().nodes[0].semantic_configs,
+        mcu.as_plan().nodes[0].semantic_configs
+    );
+    assert_eq!(
+        host.as_plan().nodes[0].input_contracts,
+        mcu.as_plan().nodes[0].input_contracts
+    );
+    assert_eq!(
+        host.as_plan().nodes[0].output_contracts,
+        mcu.as_plan().nodes[0].output_contracts
+    );
 }
 
 #[test]
