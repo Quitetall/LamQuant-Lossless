@@ -15,12 +15,11 @@
 //! pinned, `include_bytes!`'d into [`EmbeddedWeights`].
 
 use alloc::string::String;
-use semantic_abir::{ContentId, Rational};
-use semantic_abir_bcs::{ModelProvenance, PccpStatus};
+use semantic_abir::Rational;
 
 use crate::backend::{
-    BackendError, BackendTarget, NeuralBackend, NeuralBackendCapabilities, NeuralSignal,
-    NeuralTokens, SignalDomain,
+    BackendError, BackendModel, BackendTarget, NeuralBackend, NeuralBackendCapabilities,
+    NeuralSignal, NeuralTokens, SignalDomain, TrainedModelArtifact,
 };
 
 /// Registry-SHA-pinned ternary weights baked into the binary. Placeholder: the
@@ -42,17 +41,19 @@ impl EmbeddedWeights {
 /// The fully-Rust neural backend (ADR 0074 N3). **Scaffold only** — the forward
 /// pass is deferred; it is wired behind [`NeuralBackend`] so it drops in with no
 /// wire change when the architecture freezes. Use `PyBackend` (N2) until then.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RustBackend {
     #[allow(dead_code)]
     weights: EmbeddedWeights,
+    model: TrainedModelArtifact,
 }
 
 impl RustBackend {
     /// Construct with the embedded weights.
-    pub fn new() -> Self {
+    pub fn new(model: TrainedModelArtifact) -> Self {
         Self {
             weights: EmbeddedWeights::embedded(),
+            model,
         }
     }
 }
@@ -80,14 +81,8 @@ impl NeuralBackend for RustBackend {
         }
     }
 
-    fn model_provenance(&self) -> ModelProvenance {
-        ModelProvenance {
-            checkpoint_content_id: ContentId::from_bytes([0x61; 32]),
-            checkpoint_sha256: [0x62; 32],
-            pccp_change_id: String::from("LMQ-RUST-DEFERRED"),
-            pccp_evidence_id: ContentId::from_bytes([0x63; 32]),
-            pccp_status: PccpStatus::Candidate,
-        }
+    fn model(&self) -> BackendModel<'_> {
+        BackendModel::trained(&self.model)
     }
 
     fn encode(
@@ -106,10 +101,40 @@ impl NeuralBackend for RustBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::ModelInputContract;
+    use semantic_abir::{ConceptId, ContentId};
+    use semantic_abir_bcs::{ModelProvenance, PccpStatus};
+
+    fn model_input_contract() -> ModelInputContract {
+        ModelInputContract::new(
+            ConceptId::new("abir:modality/eeg").unwrap(),
+            alloc::vec![ConceptId::new("lamquant:test-channel/c0").unwrap()],
+            ContentId::from_bytes([4; 32]),
+            Rational::new(250, 1).unwrap(),
+            2_500,
+            SignalDomain::PhysicalMicrovoltQ16,
+            ConceptId::new("lamquant:operation/model-input-v1").unwrap(),
+            ConceptId::new("lamquant:proof/model-input-v1").unwrap(),
+            ConceptId::new("lamquant:backend-pipeline/subband-v1").unwrap(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn rust_backend_is_wired_but_deferred() {
-        let b = RustBackend::new();
+        let contract = model_input_contract();
+        let model = TrainedModelArtifact::new(
+            ModelProvenance {
+                checkpoint_content_id: ContentId::from_bytes([0x61; 32]),
+                checkpoint_sha256: [0x62; 32],
+                pccp_change_id: String::from("LMQ-RUST-DEFERRED"),
+                pccp_evidence_id: ContentId::from_bytes([0x63; 32]),
+                pccp_status: PccpStatus::Candidate,
+            },
+            contract.clone(),
+        );
+        let b = RustBackend::new(model);
+        assert_eq!(b.model().input_contract(), Some(&contract));
         // Wired behind the trait (so the swap is a drop-in), but the forward pass
         // returns a clear deferred error — never a panic.
         assert!(b

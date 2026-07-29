@@ -39,8 +39,8 @@ use serde_json::value::RawValue;
 use serde_json::{json, Value};
 
 use crate::backend::{
-    BackendError, BackendTarget, NeuralBackend, NeuralBackendCapabilities, NeuralSignal,
-    NeuralTokens, SignalDomain,
+    BackendError, BackendModel, BackendTarget, NeuralBackend, NeuralBackendCapabilities,
+    NeuralSignal, NeuralTokens, SignalDomain, TrainedModelArtifact,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -99,11 +99,25 @@ pub struct PyBackend {
     /// (the real `SubbandCodec`; optional in developer tests, mandatory in the
     /// package evidence gate).
     mode: String,
-    model: ModelProvenance,
+    model: PyBackendModel,
     timeout: Duration,
     cancellation: BackendCancellation,
     capabilities: NeuralBackendCapabilities,
     io_limits: BackendIoLimits,
+}
+
+enum PyBackendModel {
+    ModelFree(ModelProvenance),
+    Trained(Box<TrainedModelArtifact>),
+}
+
+impl PyBackendModel {
+    const fn provenance(&self) -> &ModelProvenance {
+        match self {
+            Self::ModelFree(provenance) => provenance,
+            Self::Trained(artifact) => artifact.provenance(),
+        }
+    }
 }
 
 impl PyBackend {
@@ -111,13 +125,13 @@ impl PyBackend {
     pub fn model(
         python: impl Into<String>,
         helper: impl Into<PathBuf>,
-        model: ModelProvenance,
+        model: TrainedModelArtifact,
     ) -> Self {
         Self {
             python: python.into(),
             helper: helper.into(),
             mode: "model".to_string(),
-            model,
+            model: PyBackendModel::Trained(Box::new(model)),
             timeout: DEFAULT_TIMEOUT,
             cancellation: BackendCancellation::default(),
             capabilities: model_capabilities(),
@@ -135,7 +149,7 @@ impl PyBackend {
             python: python.into(),
             helper: helper.into(),
             mode: "selftest".to_string(),
-            model,
+            model: PyBackendModel::ModelFree(model),
             timeout: DEFAULT_TIMEOUT,
             cancellation: BackendCancellation::default(),
             capabilities: selftest_capabilities(),
@@ -167,7 +181,7 @@ impl PyBackend {
         request["mode"] = json!(self.mode);
         if self.mode == "model" {
             request["expected_checkpoint_sha256"] =
-                json!(encode_hex(&self.model.checkpoint_sha256));
+                json!(encode_hex(&self.model.provenance().checkpoint_sha256));
         }
         let request = serde_json::to_vec(&request)
             .map_err(|e| BackendError(format!("serialize request: {e}")))?;
@@ -319,7 +333,7 @@ impl PyBackend {
 
     fn validate_checkpoint(&self, actual: Option<&str>) -> Result<(), BackendError> {
         if self.mode == "model"
-            && actual != Some(encode_hex(&self.model.checkpoint_sha256).as_str())
+            && actual != Some(encode_hex(&self.model.provenance().checkpoint_sha256).as_str())
         {
             return Err(BackendError(
                 "helper executed a checkpoint different from model provenance".to_string(),
@@ -748,8 +762,11 @@ impl NeuralBackend for PyBackend {
         self.capabilities
     }
 
-    fn model_provenance(&self) -> ModelProvenance {
-        self.model.clone()
+    fn model(&self) -> BackendModel<'_> {
+        match &self.model {
+            PyBackendModel::ModelFree(provenance) => BackendModel::ModelFree(provenance.clone()),
+            PyBackendModel::Trained(artifact) => BackendModel::trained(artifact),
+        }
     }
 
     fn encode(
@@ -1145,6 +1162,7 @@ fn preflight_decode_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::ModelInputContract;
     use semantic_abir::ContentId;
     use semantic_abir_bcs::PccpStatus;
     use std::fs;
@@ -1160,12 +1178,35 @@ mod tests {
         }
     }
 
+    fn trained_model() -> TrainedModelArtifact {
+        TrainedModelArtifact::new(model(), model_input_contract())
+    }
+
     fn rate() -> Rational {
         Rational::new(250, 1).unwrap()
     }
 
     fn digital(channels: Vec<Vec<i64>>) -> NeuralSignal {
         NeuralSignal::digital(channels)
+    }
+
+    fn model_input_contract() -> ModelInputContract {
+        ModelInputContract::new(
+            semantic_abir::ConceptId::new("abir:modality/eeg").unwrap(),
+            (0..21)
+                .map(|index| {
+                    semantic_abir::ConceptId::new(format!("lamquant:test-channel/{index}")).unwrap()
+                })
+                .collect(),
+            ContentId::from_bytes([4; 32]),
+            Rational::new(250, 1).unwrap(),
+            2_500,
+            SignalDomain::PhysicalMicrovoltQ16,
+            semantic_abir::ConceptId::new("lamquant:operation/model-input-v1").unwrap(),
+            semantic_abir::ConceptId::new("lamquant:proof/model-input-v1").unwrap(),
+            semantic_abir::ConceptId::new("lamquant:backend-pipeline/subband-v1").unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1183,7 +1224,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn model_backend_enforces_exact_capabilities_before_spawn() {
-        let backend = PyBackend::model("missing-executable", "missing-helper", model());
+        let backend = PyBackend::model("missing-executable", "missing-helper", trained_model());
+        let backend_model = backend.model();
+        let contract = backend_model
+            .input_contract()
+            .expect("trained model must bind semantic input");
+        assert_eq!(contract.channel_concepts().len(), 21);
+        assert_eq!(contract.sample_rate(), Rational::new(250, 1).unwrap());
+        assert_eq!(contract.samples(), 2_500);
+        assert_eq!(contract.signal_domain(), SignalDomain::PhysicalMicrovoltQ16);
         let error = backend
             .encode(
                 &NeuralSignal::physical_microvolt_q16(vec![vec![1]]),

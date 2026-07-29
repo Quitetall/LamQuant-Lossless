@@ -11,8 +11,9 @@ use core::fmt;
 
 use semantic_abir::{
     canonical_debug_json, parse_canonical_dataset, verify_payload_content, AbirDataset, Atom,
-    ByteOrder, ContentId, ElementType, InMemoryPayloadAccess, Layout, OpenedDataset, PayloadAccess,
-    PayloadDescriptor, PayloadLease, Presence, Rational, TimeAxis,
+    ByteOrder, ChannelTag, ConceptId, ContentId, ElementType, InMemoryPayloadAccess, Layout,
+    ObjectId, OpenedDataset, PayloadAccess, PayloadDescriptor, PayloadLease, Presence, Rational,
+    ReferenceKind, SemanticRef, TimeAxis,
 };
 use semantic_abir_bcs::{
     encode_codec_bundle, CodecBundleError, CodecBundleInput, CodecBundleView, CodecFidelity,
@@ -21,7 +22,8 @@ use semantic_abir_bcs::{
 };
 
 use crate::backend::{
-    BackendCapabilityError, BackendError, NeuralBackend, NeuralSignal, NeuralTokens, SignalDomain,
+    hash_field, BackendCapabilityError, BackendError, BackendModel, ModelInputContractError,
+    NeuralBackend, NeuralSignal, NeuralTokens, SignalDomain, TrainedModelArtifact,
 };
 use crate::body::{decode_body_bounded, encode_body_bounded, BodyBounds, BodyError};
 use crate::calibration::{AffineDomainTransform, CalibrationDomainError};
@@ -37,7 +39,8 @@ const PACKET_MAGIC: &[u8; 4] = b"LMQP";
 const PACKET_VERSION: u8 = 1;
 const PACKET_HEADER_LEN: usize = 15;
 const LMQ_WIRE_ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
-const LINKED_ABIR_REVISION: &str = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc";
+const LINKED_ABIR_REVISION: &str = "c82228ea1a28ad48488a62c2073344a8ff40265f";
+const MODEL_CHANNEL_BASIS_DOMAIN: &[u8] = b"lamquant.lmq.model-channel-basis.v1";
 
 /// LMQ-specific resource ceilings layered over BCS2 frame/catalog limits.
 ///
@@ -49,12 +52,24 @@ const LINKED_ABIR_REVISION: &str = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc";
 pub struct LmqResourceBounds {
     pub bundle: ResourceBounds,
     pub max_signal_bytes: u64,
+    /// Maximum signal atoms/channels resolved for one LMQ stream.
+    pub max_signal_channels: u16,
     /// Also bounds the shell's temporary eight-byte-per-token I64 staging.
     pub max_tokens: u32,
     pub max_schedule_bytes: u32,
     pub max_backend_meta_bytes: u32,
     pub max_alphabet: u16,
     pub max_model_total: u32,
+    /// Maximum channel records indexed while validating a portable model basis.
+    pub max_model_basis_channels: u32,
+    /// Maximum aggregate weighted terms hashed for one model basis.
+    pub max_model_basis_terms: u32,
+    /// Maximum derivation records inspected for one trained-model contract.
+    pub max_model_derivations: u32,
+    /// Maximum typed claim records indexed for one trained-model contract.
+    pub max_model_claims: u32,
+    /// Maximum aggregate derivation output edges inspected.
+    pub max_model_derivation_output_edges: u32,
     /// Bounds allocations internal to the body codec. Shell token staging is
     /// governed separately by `max_tokens`.
     pub max_body_internal_working_bytes: u64,
@@ -65,11 +80,17 @@ impl LmqResourceBounds {
         Self {
             bundle,
             max_signal_bytes: bundle.max_frame_bytes as u64,
+            max_signal_channels: u16::MAX,
             max_tokens: lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32,
             max_schedule_bytes: bundle.max_frame_bytes,
             max_backend_meta_bytes: bundle.max_frame_bytes,
             max_alphabet: u16::MAX,
             max_model_total: RANS_MODEL_TOTAL as u32,
+            max_model_basis_channels: u16::MAX as u32,
+            max_model_basis_terms: lamquant_lml_mcu::rans::MAX_RANS_SYMBOLS as u32,
+            max_model_derivations: u16::MAX as u32,
+            max_model_claims: u16::MAX as u32,
+            max_model_derivation_output_edges: 1 << 20,
             max_body_internal_working_bytes: bundle.max_frame_bytes as u64 + 17 * 1024 * 1024,
         }
     }
@@ -91,6 +112,16 @@ impl Default for LmqResourceBounds {
     fn default() -> Self {
         Self::from_bundle(ResourceBounds::default())
     }
+}
+
+/// Explicit compatibility policy for catalogs written before model contracts.
+///
+/// Current APIs reject legacy catalogs by default. Compatibility bridges must
+/// opt in and still pass complete dataset/model-contract validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacyModelContractPolicy {
+    Reject,
+    AllowPreContractCatalog,
 }
 
 #[derive(Debug)]
@@ -125,6 +156,7 @@ impl<'a> OpenedLmqBundle<'a> {
 pub enum LmqError {
     Backend(BackendError),
     BackendCapability(BackendCapabilityError),
+    ModelInputContract(ModelInputContractError),
     Body(BodyError),
     Bundle(CodecBundleError),
     CatalogContract,
@@ -148,9 +180,15 @@ pub enum LmqError {
 #[non_exhaustive]
 pub enum LmqResource {
     SignalBytes,
+    SignalChannels,
     TokenCount,
     Alphabet,
     ModelTotal,
+    ModelBasisChannels,
+    ModelBasisTerms,
+    ModelDerivations,
+    ModelClaims,
+    ModelDerivationOutputEdges,
     ScheduleBytes,
     BackendMetadataBytes,
     PacketBytes,
@@ -181,6 +219,9 @@ impl fmt::Display for LmqError {
             Self::Backend(error) => write!(formatter, "LMQ backend failed: {}", error.0),
             Self::BackendCapability(error) => {
                 write!(formatter, "LMQ backend capability mismatch: {error:?}")
+            }
+            Self::ModelInputContract(error) => {
+                write!(formatter, "LMQ model input contract mismatch: {error:?}")
             }
             Self::Body(error) => write!(formatter, "LMQ token body failed: {error:?}"),
             Self::Bundle(error) => error.fmt(formatter),
@@ -268,14 +309,33 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
     // ABIR before payload access or backend work. This guarantees every emitted
     // bundle can pass the decoder's fidelity projection.
     codec_fidelity_statement(dataset.id(), &fidelity)?;
-    let (expected_channels, expected_samples, sample_rate) = reconstruction_shape(dataset)?;
     let capabilities = backend.capabilities();
+    let expected_channels = preflight_signal_channel_count(dataset, bounds)?;
+    if expected_channels < capabilities.minimum_channels
+        || expected_channels > capabilities.maximum_channels
+    {
+        return Err(LmqError::BackendCapability(
+            BackendCapabilityError::ChannelCount,
+        ));
+    }
+    let layout = resolve_signal_layout(dataset, bounds)?;
+    let expected_samples = layout.samples;
+    let sample_rate = layout.sample_rate;
+    let model = backend.model();
     capabilities
         .validate_input(expected_channels, expected_samples, sample_rate)
         .map_err(LmqError::BackendCapability)?;
-    let domain_plan = compile_signal_domain_plan(dataset, capabilities.signal_domain)?;
-    let signal = read_signal(dataset, access, bounds.max_signal_bytes, &domain_plan)?;
-    let model = backend.model_provenance();
+    validate_model_input_contract(
+        dataset,
+        &model,
+        capabilities.signal_domain,
+        expected_channels,
+        sample_rate,
+        expected_samples,
+        bounds,
+    )?;
+    let domain_plan = compile_signal_domain_plan(&layout, capabilities.signal_domain)?;
+    let signal = read_signal(&layout, access, bounds.max_signal_bytes, &domain_plan)?;
     let tokens = backend
         .encode(&signal, sample_rate)
         .map_err(LmqError::Backend)?;
@@ -295,9 +355,9 @@ pub fn encode_bundle_bounded<A: PayloadAccess>(
             canonical_semantics: &semantics,
             fidelity,
             implementation,
-            model_provenance: Some(model),
+            model_provenance: Some(model.provenance().clone()),
             packets: &packets,
-            parameters: canonical_parameters(capabilities.signal_domain),
+            parameters: canonical_parameters(capabilities.signal_domain, model.trained_artifact()),
             profile: CodecProfile::LmqProgressive,
         },
         bounds.bundle,
@@ -310,7 +370,26 @@ pub fn open_bundle<'a>(
     backend: &dyn NeuralBackend,
     bounds: ResourceBounds,
 ) -> Result<OpenedLmqBundle<'a>, LmqError> {
-    open_bundle_bounded(bytes, backend, LmqResourceBounds::from_bundle(bounds))
+    open_bundle_bounded_with_policy(
+        bytes,
+        backend,
+        LmqResourceBounds::from_bundle(bounds),
+        LegacyModelContractPolicy::Reject,
+    )
+}
+
+/// Open one pre-contract catalog through explicit compatibility policy.
+pub fn open_bundle_with_legacy_contract<'a>(
+    bytes: &'a [u8],
+    backend: &dyn NeuralBackend,
+    bounds: ResourceBounds,
+) -> Result<OpenedLmqBundle<'a>, LmqError> {
+    open_bundle_bounded_with_policy(
+        bytes,
+        backend,
+        LmqResourceBounds::from_bundle(bounds),
+        LegacyModelContractPolicy::AllowPreContractCatalog,
+    )
 }
 
 pub fn open_bundle_bounded<'a>(
@@ -318,25 +397,59 @@ pub fn open_bundle_bounded<'a>(
     backend: &dyn NeuralBackend,
     bounds: LmqResourceBounds,
 ) -> Result<OpenedLmqBundle<'a>, LmqError> {
+    open_bundle_bounded_with_policy(bytes, backend, bounds, LegacyModelContractPolicy::Reject)
+}
+
+pub fn open_bundle_bounded_with_policy<'a>(
+    bytes: &'a [u8],
+    backend: &dyn NeuralBackend,
+    bounds: LmqResourceBounds,
+    legacy_policy: LegacyModelContractPolicy,
+) -> Result<OpenedLmqBundle<'a>, LmqError> {
     let bundle = CodecBundleView::open(bytes, bounds.bundle).map_err(LmqError::Bundle)?;
     let catalog = bundle.catalog();
     let capabilities = backend.capabilities();
+    let model = backend.model();
     if catalog.profile() != CodecProfile::LmqProgressive
         || catalog.packet_count() != 1
-        || catalog.model_provenance() != Some(&backend.model_provenance())
+        || catalog.model_provenance() != Some(model.provenance())
         || catalog.fidelity().kind == CodecFidelityKind::Exact
         || catalog.implementation().kernel_id != LMQ_KERNEL_ID
-        || catalog.parameters() != canonical_parameters(capabilities.signal_domain)
+        || !catalog_parameters_supported(
+            catalog.parameters(),
+            capabilities.signal_domain,
+            &model,
+            legacy_policy,
+        )
     {
         return Err(LmqError::CatalogContract);
     }
     let dataset = parse_canonical_dataset(bundle.canonical_semantics())
         .map_err(|_| LmqError::SemanticEncoding)?;
-    let (expected_channels, expected_samples, sample_rate) = reconstruction_shape(&dataset)?;
+    let expected_channels = preflight_signal_channel_count(&dataset, bounds)?;
+    if expected_channels < capabilities.minimum_channels
+        || expected_channels > capabilities.maximum_channels
+    {
+        return Err(LmqError::BackendCapability(
+            BackendCapabilityError::ChannelCount,
+        ));
+    }
+    let layout = resolve_signal_layout(&dataset, bounds)?;
+    let expected_samples = layout.samples;
+    let sample_rate = layout.sample_rate;
     capabilities
         .validate_input(expected_channels, expected_samples, sample_rate)
         .map_err(LmqError::BackendCapability)?;
-    let domain_plan = compile_signal_domain_plan(&dataset, capabilities.signal_domain)?;
+    validate_model_input_contract(
+        &dataset,
+        &model,
+        capabilities.signal_domain,
+        expected_channels,
+        sample_rate,
+        expected_samples,
+        bounds,
+    )?;
+    let domain_plan = compile_signal_domain_plan(&layout, capabilities.signal_domain)?;
     enforce_signal_bound(expected_channels, expected_samples, bounds.max_signal_bytes)?;
     let packet = bundle.packet(0).ok_or(LmqError::Header)?;
     let tokens = decode_packet_bounded(packet, bounds)?;
@@ -379,7 +492,17 @@ pub fn open_bundle_bounded<'a>(
     })
 }
 
-fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32, Rational), LmqError> {
+struct ResolvedSignalLayout<'a> {
+    atoms: Vec<&'a Atom>,
+    channels: u16,
+    samples: u32,
+    sample_rate: Rational,
+}
+
+fn preflight_signal_channel_count(
+    dataset: &AbirDataset,
+    bounds: LmqResourceBounds,
+) -> Result<u16, LmqError> {
     if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
         return Err(LmqError::UnsupportedSemantics(
             "requires exactly one recording and one stream",
@@ -396,17 +519,55 @@ fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32, Rational), L
             "stream must own every atom exactly once",
         ));
     }
-    let channels =
-        u16::try_from(stream.atoms().len()).map_err(|_| LmqError::SignalShapeMismatch)?;
+    enforce_lmq_limit(
+        LmqResource::SignalChannels,
+        stream.atoms().len() as u64,
+        u64::from(bounds.max_signal_channels),
+    )?;
+    u16::try_from(stream.atoms().len()).map_err(|_| LmqError::ResourceLimit {
+        resource: LmqResource::SignalChannels,
+        actual: stream.atoms().len() as u64,
+        limit: u64::from(bounds.max_signal_channels),
+    })
+}
+
+fn resolve_signal_layout(
+    dataset: &AbirDataset,
+    bounds: LmqResourceBounds,
+) -> Result<ResolvedSignalLayout<'_>, LmqError> {
+    let channels = preflight_signal_channel_count(dataset, bounds)?;
+    let stream = &dataset.streams()[0];
+    let mut atom_by_id = dataset
+        .atoms()
+        .iter()
+        .map(|atom| (atom.id(), atom))
+        .collect::<Vec<_>>();
+    atom_by_id.sort_unstable_by_key(|(id, _)| *id);
+    if atom_by_id.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(LmqError::UnsupportedSemantics(
+            "dataset atom identities are not unique",
+        ));
+    }
+    let mut atoms = Vec::with_capacity(usize::from(channels));
+    let mut membership = Vec::with_capacity(usize::from(channels));
+    for atom_id in stream.atoms() {
+        let index = atom_by_id
+            .binary_search_by_key(atom_id, |(id, _)| *id)
+            .map_err(|_| LmqError::UnsupportedSemantics("unresolved stream atom"))?;
+        atoms.push(atom_by_id[index].1);
+        membership.push(*atom_id);
+    }
+    membership.sort_unstable();
+    if membership.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(LmqError::UnsupportedSemantics(
+            "stream atom membership is not bijective",
+        ));
+    }
+
     let mut samples = None;
     let mut start = None;
     let mut sample_rate = None;
-    for atom_id in stream.atoms() {
-        let atom = dataset
-            .atoms()
-            .iter()
-            .find(|atom| atom.id() == *atom_id)
-            .ok_or(LmqError::UnsupportedSemantics("unresolved stream atom"))?;
+    for atom in &atoms {
         let Atom::SignalBlock(block) = atom else {
             return Err(LmqError::UnsupportedSemantics(
                 "only SignalBlock atoms are supported",
@@ -447,15 +608,19 @@ fn reconstruction_shape(dataset: &AbirDataset) -> Result<(u16, u32, Rational), L
     }
     let samples = u32::try_from(samples.ok_or(LmqError::SignalShapeMismatch)?)
         .map_err(|_| LmqError::SignalShapeMismatch)?;
-    Ok((
+    Ok(ResolvedSignalLayout {
+        atoms,
         channels,
         samples,
-        sample_rate.ok_or(LmqError::SignalShapeMismatch)?,
-    ))
+        sample_rate: sample_rate.ok_or(LmqError::SignalShapeMismatch)?,
+    })
 }
 
-fn canonical_parameters(signal_domain: SignalDomain) -> Vec<CodecParameter> {
-    vec![
+fn canonical_parameters(
+    signal_domain: SignalDomain,
+    model: Option<&TrainedModelArtifact>,
+) -> Vec<CodecParameter> {
+    let mut parameters = vec![
         CodecParameter {
             name: "abir.revision".to_string(),
             value: CodecParameterValue::Text {
@@ -480,7 +645,320 @@ fn canonical_parameters(signal_domain: SignalDomain) -> Vec<CodecParameter> {
                 value: LMQ_FIDELITY_CONTRACT.to_string(),
             },
         },
-    ]
+    ];
+    if let Some(artifact) = model {
+        parameters.push(CodecParameter {
+            name: "neural.input-contract".to_string(),
+            value: CodecParameterValue::Text {
+                value: artifact.input_contract().content_id().to_string(),
+            },
+        });
+        parameters.push(CodecParameter {
+            name: "neural.model-artifact".to_string(),
+            value: CodecParameterValue::Text {
+                value: artifact.content_id().to_string(),
+            },
+        });
+    }
+    parameters.sort_by(|left, right| left.name.cmp(&right.name));
+    parameters
+}
+
+fn catalog_parameters_supported(
+    actual: &[CodecParameter],
+    signal_domain: SignalDomain,
+    model: &BackendModel<'_>,
+    legacy_policy: LegacyModelContractPolicy,
+) -> bool {
+    actual == canonical_parameters(signal_domain, model.trained_artifact())
+        || (legacy_policy == LegacyModelContractPolicy::AllowPreContractCatalog
+            && model.input_contract().is_some()
+            && actual == canonical_parameters(signal_domain, None))
+}
+
+fn validate_model_input_contract(
+    dataset: &AbirDataset,
+    model: &BackendModel<'_>,
+    signal_domain: SignalDomain,
+    expected_channels: u16,
+    sample_rate: Rational,
+    samples: u32,
+    bounds: LmqResourceBounds,
+) -> Result<(), LmqError> {
+    let Some(contract) = model.input_contract() else {
+        return Ok(());
+    };
+    if contract.signal_domain() != signal_domain {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::SignalDomain,
+        ));
+    }
+    if contract.sample_rate() != sample_rate {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::SampleRate,
+        ));
+    }
+    if contract.samples() != samples {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::SampleCount,
+        ));
+    }
+    let stream = dataset
+        .streams()
+        .first()
+        .ok_or(LmqError::ModelInputContract(
+            ModelInputContractError::Modality,
+        ))?;
+    if stream.modality() != contract.modality() {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::Modality,
+        ));
+    }
+    let basis_id = stream
+        .channel_basis_id()
+        .ok_or(LmqError::ModelInputContract(
+            ModelInputContractError::MissingChannelBasis,
+        ))?;
+    let basis = dataset
+        .channel_bases()
+        .iter()
+        .find(|basis| basis.id() == basis_id)
+        .ok_or(LmqError::ModelInputContract(
+            ModelInputContractError::MissingChannelBasis,
+        ))?;
+    let expected_channels = usize::from(expected_channels);
+    if basis.channels().len() != expected_channels
+        || contract.channel_concepts().len() != expected_channels
+    {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::ChannelCount,
+        ));
+    }
+    if basis
+        .channels()
+        .iter()
+        .map(|channel| channel.concept())
+        .ne(contract.channel_concepts())
+    {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::ChannelOrder,
+        ));
+    }
+    if model_channel_basis_content_id_bounded(dataset, bounds)?
+        != contract.model_channel_basis_content_id()
+    {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::ChannelBasis,
+        ));
+    }
+    enforce_lmq_limit(
+        LmqResource::ModelDerivations,
+        dataset.derivations().len() as u64,
+        u64::from(bounds.max_model_derivations),
+    )?;
+    enforce_lmq_limit(
+        LmqResource::ModelClaims,
+        dataset.proofs().len() as u64,
+        u64::from(bounds.max_model_claims),
+    )?;
+    let mut claim_subjects = dataset
+        .proofs()
+        .iter()
+        .filter(|proof| proof.kind() == contract.upstream_claim_kind())
+        .map(|proof| proof.subject())
+        .collect::<Vec<_>>();
+    claim_subjects.sort_unstable();
+    claim_subjects.dedup();
+
+    let stream_ref = SemanticRef::of(stream.id());
+    let mut saw_output = false;
+    let mut saw_operation = false;
+    let mut matched_derivation = None;
+    let mut output_edges = 0_u64;
+    for derivation in dataset.derivations() {
+        output_edges = output_edges
+            .checked_add(derivation.outputs().len() as u64)
+            .ok_or(LmqError::ResourceLimit {
+                resource: LmqResource::ModelDerivationOutputEdges,
+                actual: u64::MAX,
+                limit: u64::from(bounds.max_model_derivation_output_edges),
+            })?;
+        enforce_lmq_limit(
+            LmqResource::ModelDerivationOutputEdges,
+            output_edges,
+            u64::from(bounds.max_model_derivation_output_edges),
+        )?;
+        if !derivation.outputs().contains(&stream_ref) {
+            continue;
+        }
+        saw_output = true;
+        if derivation.operation() != contract.upstream_derivation() {
+            continue;
+        }
+        saw_operation = true;
+        let derivation_ref = SemanticRef::of(derivation.id());
+        if claim_subjects.binary_search(&derivation_ref).is_ok()
+            && matched_derivation.replace(derivation).is_some()
+        {
+            return Err(LmqError::ModelInputContract(
+                ModelInputContractError::Derivation,
+            ));
+        }
+    }
+    if !saw_output {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::MissingDerivation,
+        ));
+    }
+    if !saw_operation {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::Derivation,
+        ));
+    }
+    matched_derivation.ok_or(LmqError::ModelInputContract(
+        ModelInputContractError::MissingDerivationClaim,
+    ))?;
+    Ok(())
+}
+
+/// Portable model-role identity of exact weighted basis used by first stream.
+///
+/// ABIR `ObjectId<ChannelTag>` values retain source-observation identity. Model
+/// contracts intentionally project those instance identities onto channel-role
+/// concepts so one contract applies across recordings. Every referenced role
+/// must resolve uniquely; duplicate roles fail closed rather than collapsing
+/// distinct observations.
+pub fn model_channel_basis_content_id(dataset: &AbirDataset) -> Result<ContentId, LmqError> {
+    model_channel_basis_content_id_bounded(dataset, LmqResourceBounds::default())
+}
+
+pub fn model_channel_basis_content_id_bounded(
+    dataset: &AbirDataset,
+    bounds: LmqResourceBounds,
+) -> Result<ContentId, LmqError> {
+    let stream = dataset
+        .streams()
+        .first()
+        .ok_or(LmqError::ModelInputContract(
+            ModelInputContractError::Modality,
+        ))?;
+    let basis_id = stream
+        .channel_basis_id()
+        .ok_or(LmqError::ModelInputContract(
+            ModelInputContractError::MissingChannelBasis,
+        ))?;
+    let basis = dataset
+        .channel_bases()
+        .iter()
+        .find(|basis| basis.id() == basis_id)
+        .ok_or(LmqError::ModelInputContract(
+            ModelInputContractError::MissingChannelBasis,
+        ))?;
+    let construction = basis.construction().ok_or(LmqError::ModelInputContract(
+        ModelInputContractError::MissingChannelBasisConstruction,
+    ))?;
+    if construction.len() != basis.channels().len() {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::ChannelBasis,
+        ));
+    }
+    enforce_lmq_limit(
+        LmqResource::ModelBasisChannels,
+        dataset.channels().len() as u64,
+        u64::from(bounds.max_model_basis_channels),
+    )?;
+    enforce_lmq_limit(
+        LmqResource::ModelBasisChannels,
+        basis.channels().len() as u64,
+        u64::from(bounds.max_model_basis_channels),
+    )?;
+
+    // Build one bounded typed-source index. Portable role ambiguity is checked
+    // only across source records actually referenced by this basis; unrelated
+    // catalog channels cannot invalidate an otherwise exact construction.
+    let mut source_by_id =
+        Vec::<(ObjectId<ChannelTag>, &ConceptId)>::with_capacity(dataset.channels().len());
+    for channel in dataset.channels() {
+        source_by_id.push((channel.id(), channel.kind()));
+    }
+    source_by_id.sort_by_key(|(id, _)| *id);
+
+    let mut hasher = blake3::Hasher::new();
+    hash_field(&mut hasher, MODEL_CHANNEL_BASIS_DOMAIN);
+    hash_field(&mut hasher, reference_kind_name(basis.reference()));
+    let output_count = u32::try_from(basis.channels().len())
+        .map_err(|_| LmqError::ModelInputContract(ModelInputContractError::ChannelCount))?;
+    hash_field(&mut hasher, &output_count.to_le_bytes());
+
+    let mut total_terms = 0_u64;
+    let mut referenced_sources = Vec::new();
+    for (output, vector) in basis.channels().iter().zip(construction) {
+        hash_field(&mut hasher, output.concept().as_str().as_bytes());
+        let term_count = u32::try_from(vector.terms().len())
+            .map_err(|_| LmqError::ModelInputContract(ModelInputContractError::ChannelBasis))?;
+        total_terms =
+            total_terms
+                .checked_add(u64::from(term_count))
+                .ok_or(LmqError::ResourceLimit {
+                    resource: LmqResource::ModelBasisTerms,
+                    actual: u64::MAX,
+                    limit: u64::from(bounds.max_model_basis_terms),
+                })?;
+        enforce_lmq_limit(
+            LmqResource::ModelBasisTerms,
+            total_terms,
+            u64::from(bounds.max_model_basis_terms),
+        )?;
+        hash_field(&mut hasher, &term_count.to_le_bytes());
+        let mut terms = Vec::<(&ConceptId, Rational)>::with_capacity(vector.terms().len());
+        for term in vector.terms() {
+            let source_index = source_by_id
+                .binary_search_by_key(&term.source(), |(id, _)| *id)
+                .map_err(|_| {
+                    LmqError::ModelInputContract(ModelInputContractError::MissingChannelBasisSource)
+                })?;
+            let source = source_by_id[source_index].1;
+            referenced_sources.push((source, term.source()));
+            terms.push((source, term.coefficient()));
+        }
+        terms.sort_by(|left, right| {
+            left.0.cmp(right.0).then_with(|| {
+                let (left_numerator, left_denominator) = left.1.parts();
+                let (right_numerator, right_denominator) = right.1.parts();
+                (left_numerator, left_denominator).cmp(&(right_numerator, right_denominator))
+            })
+        });
+        if terms.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(LmqError::ModelInputContract(
+                ModelInputContractError::AmbiguousChannelBasisSource,
+            ));
+        }
+        for (source, coefficient) in terms {
+            hash_field(&mut hasher, source.as_str().as_bytes());
+            let (numerator, denominator) = coefficient.parts();
+            hash_field(&mut hasher, &numerator.to_le_bytes());
+            hash_field(&mut hasher, &denominator.to_le_bytes());
+        }
+    }
+    referenced_sources.sort_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(&right.1)));
+    if referenced_sources
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1)
+    {
+        return Err(LmqError::ModelInputContract(
+            ModelInputContractError::AmbiguousChannelBasisSource,
+        ));
+    }
+    Ok(ContentId::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+const fn reference_kind_name(reference: ReferenceKind) -> &'static [u8] {
+    match reference {
+        ReferenceKind::Absolute => b"absolute",
+        ReferenceKind::Common => b"common",
+        ReferenceKind::Differential => b"differential",
+        ReferenceKind::Unknown => b"unknown",
+    }
 }
 
 #[cfg(test)]
@@ -645,116 +1123,22 @@ fn decode_packet_bounded(
 }
 
 fn read_signal<A: PayloadAccess>(
-    dataset: &AbirDataset,
+    layout: &ResolvedSignalLayout<'_>,
     access: &A,
     max_signal_bytes: u64,
     domain_plan: &SignalDomainPlan,
 ) -> Result<NeuralSignal, LmqError> {
-    if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
-        return Err(LmqError::UnsupportedSemantics(
-            "requires exactly one recording and one stream",
-        ));
-    }
-    let recording = &dataset.recordings()[0];
-    let stream = &dataset.streams()[0];
-    if recording.streams() != [stream.id()]
-        || stream.recording_id() != recording.id()
-        || stream.atoms().is_empty()
-        || stream.atoms().len() != dataset.atoms().len()
-    {
-        return Err(LmqError::UnsupportedSemantics(
-            "stream must own every atom exactly once",
-        ));
-    }
-    let channel_count =
-        u16::try_from(stream.atoms().len()).map_err(|_| LmqError::SignalShapeMismatch)?;
-    let minimum_signal_bytes =
-        u64::from(channel_count)
-            .checked_mul(8)
-            .ok_or(LmqError::ResourceLimit {
-                resource: LmqResource::SignalBytes,
-                actual: u64::MAX,
-                limit: max_signal_bytes,
-            })?;
-    enforce_lmq_limit(
-        LmqResource::SignalBytes,
-        minimum_signal_bytes,
-        max_signal_bytes,
-    )?;
-    let mut channels = Vec::with_capacity(usize::from(channel_count));
-    let mut decoded_bytes = 0_u64;
-    let mut sample_rate = None;
-    let mut sample_count = None;
-    let mut start = None;
-    for atom_id in stream.atoms() {
-        let atom = dataset
-            .atoms()
-            .iter()
-            .find(|atom| atom.id() == *atom_id)
-            .ok_or(LmqError::UnsupportedSemantics("unresolved stream atom"))?;
-        let Atom::SignalBlock(block) = atom else {
-            return Err(LmqError::UnsupportedSemantics(
-                "only SignalBlock atoms are supported",
-            ));
-        };
-        if atom.presence() != Presence::Present {
-            return Err(LmqError::UnsupportedSemantics(
-                "only present signal blocks are supported",
-            ));
-        }
+    enforce_signal_bound(layout.channels, layout.samples, max_signal_bytes)?;
+    let mut signal = Vec::with_capacity(layout.atoms.len());
+    for (index, atom) in layout.atoms.iter().enumerate() {
         let descriptor = atom
             .payload()
             .ok_or(LmqError::UnsupportedSemantics("signal has no payload"))?;
-        validate_descriptor(descriptor)?;
-        let TimeAxis::Regular(segment) = block.time_axis() else {
-            return Err(LmqError::UnsupportedSemantics(
-                "LMQ requires a regular time axis",
-            ));
-        };
-        u32::try_from(segment.samples()).map_err(|_| LmqError::SignalShapeMismatch)?;
-        let rate = segment.rate();
-        if sample_rate.replace(rate).is_some_and(|prior| prior != rate)
-            || sample_count
-                .replace(segment.samples())
-                .is_some_and(|prior| prior != segment.samples())
-            || start
-                .replace(segment.start())
-                .is_some_and(|prior| prior != segment.start())
-        {
-            return Err(LmqError::UnsupportedSemantics(
-                "LMQ requires aligned starts, uniform rates, and sample counts",
-            ));
-        }
-        if descriptor.shape().last().copied() != Some(segment.samples()) {
-            return Err(LmqError::SignalShapeMismatch);
-        }
-        decoded_bytes = decoded_bytes
-            .checked_add(
-                segment
-                    .samples()
-                    .checked_mul(8)
-                    .ok_or(LmqError::ResourceLimit {
-                        resource: LmqResource::SignalBytes,
-                        actual: u64::MAX,
-                        limit: max_signal_bytes,
-                    })?,
-            )
-            .ok_or(LmqError::ResourceLimit {
-                resource: LmqResource::SignalBytes,
-                actual: u64::MAX,
-                limit: max_signal_bytes,
-            })?;
-        channels.push((descriptor, segment.samples()));
-    }
-    enforce_lmq_limit(LmqResource::SignalBytes, decoded_bytes, max_signal_bytes)?;
-
-    let mut signal = Vec::with_capacity(channels.len());
-    for (index, (descriptor, samples)) in channels.into_iter().enumerate() {
         let lease = access.lease(descriptor).map_err(LmqError::PayloadAccess)?;
         verify_payload_content(descriptor, lease.bytes())
             .map_err(|_| LmqError::PayloadIdentityMismatch)?;
         let mut channel = decode_integer_payload(descriptor, lease.bytes())?;
-        if channel.len() as u64 != samples {
+        if channel.len() != layout.samples as usize {
             return Err(LmqError::SignalShapeMismatch);
         }
         if domain_plan.domain == SignalDomain::PhysicalMicrovoltQ16 {
@@ -768,7 +1152,6 @@ fn read_signal<A: PayloadAccess>(
         }
         signal.push(channel);
     }
-    sample_rate.ok_or(LmqError::SignalShapeMismatch)?;
     Ok(NeuralSignal {
         domain: domain_plan.domain,
         channels: signal,
@@ -781,7 +1164,7 @@ struct SignalDomainPlan {
 }
 
 fn compile_signal_domain_plan(
-    dataset: &AbirDataset,
+    layout: &ResolvedSignalLayout<'_>,
     domain: SignalDomain,
 ) -> Result<SignalDomainPlan, LmqError> {
     if domain == SignalDomain::DigitalInteger {
@@ -790,17 +1173,8 @@ fn compile_signal_domain_plan(
             transforms: Vec::new(),
         });
     }
-    let stream = dataset
-        .streams()
-        .first()
-        .ok_or(LmqError::SignalShapeMismatch)?;
-    let mut transforms = Vec::with_capacity(stream.atoms().len());
-    for atom_id in stream.atoms() {
-        let atom = dataset
-            .atoms()
-            .iter()
-            .find(|atom| atom.id() == *atom_id)
-            .ok_or(LmqError::UnsupportedSemantics("unresolved stream atom"))?;
+    let mut transforms = Vec::with_capacity(layout.atoms.len());
+    for atom in &layout.atoms {
         let Atom::SignalBlock(block) = atom else {
             return Err(LmqError::UnsupportedSemantics(
                 "only SignalBlock atoms are supported",
@@ -981,21 +1355,33 @@ fn histogram(tokens: &[i32], alphabet: u16) -> Result<Vec<i32>, LmqError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::StubBackend;
+    use crate::backend::{ModelInputContract, StubBackend};
     use alloc::format;
     use semantic_abir::{
         payload_content_id, Acquisition, AcquisitionTag, AtomTag, Calibration, Channel,
-        ChannelBasis, ChannelBasisTag, ChannelSpec, ChannelTag, Clock, ClockRelation,
-        ClockRelationTag, ClockTag, ConceptDictionary, ConceptDictionaryTag, ConceptId,
-        CoordinateFrame, CoordinateFrameTag, DatasetDraft, DatasetTag, Derivation, DerivationTag,
-        DerivedArtifact, DerivedArtifactTag, Device, DeviceTag, Event, EventTag, ExactNumber,
-        ExecutionRecord, Fidelity, FidelityKind, FrameTransform, FrameTransformTag,
-        InMemoryPayloadAccess, ObjectId, OpenedDataset, Patient, PatientTag, Policy, PolicyTag,
-        Proof, ProofTag, Rational, Recording, RecordingTag, ReferenceKind, SemanticRef, Sensor,
-        SensorTag, Session, SessionTag, SignalBlock, SourceCapsule, SourceKey, SourceRelationship,
-        Stream, StreamTag, Subject, SubjectTag, TimeSegment, ValidationLimits,
+        ChannelBasis, ChannelBasisTag, ChannelBasisTerm, ChannelBasisVector, ChannelSpec,
+        ChannelTag, Clock, ClockRelation, ClockRelationTag, ClockTag, ConceptDictionary,
+        ConceptDictionaryTag, ConceptId, CoordinateFrame, CoordinateFrameTag, DatasetDraft,
+        DatasetTag, Derivation, DerivationTag, DerivedArtifact, DerivedArtifactTag, Device,
+        DeviceTag, Event, EventTag, ExactNumber, ExecutionRecord, Fidelity, FidelityKind,
+        FrameTransform, FrameTransformTag, InMemoryPayloadAccess, ObjectId, OpenedDataset, Patient,
+        PatientTag, Policy, PolicyTag, Proof, ProofTag, Rational, Recording, RecordingTag,
+        ReferenceKind, SemanticRef, Sensor, SensorTag, Session, SessionTag, SignalBlock,
+        SourceCapsule, SourceKey, SourceRelationship, Stream, StreamTag, Subject, SubjectTag,
+        TimeSegment, ValidationLimits,
     };
     use semantic_abir_bcs::{ModelProvenance, PccpStatus, BCS2_MAGIC};
+
+    fn stub_model_provenance() -> ModelProvenance {
+        match StubBackend::default().model() {
+            BackendModel::ModelFree(provenance) => provenance,
+            BackendModel::Trained(_) => unreachable!(),
+        }
+    }
+
+    fn stub_model_artifact(contract: &ModelInputContract) -> TrainedModelArtifact {
+        TrainedModelArtifact::new(stub_model_provenance(), contract.clone())
+    }
 
     fn fixture() -> OpenedDataset<InMemoryPayloadAccess> {
         fixture_with_starts(&[0, 0, 0, 0])
@@ -1131,8 +1517,8 @@ mod tests {
             capabilities
         }
 
-        fn model_provenance(&self) -> ModelProvenance {
-            StubBackend::default().model_provenance()
+        fn model(&self) -> BackendModel<'_> {
+            BackendModel::ModelFree(stub_model_provenance())
         }
 
         fn encode(
@@ -1158,6 +1544,40 @@ mod tests {
         }
     }
 
+    struct ContractStubBackend {
+        artifact: TrainedModelArtifact,
+    }
+
+    impl ContractStubBackend {
+        fn new(contract: ModelInputContract) -> Self {
+            Self {
+                artifact: stub_model_artifact(&contract),
+            }
+        }
+    }
+
+    impl NeuralBackend for ContractStubBackend {
+        fn capabilities(&self) -> crate::backend::NeuralBackendCapabilities {
+            StubBackend::default().capabilities()
+        }
+
+        fn model(&self) -> BackendModel<'_> {
+            BackendModel::trained(&self.artifact)
+        }
+
+        fn encode(
+            &self,
+            signal: &NeuralSignal,
+            sample_rate: Rational,
+        ) -> Result<NeuralTokens, BackendError> {
+            StubBackend::default().encode(signal, sample_rate)
+        }
+
+        fn decode(&self, tokens: &NeuralTokens) -> Result<NeuralSignal, BackendError> {
+            StubBackend::default().decode(tokens)
+        }
+    }
+
     fn calibrated_fixture() -> OpenedDataset<InMemoryPayloadAccess> {
         let calibration = calibration((2, 1), (1, 1), "ucum:uV");
         let (mut draft, access, atom_ids, recording_id, stream_id) =
@@ -1173,6 +1593,260 @@ mod tests {
             None,
         ));
         OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
+    }
+
+    fn test_input_contract(
+        dataset: &AbirDataset,
+        channel_concepts: Vec<ConceptId>,
+    ) -> ModelInputContract {
+        ModelInputContract::new(
+            concept("abir:modality/eeg"),
+            channel_concepts,
+            model_channel_basis_content_id(dataset).unwrap(),
+            Rational::new(250, 1).unwrap(),
+            500,
+            SignalDomain::DigitalInteger,
+            concept("lamquant:operation/model-input-v1"),
+            concept("lamquant:proof/model-input-v1"),
+            concept("lamquant:backend-pipeline/test-v1"),
+        )
+        .unwrap()
+    }
+
+    fn contract_fixture(
+        channel_concepts: Vec<ConceptId>,
+        reference: ReferenceKind,
+    ) -> OpenedDataset<InMemoryPayloadAccess> {
+        contract_fixture_with_identity(channel_concepts, reference, 83, 84, true)
+    }
+
+    fn contract_fixture_with_identity(
+        channel_concepts: Vec<ConceptId>,
+        reference: ReferenceKind,
+        reference_byte: u8,
+        source_start: u8,
+        include_proof: bool,
+    ) -> OpenedDataset<InMemoryPayloadAccess> {
+        contract_fixture_with_identity_and_extra_derivation(
+            channel_concepts,
+            reference,
+            reference_byte,
+            source_start,
+            include_proof,
+            false,
+            false,
+        )
+    }
+
+    fn contract_fixture_with_identity_and_extra_derivation(
+        channel_concepts: Vec<ConceptId>,
+        reference: ReferenceKind,
+        reference_byte: u8,
+        source_start: u8,
+        include_proof: bool,
+        include_unrelated_derivation: bool,
+        include_unrelated_duplicate_role: bool,
+    ) -> OpenedDataset<InMemoryPayloadAccess> {
+        let (mut draft, access, atom_ids, recording_id, stream_id) = fixture_parts(&[0, 0, 0, 0]);
+        let basis_id = id::<ChannelBasisTag>(82);
+        let reference_id = id::<ChannelTag>(reference_byte);
+        draft.add_channel(Channel::new(
+            reference_id,
+            concept("lamquant:test-source/reference"),
+        ));
+        let mut vectors = Vec::with_capacity(channel_concepts.len());
+        for (index, _) in channel_concepts.iter().enumerate() {
+            let source_id = ObjectId::<ChannelTag>::from_bytes([source_start + index as u8; 16]);
+            draft.add_channel(Channel::new(
+                source_id,
+                concept(&format!("lamquant:test-source/{index}")),
+            ));
+            vectors.push(
+                ChannelBasisVector::new(vec![
+                    ChannelBasisTerm::new(source_id, Rational::new(1, 1).unwrap()).unwrap(),
+                    ChannelBasisTerm::new(reference_id, Rational::new(-1, 1).unwrap()).unwrap(),
+                ])
+                .unwrap(),
+            );
+        }
+        draft.add_recording(Recording::new(recording_id, vec![stream_id]));
+        draft.add_channel_basis(
+            ChannelBasis::new(
+                basis_id,
+                channel_concepts.into_iter().map(ChannelSpec::new).collect(),
+                reference,
+            )
+            .with_construction(vectors)
+            .unwrap(),
+        );
+        draft.add_stream(Stream::new(
+            stream_id,
+            recording_id,
+            concept("abir:modality/eeg"),
+            atom_ids.clone(),
+            None,
+            Some(basis_id),
+            None,
+        ));
+        let derivation_id = id::<DerivationTag>(90);
+        draft.add_derivation(Derivation::new(
+            derivation_id,
+            concept("lamquant:operation/model-input-v1"),
+            atom_ids.into_iter().map(SemanticRef::of).collect(),
+            vec![SemanticRef::of(stream_id)],
+        ));
+        if include_proof {
+            draft.add_proof(Proof::new(
+                id::<ProofTag>(91),
+                concept("lamquant:proof/model-input-v1"),
+                SemanticRef::of(derivation_id),
+                ContentId::from_bytes([92; 32]),
+            ));
+        }
+        if include_unrelated_derivation {
+            draft.add_derivation(Derivation::new(
+                id::<DerivationTag>(93),
+                concept("future:operation/unrelated-v1"),
+                Vec::new(),
+                vec![SemanticRef::of(stream_id)],
+            ));
+        }
+        if include_unrelated_duplicate_role {
+            draft.add_channel(Channel::new(
+                id::<ChannelTag>(94),
+                concept("lamquant:test-source/0"),
+            ));
+        }
+        OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
+    }
+
+    #[test]
+    fn model_channel_basis_identity_is_portable_across_abir_object_ids() {
+        let channels = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let first =
+            contract_fixture_with_identity(channels.clone(), ReferenceKind::Common, 83, 84, true);
+        // Reverse relative source/reference ID ordering. ABIR canonicalizes
+        // terms by ObjectId, while LMQ contract identity must remain semantic.
+        let second =
+            contract_fixture_with_identity(channels, ReferenceKind::Common, 120, 100, true);
+        assert_eq!(
+            model_channel_basis_content_id(first.dataset()).unwrap(),
+            model_channel_basis_content_id(second.dataset()).unwrap()
+        );
+    }
+
+    #[test]
+    fn unrelated_duplicate_source_role_does_not_change_model_basis_identity() {
+        let channels = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let baseline = contract_fixture_with_identity_and_extra_derivation(
+            channels.clone(),
+            ReferenceKind::Common,
+            83,
+            84,
+            true,
+            false,
+            false,
+        );
+        let with_unrelated_duplicate = contract_fixture_with_identity_and_extra_derivation(
+            channels,
+            ReferenceKind::Common,
+            83,
+            84,
+            true,
+            false,
+            true,
+        );
+        assert_eq!(
+            model_channel_basis_content_id(baseline.dataset()).unwrap(),
+            model_channel_basis_content_id(with_unrelated_duplicate.dataset()).unwrap()
+        );
+    }
+
+    #[test]
+    fn model_channel_basis_metadata_is_bounded_before_inference() {
+        let channels = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let opened = contract_fixture(channels.clone(), ReferenceKind::Common);
+        let backend = ContractStubBackend::new(test_input_contract(opened.dataset(), channels));
+        let channel_bounds = LmqResourceBounds {
+            max_model_basis_channels: 1,
+            ..LmqResourceBounds::default()
+        };
+        assert!(matches!(
+            encode_bundle_bounded(
+                opened.dataset(),
+                opened.access(),
+                &backend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                channel_bounds,
+            ),
+            Err(LmqError::ResourceLimit {
+                resource: LmqResource::ModelBasisChannels,
+                ..
+            })
+        ));
+        let term_bounds = LmqResourceBounds {
+            max_model_basis_terms: 1,
+            ..LmqResourceBounds::default()
+        };
+        assert!(matches!(
+            encode_bundle_bounded(
+                opened.dataset(),
+                opened.access(),
+                &backend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                term_bounds,
+            ),
+            Err(LmqError::ResourceLimit {
+                resource: LmqResource::ModelBasisTerms,
+                ..
+            })
+        ));
+        for (bounds, resource) in [
+            (
+                LmqResourceBounds {
+                    max_model_derivations: 0,
+                    ..LmqResourceBounds::default()
+                },
+                LmqResource::ModelDerivations,
+            ),
+            (
+                LmqResourceBounds {
+                    max_model_claims: 0,
+                    ..LmqResourceBounds::default()
+                },
+                LmqResource::ModelClaims,
+            ),
+            (
+                LmqResourceBounds {
+                    max_model_derivation_output_edges: 0,
+                    ..LmqResourceBounds::default()
+                },
+                LmqResource::ModelDerivationOutputEdges,
+            ),
+        ] {
+            assert!(matches!(
+                encode_bundle_bounded(
+                    opened.dataset(),
+                    opened.access(),
+                    &backend,
+                    transformed_fidelity("test-residue"),
+                    implementation_identity("test-build"),
+                    bounds,
+                ),
+                Err(LmqError::ResourceLimit {
+                    resource: actual,
+                    ..
+                }) if actual == resource
+            ));
+        }
     }
 
     #[test]
@@ -1503,6 +2177,39 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_stream_atom_membership_is_rejected() {
+        let (mut draft, access, mut atom_ids, recording_id, stream_id) =
+            fixture_parts(&[0, 0, 0, 0]);
+        atom_ids[1] = atom_ids[0];
+        draft.add_recording(Recording::new(recording_id, vec![stream_id]));
+        draft.add_stream(Stream::new(
+            stream_id,
+            recording_id,
+            concept("abir:modality/eeg"),
+            atom_ids,
+            None,
+            None,
+            None,
+        ));
+        let opened =
+            OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access);
+
+        assert!(matches!(
+            encode_bundle(
+                opened.dataset(),
+                opened.access(),
+                &StubBackend::default(),
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::UnsupportedSemantics(
+                "stream atom membership is not bijective"
+            ))
+        ));
+    }
+
+    #[test]
     fn backend_input_contract_fails_before_payload_or_inference() {
         struct ContractRejectingBackend;
         impl NeuralBackend for ContractRejectingBackend {
@@ -1513,8 +2220,8 @@ mod tests {
                 capabilities
             }
 
-            fn model_provenance(&self) -> ModelProvenance {
-                StubBackend::default().model_provenance()
+            fn model(&self) -> BackendModel<'_> {
+                BackendModel::ModelFree(stub_model_provenance())
             }
 
             fn encode(
@@ -1547,6 +2254,260 @@ mod tests {
     }
 
     #[test]
+    fn semantic_model_input_contract_fails_before_payload_or_inference() {
+        struct PanicLease;
+        impl PayloadLease for PanicLease {
+            fn bytes(&self) -> &[u8] {
+                unreachable!()
+            }
+        }
+        struct PanicAccess;
+        impl PayloadAccess for PanicAccess {
+            type Lease<'a>
+                = PanicLease
+            where
+                Self: 'a;
+
+            fn lease<'a>(
+                &'a self,
+                _descriptor: &PayloadDescriptor,
+            ) -> Result<Self::Lease<'a>, semantic_abir::PayloadAccessError> {
+                panic!("payload lease must not run after model-contract rejection")
+            }
+        }
+        let expected = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let canonical = contract_fixture(expected.clone(), ReferenceKind::Common);
+        let contract = test_input_contract(canonical.dataset(), expected.clone());
+        let mut wrong_order = expected.clone();
+        wrong_order.swap(1, 2);
+        let opened = contract_fixture(wrong_order, ReferenceKind::Common);
+        let backend = ContractStubBackend::new(contract);
+
+        assert!(matches!(
+            encode_bundle(
+                opened.dataset(),
+                &PanicAccess,
+                &backend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::ModelInputContract(
+                ModelInputContractError::ChannelOrder
+            ))
+        ));
+        let differential = contract_fixture(expected, ReferenceKind::Differential);
+        assert!(matches!(
+            encode_bundle(
+                differential.dataset(),
+                &PanicAccess,
+                &backend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::ModelInputContract(
+                ModelInputContractError::ChannelBasis
+            ))
+        ));
+        let one_channel = vec![concept("lamquant:test-channel/c0")];
+        let underspecified = contract_fixture(one_channel.clone(), ReferenceKind::Common);
+        let underspecified_backend =
+            ContractStubBackend::new(test_input_contract(underspecified.dataset(), one_channel));
+        assert!(matches!(
+            encode_bundle(
+                underspecified.dataset(),
+                &PanicAccess,
+                &underspecified_backend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::ModelInputContract(
+                ModelInputContractError::ChannelCount
+            ))
+        ));
+    }
+
+    #[test]
+    fn semantic_model_input_contract_requires_upstream_derivation_claim() {
+        let channels = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let opened =
+            contract_fixture_with_identity(channels.clone(), ReferenceKind::Common, 83, 84, false);
+        let backend = ContractStubBackend::new(test_input_contract(opened.dataset(), channels));
+
+        assert!(matches!(
+            encode_bundle(
+                opened.dataset(),
+                opened.access(),
+                &backend,
+                transformed_fidelity("test-residue"),
+                implementation_identity("test-build"),
+                ResourceBounds::default(),
+            ),
+            Err(LmqError::ModelInputContract(
+                ModelInputContractError::MissingDerivationClaim
+            ))
+        ));
+    }
+
+    #[test]
+    fn semantic_model_input_contract_allows_unrelated_derivations() {
+        let channels = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let opened = contract_fixture_with_identity_and_extra_derivation(
+            channels.clone(),
+            ReferenceKind::Common,
+            83,
+            84,
+            true,
+            true,
+            false,
+        );
+        let backend = ContractStubBackend::new(test_input_contract(opened.dataset(), channels));
+
+        encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &backend,
+            transformed_fidelity("test-residue"),
+            implementation_identity("test-build"),
+            ResourceBounds::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn catalog_binds_model_input_contract_identity() {
+        let expected = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let opened = contract_fixture(expected.clone(), ReferenceKind::Common);
+        let backend =
+            ContractStubBackend::new(test_input_contract(opened.dataset(), expected.clone()));
+        let bytes = encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &backend,
+            transformed_fidelity("test-residue"),
+            implementation_identity("test-build"),
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        let mut wrong_order = expected;
+        wrong_order.swap(1, 2);
+        let wrong = ContractStubBackend::new(test_input_contract(opened.dataset(), wrong_order));
+        assert!(matches!(
+            open_bundle(&bytes, &wrong, ResourceBounds::default()),
+            Err(LmqError::CatalogContract)
+        ));
+    }
+
+    #[test]
+    fn trained_catalog_dual_reads_legacy_but_single_writes_contract_identity() {
+        let channels = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let opened = contract_fixture(channels.clone(), ReferenceKind::Common);
+        let contract = test_input_contract(opened.dataset(), channels);
+        let artifact = stub_model_artifact(&contract);
+        let semantics = BackendModel::trained(&artifact);
+        let current = canonical_parameters(SignalDomain::DigitalInteger, Some(&artifact));
+        let legacy = canonical_parameters(SignalDomain::DigitalInteger, None);
+
+        assert!(catalog_parameters_supported(
+            &current,
+            SignalDomain::DigitalInteger,
+            &semantics,
+            LegacyModelContractPolicy::Reject,
+        ));
+        assert!(!catalog_parameters_supported(
+            &legacy,
+            SignalDomain::DigitalInteger,
+            &semantics,
+            LegacyModelContractPolicy::Reject,
+        ));
+        assert!(catalog_parameters_supported(
+            &legacy,
+            SignalDomain::DigitalInteger,
+            &semantics,
+            LegacyModelContractPolicy::AllowPreContractCatalog,
+        ));
+        assert_ne!(current, legacy);
+    }
+
+    #[test]
+    fn explicit_legacy_open_revalidates_complete_model_contract() {
+        let channels = ["c0", "c1", "c2", "c3"]
+            .map(|name| concept(&format!("lamquant:test-channel/{name}")))
+            .to_vec();
+        let opened = contract_fixture(channels.clone(), ReferenceKind::Common);
+        let backend =
+            ContractStubBackend::new(test_input_contract(opened.dataset(), channels.clone()));
+        let current = encode_bundle(
+            opened.dataset(),
+            opened.access(),
+            &backend,
+            transformed_fidelity("test-residue"),
+            implementation_identity("test-build"),
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        let current = CodecBundleView::open(&current, ResourceBounds::default()).unwrap();
+        let packets = [current.packet(0).unwrap()];
+        let legacy = encode_codec_bundle(
+            CodecBundleInput {
+                required_capabilities: 0,
+                canonical_semantics: current.canonical_semantics(),
+                fidelity: current.catalog().fidelity().clone(),
+                implementation: current.catalog().implementation().clone(),
+                model_provenance: current.catalog().model_provenance().cloned(),
+                packets: &packets,
+                parameters: canonical_parameters(SignalDomain::DigitalInteger, None),
+                profile: CodecProfile::LmqProgressive,
+            },
+            ResourceBounds::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            open_bundle(&legacy, &backend, ResourceBounds::default()),
+            Err(LmqError::CatalogContract)
+        ));
+        open_bundle_with_legacy_contract(&legacy, &backend, ResourceBounds::default()).unwrap();
+
+        let mut wrong_order = channels;
+        wrong_order.swap(1, 2);
+        let wrong = contract_fixture(wrong_order, ReferenceKind::Common);
+        let wrong_semantics = canonical_debug_json(wrong.dataset()).unwrap();
+        let invalid_legacy = encode_codec_bundle(
+            CodecBundleInput {
+                required_capabilities: 0,
+                canonical_semantics: &wrong_semantics,
+                fidelity: current.catalog().fidelity().clone(),
+                implementation: current.catalog().implementation().clone(),
+                model_provenance: current.catalog().model_provenance().cloned(),
+                packets: &packets,
+                parameters: canonical_parameters(SignalDomain::DigitalInteger, None),
+                profile: CodecProfile::LmqProgressive,
+            },
+            ResourceBounds::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            open_bundle_with_legacy_contract(&invalid_legacy, &backend, ResourceBounds::default()),
+            Err(LmqError::ModelInputContract(
+                ModelInputContractError::ChannelOrder
+            ))
+        ));
+    }
+
+    #[test]
     fn physical_model_domain_requires_calibration_before_payload_or_inference() {
         struct PhysicalBackend;
         impl NeuralBackend for PhysicalBackend {
@@ -1556,8 +2517,8 @@ mod tests {
                 capabilities
             }
 
-            fn model_provenance(&self) -> ModelProvenance {
-                StubBackend::default().model_provenance()
+            fn model(&self) -> BackendModel<'_> {
+                BackendModel::ModelFree(stub_model_provenance())
             }
 
             fn encode(
@@ -1603,7 +2564,7 @@ mod tests {
             linked_id
         );
 
-        let parameters = canonical_parameters(SignalDomain::DigitalInteger);
+        let parameters = canonical_parameters(SignalDomain::DigitalInteger, None);
         assert!(matches!(
             &parameters[0].value,
             CodecParameterValue::Text { value }
@@ -1855,10 +2816,10 @@ mod tests {
                 StubBackend::default().capabilities()
             }
 
-            fn model_provenance(&self) -> ModelProvenance {
-                let mut provenance = StubBackend::default().model_provenance();
+            fn model(&self) -> BackendModel<'_> {
+                let mut provenance = stub_model_provenance();
                 provenance.pccp_status = self.0;
-                provenance
+                BackendModel::ModelFree(provenance)
             }
 
             fn encode(
@@ -1934,10 +2895,13 @@ mod tests {
                 self.0.capabilities()
             }
 
-            fn model_provenance(&self) -> ModelProvenance {
-                let mut provenance = self.0.model_provenance();
+            fn model(&self) -> BackendModel<'_> {
+                let mut provenance = match self.0.model() {
+                    BackendModel::ModelFree(provenance) => provenance,
+                    BackendModel::Trained(_) => unreachable!(),
+                };
                 provenance.checkpoint_sha256 = [11; 32];
-                provenance
+                BackendModel::ModelFree(provenance)
             }
 
             fn encode(
@@ -2033,8 +2997,8 @@ mod tests {
                 StubBackend::default().capabilities()
             }
 
-            fn model_provenance(&self) -> ModelProvenance {
-                StubBackend::default().model_provenance()
+            fn model(&self) -> BackendModel<'_> {
+                BackendModel::ModelFree(stub_model_provenance())
             }
 
             fn encode(
@@ -2149,8 +3113,8 @@ mod tests {
                 StubBackend::default().capabilities()
             }
 
-            fn model_provenance(&self) -> ModelProvenance {
-                StubBackend::default().model_provenance()
+            fn model(&self) -> BackendModel<'_> {
+                BackendModel::ModelFree(stub_model_provenance())
             }
 
             fn encode(

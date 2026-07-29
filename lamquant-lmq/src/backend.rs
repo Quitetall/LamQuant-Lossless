@@ -10,8 +10,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
-use semantic_abir::{ContentId, Rational};
+use semantic_abir::{ConceptId, ContentId, Rational};
 use semantic_abir_bcs::{ModelProvenance, PccpStatus};
+
+const MODEL_INPUT_CONTRACT_DOMAIN: &[u8] = b"lamquant.lmq.model-input-contract.v1";
+const TRAINED_MODEL_ARTIFACT_DOMAIN: &[u8] = b"lamquant.lmq.trained-model-artifact.v1";
 
 /// Execution realm supplied by one neural backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +48,279 @@ impl SignalDomain {
         match self {
             Self::DigitalInteger => "digital-integer",
             Self::PhysicalMicrovoltQ16 => "physical-microvolt-q16",
+        }
+    }
+}
+
+/// Immutable semantic contract accepted by one neural model.
+///
+/// Shape bounds remain in [`NeuralBackendCapabilities`]. This contract binds
+/// meanings that shape alone cannot express: modality, ordered channel basis,
+/// exact weighted reference construction, upstream derivation proof, model
+/// domain, and the preprocessing executed inside the backend.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelInputContract {
+    modality: ConceptId,
+    channel_concepts: Vec<ConceptId>,
+    model_channel_basis_content_id: ContentId,
+    sample_rate: Rational,
+    samples: u32,
+    signal_domain: SignalDomain,
+    upstream_derivation: ConceptId,
+    upstream_claim_kind: ConceptId,
+    backend_pipeline: ConceptId,
+    content_id: ContentId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ModelInputContractDefinitionError {
+    EmptyChannelBasis,
+    InvalidSampleRate,
+    ZeroSamples,
+    TooManyChannels,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ModelInputContractError {
+    Modality,
+    MissingChannelBasis,
+    MissingChannelBasisConstruction,
+    MissingChannelBasisSource,
+    AmbiguousChannelBasisSource,
+    ChannelCount,
+    ChannelOrder,
+    ChannelBasis,
+    MissingDerivation,
+    Derivation,
+    MissingDerivationClaim,
+    SampleRate,
+    SampleCount,
+    SignalDomain,
+}
+
+impl ModelInputContract {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        modality: ConceptId,
+        channel_concepts: Vec<ConceptId>,
+        model_channel_basis_content_id: ContentId,
+        sample_rate: Rational,
+        samples: u32,
+        signal_domain: SignalDomain,
+        upstream_derivation: ConceptId,
+        upstream_claim_kind: ConceptId,
+        backend_pipeline: ConceptId,
+    ) -> Result<Self, ModelInputContractDefinitionError> {
+        if channel_concepts.is_empty() {
+            return Err(ModelInputContractDefinitionError::EmptyChannelBasis);
+        }
+        if u16::try_from(channel_concepts.len()).is_err() {
+            return Err(ModelInputContractDefinitionError::TooManyChannels);
+        }
+        if !sample_rate.is_positive() {
+            return Err(ModelInputContractDefinitionError::InvalidSampleRate);
+        }
+        if samples == 0 {
+            return Err(ModelInputContractDefinitionError::ZeroSamples);
+        }
+        let mut value = Self {
+            modality,
+            channel_concepts,
+            model_channel_basis_content_id,
+            sample_rate,
+            samples,
+            signal_domain,
+            upstream_derivation,
+            upstream_claim_kind,
+            backend_pipeline,
+            content_id: ContentId::from_bytes([0; 32]),
+        };
+        value.content_id = value.compute_content_id();
+        Ok(value)
+    }
+
+    pub fn modality(&self) -> &ConceptId {
+        &self.modality
+    }
+
+    pub fn channel_concepts(&self) -> &[ConceptId] {
+        &self.channel_concepts
+    }
+
+    /// Portable model-role identity of exact weighted channel construction.
+    ///
+    /// Unlike ABIR object identity, this projection uses unique source-channel
+    /// role concepts so one model contract can apply across recordings. Dataset
+    /// contract validation rejects ambiguity among basis-referenced source roles
+    /// before inference.
+    pub const fn model_channel_basis_content_id(&self) -> ContentId {
+        self.model_channel_basis_content_id
+    }
+
+    pub const fn sample_rate(&self) -> Rational {
+        self.sample_rate
+    }
+
+    pub const fn samples(&self) -> u32 {
+        self.samples
+    }
+
+    pub const fn signal_domain(&self) -> SignalDomain {
+        self.signal_domain
+    }
+
+    pub fn upstream_derivation(&self) -> &ConceptId {
+        &self.upstream_derivation
+    }
+
+    /// Required ABIR typed claim over the selected input derivation.
+    ///
+    /// ABIR Proof records are semantic claims, not runtime authorization or
+    /// signature-verification results. Model-pack trust remains an external
+    /// gate and is bound separately by [`TrainedModelArtifact`].
+    pub fn upstream_claim_kind(&self) -> &ConceptId {
+        &self.upstream_claim_kind
+    }
+
+    /// Pipeline applied by the backend after validated ABIR input is leased.
+    ///
+    /// This is not a claim about prior dataset processing. Prior processing is
+    /// separately bound by [`Self::upstream_derivation`] and
+    /// [`Self::upstream_claim_kind`].
+    pub fn backend_pipeline(&self) -> &ConceptId {
+        &self.backend_pipeline
+    }
+
+    pub const fn content_id(&self) -> ContentId {
+        self.content_id
+    }
+
+    fn compute_content_id(&self) -> ContentId {
+        let mut hasher = blake3::Hasher::new();
+        hash_field(&mut hasher, MODEL_INPUT_CONTRACT_DOMAIN);
+        hash_field(&mut hasher, self.modality.as_str().as_bytes());
+        hash_field(&mut hasher, self.model_channel_basis_content_id.as_bytes());
+        let (sample_rate_numerator, sample_rate_denominator) = self.sample_rate.parts();
+        hash_field(&mut hasher, &sample_rate_numerator.to_le_bytes());
+        hash_field(&mut hasher, &sample_rate_denominator.to_le_bytes());
+        hash_field(&mut hasher, &self.samples.to_le_bytes());
+        hash_field(&mut hasher, self.signal_domain.protocol_name().as_bytes());
+        hash_field(&mut hasher, self.upstream_derivation.as_str().as_bytes());
+        hash_field(&mut hasher, self.upstream_claim_kind.as_str().as_bytes());
+        hash_field(&mut hasher, self.backend_pipeline.as_str().as_bytes());
+        let channel_count =
+            u32::try_from(self.channel_concepts.len()).expect("constructor checked channel count");
+        hash_field(&mut hasher, &channel_count.to_le_bytes());
+        for concept in &self.channel_concepts {
+            hash_field(&mut hasher, concept.as_str().as_bytes());
+        }
+        ContentId::from_bytes(*hasher.finalize().as_bytes())
+    }
+}
+
+/// Immutable binding between executable model identity and accepted input.
+///
+/// A trained backend owns this value as one unit. Checkpoint hashes, PCCP
+/// evidence, preprocessing identity, and input semantics therefore cannot be
+/// supplied through independent backend methods or silently recombined.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrainedModelArtifact {
+    provenance: ModelProvenance,
+    input_contract: ModelInputContract,
+    content_id: ContentId,
+}
+
+impl TrainedModelArtifact {
+    pub fn new(provenance: ModelProvenance, input_contract: ModelInputContract) -> Self {
+        let mut value = Self {
+            provenance,
+            input_contract,
+            content_id: ContentId::from_bytes([0; 32]),
+        };
+        value.content_id = value.compute_content_id();
+        value
+    }
+
+    pub const fn provenance(&self) -> &ModelProvenance {
+        &self.provenance
+    }
+
+    pub const fn input_contract(&self) -> &ModelInputContract {
+        &self.input_contract
+    }
+
+    pub const fn content_id(&self) -> ContentId {
+        self.content_id
+    }
+
+    fn compute_content_id(&self) -> ContentId {
+        let mut hasher = blake3::Hasher::new();
+        hash_field(&mut hasher, TRAINED_MODEL_ARTIFACT_DOMAIN);
+        hash_field(
+            &mut hasher,
+            self.provenance.checkpoint_content_id.as_bytes(),
+        );
+        hash_field(&mut hasher, &self.provenance.checkpoint_sha256);
+        hash_field(&mut hasher, self.provenance.pccp_change_id.as_bytes());
+        hash_field(&mut hasher, self.provenance.pccp_evidence_id.as_bytes());
+        hash_field(
+            &mut hasher,
+            &[match self.provenance.pccp_status {
+                PccpStatus::Candidate => 0,
+                PccpStatus::GatePass => 1,
+                PccpStatus::Rejected => 2,
+            }],
+        );
+        hash_field(&mut hasher, self.input_contract.content_id().as_bytes());
+        ContentId::from_bytes(*hasher.finalize().as_bytes())
+    }
+}
+
+pub(crate) fn hash_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Complete model binding supplied by every neural backend.
+///
+/// No default exists. Trained model provenance and input semantics travel as
+/// one immutable [`TrainedModelArtifact`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BackendModel<'a> {
+    /// Deterministic backend with no trained weights or input contract.
+    ///
+    /// This variant intentionally skips trained-model semantic validation and
+    /// must not describe an executable learned artifact.
+    ModelFree(ModelProvenance),
+    /// Learned artifact whose provenance and input semantics are inseparable.
+    Trained(&'a TrainedModelArtifact),
+}
+
+impl<'a> BackendModel<'a> {
+    pub const fn trained(artifact: &'a TrainedModelArtifact) -> Self {
+        Self::Trained(artifact)
+    }
+
+    pub const fn provenance(&self) -> &ModelProvenance {
+        match self {
+            Self::ModelFree(provenance) => provenance,
+            Self::Trained(artifact) => artifact.provenance(),
+        }
+    }
+
+    pub const fn input_contract(&self) -> Option<&ModelInputContract> {
+        match self {
+            Self::ModelFree(_) => None,
+            Self::Trained(artifact) => Some(artifact.input_contract()),
+        }
+    }
+
+    pub const fn trained_artifact(&self) -> Option<&TrainedModelArtifact> {
+        match self {
+            Self::ModelFree(_) => None,
+            Self::Trained(artifact) => Some(artifact),
         }
     }
 }
@@ -298,10 +574,11 @@ pub trait NeuralBackend {
     /// Exact shape/rate/output envelope and execution realm.
     fn capabilities(&self) -> NeuralBackendCapabilities;
 
-    /// Immutable identity of the exact checkpoint and PCCP evidence this
-    /// backend executes. The shell seals and verifies this value; callers
-    /// cannot claim provenance independently of the inference implementation.
-    fn model_provenance(&self) -> ModelProvenance;
+    /// Complete immutable model binding beyond rectangular shape.
+    ///
+    /// Required rather than defaulted: trained implementations cannot supply
+    /// checkpoint provenance independently from their input contract.
+    fn model(&self) -> BackendModel<'_>;
 
     /// Encode a rectangular signal in the exact domain declared by
     /// [`NeuralBackendCapabilities::signal_domain`].
@@ -352,14 +629,14 @@ impl NeuralBackend for StubBackend {
         }
     }
 
-    fn model_provenance(&self) -> ModelProvenance {
-        ModelProvenance {
+    fn model(&self) -> BackendModel<'_> {
+        BackendModel::ModelFree(ModelProvenance {
             checkpoint_content_id: ContentId::from_bytes([0x51; 32]),
             checkpoint_sha256: [0x52; 32],
             pccp_change_id: String::from("LMQ-STUB-REFERENCE"),
             pccp_evidence_id: ContentId::from_bytes([0x53; 32]),
             pccp_status: PccpStatus::Candidate,
-        }
+        })
     }
 
     fn encode(
@@ -438,6 +715,84 @@ impl NeuralBackend for StubBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provenance() -> ModelProvenance {
+        ModelProvenance {
+            checkpoint_content_id: ContentId::from_bytes([11; 32]),
+            checkpoint_sha256: [12; 32],
+            pccp_change_id: String::from("LMQ-TEST-ARTIFACT"),
+            pccp_evidence_id: ContentId::from_bytes([13; 32]),
+            pccp_status: PccpStatus::GatePass,
+        }
+    }
+
+    #[test]
+    fn model_input_contract_identity_binds_channel_order() {
+        let first = ModelInputContract::new(
+            ConceptId::new("abir:modality/eeg").unwrap(),
+            ["lamquant:test-channel/c0", "lamquant:test-channel/c1"]
+                .map(|value| ConceptId::new(value).unwrap())
+                .to_vec(),
+            ContentId::from_bytes([3; 32]),
+            Rational::new(250, 1).unwrap(),
+            2_500,
+            SignalDomain::PhysicalMicrovoltQ16,
+            ConceptId::new("lamquant:operation/model-input-v1").unwrap(),
+            ConceptId::new("lamquant:proof/model-input-v1").unwrap(),
+            ConceptId::new("lamquant:backend-pipeline/subband-v1").unwrap(),
+        )
+        .unwrap();
+        let mut reversed = first.channel_concepts().to_vec();
+        reversed.reverse();
+        let second = ModelInputContract::new(
+            first.modality().clone(),
+            reversed,
+            first.model_channel_basis_content_id(),
+            first.sample_rate(),
+            first.samples(),
+            first.signal_domain(),
+            first.upstream_derivation().clone(),
+            first.upstream_claim_kind().clone(),
+            first.backend_pipeline().clone(),
+        )
+        .unwrap();
+        assert_ne!(first.content_id(), second.content_id());
+        assert_eq!(
+            ModelInputContract::new(
+                first.modality().clone(),
+                Vec::new(),
+                first.model_channel_basis_content_id(),
+                first.sample_rate(),
+                first.samples(),
+                first.signal_domain(),
+                first.upstream_derivation().clone(),
+                first.upstream_claim_kind().clone(),
+                first.backend_pipeline().clone(),
+            ),
+            Err(ModelInputContractDefinitionError::EmptyChannelBasis)
+        );
+        assert_eq!(
+            first.content_id().to_string(),
+            "9eb5c58a26861ce5bbc129b1e3c2e5367307d740b11ae771d1d0a86cc72e0361"
+        );
+        assert_eq!(
+            ModelInputContract::new(
+                first.modality().clone(),
+                alloc::vec![
+                    ConceptId::new("lamquant:test-channel/repeated").unwrap();
+                    usize::from(u16::MAX) + 1
+                ],
+                first.model_channel_basis_content_id(),
+                first.sample_rate(),
+                first.samples(),
+                first.signal_domain(),
+                first.upstream_derivation().clone(),
+                first.upstream_claim_kind().clone(),
+                first.backend_pipeline().clone(),
+            ),
+            Err(ModelInputContractDefinitionError::TooManyChannels)
+        );
+    }
 
     #[test]
     fn stub_encode_decode_is_deterministic_mod_alphabet() {
@@ -568,6 +923,56 @@ mod tests {
         assert_eq!(
             StubBackend::default().capabilities().signal_domain,
             SignalDomain::DigitalInteger
+        );
+    }
+
+    #[test]
+    fn trained_model_artifact_identity_binds_checkpoint_and_contract() {
+        let contract = ModelInputContract::new(
+            ConceptId::new("abir:modality/eeg").unwrap(),
+            alloc::vec![ConceptId::new("lamquant:test-channel/c0").unwrap()],
+            ContentId::from_bytes([3; 32]),
+            Rational::new(250, 1).unwrap(),
+            2_500,
+            SignalDomain::PhysicalMicrovoltQ16,
+            ConceptId::new("lamquant:operation/model-input-v1").unwrap(),
+            ConceptId::new("lamquant:proof/model-input-v1").unwrap(),
+            ConceptId::new("lamquant:backend-pipeline/subband-v1").unwrap(),
+        )
+        .unwrap();
+        let first = TrainedModelArtifact::new(provenance(), contract.clone());
+        let mut changed_provenance = provenance();
+        changed_provenance.checkpoint_sha256[0] ^= 1;
+        let changed_checkpoint = TrainedModelArtifact::new(changed_provenance, contract.clone());
+        let changed_contract = TrainedModelArtifact::new(
+            provenance(),
+            ModelInputContract::new(
+                contract.modality().clone(),
+                contract.channel_concepts().to_vec(),
+                contract.model_channel_basis_content_id(),
+                contract.sample_rate(),
+                contract.samples(),
+                contract.signal_domain(),
+                contract.upstream_derivation().clone(),
+                contract.upstream_claim_kind().clone(),
+                ConceptId::new("lamquant:backend-pipeline/changed-v1").unwrap(),
+            )
+            .unwrap(),
+        );
+
+        assert_ne!(first.content_id(), changed_checkpoint.content_id());
+        assert_ne!(first.content_id(), changed_contract.content_id());
+        assert_eq!(
+            BackendModel::trained(&first).provenance(),
+            first.provenance()
+        );
+        assert_eq!(
+            BackendModel::trained(&first).input_contract(),
+            Some(first.input_contract())
+        );
+        assert_eq!(
+            first.content_id().to_string(),
+            "ff0b52d79f4b0e7b87b5c47f8354fd2c46adf4d7932884e6bae7c08f879128ee"
         );
     }
 }
