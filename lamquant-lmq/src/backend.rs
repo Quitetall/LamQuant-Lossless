@@ -149,8 +149,9 @@ fn rational_cmp(left: Rational, right: Rational) -> Ordering {
     }
 }
 
-/// Compare non-negative rationals without cross multiplication. Continued
-/// fractions keep all intermediates within the original `u128` values.
+/// Compare non-negative rationals without cross multiplication. Euclidean
+/// quotients and strictly decreasing remainders keep every operand bounded by
+/// the original numerator and denominator values.
 fn compare_positive_rationals(
     mut left_numerator: u128,
     mut left_denominator: u128,

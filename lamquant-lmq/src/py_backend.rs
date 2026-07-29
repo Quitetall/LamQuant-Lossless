@@ -10,9 +10,12 @@
 //!
 //! Host-only (feature `python`): needs `std` (process) + `serde_json`. codec-neural
 //! is imported by the helper, never edited; weights resolve via `$LAMQUANT_WEIGHTS_DIR`.
-//! Hard process containment uses Bubblewrap PID namespaces on Linux and Job
-//! Objects on Windows. Other Unix hosts fail closed until the native Rust backend
-//! replaces this temporary subprocess path.
+//! Process-lifetime and write containment uses Bubblewrap PID namespaces on
+//! Linux and Job Objects on Windows. This is not a confidentiality sandbox:
+//! the helper inherits its environment, and Linux exposes the host root
+//! read-only so Python, libraries, and weights remain discoverable. Helper code
+//! and model artifacts must therefore be trusted. Other Unix hosts fail closed
+//! until the native Rust backend replaces this temporary subprocess path.
 
 use std::io::Read;
 use std::marker::PhantomData;
@@ -427,6 +430,8 @@ fn helper_command(python: &str, helper: &PathBuf) -> Result<Command, BackendErro
     // setsid(2). When the helper exits or bwrap is killed, namespace teardown
     // kills all remaining processes. Read-only host mount preserves Python and
     // weight discovery; /tmp remains writable for ordinary runtime scratch.
+    // This constrains process lifetime and host writes, not confidentiality:
+    // helper code can read user-readable host files and inherits its environment.
     verify_linux_containment()?;
     let mut command = Command::new(BUBBLEWRAP_PATH);
     command
@@ -770,7 +775,6 @@ impl NeuralBackend for PyBackend {
         self.check_active(output.started)?;
         let envelope: EncodeResponse<'_> = parse_envelope(&output)?;
         self.validate_checkpoint(envelope.checkpoint_sha256)?;
-        let samples = signal.first().map_or(0, Vec::len);
         let input_elements = signal
             .len()
             .checked_mul(samples)
