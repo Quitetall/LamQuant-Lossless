@@ -19,7 +19,7 @@ from pathlib import Path
 # Decomposition note (2026-05-28): In the LamQuant-Lossless carve, the
 # ai_models/ subtree (neural codec, SNN/TNN, training pipelines) does
 # NOT exist — those modules live in the private LamQuant-Neural repo.
-# Several tests under tests/codec/, tests/firmware/, tests/decoder/
+# Several tests under tests/firmware/ and tests/decoder/
 # were originally written when monorepo had ai_models inline; they
 # import `from subband_preprocess import ...` or similar neural-only
 # bare-name imports. Skip-collect those test files here so a Lossless-
@@ -28,16 +28,6 @@ _HAS_NEURAL = (Path(__file__).parent.parent / "ai_models").is_dir()
 collect_ignore_glob = []
 if not _HAS_NEURAL:
     collect_ignore_glob.extend([
-        "codec/test_l1_conformance.py",
-        "codec/test_l2_preprocessing.py",
-        "codec/test_l2_integrity_gaps.py",
-        "codec/test_l4_fuzz.py",
-        "codec/test_l5_subband_int_vec.py",
-        "codec/test_l5_vectorize_parity.py",
-        "codec/test_l7_adversarial_saturation.py",
-        "codec/test_l7_adversarial_zeros.py",
-        "codec/test_l7_paranoid.py",
-        "codec/test_fused_pipeline.py",
         "decoder/*.py",
         "firmware/test_checkpoint.py",
         "firmware/test_l5_cross_impl.py",
@@ -68,10 +58,6 @@ for _rel in (
     "ai_models/validation",
     "ai_models",           # for `from snn import ...` etc.
     "firmware",
-    # Standalone Python codec reference impl: parent dir of the
-    # `lamquant_codec` package so `import lamquant_codec` resolves in
-    # the Lossless carve without an editable install.
-    "reference_implementations/python_codec",
     str(_REPO_ROOT),       # for `from ai_models.validation import ...`
 ):
     _p = str((_REPO_ROOT / _rel).resolve()) if _rel != str(_REPO_ROOT) else str(_REPO_ROOT)

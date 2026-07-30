@@ -50,7 +50,7 @@ lml export out.lma --format nwb -o out.nwb --lossless-mode mcu
 | `crates/lamquant-common/` | Shared primitives (CRC-32, EDF reader, LMA archive, path helpers, ingest) — both lossless and (private) neural codecs depend on this |
 | `lamquant-lossless/` | `lml` crate: codec library + CLI/TUI binary |
 | `crates/lmafs/` | FUSE filesystem over `.lma` archives |
-| `reference_implementations/python_codec/` | Python wheel `lamquant-codec` (PyO3 bindings) |
+| `lamquant-py/` | Canonical `lamquant-core` PyO3 wheel (`import lamquant_core`) |
 
 ## Quick start
 
@@ -66,13 +66,19 @@ diff in.edf restored.edf  # byte-identical
 ### Python
 
 ```bash
-cd reference_implementations/python_codec && pip install .
+python -m pip install maturin numpy
+maturin develop --release --manifest-path lamquant-py/Cargo.toml
 ```
 ```python
-import lamquant_codec as lq
-lq.compress("in.edf", "out.lml")
-samples = lq.decompress("out.lml")
+import lamquant_core
+
+packet = lamquant_core.lml_compress([[1, 2, 3, 4]], noise_bits=0)
+samples = lamquant_core.lml_decompress(packet)
 ```
+
+Retired pure-Python codec remains available only through process-isolated
+`lamquant-legacy` adapters. It is not packaged or importable from this
+repository.
 
 ### Firmware
 

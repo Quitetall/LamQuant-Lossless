@@ -20,7 +20,11 @@ def _py_norm(data_f32, orig_sr):
         up, down = 250, int(orig_sr)
         g = gcd(up, down)
         up, down = up // g, down // g
-        data = signal.resample_poly(data, up, down, axis=1)
+        if up > 256 or down > 256:
+            num = int(data.shape[1] * 250.0 / orig_sr)
+            data = signal.resample(data, num, axis=1)
+        else:
+            data = signal.resample_poly(data, up, down, axis=1)
     sos = signal.butter(2, 0.5, btype="high", fs=250.0, output="sos")
     data = signal.sosfiltfilt(sos, data, axis=1)
     max_abs = float(np.max(np.abs(data)))
@@ -55,7 +59,10 @@ def test_flat_signal_returns_none():
     assert lc.normalize_eeg_f32(flat, 250.0) is None
 
 
-def test_fft_branch_rate_raises_for_python_fallback():
-    # 257 Hz: gcd(250,257)=1 → down=257 > 256 → FFT branch (not ported to Rust).
-    with pytest.raises(NotImplementedError):
-        lc.normalize_eeg_f32(_synth(21, 128), 257.0)
+def test_fft_branch_rate_is_bit_exact_to_python():
+    # 257 Hz: gcd(250,257)=1 → down=257 > 256 → FFT branch.
+    x = _synth(21, 128)
+    py = _py_norm(x.copy(), 257.0)
+    rust = lc.normalize_eeg_f32(x, 257.0)
+    assert rust is not None and py is not None
+    assert np.array_equal(rust, py)

@@ -11,27 +11,26 @@ What this harness covers (all deterministic, SDLC-governed, PCCP-out-of-scope):
 
     Rust gates (mirrors .github/workflows/ci.yml rust-host + firmware-no_std):
         cargo build  --workspace
-        cargo test   --workspace --lib          (or `cargo nextest run` if installed)
+        cargo test   --workspace                (or `cargo nextest run` if installed)
         cargo test   --test byte_equal_backends  (load-bearing wire-format gate)
-        cargo build  -p lamquant-firmware --no-default-features
+        cargo build  -p lamquant-lml-mcu --no-default-features
                      --target riscv32imac-unknown-none-elf   (no_std MCU path)
 
-    Python pytest categories (codec, container, edf_reader, integration,
-    firmware C-parity, codec_python_smoke). Neural-coupled smoke tests
-    self-skip via `pytest.importorskip` when the ai_models subtree is absent.
+    Python pytest categories (edf_reader, integration, firmware C-parity).
+    Canonical PyO3 binding tests live under `lamquant-py/tests` and run in
+    the dedicated CI wheel job.
 
 Tiers (each includes all lower tiers):
-    fast    Pre-commit gate. Codec/container/edf roundtrip + edge cases +
-            corruption detection + the Rust workspace build/lib tests +
-            the byte-equal wire-format gate.
-    full    Pre-push gate. fast + integration E2E + python codec smoke.
+    fast    Pre-commit gate. EDF cross-check + Rust workspace tests +
+            byte-equal wire-format gate.
+    full    Pre-push gate. fast + integration E2E.
     ci      CI/nightly. full + firmware no_std build + C-host parity.
 
 Usage:
     python tests/run_diagnostics.py              # fast (default, pre-commit)
     python tests/run_diagnostics.py full         # + integration + smoke
     python tests/run_diagnostics.py ci           # + firmware no_std + C parity
-    python tests/run_diagnostics.py codec        # one python category
+    python tests/run_diagnostics.py edf_reader   # one python category
     python tests/run_diagnostics.py rust         # only the Rust gates
     python tests/run_diagnostics.py --list       # show categories (no run)
     python tests/run_diagnostics.py --dry-run    # print the plan, run nothing
@@ -67,13 +66,13 @@ def _rust_gates():
     have_nextest = shutil.which("cargo-nextest") is not None
     if have_nextest:
         workspace_tests = {
-            "cmd": ["cargo", "nextest", "run", "--workspace", "--lib"],
-            "desc": "workspace lib tests (cargo nextest)",
+            "cmd": ["cargo", "nextest", "run", "--workspace"],
+            "desc": "workspace tests (cargo nextest)",
         }
     else:
         workspace_tests = {
-            "cmd": ["cargo", "test", "--workspace", "--lib"],
-            "desc": "workspace lib tests (cargo test)",
+            "cmd": ["cargo", "test", "--workspace"],
+            "desc": "workspace tests (cargo test)",
         }
     return {
         "rust_build": {
@@ -92,7 +91,7 @@ def _rust_gates():
         },
         "firmware_no_std": {
             "cmd": [
-                "cargo", "build", "-p", "lamquant-firmware",
+                "cargo", "build", "-p", "lamquant-lml-mcu",
                 "--no-default-features", "--target", _FIRMWARE_TARGET,
             ],
             "desc": f"firmware no_std build ({_FIRMWARE_TARGET})",
@@ -109,34 +108,14 @@ def _rust_gates():
 # DROPPED vs the monorepo registry:
 #   - "training"  : neural — needs torch / GPU, lives in LamQuant-Neural.
 #   - "decoder"   : neural — Vocos decoder + train_combined, LamQuant-Neural.
-# Neural-coupled tests that physically remain under codec_python_smoke/
-# self-skip via pytest.importorskip("subband_preprocess" / torch), so the
-# category stays green without the ai_models subtree present.
 CATEGORIES = {
-    # Core codec — fast, no GPU, no disk I/O
-    "codec": {
-        "desc": "LMQ5 roundtrip, entropy coders, fused pipeline, conformance",
-        "tier": "fast",
-        # L5 vectorize parity is 80s — exclude from fast tier
-        "exclude_patterns": ["test_l5_*"],
-    },
-    "container": {
-        "desc": "LML container, versioning, corruption detection",
-        "tier": "fast",
-    },
     "edf_reader": {
-        "desc": "EDF/EDF+/BDF reader, TAL, int24",
+        "desc": "EDF reader cross-check",
         "tier": "fast",
     },
     # Integration — needs real files, slower
     "integration": {
         "desc": "E2E codec, batch operations, package surface",
-        "tier": "full",
-    },
-    # Python codec smoke — surface-level imports + coverage; neural-coupled
-    # files in here self-skip via importorskip.
-    "codec_python_smoke": {
-        "desc": "Python codec import/coverage smoke (neural-coupled self-skip)",
         "tier": "full",
     },
     # Firmware — C parity host + cross-impl. Needs a C host toolchain.
