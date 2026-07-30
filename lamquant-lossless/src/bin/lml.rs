@@ -112,12 +112,11 @@ REPORT BUGS:
   https://github.com/Quitetall/LamQuant/issues"
 )]
 struct Cli {
-    /// Emit one JSON line per OpEvent to stdout instead of pretty progress.
-    /// Used by Tauri GUI and Python TUI to consume the same wire format
-    /// (specs/op-events.schema.json). When set, all status output goes to
-    /// stderr; stdout is reserved for OpEvent JSON lines.
+    /// Emit graph-bound plan projections to stdout instead of pretty progress.
+    /// Requires LAMQUANT_GRAPH_ID, LAMQUANT_PLAN_ID, and
+    /// LAMQUANT_INVOCATION_ID from the supervising plan runner.
     #[arg(long, global = true)]
-    emit_json_events: bool,
+    emit_plan_projections: bool,
 
     /// Suppress all log output (errors still print). Mutually exclusive
     /// with `-v`. Equivalent to `RUST_LOG=off`.
@@ -1192,10 +1191,12 @@ enum PccpAction {
     },
 }
 
-/// Process-global emit-json-events flag. Set once in main from the CLI
+/// Process-global plan-projection flag. Set once in main from the CLI
 /// arg; queried by emit_* helpers so call sites in encode loops can call
 /// them unconditionally and incur zero cost when emission is off.
-static EMIT_JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static EMIT_PROJECTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PROJECTION_IDENTITY: std::sync::OnceLock<lamquant_ops::PlanIdentity> =
+    std::sync::OnceLock::new();
 
 /// Phase 1.7 — process-global `--fail-fast` flag. Default false
 /// (continue-on-error). Set by cmd_encode / cmd_decode; consulted by
@@ -1389,12 +1390,41 @@ fn find_sidecars(edf_path: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Emit a `FileDone` OpEvent JSON line to stdout. Carries the full
-/// telemetry the TUI dashboard renders (CR, byte sizes, samples,
-/// duration, channels, sample rate, sha256, n_windows). All extended
-/// fields are optional — pass None when the value isn't known (e.g.,
-/// in the failure branch where encode_one bailed before reading the
-/// EDF metadata).
+fn init_projection_identity() -> Result<(), String> {
+    let required = |name: &str| {
+        std::env::var(name)
+            .map_err(|_| format!("--emit-plan-projections requires environment variable {name}"))
+    };
+    let identity = lamquant_ops::PlanIdentity {
+        graph_id: required("LAMQUANT_GRAPH_ID")?,
+        plan_id: required("LAMQUANT_PLAN_ID")?,
+        invocation_id: required("LAMQUANT_INVOCATION_ID")?,
+    };
+    if !identity.is_valid() {
+        return Err("plan projection environment contains invalid identity".into());
+    }
+    PROJECTION_IDENTITY
+        .set(identity)
+        .map_err(|_| "plan projection identity initialized twice".into())
+}
+
+fn emit_projection(update: lamquant_ops::PlanUpdate) {
+    let Some(identity) = PROJECTION_IDENTITY.get() else {
+        eprintln!("Error: plan projection identity is unavailable");
+        return;
+    };
+    let projection = lamquant_ops::PlanProjection::new(identity.clone(), update);
+    if let Err(error) = projection.validate() {
+        eprintln!("Error: invalid plan projection: {error}");
+        return;
+    }
+    match projection.to_json_line() {
+        Ok(line) => println!("{line}"),
+        Err(error) => eprintln!("Error: {error}"),
+    }
+}
+
+/// Emit an artifact observation carrying codec telemetry.
 #[allow(clippy::too_many_arguments)]
 fn emit_file_done(
     path: &str,
@@ -1410,85 +1440,86 @@ fn emit_file_done(
     sha256: Option<String>,
     n_windows: Option<u32>,
 ) {
-    let ev = lamquant_ops::OpEvent::FileDone {
-        ts_ms: lamquant_ops::OpEvent::now_ms(),
-        path: path.into(),
-        success,
-        ms,
-        cr,
-        bytes_in,
-        bytes_out,
-        samples,
-        duration_s,
-        n_channels,
-        sample_rate,
-        sha256,
-        n_windows,
-    };
-    println!("{}", ev.to_json_line());
+    emit_projection(lamquant_ops::PlanUpdate::Artifact {
+        node_id: 0,
+        artifact: lamquant_ops::ArtifactProjection {
+            path: path.into(),
+            success,
+            elapsed_ms: ms,
+            compression_ratio: cr,
+            bytes_in,
+            bytes_out,
+            samples,
+            duration_seconds: duration_s,
+            channel_count: n_channels,
+            sample_rate_hz: sample_rate,
+            sha256,
+            window_count: n_windows,
+        },
+    });
 }
 
-/// Emit a `Started` OpEvent JSON line to stdout. Helper for the
-/// `--emit-json-events` mode. Op-id maps onto the canonical token from
-/// `specs/ui-parity.md::Op IDs`.
+/// Declare the codec operation inside its supervising one-node plan.
 fn emit_started(op_id: &str, total: Option<u64>) {
-    let ev = lamquant_ops::OpEvent::Started {
-        ts_ms: lamquant_ops::OpEvent::now_ms(),
-        op_id: op_id.into(),
-        total,
-    };
-    println!("{}", ev.to_json_line());
+    emit_projection(lamquant_ops::PlanUpdate::Planned {
+        operation: op_id.into(),
+        total_nodes: 1,
+        total_work: total,
+    });
 }
 
-/// Emit a `Log` JSON line to stdout. Allows cmd_* functions (or future
-/// instrumentation) to push human-readable progress text through the
-/// same channel a remote TUI consumer parses. Stable contract — see
-/// `crates/lamquant-ops/src/transport/ssh.rs` for the parser.
+/// Emit a human-readable diagnostic observation.
 #[allow(dead_code)]
 pub(crate) fn emit_log(message: impl Into<String>) {
-    let ev = lamquant_ops::OpEvent::Log {
-        ts_ms: lamquant_ops::OpEvent::now_ms(),
+    emit_projection(lamquant_ops::PlanUpdate::Diagnostic {
+        node_id: Some(0),
+        level: lamquant_ops::DiagnosticLevel::Info,
         message: message.into(),
-    };
-    println!("{}", ev.to_json_line());
+    });
 }
 
-/// Emit a `Progress` JSON line. Used by cmd_* paths that have a known
-/// total (encode of N files, batch verify). Optional — parsers must
-/// tolerate ops that emit no Progress events at all.
+/// Emit a bounded work-progress observation.
 #[allow(dead_code)]
 pub(crate) fn emit_progress(current: u64, total: u64, message: impl Into<String>) {
-    let ev = lamquant_ops::OpEvent::Progress {
-        ts_ms: lamquant_ops::OpEvent::now_ms(),
+    emit_projection(lamquant_ops::PlanUpdate::Progress {
+        node_id: 0,
         current,
         total,
         message: message.into(),
-    };
-    println!("{}", ev.to_json_line());
+    });
 }
 
-/// Emit a terminal Done or Error JSON line based on the exit code returned
-/// by the underlying cmd_* function. Called once at the end of `main` when
-/// the user opted into `--emit-json-events`.
-fn emit_terminal(op_id: &str, code: i32, summary: &str) {
-    let ev = if code == 0 {
-        lamquant_ops::OpEvent::Done {
-            ts_ms: lamquant_ops::OpEvent::now_ms(),
-            message: summary.into(),
-        }
+/// Emit final codec diagnostic. Supervising PlanExecutor alone emits terminal
+/// receipt or failure after process exit.
+fn emit_terminal(_op_id: &str, code: i32, summary: &str) {
+    let level = if code == 0 {
+        lamquant_ops::DiagnosticLevel::Info
     } else {
-        lamquant_ops::OpEvent::Error {
-            ts_ms: lamquant_ops::OpEvent::now_ms(),
-            message: format!("{} exited with code {}", op_id, code),
-        }
+        lamquant_ops::DiagnosticLevel::Error
     };
-    println!("{}", ev.to_json_line());
+    emit_projection(lamquant_ops::PlanUpdate::Diagnostic {
+        node_id: Some(0),
+        level,
+        message: summary.into(),
+    });
+}
+
+fn encode_operation_id(no_bundle: bool, lml_siblings: bool) -> &'static str {
+    if no_bundle || lml_siblings {
+        "encode_lml_siblings"
+    } else {
+        "encode_lma"
+    }
 }
 
 /// Map a `Commands` variant onto its canonical op id from the parity spec.
 fn op_id_of(cmd: &Commands) -> &'static str {
     match cmd {
-        Commands::Encode { .. } => "encode",
+        Commands::Encode {
+            no_bundle,
+            lml_siblings,
+            ..
+        } => encode_operation_id(*no_bundle, *lml_siblings),
         Commands::Decode { .. } => "decode",
         Commands::Info { .. } => "info",
         Commands::Verify { .. } => "verify",
@@ -1556,7 +1587,7 @@ fn op_id_of(cmd: &Commands) -> &'static str {
 /// 3. Fallback (no flags, no env) = default level above.
 ///
 /// The subscriber writes to stderr to keep stdout reserved for the
-/// JSON event stream (`--emit-json-events`) and signal data (Phase
+/// plan-projection stream (`--emit-plan-projections`) and signal data (Phase
 /// 1.5 stdin/stdout piping).
 fn init_tracing(quiet: bool, verbose: u8, color: ColorChoice) {
     use tracing_subscriber::EnvFilter;
@@ -1593,11 +1624,22 @@ fn main() {
     if let Some(choice) = cli.backend {
         lamquant_core::backend::set_global_backend(choice.to_lib());
     }
-    let emit_json = cli.emit_json_events;
-    EMIT_JSON.store(emit_json, std::sync::atomic::Ordering::Relaxed);
-    if emit_json {
+    let emit_projections = cli.emit_plan_projections;
+    EMIT_PROJECTIONS.store(emit_projections, std::sync::atomic::Ordering::Relaxed);
+    if emit_projections {
+        if let Err(error) = init_projection_identity() {
+            eprintln!("Error: {error}");
+            std::process::exit(2);
+        }
         if let Some(cmd) = cli.command.as_ref() {
-            emit_started(op_id_of(cmd), None);
+            let operation = op_id_of(cmd);
+            if !lamquant_ops::is_canonical_operation_id(operation) {
+                eprintln!(
+                    "Error: --emit-plan-projections is unavailable for non-registry operation '{operation}'"
+                );
+                std::process::exit(2);
+            }
+            emit_started(operation, None);
         }
     }
     let op_id_for_terminal = cli.command.as_ref().map(op_id_of).unwrap_or("interactive");
@@ -2025,7 +2067,7 @@ fn main() {
             1
         }
     };
-    if emit_json {
+    if emit_projections {
         let summary = match &result {
             Ok(()) => format!("{} completed", op_id_for_terminal),
             Err(e) => format!("{}: {}", op_id_for_terminal, e),
@@ -2148,7 +2190,7 @@ struct FileResult {
 
 /// Telemetry returned by encode_one. Sourced from ContainerStats plus the
 /// SHA-256 hash and verify flag computed in encode_one. Drives both the
-/// FileResult that lands in manifest.lml.json AND the OpEvent::FileDone
+/// FileResult that lands in manifest.lml.json and artifact projection
 /// that the TUI dashboard consumes.
 struct EncodeMetrics {
     raw_size: usize,
@@ -4050,7 +4092,7 @@ fn cmd_encode(
             flags,
             m.sha256
         );
-        if EMIT_JSON.load(std::sync::atomic::Ordering::Relaxed) {
+        if EMIT_PROJECTIONS.load(std::sync::atomic::Ordering::Relaxed) {
             emit_file_done(
                 &edfs[0].display().to_string(),
                 true,
@@ -4080,7 +4122,7 @@ fn cmd_encode(
     // fires in main() before cmd_encode runs (total unknown at that
     // point), so without this Progress kick the dashboard shows
     // "0 / 0 files" indefinitely.
-    if EMIT_JSON.load(Ordering::Relaxed) {
+    if EMIT_PROJECTIONS.load(Ordering::Relaxed) {
         emit_progress(0, total as u64, format!("0/{}", total));
     }
 
@@ -4341,8 +4383,8 @@ fn cmd_encode(
                         let _ = w.flush();
                     }
 
-                    // Per-file FileDone OpEvent (consumed by the TUI dashboard).
-                    if EMIT_JSON.load(Ordering::Relaxed) {
+                    // Per-file artifact observation consumed by dashboards.
+                    if EMIT_PROJECTIONS.load(Ordering::Relaxed) {
                         emit_file_done(
                             &source_rel,
                             true,
@@ -4418,10 +4460,10 @@ fn cmd_encode(
                         let _ = w.flush();
                     }
 
-                    // Per-file FileDone OpEvent (failed). bytes_*/cr left
+                    // Failed per-file artifact observation. bytes_*/cr left
                     // None — the file never compressed. duration_s/etc.
                     // also unavailable since encode_one bailed early.
-                    if EMIT_JSON.load(Ordering::Relaxed) {
+                    if EMIT_PROJECTIONS.load(Ordering::Relaxed) {
                         emit_file_done(
                             &source_rel,
                             false,
@@ -4461,7 +4503,7 @@ fn cmd_encode(
             // Emit a Progress event after every file when JSON streaming
             // is on so the TUI dashboard's progress bar + ETA math have
             // current values. Cheap (one JSON line per file).
-            if EMIT_JSON.load(Ordering::Relaxed) {
+            if EMIT_PROJECTIONS.load(Ordering::Relaxed) {
                 emit_progress(n as u64, total as u64, format!("{}/{}", n, total));
             }
             if n % 100 == 0 || n == total {
@@ -10412,6 +10454,20 @@ mod tests {
         let err =
             reject_explicit_lossless_with_non_lossless(Some("mcu"), Some(1), None).unwrap_err();
         assert!(err.contains("--max-error"));
+    }
+
+    #[test]
+    fn encode_projection_ids_match_canonical_registry() {
+        for operation in [
+            encode_operation_id(false, false),
+            encode_operation_id(true, false),
+            encode_operation_id(false, true),
+        ] {
+            assert!(lamquant_ops::is_canonical_operation_id(operation));
+        }
+        assert_eq!(encode_operation_id(false, false), "encode_lma");
+        assert_eq!(encode_operation_id(true, false), "encode_lml_siblings");
+        assert_eq!(encode_operation_id(false, true), "encode_lml_siblings");
     }
 
     #[cfg(not(feature = "experimental_basestation"))]

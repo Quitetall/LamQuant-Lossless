@@ -29,7 +29,7 @@ crate-type = ["rlib"]
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
-lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops" }
+lamquant-ops = { version = "0.1.0", path = "../../crates/lamquant-ops", features = ["test-advanced-process"] }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.

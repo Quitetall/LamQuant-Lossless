@@ -1,0 +1,391 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openhuman.tech/schemas/lamquant/plan-projections.schema.json",
+  "title": "LamQuant compiled plan projection",
+  "description": "Observation or terminal execution-receipt projection for one compiled ABIR node plan.",
+  "type": "object",
+  "required": ["schema", "observed_at_ms", "plan", "projection"],
+  "properties": {
+    "schema": {
+      "const": "org.quitetall.lamquant.plan-projection/v1"
+    },
+    "observed_at_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "plan": {
+      "$ref": "#/$defs/planIdentity"
+    },
+    "projection": {
+      "enum": ["planned", "progress", "artifact", "receipt", "failure", "diagnostic"]
+    },
+    "operation": {
+      "enum": [
+        "encode_lma",
+        "encode_lml_siblings",
+        "decode",
+        "verify",
+        "info",
+        "stats",
+        "bench",
+        "archive",
+        "extract",
+        "list_archive",
+        "verify_archive",
+        "verify_manifest",
+        "export_csv",
+        "export_npy",
+        "export_raw",
+        "recover",
+        "diff",
+        "train_encoder",
+        "train_snn",
+        "train_tnn",
+        "train_resume",
+        "eagle_quick",
+        "eagle_full",
+        "eagle_bench",
+        "eagle_lqs_l",
+        "eagle_lqs_c",
+        "eagle_lqs_m",
+        "eagle_lqs_a",
+        "eagle_perf",
+        "eagle_rd",
+        "eagle_h2h",
+        "test_conformance",
+        "test_full",
+        "test_paranoid",
+        "test_codec",
+        "setup_pip",
+        "setup_extras",
+        "setup_cargo",
+        "setup_musl",
+        "setup_windows",
+        "gui",
+        "viz_lamquant-gui",
+        "viz_eeglab",
+        "viz_mne",
+        "viz_legacy_OpenBCIGUI",
+        "viz_legacy_BVAnalyzer",
+        "viz_legacy_besa",
+        "viz_OpenBCIGUI",
+        "viz_BVAnalyzer",
+        "viz_besa",
+        "viz_install_lamquant_gui",
+        "viz_install_mne",
+        "viz_install_scope_tui",
+        "viz_install_bottom",
+        "viz_install_television",
+        "viz_install_csvlens",
+        "viz_install_gitui",
+        "viz_uninstall_lamquant_gui",
+        "viz_uninstall_mne",
+        "viz_uninstall_scope_tui",
+        "viz_uninstall_bottom",
+        "viz_uninstall_television",
+        "viz_uninstall_csvlens",
+        "viz_uninstall_gitui",
+        "cockpit_reset",
+        "cockpit_checkpoints",
+        "cockpit_metrics",
+        "fw_list_devices",
+        "fw_build_rp2350",
+        "fw_build_nrf54l15",
+        "fw_build_esp32p4",
+        "fw_build_stm32n6",
+        "fw_flash_rp2350",
+        "fw_flash_nrf54l15",
+        "fw_flash_esp32p4",
+        "fw_flash_stm32n6",
+        "fw_size_rp2350",
+        "fw_size_stm32n6",
+        "fw_size_esp32p4",
+        "fw_size_nrf54l15",
+        "fw_check_rp2350",
+        "fw_check_stm32n6",
+        "fw_check_esp32p4",
+        "fw_check_nrf54l15",
+        "fw_export",
+        "fw_legacy_esp32s3",
+        "cockpit_jobs",
+        "cockpit_export",
+        "syscheck_py",
+        "cockpit_data_prep",
+        "cockpit_train_encoder",
+        "cockpit_train_snn",
+        "cockpit_train_oracle",
+        "setup_install_lml",
+        "setup_install_eagle",
+        "setup_install_lqt"
+      ]
+    },
+    "total_nodes": {"$ref": "#/$defs/positiveInteger"},
+    "total_work": {"$ref": "#/$defs/nonnegativeInteger"},
+    "node_id": {"$ref": "#/$defs/nonnegativeInteger"},
+    "current": {"$ref": "#/$defs/nonnegativeInteger"},
+    "total": {"$ref": "#/$defs/positiveInteger"},
+    "message": {"type": "string"},
+    "level": {"enum": ["info", "warning", "error"]},
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "receipt": {"$ref": "#/$defs/receipt"},
+    "failure": {"$ref": "#/$defs/failure"},
+    "cancelled": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"projection": {"const": "planned"}}},
+      "then": {
+        "required": ["operation", "total_nodes"],
+        "not": {
+          "anyOf": [
+            {"required": ["node_id"]},
+            {"required": ["current"]},
+            {"required": ["total"]},
+            {"required": ["message"]},
+            {"required": ["level"]},
+            {"required": ["artifact"]},
+            {"required": ["receipt"]},
+            {"required": ["failure"]},
+            {"required": ["cancelled"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"projection": {"const": "progress"}}},
+      "then": {
+        "required": ["node_id", "current", "total", "message"],
+        "not": {
+          "anyOf": [
+            {"required": ["operation"]},
+            {"required": ["total_nodes"]},
+            {"required": ["total_work"]},
+            {"required": ["level"]},
+            {"required": ["artifact"]},
+            {"required": ["receipt"]},
+            {"required": ["failure"]},
+            {"required": ["cancelled"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"projection": {"const": "artifact"}}},
+      "then": {
+        "required": ["node_id", "artifact"],
+        "not": {
+          "anyOf": [
+            {"required": ["operation"]},
+            {"required": ["total_nodes"]},
+            {"required": ["total_work"]},
+            {"required": ["current"]},
+            {"required": ["total"]},
+            {"required": ["message"]},
+            {"required": ["level"]},
+            {"required": ["receipt"]},
+            {"required": ["failure"]},
+            {"required": ["cancelled"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"projection": {"const": "receipt"}}},
+      "then": {
+        "required": ["receipt", "message"],
+        "not": {
+          "anyOf": [
+            {"required": ["operation"]},
+            {"required": ["total_nodes"]},
+            {"required": ["total_work"]},
+            {"required": ["node_id"]},
+            {"required": ["current"]},
+            {"required": ["total"]},
+            {"required": ["level"]},
+            {"required": ["artifact"]},
+            {"required": ["failure"]},
+            {"required": ["cancelled"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"projection": {"const": "failure"}}},
+      "then": {
+        "required": ["receipt", "failure", "cancelled"],
+        "not": {
+          "anyOf": [
+            {"required": ["operation"]},
+            {"required": ["total_nodes"]},
+            {"required": ["total_work"]},
+            {"required": ["node_id"]},
+            {"required": ["current"]},
+            {"required": ["total"]},
+            {"required": ["message"]},
+            {"required": ["level"]},
+            {"required": ["artifact"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"projection": {"const": "diagnostic"}}},
+      "then": {
+        "required": ["level", "message"],
+        "not": {
+          "anyOf": [
+            {"required": ["operation"]},
+            {"required": ["total_nodes"]},
+            {"required": ["total_work"]},
+            {"required": ["current"]},
+            {"required": ["total"]},
+            {"required": ["artifact"]},
+            {"required": ["receipt"]},
+            {"required": ["failure"]},
+            {"required": ["cancelled"]}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hex256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonnegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "planIdentity": {
+      "type": "object",
+      "required": ["graph_id", "plan_id", "invocation_id"],
+      "properties": {
+        "graph_id": {"$ref": "#/$defs/hex256"},
+        "plan_id": {"$ref": "#/$defs/hex256"},
+        "invocation_id": {"$ref": "#/$defs/hex256"}
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["path", "success", "elapsed_ms"],
+      "properties": {
+        "path": {"type": "string"},
+        "success": {"type": "boolean"},
+        "elapsed_ms": {"$ref": "#/$defs/nonnegativeInteger"},
+        "compression_ratio": {"type": "number", "minimum": 0},
+        "bytes_in": {"$ref": "#/$defs/nonnegativeInteger"},
+        "bytes_out": {"$ref": "#/$defs/nonnegativeInteger"},
+        "samples": {"$ref": "#/$defs/nonnegativeInteger"},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "channel_count": {"$ref": "#/$defs/nonnegativeInteger"},
+        "sample_rate_hz": {"type": "number", "minimum": 0},
+        "sha256": {"type": "string"},
+        "window_count": {"$ref": "#/$defs/nonnegativeInteger"}
+      },
+      "dependentRequired": {
+        "bytes_in": ["bytes_out"],
+        "bytes_out": ["bytes_in"]
+      },
+      "additionalProperties": false
+    },
+    "attempt": {
+      "type": "object",
+      "required": [
+        "step_id",
+        "node_ids",
+        "kernel_id",
+        "implementation_id",
+        "attempts",
+        "kernel_succeeded",
+        "completed"
+      ],
+      "properties": {
+        "step_id": {"$ref": "#/$defs/nonnegativeInteger"},
+        "node_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonnegativeInteger"}
+        },
+        "kernel_id": {"$ref": "#/$defs/nonnegativeInteger"},
+        "implementation_id": {"$ref": "#/$defs/hex256"},
+        "attempts": {"$ref": "#/$defs/nonnegativeInteger"},
+        "kernel_succeeded": {"type": "boolean"},
+        "completed": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "gap": {
+      "type": "object",
+      "required": ["step_id", "node_ids", "output_index", "offset", "domain", "code"],
+      "properties": {
+        "step_id": {"$ref": "#/$defs/nonnegativeInteger"},
+        "node_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonnegativeInteger"}
+        },
+        "output_index": {"$ref": "#/$defs/nonnegativeInteger"},
+        "offset": {"$ref": "#/$defs/nonnegativeInteger"},
+        "length": {"$ref": "#/$defs/positiveInteger"},
+        "domain": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "receipt": {
+      "type": "object",
+      "required": [
+        "invocation_id",
+        "graph_id",
+        "plan_id",
+        "realm",
+        "completed_node_ids",
+        "attempts",
+        "committed_transactions",
+        "gaps"
+      ],
+      "properties": {
+        "invocation_id": {"$ref": "#/$defs/hex256"},
+        "graph_id": {"$ref": "#/$defs/hex256"},
+        "plan_id": {"$ref": "#/$defs/hex256"},
+        "realm": {"enum": ["mcu-aot", "host-stream", "blut-durable"]},
+        "completed_node_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonnegativeInteger"}
+        },
+        "attempts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/attempt"}
+        },
+        "committed_transactions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/gap"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "failure": {
+      "type": "object",
+      "required": ["domain", "code", "message", "retryable"],
+      "properties": {
+        "domain": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string"},
+        "retryable": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

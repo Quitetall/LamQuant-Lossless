@@ -24,7 +24,7 @@ so `lml encode --quiet` and `lml verify --quiet` both work.
 | Stdin pipe (encode) | `lml encode -` | shipped | v1.0 (1.5a) | Tempfile shim; refuses TTY |
 | Stdout pipe (decode) | `-o -` | shipped | v1.0 (1.5b) | Refuses TTY / `--to-edf` / batch |
 | Output templating | `-o '{stem}.lml'` | shipped | v1.0 (1.6) | `paths::expand_template` |
-| JSON event stream | `--emit-json-events` | shipped | v1.0 | OpEvent JSON lines on stdout (Tauri GUI / Python TUI consume) |
+| JSON event stream | `--emit-plan-projections` | shipped | v1.0 | PlanProjection JSON lines on stdout (Tauri GUI / Python TUI consume) |
 | Backend selector | `--backend {desktop,firmware}` | shipped | v1.0 | Host rayon+AVX2 vs scalar reference |
 | Help text | `--help` / `-h` | shipped | v1.0 | Per-subcommand EXAMPLES blocks |
 | Version | `--version` | shipped | v1.0 | clap auto-injected |
@@ -38,7 +38,7 @@ top-level `Cli` struct as `global = true`:
 $ lml --help
 ...
 GLOBAL OPTIONS:
-  --emit-json-events       Emit one JSON line per OpEvent to stdout
+  --emit-plan-projections       Emit graph-bound PlanProjection observations to stdout
   -q, --quiet              Suppress all log output
   -v, --verbose...         Increase log verbosity
   --color <CHOICE>         auto / always / never
@@ -81,7 +81,7 @@ Filter precedence (highest first):
 | `-vvv` | `lamquant_core=trace,lml=trace` |
 
 Output writer is **stderr**, not stdout — stdout is reserved for
-signal data (decode), JSON events (`--emit-json-events`), and command
+signal data (decode), PlanProjection observations (`--emit-plan-projections`), and command
 output (cat / ls / etc.).
 
 `--quiet` and `-v` are mutually exclusive (clap conflict).
@@ -102,14 +102,14 @@ If you want fail-on-exist semantics for `encode` / `decode` / `export`
 in a CI pipeline, the operator should check `test ! -e <output>`
 before invocation.
 
-### `--emit-json-events`
+### `--emit-plan-projections`
 
-When set, every subcommand emits one JSON line per `OpEvent` on
+When set, every subcommand emits one JSON line per `PlanProjection` on
 stdout instead of pretty progress. All status output goes to stderr;
 stdout is reserved for the event stream.
 
 Used by the Tauri GUI and Python TUI to consume the same wire format
-(`specs/op-events.schema.json`). Events include:
+(`specs/plan-projections.schema.json`). Observation kinds include (examples):
 
 | Event | Fields |
 |---|---|
@@ -122,7 +122,7 @@ Used by the Tauri GUI and Python TUI to consume the same wire format
 
 Example consumer:
 ```sh
-lml encode -r /data/ -o out/ --emit-json-events 2>/dev/null \
+lml --emit-plan-projections encode -r /data/ -o out/ 2>/dev/null \
   | jq -c 'select(.type == "FileDone" and .success == false)'
 ```
 
@@ -264,7 +264,7 @@ All globally-scoped flags (work on every subcommand):
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--emit-json-events` | bool | false | Emit OpEvent JSON lines on stdout |
+| `--emit-plan-projections` | bool | false | Emit PlanProjection JSON lines on stdout |
 | `-q`, `--quiet` | bool | false | Suppress all log output (mutually excl. with `-v`) |
 | `-v`, `--verbose` | count | 0 | `-v` INFO, `-vv` DEBUG, `-vvv` TRACE |
 | `--color <CHOICE>` | enum | `auto` | `auto` / `always` / `never` |
@@ -306,7 +306,7 @@ Per-subcommand UX flags:
 - **Other buckets**:
   - All other buckets — every command in every bucket inherits the
     global flags
-  - [Operational](./09-operational.md) — `--emit-json-events` for daemonised use
+  - [Operational](./09-operational.md) — `--emit-plan-projections` for daemonised use
   - [Browse / Inspect](./05-browse-inspect.md) — `lml cat` is a UX-friendly entry point
 - **Source files**:
   - `lamquant-core/src/bin/lml.rs:20-90` — root `Cli` struct (global flags)
@@ -316,13 +316,13 @@ Per-subcommand UX flags:
   - `lamquant-core/src/bin/lml.rs:949` — `SelfTest`
   - `lamquant-core/src/bin/lml.rs:942` — `Manpage`
   - `lamquant-core/src/paths.rs` — `expand_template` (output templating)
-  - `crates/lamquant-ops/` — `OpEvent` JSON wire format
+  - `crates/lamquant-ops/` — `PlanProjection` JSON wire format
 - **Tests**:
   - `tests/integration/test_color_env_overrides.py`
   - `tests/integration/test_completions_generation.py`
   - `tests/integration/test_self_test.py`
   - `tests/integration/test_output_templating.py`
-  - `tests/integration/test_emit_json_events.py`
+  - `tests/test_plan_projection_emit.py`
 - **Commits**:
   - Phase 1.2 — `--quiet` / `-v`
   - Phase 1.3 — `--color`

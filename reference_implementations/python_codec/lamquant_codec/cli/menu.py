@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -166,6 +167,18 @@ def cli_version():
 # precedence so all three front-ends read/write the same file.
 # ────────────────────────────────────────────────────────────────────
 
+CURRENT_HISTORY_SCHEMA = "2.0"
+CURRENT_PARITY_VERSION = 2
+
+
+class HistoryFormatError(ValueError):
+    """history.json is malformed or violates the current structural contract."""
+
+
+class HistoryParityError(ValueError):
+    """history.json belongs to another front-end protocol generation."""
+
+
 def _history_dir():
     """Resolve the per-OS history directory.
 
@@ -201,7 +214,8 @@ def _history_path():
 
 def _empty_history():
     return {
-        "schema_version": "1.0",
+        "schema_version": CURRENT_HISTORY_SCHEMA,
+        "parity_version": CURRENT_PARITY_VERSION,
         "recent_operations": [],
         "recent_paths": {"inputs": [], "outputs": []},
         "interrupted": False,
@@ -211,59 +225,287 @@ def _empty_history():
     }
 
 
+def _validate_current_history(data):
+    if not isinstance(data, dict):
+        raise HistoryFormatError("history root must be an object")
+    parity = data.get("parity_version", 1)
+    if isinstance(parity, bool) or not isinstance(parity, int):
+        raise HistoryFormatError("parity_version must be an integer")
+    if parity != CURRENT_PARITY_VERSION:
+        raise HistoryParityError(
+            f"history parity mismatch: found {parity}, expected {CURRENT_PARITY_VERSION}; "
+            "rerun setup wizard or downgrade"
+        )
+    required = {
+        "schema_version",
+        "parity_version",
+        "recent_operations",
+        "recent_paths",
+    }
+    optional = {"interrupted", "last_op", "last_input", "last_output"}
+    missing = required - set(data)
+    unknown = set(data) - required - optional
+    if missing:
+        raise HistoryFormatError(
+            f"history missing required fields: {', '.join(sorted(missing))}"
+        )
+    if unknown:
+        raise HistoryFormatError(
+            f"history contains unknown fields: {', '.join(sorted(unknown))}"
+        )
+    if data.get("schema_version") != CURRENT_HISTORY_SCHEMA:
+        raise HistoryFormatError(
+            f"history schema mismatch: found {data.get('schema_version')!r}, "
+            f"expected {CURRENT_HISTORY_SCHEMA!r}"
+        )
+    operations = data["recent_operations"]
+    paths = data["recent_paths"]
+    if not isinstance(operations, list) or len(operations) > 50:
+        raise HistoryFormatError("recent_operations must be an array of at most 50 entries")
+    for index, operation in enumerate(operations):
+        _validate_history_operation(operation, index)
+    if not isinstance(paths, dict) or set(paths) != {"inputs", "outputs"}:
+        raise HistoryFormatError("recent_paths must contain exactly inputs and outputs")
+    for kind in ("inputs", "outputs"):
+        values = paths[kind]
+        if (
+            not isinstance(values, list)
+            or len(values) > 20
+            or any(not isinstance(value, str) for value in values)
+        ):
+            raise HistoryFormatError(f"recent_paths.{kind} must be at most 20 strings")
+    if not isinstance(data.get("interrupted", False), bool):
+        raise HistoryFormatError("interrupted must be a boolean")
+    for field in ("last_op", "last_input", "last_output"):
+        value = data.get(field)
+        if value is not None and not isinstance(value, str):
+            raise HistoryFormatError(f"{field} must be a string or null")
+    return data
+
+
+def _validate_history_operation(operation, index=0):
+    if not isinstance(operation, dict) or set(operation) != {
+        "action",
+        "target",
+        "when",
+        "result",
+    }:
+        raise HistoryFormatError(
+            f"recent_operations[{index}] must contain exactly "
+            "action, target, when, and result"
+        )
+    if (
+        not isinstance(operation["action"], str)
+        or not operation["action"]
+        or not isinstance(operation["target"], str)
+        or not isinstance(operation["when"], str)
+        or not _is_rfc3339_date_time(operation["when"])
+    ):
+        raise HistoryFormatError(
+            f"recent_operations[{index}] contains invalid strings or timestamp"
+        )
+    if operation["result"] not in {"ok", "error", "cancelled", "partial"}:
+        raise HistoryFormatError(f"recent_operations[{index}].result is invalid")
+
+
+def _is_rfc3339_date_time(value):
+    import re
+
+    match = re.fullmatch(
+        r"(\d{4})-(\d{2})-(\d{2})[Tt]"
+        r"(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?"
+        r"(?:[Zz]|[+-](\d{2}):(\d{2}))",
+        value,
+    )
+    if match is None:
+        return False
+    year, month, day, hour, minute, second, offset_hour, offset_minute = (
+        int(part) if part is not None else None for part in match.groups()
+    )
+    if (
+        year == 0
+        or not 1 <= month <= 12
+        or hour > 23
+        or minute > 59
+        or second > 60
+        or (offset_hour is not None and offset_hour > 23)
+        or (offset_minute is not None and offset_minute > 59)
+    ):
+        return False
+    import calendar
+
+    return 1 <= day <= calendar.monthrange(year, month)[1]
+
+
 def _load_or_migrate(path: Path):
-    """Read history JSON; migrate the legacy flat shape if encountered."""
+    """Read current history strictly; migration requires explicit setup."""
+    if not path.exists():
+        return _empty_history()
     try:
         data = json.loads(path.read_text())
-    except Exception:
-        return _empty_history()
-    # Spec format already.
-    if "recent_paths" in data:
-        return data
-    # Legacy flat shape: pre-Phase-2 had `recent_inputs`/`recent_outputs`
-    # at top level. Migrate quietly so users don't lose history.
-    return {
-        "schema_version": "1.0",
-        "recent_operations": data.get("recent_operations", []),
-        "recent_paths": {
-            "inputs":  data.get("recent_inputs",  []),
-            "outputs": data.get("recent_outputs", []),
-        },
-        "interrupted":  data.get("interrupted",  False),
-        "last_op":      data.get("last_op",      None),
-        "last_input":   data.get("last_input",   None),
-        "last_output":  data.get("last_output",  None),
-    }
+    except (OSError, json.JSONDecodeError) as error:
+        raise HistoryFormatError(f"cannot read valid history JSON: {error}") from error
+    return _validate_current_history(data)
 
 
-def _atomic_write_locked(path: Path, body: str):
-    """Atomic write with an OS-level advisory lock on a sibling lock file.
+def migrate_history_to_current(path: Path | None = None):
+    """Explicit setup-wizard migration preserving compatible history fields."""
+    target = path or _history_path()
+    with _history_lock(target):
+        if not target.exists():
+            migrated = _empty_history()
+            _atomic_replace_unlocked(target, json.dumps(migrated, indent=2))
+            return migrated
+        try:
+            data = json.loads(target.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise HistoryFormatError(
+                f"cannot migrate malformed history JSON: {error}"
+            ) from error
+        if not isinstance(data, dict):
+            raise HistoryFormatError("cannot migrate non-object history")
+        if data.get("parity_version") == CURRENT_PARITY_VERSION:
+            return _validate_current_history(data)
+        recent_paths = data.get("recent_paths")
+        if not isinstance(recent_paths, dict):
+            recent_paths = {
+                "inputs": data.get("recent_inputs", []),
+                "outputs": data.get("recent_outputs", []),
+            }
+        recent_operations = []
+        for index, operation in enumerate(data.get("recent_operations", [])):
+            try:
+                _validate_history_operation(operation, index)
+            except HistoryFormatError:
+                continue
+            recent_operations.append(operation)
+        migrated = {
+            "schema_version": CURRENT_HISTORY_SCHEMA,
+            "parity_version": CURRENT_PARITY_VERSION,
+            "recent_operations": recent_operations[:50],
+            "recent_paths": {
+                "inputs": list(recent_paths.get("inputs", []))[:20],
+                "outputs": list(recent_paths.get("outputs", []))[:20],
+            },
+            "interrupted": data.get("interrupted", False),
+            "last_op": data.get("last_op"),
+            "last_input": data.get("last_input"),
+            "last_output": data.get("last_output"),
+        }
+        _validate_current_history(migrated)
+        _atomic_replace_unlocked(target, json.dumps(migrated, indent=2))
+        return migrated
 
-    Mirrors the Rust ``lamquant_history`` writer so the TUI, GUI, and this
-    Python entrypoint cooperate when they happen to write simultaneously.
+
+@contextmanager
+def _history_lock(path: Path):
+    """Hold the shared history lock for a complete read/merge/write transaction.
+
+    POSIX uses ``flock``. Windows calls ``LockFileEx`` on byte zero of the
+    sibling lock file so Python and Rust can share one blocking lock protocol.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".json.lock")
-    tmp = path.with_suffix(".json.tmp")
-    lock_fh = None
-    try:
-        # Acquire the lock. Best-effort on non-POSIX platforms.
-        lock_fh = open(lock_path, "a+")
-        try:
-            import fcntl  # POSIX
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            pass  # Windows: opening with default share mode is best we can do.
-        tmp.write_text(body)
-        tmp.replace(path)
-    finally:
-        if lock_fh is not None:
-            try:
-                import fcntl
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
+    lock_fh = open(lock_path, "a+b")
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class Overlapped(ctypes.Structure):
+            _fields_ = [
+                ("Internal", ctypes.c_size_t),
+                ("InternalHigh", ctypes.c_size_t),
+                ("Offset", wintypes.DWORD),
+                ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        overlapped = Overlapped()
+        handle = msvcrt.get_osfhandle(lock_fh.fileno())
+        lock_file_ex = kernel32.LockFileEx
+        lock_file_ex.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(Overlapped),
+        ]
+        lock_file_ex.restype = wintypes.BOOL
+        if not lock_file_ex(handle, 0x00000002, 0, 1, 0, ctypes.byref(overlapped)):
             lock_fh.close()
+            raise OSError(ctypes.get_last_error(), "LockFileEx history lock failed")
+        try:
+            yield
+        finally:
+            unlock_file_ex = kernel32.UnlockFileEx
+            unlock_file_ex.argtypes = [
+                wintypes.HANDLE,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.POINTER(Overlapped),
+            ]
+            unlock_file_ex.restype = wintypes.BOOL
+            if not unlock_file_ex(handle, 0, 1, 0, ctypes.byref(overlapped)):
+                error = ctypes.get_last_error()
+                lock_fh.close()
+                raise OSError(error, "UnlockFileEx history lock failed")
+            lock_fh.close()
+    else:
+        import fcntl
+
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_fh.close()
+
+
+def _atomic_replace_unlocked(path: Path, body: str):
+    """Write and fsync one unique same-directory temporary, then replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        if os.name != "nt":
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_write_locked(path: Path, body: str):
+    with _history_lock(path):
+        _atomic_replace_unlocked(path, body)
+
+
+def _mutate_history(path: Path, mutate):
+    with _history_lock(path):
+        history = _load_or_migrate(path)
+        mutate(history)
+        _validate_current_history(history)
+        _atomic_replace_unlocked(path, json.dumps(history, indent=2))
 
 
 def load_history():
@@ -276,14 +518,15 @@ def update_history(action: str, target: str, result: str):
     """Append an op to the rolling 50-entry log, atomically + locked."""
     path = _history_path()
     try:
-        history = _load_or_migrate(path)
-        history["recent_operations"].insert(0, {
-            "action": action, "target": target,
-            "when": datetime.now(timezone.utc).isoformat(),
-            "result": result,
-        })
-        history["recent_operations"] = history["recent_operations"][:50]
-        _atomic_write_locked(path, json.dumps(history, indent=2))
+        def mutate(history):
+            history["recent_operations"].insert(0, {
+                "action": action, "target": target,
+                "when": datetime.now(timezone.utc).isoformat(),
+                "result": result,
+            })
+            history["recent_operations"] = history["recent_operations"][:50]
+
+        _mutate_history(path, mutate)
     except Exception as e:
         print(f"warning: could not update history: {e}", file=sys.stderr)
 
@@ -296,13 +539,14 @@ def add_recent_path(kind: str, path: str):
         kind = kind + "s"
     target_path = _history_path()
     try:
-        history = _load_or_migrate(target_path)
-        paths = history.setdefault("recent_paths", {}).setdefault(kind, [])
-        if path in paths:
-            paths.remove(path)
-        paths.insert(0, path)
-        history["recent_paths"][kind] = paths[:20]
-        _atomic_write_locked(target_path, json.dumps(history, indent=2))
+        def mutate(history):
+            paths = history["recent_paths"][kind]
+            if path in paths:
+                paths.remove(path)
+            paths.insert(0, path)
+            history["recent_paths"][kind] = paths[:20]
+
+        _mutate_history(target_path, mutate)
     except Exception as e:
         print(f"warning: could not save recent path: {e}", file=sys.stderr)
 
@@ -397,7 +641,3 @@ def match_input(text, options_map):
         if label.lower().startswith(text):
             return key
     return None
-
-
-def run(cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd or str(ROOT)).returncode

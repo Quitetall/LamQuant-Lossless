@@ -191,7 +191,7 @@ Caps: `MAX_ENTRY_ORIGINAL_SIZE = 16 GiB`, `MAX_ENTRY_DECOMPRESS_SIZE = 4 GiB`,
   - [Verification](./03-verification.md) — `--verify` and `--cross-validate` integrity chain
   - [Archive Ops](./04-archive-ops.md) — `volume-split` / `append` / `recompress` lifecycle
   - [Browse / Inspect](./05-browse-inspect.md) — read the archive you just made
-  - [CLI UX](./11-cli-ux.md) — `--quiet` / `-v` / `--color` / `--emit-json-events`
+  - [CLI UX](./11-cli-ux.md) — `--quiet` / `-v` / `--color` / `--emit-plan-projections`
 - **Source files**:
   - `lamquant-core/src/bin/lml.rs:192` — `Encode` subcommand definition
   - `lamquant-core/src/bin/lml.rs:1065` — `find_sidecars`

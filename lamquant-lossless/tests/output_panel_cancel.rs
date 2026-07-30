@@ -1,97 +1,99 @@
-//! Phase 0 #17 contract: when the runner emits an Error event whose message
-//! contains "cancelled", the OutputPanel sets cancelled=true (NOT
-//! failed=true) so the border + header render in theme::warning() yellow
-//! rather than theme::error() red. A genuine error keeps failed=true.
+//! Output panel terminal-state projection contract.
 
-use lamquant_core::tui::operations::{channel, OpEvent, OpEventSink};
-use lamquant_core::tui::panel::Panel;
-use lamquant_core::tui::panels::output::OutputPanel;
+#![cfg(target_os = "linux")]
 
-fn ts() -> i64 {
-    1_730_000_000_000
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use lamquant_ops::{bounded_channel, spawn_advanced_command};
+use lamquant_tui::panel::Panel;
+use lamquant_tui::panels::output::OutputPanel;
+
+fn with_current_history<T>(run: impl FnOnce() -> T) -> T {
+    static HISTORY_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = HISTORY_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let directory = tempfile::tempdir().expect("temporary history directory");
+    let path = directory.path().join("history.json");
+    std::fs::write(
+        &path,
+        r#"{
+  "schema_version": "2.0",
+  "parity_version": 2,
+  "recent_operations": [],
+  "recent_paths": {"inputs": [], "outputs": []},
+  "interrupted": false,
+  "last_op": null,
+  "last_input": null,
+  "last_output": null
+}"#,
+    )
+    .expect("write current history");
+    let previous = std::env::var_os("LAMQUANT_HISTORY");
+    unsafe {
+        std::env::set_var("LAMQUANT_HISTORY", &path);
+    }
+    let result = run();
+    match previous {
+        Some(value) => unsafe { std::env::set_var("LAMQUANT_HISTORY", value) },
+        None => unsafe { std::env::remove_var("LAMQUANT_HISTORY") },
+    }
+    result
+}
+
+fn run_to_terminal(program: &str, arguments: Vec<String>, cancel: bool) -> OutputPanel {
+    let (sink, receiver) = bounded_channel();
+    let handle = with_current_history(|| {
+        spawn_advanced_command("info".into(), program.into(), arguments, sink)
+            .expect("compile supervising plan")
+    });
+    let mut panel = OutputPanel::new();
+    panel.start("info".into(), receiver);
+    if cancel {
+        handle.kill();
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        while let Some(projection) = panel.try_recv_projection() {
+            panel.consume(projection);
+        }
+        panel.tick();
+        if panel.is_done() {
+            return panel;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("expected executor-issued terminal projection");
 }
 
 #[test]
-fn cancelled_message_marks_panel_cancelled_not_failed() {
-    let mut panel = OutputPanel::new();
-    let (sink, rx) = channel();
-    panel.start("encode".into(), rx);
-
-    sink.emit(OpEvent::Started {
-        ts_ms: ts(),
-        op_id: "encode".into(),
-        total: None,
-    });
-    sink.emit(OpEvent::Error {
-        ts_ms: ts(),
-        message: "encode cancelled by user".into(),
-    });
-    // P3 of refactor: tick() no longer drains; pull each event via
-    // try_recv_event() and apply via consume() — same flow App.tick_panels uses.
-    while let Some(ev) = panel.try_recv_event() {
-        panel.consume(ev);
-    }
-    panel.tick();
-
-    assert!(panel.is_done(), "panel should reach done state");
-    assert!(
-        panel.is_cancelled(),
-        "expected cancelled=true on cancel message"
-    );
-    assert!(!panel.is_failed(), "failed must stay false on cancel");
-}
-
-#[test]
-fn real_error_message_marks_panel_failed_not_cancelled() {
-    let mut panel = OutputPanel::new();
-    let (sink, rx) = channel();
-    panel.start("encode".into(), rx);
-
-    sink.emit(OpEvent::Started {
-        ts_ms: ts(),
-        op_id: "encode".into(),
-        total: None,
-    });
-    sink.emit(OpEvent::Error {
-        ts_ms: ts(),
-        message: "out of disk space".into(),
-    });
-    // P3 of refactor: tick() no longer drains; pull each event via
-    // try_recv_event() and apply via consume() — same flow App.tick_panels uses.
-    while let Some(ev) = panel.try_recv_event() {
-        panel.consume(ev);
-    }
-    panel.tick();
+fn cancelled_failure_marks_panel_cancelled_not_failed() {
+    let started = Instant::now();
+    let panel = run_to_terminal("sleep", vec!["30".into()], true);
 
     assert!(panel.is_done());
-    assert!(panel.is_failed(), "expected failed=true on real error");
+    assert!(panel.is_cancelled());
+    assert!(!panel.is_failed());
     assert!(
-        !panel.is_cancelled(),
-        "cancelled must stay false on real error"
+        started.elapsed() < Duration::from_secs(3),
+        "immediate cancellation waited for the containment fallback timeout"
     );
 }
 
 #[test]
-fn done_message_marks_neither_failed_nor_cancelled() {
-    let mut panel = OutputPanel::new();
-    let (sink, rx) = channel();
-    panel.start("encode".into(), rx);
+fn real_failure_marks_panel_failed_not_cancelled() {
+    let panel = run_to_terminal("false", vec![], false);
 
-    sink.emit(OpEvent::Started {
-        ts_ms: ts(),
-        op_id: "encode".into(),
-        total: None,
-    });
-    sink.emit(OpEvent::Done {
-        ts_ms: ts(),
-        message: "ok".into(),
-    });
-    // P3 of refactor: tick() no longer drains; pull each event via
-    // try_recv_event() and apply via consume() — same flow App.tick_panels uses.
-    while let Some(ev) = panel.try_recv_event() {
-        panel.consume(ev);
-    }
-    panel.tick();
+    assert!(panel.is_done());
+    assert!(panel.is_failed());
+    assert!(!panel.is_cancelled());
+}
+
+#[test]
+fn receipt_marks_neither_failed_nor_cancelled() {
+    let panel = run_to_terminal("true", vec![], false);
 
     assert!(panel.is_done());
     assert!(!panel.is_failed());

@@ -213,7 +213,7 @@ lml ls --long recording.lma | awk -F'\t' '$5 ~ /\.tse$/'
   - [Decompression](./02-decompression.md) — `lml extract-entry` writes what `lml cat` streams
   - [Verification](./03-verification.md) — `lml verify` uses the same magic-byte dispatch
   - [OS Integration](./07-os-integration.md) — `lml ls --long` is the Ark Kerfuffle plugin's wire format
-  - [CLI UX](./11-cli-ux.md) — `--emit-json-events` provides a richer machine format
+  - [CLI UX](./11-cli-ux.md) — `--emit-plan-projections` provides a richer machine format
 - **Source files**:
   - `lamquant-core/src/bin/lml.rs:571` — `Ls` subcommand
   - `lamquant-core/src/bin/lml.rs:599` — `Cat` subcommand

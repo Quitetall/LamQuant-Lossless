@@ -89,7 +89,7 @@ Output is human-readable and meant for the "no black box" contract —
 operators should be able to reproduce the verification by hand from the
 spec ([`../lml-format-v1.md`](../lml-format-v1.md)). For machine
 parsing, prefer the compact default output (`OK n/n entries`) or
-`--emit-json-events`.
+`--emit-plan-projections`.
 
 ### `lml verify-archive`
 

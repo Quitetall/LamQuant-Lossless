@@ -4,9 +4,13 @@
   "title": "LamQuant history.json",
   "description": "Persistent recent-activity record. Lives at ~/.config/lamquant/history.json (Linux), ~/Library/Application Support/lamquant/history.json (macOS), or %APPDATA%\\lamquant\\history.json (Windows). Atomic writes via temp+rename, fcntl-locked on Unix and LockFileEx on Windows.",
   "type": "object",
-  "required": ["recent_operations", "recent_paths"],
+  "required": ["schema_version", "parity_version", "recent_operations", "recent_paths"],
   "properties": {
-    "schema_version": { "type": "string", "default": "1.0" },
+    "schema_version": { "const": "2.0" },
+    "parity_version": {
+      "const": 2,
+      "description": "Must equal the front-end protocol parity version. Missing values are interpreted as legacy version 1 and require explicit setup-wizard migration."
+    },
     "recent_operations": {
       "type": "array",
       "maxItems": 50,
@@ -39,11 +43,15 @@
       "type": "object",
       "required": ["inputs", "outputs"],
       "properties": {
-        "inputs":  { "type": "array", "maxItems": 10, "items": { "type": "string" } },
-        "outputs": { "type": "array", "maxItems": 10, "items": { "type": "string" } }
+        "inputs":  { "type": "array", "maxItems": 20, "items": { "type": "string" } },
+        "outputs": { "type": "array", "maxItems": 20, "items": { "type": "string" } }
       },
       "additionalProperties": false
-    }
+    },
+    "interrupted": { "type": "boolean", "default": false },
+    "last_op": { "type": ["string", "null"], "default": null },
+    "last_input": { "type": ["string", "null"], "default": null },
+    "last_output": { "type": ["string", "null"], "default": null }
   },
   "additionalProperties": false
 }

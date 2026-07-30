@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -149,7 +151,8 @@ def test_history_path_default_resolves_under_dir(monkeypatch, tmp_path):
 
 def test_empty_history_has_documented_keys():
     h = menu._empty_history()
-    assert h["schema_version"] == "1.0"
+    assert h["schema_version"] == "2.0"
+    assert h["parity_version"] == 2
     assert "recent_operations" in h
     assert "recent_paths" in h
     assert "inputs" in h["recent_paths"]
@@ -167,14 +170,48 @@ def test_load_or_migrate_missing_file_returns_empty(tmp_path):
 def test_load_or_migrate_existing_spec_format(tmp_path):
     p = tmp_path / "h.json"
     data = menu._empty_history()
-    data["recent_operations"] = [{"action": "test"}]
+    data["recent_operations"] = [{
+        "action": "info",
+        "target": "example.lml",
+        "when": "2026-07-30T00:00:00Z",
+        "result": "ok",
+    }]
     p.write_text(json.dumps(data))
     out = menu._load_or_migrate(p)
-    assert out["recent_operations"][0]["action"] == "test"
+    assert out["recent_operations"][0]["action"] == "info"
 
 
-def test_load_or_migrate_legacy_format(tmp_path):
-    """Legacy schema had `recent_inputs`/`recent_outputs` flat."""
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda data: data.pop("recent_paths"),
+        lambda data: data.update(extra=True),
+        lambda data: data["recent_paths"].update(extra=[]),
+        lambda data: data["recent_operations"].append({
+            "action": "info",
+            "target": "x",
+            "when": "2026-07-30T00:00:00Z",
+            "result": "maybe",
+        }),
+        lambda data: data["recent_operations"].append({
+            "action": "info",
+            "target": "x",
+            "when": "yesterday",
+            "result": "ok",
+        }),
+    ],
+)
+def test_current_history_rejects_schema_invalid_documents(tmp_path, mutate):
+    p = tmp_path / "h.json"
+    data = menu._empty_history()
+    mutate(data)
+    p.write_text(json.dumps(data))
+    with pytest.raises(menu.HistoryFormatError):
+        menu._load_or_migrate(p)
+
+
+def test_load_or_migrate_legacy_format_fails_closed(tmp_path):
+    """Legacy history cannot authorize parity-v2 operations."""
     p = tmp_path / "h.json"
     legacy = {
         "schema_version": "0.9",
@@ -183,16 +220,30 @@ def test_load_or_migrate_legacy_format(tmp_path):
         "recent_operations": [],
     }
     p.write_text(json.dumps(legacy))
-    out = menu._load_or_migrate(p)
-    assert out["recent_paths"]["inputs"] == ["/a"]
-    assert out["recent_paths"]["outputs"] == ["/b"]
+    with pytest.raises(menu.HistoryParityError):
+        menu._load_or_migrate(p)
 
 
-def test_load_or_migrate_corrupt_returns_empty(tmp_path):
+def test_load_or_migrate_corrupt_fails_closed(tmp_path):
     p = tmp_path / "h.json"
     p.write_text("{not valid")
-    out = menu._load_or_migrate(p)
-    assert out == menu._empty_history()
+    with pytest.raises(menu.HistoryFormatError):
+        menu._load_or_migrate(p)
+
+
+def test_explicit_history_migration_preserves_compatible_fields(tmp_path):
+    p = tmp_path / "h.json"
+    p.write_text(json.dumps({
+        "schema_version": "1.0",
+        "recent_inputs": ["/a"],
+        "recent_outputs": ["/b"],
+        "recent_operations": [{"action": "verify"}],
+    }))
+    migrated = menu.migrate_history_to_current(p)
+    assert migrated["schema_version"] == "2.0"
+    assert migrated["parity_version"] == 2
+    assert migrated["recent_paths"] == {"inputs": ["/a"], "outputs": ["/b"]}
+    assert json.loads(p.read_text())["parity_version"] == 2
 
 
 # ----- load_history / update_history / add_recent_path ----------------
@@ -221,6 +272,38 @@ def test_update_history_caps_at_50(monkeypatch, tmp_path):
         menu.update_history("op", f"target{i}", "ok")
     h = menu.load_history()
     assert len(h["recent_operations"]) == 50
+
+
+def test_concurrent_python_history_writers_preserve_entries(monkeypatch, tmp_path):
+    history_path = tmp_path / "history.json"
+    monkeypatch.setenv("LAMQUANT_HISTORY", str(history_path))
+    environment = os.environ.copy()
+    python_root = str(
+        Path(__file__).resolve().parents[2]
+        / "reference_implementations"
+        / "python_codec"
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [python_root, environment.get("PYTHONPATH", "")])
+    )
+    program = (
+        "import sys; "
+        "from lamquant_codec.cli.menu import update_history; "
+        "update_history('info', sys.argv[1], 'ok')"
+    )
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", program, f"target-{index}"],
+            env=environment,
+        )
+        for index in range(12)
+    ]
+    for worker in workers:
+        assert worker.wait(timeout=10) == 0
+    history = menu.load_history()
+    assert {entry["target"] for entry in history["recent_operations"]} == {
+        f"target-{index}" for index in range(12)
+    }
 
 
 def test_add_recent_path_inputs(monkeypatch, tmp_path):

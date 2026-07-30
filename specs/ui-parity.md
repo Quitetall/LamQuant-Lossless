@@ -116,24 +116,120 @@ Workflow → list of well-known screen IDs. New screens MUST land in this table 
 
 ## Op contract
 
-Every long-running operation in any UI MUST flow through `lamquant-ops`. The wire format is the JSON Schema at `specs/op-events.schema.json`. Front-ends do not invent new event shapes — extending the schema requires the parity test to pass first.
+Every long-running operation in any UI MUST flow through `lamquant-ops`. The wire
+format is the JSON Schema at `specs/plan-projections.schema.json`. Front-ends do
+not invent new protocol payloads — extending the schema requires the parity test
+to pass first.
 
 ### Op IDs (canonical strings)
 
-These map 1:1 to the `op_id` field of `OpEvent::Started`:
+These map 1:1 to the `operation` field of the initial `planned` projection and
+to the Rust launcher registry. This marker block is machine-checked against
+every codec, external, BLUT, and parameterized-install operation:
 
-- Codec: `encode`, `decode`, `verify`, `info`, `stats`, `archive`, `extract`, `list_archive`, `verify_archive`, `verify_manifest`, `recover`, `bench`, `diff`, `export_csv`, `export_npy`, `export_raw`, `export_edf` (post-recording), `export_lml`, `export_npz`
-- Eagle: `eagle_quick`, `eagle_lqs_l`, `eagle_lqs_c`, `eagle_lqs_m`, `eagle_lqs_a`, `eagle_perf`, `eagle_rd`, `eagle_h2h`, `eagle_downstream`, `eagle_hallucination`
-- Firmware: `firmware_export_weights`, `firmware_configure`, `firmware_build`, `firmware_size`, `firmware_flash`
-- Cockpit: `train_encoder`, `train_snn`, `train_tnn`, `train_resume`
-- Setup: `setup_pip`, `setup_extras`, `setup_cargo`, `setup_musl`, `setup_windows`, `syscheck_bench_compress`, `syscheck_bench_sha256`
-- Diagnostics: `test_conformance`, `test_codec`, `test_full`, `test_paranoid`
+<!-- canonical-operation-ids:start -->
+- `encode_lma`
+- `encode_lml_siblings`
+- `decode`
+- `verify`
+- `info`
+- `stats`
+- `bench`
+- `archive`
+- `extract`
+- `list_archive`
+- `verify_archive`
+- `verify_manifest`
+- `export_csv`
+- `export_npy`
+- `export_raw`
+- `recover`
+- `diff`
+- `train_encoder`
+- `train_snn`
+- `train_tnn`
+- `train_resume`
+- `eagle_quick`
+- `eagle_full`
+- `eagle_bench`
+- `eagle_lqs_l`
+- `eagle_lqs_c`
+- `eagle_lqs_m`
+- `eagle_lqs_a`
+- `eagle_perf`
+- `eagle_rd`
+- `eagle_h2h`
+- `test_conformance`
+- `test_full`
+- `test_paranoid`
+- `test_codec`
+- `setup_pip`
+- `setup_extras`
+- `setup_cargo`
+- `setup_musl`
+- `setup_windows`
+- `gui`
+- `viz_lamquant-gui`
+- `viz_eeglab`
+- `viz_mne`
+- `viz_legacy_OpenBCIGUI`
+- `viz_legacy_BVAnalyzer`
+- `viz_legacy_besa`
+- `viz_OpenBCIGUI`
+- `viz_BVAnalyzer`
+- `viz_besa`
+- `viz_install_lamquant_gui`
+- `viz_install_mne`
+- `viz_install_scope_tui`
+- `viz_install_bottom`
+- `viz_install_television`
+- `viz_install_csvlens`
+- `viz_install_gitui`
+- `viz_uninstall_lamquant_gui`
+- `viz_uninstall_mne`
+- `viz_uninstall_scope_tui`
+- `viz_uninstall_bottom`
+- `viz_uninstall_television`
+- `viz_uninstall_csvlens`
+- `viz_uninstall_gitui`
+- `cockpit_reset`
+- `cockpit_checkpoints`
+- `cockpit_metrics`
+- `fw_list_devices`
+- `fw_build_rp2350`
+- `fw_build_nrf54l15`
+- `fw_build_esp32p4`
+- `fw_build_stm32n6`
+- `fw_flash_rp2350`
+- `fw_flash_nrf54l15`
+- `fw_flash_esp32p4`
+- `fw_flash_stm32n6`
+- `fw_size_rp2350`
+- `fw_size_stm32n6`
+- `fw_size_esp32p4`
+- `fw_size_nrf54l15`
+- `fw_check_rp2350`
+- `fw_check_stm32n6`
+- `fw_check_esp32p4`
+- `fw_check_nrf54l15`
+- `fw_export`
+- `fw_legacy_esp32s3`
+- `cockpit_jobs`
+- `cockpit_export`
+- `syscheck_py`
+- `cockpit_data_prep`
+- `cockpit_train_encoder`
+- `cockpit_train_snn`
+- `cockpit_train_oracle`
+- `setup_install_lml`
+- `setup_install_eagle`
+- `setup_install_lqt`
+<!-- canonical-operation-ids:end -->
 
 Adding a new op ID requires:
 1. Entry here in `ui-parity.md`
-2. Entry in `lamquant_ops::launcher::launcher()` table (Rust)
-3. Entry in `lamquant_codec/cli/op_emit.py::OP_LAUNCHERS` (Python, when natively spawned)
-4. Schema parity test passing
+2. Entry in the applicable Rust codec/launcher registry
+3. Exact registry and front-end parity tests passing
 
 ## Lexicon (frozen)
 
@@ -167,16 +263,59 @@ UI labels MAY use a longer human-readable form (e.g. "Encode (LML lossless)") bu
 
 Round-trip rule: writes go through ONE binary per file (`lml` for state mutation, `lml settings --apply` for TOML). No UI directly serializes TOML or `history.json` from its own code path. Readers MAY parse directly.
 
-## Codegen targets
+## Bindings
 
-Schemas in `specs/` are language-neutral. Each UI generates bindings:
+Schemas in `specs/` are language-neutral. Each UI/runner must keep plan-projection
+bindings in sync with the protocol:
 
-- **Rust:** `crates/lamquant-ops/build.rs` runs `typify` to produce `OpEvent` types.
-- **Python:** pre-commit hook runs `datamodel-code-generator` into `lamquant_codec/cli/op_events_generated.py`.
-- **TS:** `gui/` `npm prebuild` script runs `json-schema-to-typescript` into `gui/src/lib/types/op-events.ts`.
+- **Rust:** `crates/lamquant-ops` exports binding types for `PlanProjection`.
+- **Python:** `lamquant_codec/cli` keeps Python bindings consistent with `plan-projections`.
+- **TS:** `gui/` keeps TypeScript bindings consistent with `plan-projections`.
 
-The schema parity test in `crates/lamquant-ops/tests/schema_parity.rs` round-trips a YAML/JSON fixture through all three generated bindings. If any of them rejects the fixture, the build fails.
+Producers may emit `planned`, `progress`, `artifact`, and `diagnostic`
+observations while executing. They never invent terminal `receipt` or `failure`
+projections; the supervising graph `PlanExecutor` owns terminal
+`Receipt`/`Failure`.
+
+Product process plans MUST be constructed from the sealed canonical operation
+registry. They declare the `source-bound-first-party-v1` implementation class
+and one compatible versioned observation protocol: `exit-status-v1`,
+`plan-projection-v1`, or `blut-status-jsonl-v1`. Third-party Python, CUDA, C++,
+vendor, and legacy Node implementations MUST NOT use this runner. They require
+an Ed25519-verified capability manifest and the BPC2 v2 control protocol through
+the dedicated supervised-process transport. Raw command construction is
+test-feature-only and is not part of the product API.
+
+Registered operations whose semantics depend on checkout-relative paths MUST
+provide an explicit canonical working directory. That directory is hashed into
+the compiled plan and revalidated before spawn. Every interpreted script or
+source-tree root declared by that registered operation is recursively hashed
+into the same plan and revalidated immediately before spawn. Generated caches
+are excluded by fixed runtime policy; callers cannot supply their own source
+closure.
+
+Vision software preflight uses `test_full`; benchmark preflight uses
+`eagle_bench`. Both run through one app-lifetime `useOp` handle per operation
+kind, render executor-issued terminal receipts plus bounded diagnostic history,
+and expose invocation-scoped cancellation. One operation kind cannot have two
+active GUI invocations. Required benchmark skips and zero-audit runs fail
+closed. Direct Tauri test, benchmark, or Python-decoder subprocess commands are
+forbidden.
+
+The schema parity test in `crates/lamquant-ops/tests/schema_parity.rs` round-trips
+a YAML/JSON fixture through all three bindings. If any of them rejects the
+fixture, the build fails.
 
 ## Versioning
 
-This spec is `parity-version: 1`. Bumping the version is a deliberate breaking change. Front-ends MUST refuse to run if their `parity-version` doesn't match the version in `~/.config/lamquant/history.json` after a transition; the user is prompted to re-run `setup.wizard` or downgrade.
+This spec is `parity-version: 2`. Version 2 replaces the retired `OpEvent`
+protocol with executor-owned plan projections. Bumping the version is a
+deliberate breaking change.
+
+Every front-end operation MUST load `history.json` through the checked shared
+reader before compiling a process plan. A missing file creates a version-2
+history. A file missing `parity_version` is version 1. Malformed history and
+any version mismatch fail closed before execution. Normal history writes never
+change parity. Completing the setup wizard is the explicit migration action:
+it preserves compatible history fields, writes `schema_version: "2.0"` and
+`parity_version: 2`, then permits operations. Downgrade remains an alternative.

@@ -20,7 +20,7 @@ AIO wrapper (TUI + dispatch) lives in the Codec/hub repo and `exec`s `lml`;
 | Flag | Effect |
 |---|---|
 | `--backend desktop\|firmware` | Compute path. `desktop` (default) = rayon + AVX2. `firmware` = scalar serial, matches the MCU build **byte-for-byte**. Output bytes identical across both (locked by `tests/byte_equal_backends.rs`); only wall-clock differs. |
-| `--json` | One JSON `OpEvent` per line to stdout (`specs/op-events.schema.json`); status → stderr. The GUI/TUI wire format. |
+| `--emit-plan-projections` | One JSON `PlanProjection` per line to stdout (`specs/plan-projections.schema.json`); status → stderr. The GUI/TUI wire format. |
 | `-v` / `-vv` / `-vvv` | INFO / DEBUG / TRACE. `RUST_LOG` overrides. |
 | `--quiet` | Errors only. Mutually exclusive with `-v`. |
 | `--color auto\|always\|never` | ANSI control; respects `NO_COLOR` / `CLICOLOR_FORCE`. |

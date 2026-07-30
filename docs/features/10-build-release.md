@@ -227,7 +227,7 @@ packagers can pick a smaller subset.
 | `lamquant-lossless/` | `lml` library crate + CLI/TUI binary |
 | `crates/lmafs/` | FUSE filesystem ([OS Integration](./07-os-integration.md)) |
 | `crates/lamquant-history/` | Append-only event log helpers |
-| `crates/lamquant-ops/` | `OpEvent` wire format (for `--emit-json-events`) |
+| `crates/lamquant-ops/` | `PlanProjection` wire format (for `--emit-plan-projections`) |
 | `specs/conformance/` | Codec conformance vectors |
 | `fuzz/` | libfuzzer-sys harnesses |
 | `dist/systemd/` | systemd unit templates |

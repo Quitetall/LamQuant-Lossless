@@ -1,12 +1,12 @@
 """Coverage tests for ``lamquant_codec.cli.backend``.
 
-The backend module dispatches encode/decode to either the Rust ``lml``
-binary, a custom binary, or the Python fallback. Pure helpers exercised:
+The backend module reports configured implementations but routes product
+encode/decode through the Rust operation broker. Pure helpers exercised:
 
   * ``detect_backend(cfg)`` returns one of {rust, python, custom}
   * ``get_backend_version(cfg)`` returns a string for every branch
-  * ``run_encode`` / ``run_decode`` propagate exit codes from subprocess
-  * Missing-binary path returns nonzero exit code
+  * ``run_encode`` / ``run_decode`` invoke canonical broker operations
+  * Missing-broker and unsupported-backend paths return nonzero exit codes
   * Timeout / FileNotFoundError / KeyboardInterrupt branches
 
 All subprocess invocations are mocked — no real binary is executed.
@@ -137,57 +137,76 @@ def test_get_backend_version_custom_oserror():
 # ----- run_encode -------------------------------------------------------
 
 
-def test_run_encode_rust_missing_binary_returns_one(capsys):
+def test_run_encode_rust_missing_broker_returns_one(capsys):
     cfg = _cfg("rust")
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary", return_value=None
+        "lamquant_codec.cli.backend._resolve_broker", return_value=None
     ):
         rc = backend_mod.run_encode(cfg, "/in", "/out")
     assert rc == 1
 
 
-def test_run_encode_rust_success_propagates_returncode():
+def test_run_encode_rust_uses_canonical_operation_broker():
     cfg = _cfg("rust")
-    fake_proc = SimpleNamespace(returncode=0)
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run", return_value=fake_proc
-    ) as run_mock:
-        rc = backend_mod.run_encode(
-            cfg, "/in", "/out", workers=2, noise_bits=3,
-        )
+        "lamquant_codec.cli.backend.subprocess.Popen", return_value=fake_proc
+    ) as popen_mock:
+        rc = backend_mod.run_encode(cfg, "/in", "/out")
     assert rc == 0
-    # CLI flags should be present
-    cmd = run_mock.call_args[0][0]
-    assert "encode" in cmd
-    assert "/in" in cmd
-    assert "--output" in cmd
-    assert "--threads" in cmd
-    assert "--noise-bits" in cmd
+    assert popen_mock.call_args[0][0] == [
+        "/usr/bin/lamquant",
+        "op",
+        "run",
+        "encode_lma",
+        "--input",
+        "/in",
+        "--output",
+        "/out",
+    ]
+
+
+def test_run_encode_rejects_noncanonical_overrides(capsys):
+    cfg = _cfg("rust")
+    with patch("lamquant_codec.cli.backend.subprocess.Popen") as popen_mock:
+        rc = backend_mod.run_encode(cfg, "/in", "/out", workers=2)
+    assert rc == 2
+    popen_mock.assert_not_called()
+    assert "canonical encode_lma contract" in capsys.readouterr().err
 
 
 def test_run_encode_rust_timeout_returns_one():
     cfg = _cfg("rust")
+    fake_proc = MagicMock()
+    fake_proc.wait.side_effect = [
+        subprocess.TimeoutExpired("lamquant", 7200),
+        0,
+    ]
+    fake_proc.poll.return_value = None
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run",
-        side_effect=subprocess.TimeoutExpired("lml", 1),
+        "lamquant_codec.cli.backend.subprocess.Popen",
+        return_value=fake_proc,
     ):
         rc = backend_mod.run_encode(cfg, "/in", "/out")
     assert rc == 1
+    fake_proc.terminate.assert_called_once_with()
+    assert fake_proc.wait.call_args_list[-1].kwargs == {"timeout": 10}
 
 
 def test_run_encode_rust_filenotfound_returns_one():
     cfg = _cfg("rust")
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run",
+        "lamquant_codec.cli.backend.subprocess.Popen",
         side_effect=FileNotFoundError(),
     ):
         rc = backend_mod.run_encode(cfg, "/in", "/out")
@@ -196,93 +215,125 @@ def test_run_encode_rust_filenotfound_returns_one():
 
 def test_run_encode_rust_keyboard_interrupt_returns_130():
     cfg = _cfg("rust")
+    fake_proc = MagicMock()
+    fake_proc.wait.side_effect = [KeyboardInterrupt(), 0]
+    fake_proc.poll.return_value = None
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run",
-        side_effect=KeyboardInterrupt(),
+        "lamquant_codec.cli.backend.subprocess.Popen",
+        return_value=fake_proc,
+    ), patch(
+        "lamquant_codec.cli.backend.os.name",
+        "posix",
     ):
         rc = backend_mod.run_encode(cfg, "/in", "/out")
     assert rc == 130
+    fake_proc.send_signal.assert_called_once_with(backend_mod.signal.SIGINT)
 
 
-def test_run_encode_python_dispatch():
-    """Python backend should dispatch to ``compress.main``."""
+def test_stop_broker_escalates_after_grace_timeout():
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+    fake_proc.wait.side_effect = [subprocess.TimeoutExpired("lamquant", 10), 0]
+    backend_mod._stop_broker(fake_proc, interrupt=False)
+    fake_proc.terminate.assert_called_once_with()
+    fake_proc.kill.assert_called_once_with()
+    assert fake_proc.wait.call_args_list[-1].args == ()
+    assert fake_proc.wait.call_args_list[-1].kwargs == {}
+
+
+def test_run_encode_python_backend_fails_closed(capsys):
     cfg = _cfg("python")
-    with patch(
-        "lamquant_codec.cli.compress.main", return_value=0
-    ) as mock_main:
-        rc = backend_mod.run_encode(
-            cfg, "/in", "/out",
-            workers=4, noise_bits=2, skip_existing=True,
-        )
-    assert rc == 0
-    # Ensure dispatch invoked
-    mock_main.assert_called_once()
-    argv = mock_main.call_args[0][0]
-    assert "/in" in argv
-    assert "-o" in argv
-    assert "/out" in argv
-
-
-def test_run_encode_python_main_returns_none_normalized_to_zero():
-    cfg = _cfg("python")
-    with patch(
-        "lamquant_codec.cli.compress.main", return_value=None
-    ):
+    with patch("lamquant_codec.cli.backend.subprocess.Popen") as popen_mock:
         rc = backend_mod.run_encode(cfg, "/in", "/out")
-    assert rc == 0
+    assert rc == 2
+    popen_mock.assert_not_called()
+    assert "requires the Rust operation broker" in capsys.readouterr().err
+
+
+def test_run_encode_custom_backend_fails_closed_without_manifest(capsys):
+    cfg = _cfg("custom", custom_binary="/custom/lml")
+    with patch("lamquant_codec.cli.backend.subprocess.Popen") as popen_mock:
+        rc = backend_mod.run_encode(cfg, "/in", "/out")
+    assert rc == 2
+    popen_mock.assert_not_called()
+    assert "signed capability manifest" in capsys.readouterr().err
 
 
 # ----- run_decode -------------------------------------------------------
 
 
-def test_run_decode_rust_missing_binary_returns_one():
+def test_run_decode_rust_missing_broker_returns_one():
     cfg = _cfg("rust")
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary", return_value=None
+        "lamquant_codec.cli.backend._resolve_broker", return_value=None
     ):
         rc = backend_mod.run_decode(cfg, "/in", "/out")
     assert rc == 1
 
 
-def test_run_decode_rust_success():
+def test_run_decode_rust_uses_canonical_operation_broker():
     cfg = _cfg("rust")
-    fake_proc = SimpleNamespace(returncode=0)
+    fake_proc = MagicMock()
+    fake_proc.wait.return_value = 0
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run", return_value=fake_proc
-    ) as run_mock:
-        rc = backend_mod.run_decode(cfg, "/in", "/out", workers=2)
+        "lamquant_codec.cli.backend.subprocess.Popen", return_value=fake_proc
+    ) as popen_mock:
+        rc = backend_mod.run_decode(cfg, "/in", "/out")
     assert rc == 0
-    cmd = run_mock.call_args[0][0]
-    assert "decode" in cmd
-    assert "/in" in cmd
+    assert popen_mock.call_args[0][0] == [
+        "/usr/bin/lamquant",
+        "op",
+        "run",
+        "decode",
+        "--input",
+        "/in",
+        "--output",
+        "/out",
+    ]
+
+
+def test_run_decode_rejects_noncanonical_overrides(capsys):
+    cfg = _cfg("rust")
+    with patch("lamquant_codec.cli.backend.subprocess.Popen") as popen_mock:
+        rc = backend_mod.run_decode(cfg, "/in", "/out", workers=2)
+    assert rc == 2
+    popen_mock.assert_not_called()
+    assert "canonical decode contract" in capsys.readouterr().err
 
 
 def test_run_decode_rust_timeout():
     cfg = _cfg("rust")
+    fake_proc = MagicMock()
+    fake_proc.wait.side_effect = [
+        subprocess.TimeoutExpired("lamquant", 7200),
+        0,
+    ]
+    fake_proc.poll.return_value = None
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run",
-        side_effect=subprocess.TimeoutExpired("lml", 1),
+        "lamquant_codec.cli.backend.subprocess.Popen",
+        return_value=fake_proc,
     ):
         rc = backend_mod.run_decode(cfg, "/in", "/out")
     assert rc == 1
+    fake_proc.terminate.assert_called_once_with()
 
 
 def test_run_decode_rust_filenotfound():
     cfg = _cfg("rust")
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run",
+        "lamquant_codec.cli.backend.subprocess.Popen",
         side_effect=FileNotFoundError(),
     ):
         rc = backend_mod.run_decode(cfg, "/in", "/out")
@@ -291,32 +342,28 @@ def test_run_decode_rust_filenotfound():
 
 def test_run_decode_rust_keyboard_interrupt():
     cfg = _cfg("rust")
+    fake_proc = MagicMock()
+    fake_proc.wait.side_effect = [KeyboardInterrupt(), 0]
+    fake_proc.poll.return_value = None
     with patch(
-        "lamquant_codec.cli.backend._resolve_binary",
-        return_value="/usr/bin/lml",
+        "lamquant_codec.cli.backend._resolve_broker",
+        return_value="/usr/bin/lamquant",
     ), patch(
-        "lamquant_codec.cli.backend.subprocess.run",
-        side_effect=KeyboardInterrupt(),
+        "lamquant_codec.cli.backend.subprocess.Popen",
+        return_value=fake_proc,
+    ), patch(
+        "lamquant_codec.cli.backend.os.name",
+        "posix",
     ):
         rc = backend_mod.run_decode(cfg, "/in", "/out")
     assert rc == 130
+    fake_proc.send_signal.assert_called_once_with(backend_mod.signal.SIGINT)
 
 
-def test_run_decode_python_dispatch():
+def test_run_decode_python_backend_fails_closed(capsys):
     cfg = _cfg("python")
-    fake_report = SimpleNamespace(n_failed=0)
-    with patch(
-        "lamquant_codec.batch.decompress_batch", return_value=fake_report
-    ):
-        rc = backend_mod.run_decode(cfg, "/in", "/out", workers=2)
-    assert rc == 0
-
-
-def test_run_decode_python_failure():
-    cfg = _cfg("python")
-    fake_report = SimpleNamespace(n_failed=3)
-    with patch(
-        "lamquant_codec.batch.decompress_batch", return_value=fake_report
-    ):
+    with patch("lamquant_codec.cli.backend.subprocess.Popen") as popen_mock:
         rc = backend_mod.run_decode(cfg, "/in", "/out")
-    assert rc == 1
+    assert rc == 2
+    popen_mock.assert_not_called()
+    assert "requires the Rust operation broker" in capsys.readouterr().err

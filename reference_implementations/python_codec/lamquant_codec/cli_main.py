@@ -30,7 +30,11 @@ def _run(cmd: list[str], cwd: Path | None = None) -> int:
 
 def _cmd_setup(args: argparse.Namespace, _extra: list[str]) -> int:
     from lamquant_codec import setup_cmd
-    return setup_cmd.run(yes=args.yes)
+    result = setup_cmd.run(yes=args.yes)
+    if result == 0:
+        from lamquant_codec.cli import menu
+        menu.migrate_history_to_current()
+    return result
 
 
 def _cmd_download(_args: argparse.Namespace, extra: list[str]) -> int:

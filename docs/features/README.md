@@ -16,7 +16,7 @@ nuance, and known error in that area.
 8. [Export](./08-export.md) — MATLAB / Parquet / HDF5 / BIDS sinks
 9. [Operational](./09-operational.md) — watch, systemd, webhooks, metrics, S3
 10. [Build / Release](./10-build-release.md) — musl, SBOM, fuzz, conformance
-11. [CLI UX](./11-cli-ux.md) — colors, verbosity, completions, man, `--force`, `--emit-json-events`
+11. [CLI UX](./11-cli-ux.md) — colors, verbosity, completions, man, `--force`, `--emit-plan-projections`
 
 ## Cross-cutting docs
 

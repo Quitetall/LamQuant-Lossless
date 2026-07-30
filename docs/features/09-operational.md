@@ -282,7 +282,7 @@ peer workers short-circuit on the next poll.
   - [Compression](./01-compression.md) — `lml watch` is encode-on-arrival
   - [Verification](./03-verification.md) — `lml notify` payloads can include the archive SHA
   - [OS Integration](./07-os-integration.md) — `lmafs.service` per-user systemd template
-  - [CLI UX](./11-cli-ux.md) — `--quiet` / `-v` / `--emit-json-events` for daemonised use
+  - [CLI UX](./11-cli-ux.md) — `--quiet` / `-v` / `--emit-plan-projections` for daemonised use
   - [Build / Release](./10-build-release.md) — `--features async` / `--features s3` lanes
 - **Source files**:
   - `lamquant-core/src/bin/lml.rs:666` — `Watch`

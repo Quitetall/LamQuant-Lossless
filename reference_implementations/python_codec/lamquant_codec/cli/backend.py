@@ -1,22 +1,19 @@
-"""Compression backend dispatcher.
+"""Compression backend status and product-operation broker.
 
-Routes encode/decode operations to the configured backend:
-  - rust:   Rust `lml` binary (198 MB/s, default when available)
-  - python: Python lamquant_codec (15 MB/s, always available)
-  - custom: user-provided binary (must follow the backend contract)
+Configured Python and custom implementations remain visible for diagnostics,
+library calls, and research. Product TUI encode/decode always cross the Rust
+``lamquant op run`` broker so checked history, canonical operation identity,
+compiled containment, cancellation, and executor-issued receipts cannot be
+bypassed by one frontend.
 
-Backend contract:
-  <binary> encode <input> --output <output> [--recursive] [--verify]
-           [--skip-existing] [--threads N] [--noise-bits N]
-  <binary> decode <input> --output <output> [--recursive]
-           [--skip-existing] [--threads N]
-
-Output: LML v1 files with CRC-32 per window, SHA-256 in metadata.
+Custom product execution stays fail-closed until a signed capability manifest
+and versioned control protocol are verified by the broker.
 """
 import os
+import shutil
+import signal
 import subprocess
 import sys
-from pathlib import Path
 from typing import Optional
 
 
@@ -55,98 +52,112 @@ def run_encode(config, input_path: str, output_path: str, *,
                recursive: bool = True, verify: bool = True,
                skip_existing: bool = True, workers: int = 0,
                noise_bits: int = 0) -> int:
-    """Dispatch encode to the active backend. Returns exit code."""
-    backend = config.backend.resolve()
-
-    if backend in ("rust", "custom"):
-        binary = _resolve_binary(config) if backend == "rust" else config.backend.custom_binary
-        if not binary:
-            print(f"error: Rust binary not found. Install with: cargo build --release",
-                  file=sys.stderr)
-            print(f"       Or set backend.mode = 'python' in lamquant.toml", file=sys.stderr)
-            return 1
-
-        cmd = [binary, "encode", input_path, "--output", output_path]
-        if recursive:
-            cmd.append("--recursive")
-        if verify:
-            cmd.append("--verify")
-        if skip_existing:
-            cmd.append("--skip-existing")
-        if workers > 0:
-            cmd.extend(["--threads", str(workers)])
-        if noise_bits > 0:
-            cmd.extend(["--noise-bits", str(noise_bits)])
-
-        try:
-            result = subprocess.run(cmd, timeout=7200)
-            return result.returncode
-        except subprocess.TimeoutExpired:
-            print(f"error: backend timed out after 2 hours", file=sys.stderr)
-            return 1
-        except FileNotFoundError:
-            print(f"error: backend binary not found: {binary}", file=sys.stderr)
-            return 1
-        except KeyboardInterrupt:
-            return 130
-
-    else:
-        # Python backend
-        from lamquant_codec.cli.compress import main as compress_main
-        args = [input_path, "-o", output_path]
-        if workers > 0:
-            args.extend(["-j", str(workers)])
-        if noise_bits > 0:
-            args.extend(["--noise-bits", str(noise_bits)])
-        if skip_existing:
-            args.append("--skip-existing")
-        return compress_main(args) or 0
+    """Run canonical ``encode_lma`` through the Rust operation broker."""
+    if not recursive or not verify or not skip_existing or workers != 0 or noise_bits != 0:
+        print(
+            "error: Python TUI accepts only the canonical encode_lma contract; "
+            "use the non-product codec CLI for experimental overrides",
+            file=sys.stderr,
+        )
+        return 2
+    return _run_product_operation(config, "encode_lma", input_path, output_path)
 
 
 def run_decode(config, input_path: str, output_path: str, *,
                recursive: bool = True, skip_existing: bool = True,
                workers: int = 0) -> int:
-    """Dispatch decode to the active backend. Returns exit code."""
-    backend = config.backend.resolve()
-
-    if backend in ("rust", "custom"):
-        binary = _resolve_binary(config) if backend == "rust" else config.backend.custom_binary
-        if not binary:
-            print(f"error: backend binary not found", file=sys.stderr)
-            return 1
-
-        cmd = [binary, "decode", input_path, "--output", output_path]
-        if recursive:
-            cmd.append("--recursive")
-        if skip_existing:
-            cmd.append("--skip-existing")
-        if workers > 0:
-            cmd.extend(["--threads", str(workers)])
-
-        try:
-            result = subprocess.run(cmd, timeout=7200)
-            return result.returncode
-        except subprocess.TimeoutExpired:
-            print(f"error: backend timed out after 2 hours", file=sys.stderr)
-            return 1
-        except FileNotFoundError:
-            print(f"error: backend binary not found: {binary}", file=sys.stderr)
-            return 1
-        except KeyboardInterrupt:
-            return 130
-
-    else:
-        # Python backend
-        from lamquant_codec.batch import decompress_batch
-        report = decompress_batch(
-            inputs=[input_path], output_dir=output_path,
-            recursive=recursive, skip_existing=skip_existing,
-            workers=workers or None, quiet=False,
+    """Run canonical ``decode`` through the Rust operation broker."""
+    if not recursive or not skip_existing or workers != 0:
+        print(
+            "error: Python TUI accepts only the canonical decode contract; "
+            "use the non-product codec CLI for experimental overrides",
+            file=sys.stderr,
         )
-        return 1 if report.n_failed > 0 else 0
+        return 2
+    return _run_product_operation(config, "decode", input_path, output_path)
+
+
+def _run_product_operation(
+    config, operation: str, input_path: str, output_path: str
+) -> int:
+    backend = config.backend.resolve()
+    if backend == "python":
+        print(
+            "error: Python TUI product execution requires the Rust operation broker; "
+            "Python codec functions remain available as library/research APIs",
+            file=sys.stderr,
+        )
+        return 2
+    if backend == "custom":
+        print(
+            "error: custom product backend refused without a broker-verified "
+            "signed capability manifest and versioned control protocol",
+            file=sys.stderr,
+        )
+        return 2
+    broker = _resolve_broker()
+    if not broker:
+        print(
+            "error: LamQuant operation broker not found; install the `lamquant` "
+            "or `lq` product binary",
+            file=sys.stderr,
+        )
+        return 1
+    command = [
+        broker,
+        "op",
+        "run",
+        operation,
+        "--input",
+        input_path,
+        "--output",
+        output_path,
+    ]
+    process = None
+    try:
+        process = subprocess.Popen(command)
+        return process.wait(timeout=7200)
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            _stop_broker(process, interrupt=False)
+        print("error: operation broker timed out after 2 hours", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print(f"error: operation broker not found: {broker}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        if process is not None:
+            _stop_broker(process, interrupt=True)
+        return 130
+
+
+def _stop_broker(process, *, interrupt: bool) -> None:
+    """Request exact broker cancellation, then escalate after a bounded grace."""
+    if process.poll() is not None:
+        return
+    try:
+        if interrupt and os.name != "nt":
+            process.send_signal(signal.SIGINT)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        process.wait()
 
 
 def _resolve_binary(config) -> Optional[str]:
     """Resolve the Rust binary path from config."""
     from lamquant_codec.cli.config import _find_rust_binary
     return _find_rust_binary(config.backend.rust_binary)
+
+
+def _resolve_broker() -> Optional[str]:
+    """Resolve the product operation broker, preferring long-form name."""
+    return shutil.which("lamquant") or shutil.which("lq")
