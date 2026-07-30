@@ -19,3 +19,10 @@ path = "src/bin/optimum_v2_codec.rs"
 libc = "0.2"
 serde_json = "1"
 sha2 = "0.10"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "peer_codec"
+harness = false

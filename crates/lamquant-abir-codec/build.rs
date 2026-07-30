@@ -51,6 +51,10 @@ fn main() {
         files.push(repository.join("lamquant-lml-optimum/build.rs"));
         collect_files(&repository.join("lamquant-lml-optimum/src"), &mut files);
     }
+    if env::var_os("CARGO_FEATURE_OPTIMUM_V2").is_some() {
+        files.push(repository.join("lamquant-lml-optimum-v2/Cargo.toml"));
+        collect_files(&repository.join("lamquant-lml-optimum-v2/src"), &mut files);
+    }
     files.sort();
 
     let mut hasher = blake3::Hasher::new();

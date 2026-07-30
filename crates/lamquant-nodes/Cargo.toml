@@ -22,6 +22,11 @@ experimental-arithmetic = [
     "lamquant-abir-codec/experimental-arithmetic",
     "lamquant-lml-mcu/experimental_arithmetic",
 ]
+optimum-v2 = [
+    "std",
+    "lamquant-abir-codec/optimum-v2",
+    "dep:lamquant-lml-optimum-v2",
+]
 standard-adapters = [
     "std",
     "dep:abir-adapter",
@@ -38,6 +43,7 @@ blake3 = { version = "=1.5.5", default-features = false }
 blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "7e9dccb9dedac65eb0d6e36f5ee7f4a934168403", default-features = false }
 lamquant-abir-codec = { version = "0.1.0", path = "../lamquant-abir-codec", default-features = false }
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
+lamquant-lml-optimum-v2 = { version = "0.1.0", path = "../../lamquant-lml-optimum-v2", optional = true }
 lamquant-standard-adapters = { version = "0.1.0", path = "../lamquant-standard-adapters", default-features = false, optional = true }
 semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc", default-features = false, features = ["alloc"] }
 semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc", default-features = false, features = ["alloc"] }

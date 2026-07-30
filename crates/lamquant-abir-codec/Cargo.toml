@@ -12,6 +12,7 @@ default = ["std"]
 # ever handles baseline LML should not link a second decoder, and firmware does
 # not depend on this crate at all.
 optimum = ["dep:lamquant-lml-optimum"]
+optimum-v2 = ["std", "dep:lamquant-lml-optimum-v2"]
 experimental-arithmetic = ["std", "lamquant-lml-mcu/experimental_arithmetic"]
 
 std = [
@@ -33,6 +34,7 @@ lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", 
 # optimum-coded packets before sealing them. Optional and `decode`-only: that
 # feature is no_std-capable, so enabling it does not drag std into this crate.
 lamquant-lml-optimum = { version = "0.0.1", path = "../../lamquant-lml-optimum", default-features = false, features = ["decode"], optional = true }
+lamquant-lml-optimum-v2 = { version = "0.1.0", path = "../../lamquant-lml-optimum-v2", optional = true }
 
 [build-dependencies]
 blake3 = { version = "=1.5.5" }

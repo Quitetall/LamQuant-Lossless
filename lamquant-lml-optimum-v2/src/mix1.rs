@@ -14,9 +14,9 @@ use std::collections::HashMap;
 const HEADER_LEN: usize = 72;
 const COMPACT_HEADER_LEN: usize = 40;
 const ULTRA_COMPACT_HEADER_LEN: usize = 24;
-const MAX_CHANNELS: usize = 256;
-const MAX_SAMPLES: usize = 32_768;
-const MAX_VALUES: usize = 131_072;
+pub(crate) const MAX_CHANNELS: usize = 256;
+pub(crate) const MAX_SAMPLES: usize = 32_768;
+pub(crate) const MAX_VALUES: usize = 131_072;
 const MAX_EVENTS_PER_VALUE: usize = 129;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -17,6 +17,11 @@ use lamquant_nodes::{
     LML_ENTROPY_NODE_TYPE, LML_PACKET_BASELINE_NODE_TYPE, LML_PREDICT_NODE_TYPE,
     LML_QUANTIZE_NODE_TYPE, LML_TRANSFORM_NODE_TYPE,
 };
+#[cfg(feature = "optimum-v2")]
+use lamquant_nodes::{
+    optimum_v2_node_config, optimum_v2_peer_descriptor, CAP_LML_OPTIMUM_V2_PEER_NODE,
+    OPTIMUM_V2_PEER_NODE_TYPE,
+};
 use semantic_abir::{
     payload_content_id, AbirDataset, Atom, AtomTag, ByteOrder, ConceptId, DatasetDraft, DatasetTag,
     ElementType, Layout, ObjectId, PayloadDescriptor, Presence, Rational, Recording, RecordingTag,
@@ -287,6 +292,95 @@ fn compiled_baseline_node_matches_direct_fused_bundle() {
     }
 }
 
+#[cfg(feature = "optimum-v2")]
+#[test]
+fn optimum_v2_peer_node_matches_direct_codec_and_bcs2_closure() {
+    use lamquant_abir_codec::{
+        open_optimum_v2_bundle, optimum_v2_implementation_identity, seal_optimum_v2_packets,
+    };
+    use lamquant_lml_optimum_v2::{PeerCodec, PeerEncodeContext};
+
+    let signal = fixture_signal();
+    let dataset = fixture_dataset(&signal);
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let bounds = ResourceBounds::default();
+    let descriptor = optimum_v2_peer_descriptor();
+    assert_eq!(descriptor.type_name, OPTIMUM_V2_PEER_NODE_TYPE);
+    assert_eq!(descriptor.targets, vec![Target::Host, Target::BlutDurable]);
+    assert!(descriptor
+        .capabilities
+        .contains(&Capability(CAP_LML_OPTIMUM_V2_PEER_NODE.into())));
+
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+    let graph = single_lml_graph(
+        OPTIMUM_V2_PEER_NODE_TYPE,
+        descriptor.capabilities,
+        optimum_v2_node_config(256_000, 16).unwrap(),
+    );
+    let direct_packet = PeerCodec
+        .encode_window(
+            &signal,
+            PeerEncodeContext {
+                sample_rate_mhz: 256_000,
+                bit_depth: 16,
+            },
+        )
+        .unwrap();
+    let direct_bundle = seal_optimum_v2_packets(
+        &dataset,
+        &[direct_packet.as_slice()],
+        optimum_v2_implementation_identity(),
+        bounds,
+    )
+    .unwrap();
+
+    let execute = |realm| {
+        let plan = Compiler::new(&registry, realm).compile(&graph).unwrap();
+        let selected = plan
+            .as_plan()
+            .nodes
+            .iter()
+            .map(|node| (node.kernel, node.implementation_id))
+            .collect::<Vec<_>>();
+        let mut kernels = lamquant_nodes::LamQuantKernelExecutor::default();
+        let mut sink = NoopTransactionalSink;
+        let mut executor = PlanExecutor::new(&mut kernels, &mut sink);
+        let result = executor
+            .execute(
+                &plan,
+                [0x81; 32],
+                BTreeMap::from([(
+                    PortRef {
+                        node: NodeId(0),
+                        port: "signal".into(),
+                    },
+                    LamQuantNodeValue::LmlSignal(
+                        LmlSignalView::new(&dataset, &views, bounds).unwrap(),
+                    ),
+                )]),
+            )
+            .unwrap();
+        let bytes = match &result.terminal_values.get(&NodeId(0)).unwrap()[0] {
+            LamQuantNodeValue::Bcs2(bytes) => bytes.clone(),
+            other => panic!("unexpected peer node output: {other:?}"),
+        };
+        (selected, bytes)
+    };
+
+    let (host_kernels, host) = execute(ExecutionRealm::HostStream);
+    let (blut_kernels, blut) = execute(ExecutionRealm::BlutDurable);
+    assert_ne!(host_kernels, blut_kernels);
+    assert_eq!(host, direct_bundle);
+    assert_eq!(blut, host);
+    let opened = open_optimum_v2_bundle(&host, bounds).unwrap();
+    assert_eq!(opened.packet(), direct_packet);
+    assert_eq!(opened.signal(), signal);
+    assert!(Compiler::new(&registry, ExecutionRealm::McuAot)
+        .compile(&graph)
+        .is_err());
+}
+
 /// P8.3 #22 — one graph, two realms, identical bytes.
 ///
 /// The MCU and host kernels are NOT the same kernel. They carry different
@@ -361,7 +455,10 @@ fn one_graph_encodes_identically_in_the_mcu_and_host_realms() {
         host_kernels, mcu_kernels,
         "the two realms selected the same kernel, so equal bytes prove nothing"
     );
-    assert!(!host.is_empty(), "an empty encode would make equality vacuous");
+    assert!(
+        !host.is_empty(),
+        "an empty encode would make equality vacuous"
+    );
     assert_eq!(
         host, mcu,
         "the same graph produced different bytes in the host and MCU realms: a \
