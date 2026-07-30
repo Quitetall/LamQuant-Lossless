@@ -376,8 +376,10 @@ def migrate_history_to_current(path: Path | None = None):
         for index, operation in enumerate(data.get("recent_operations", [])):
             try:
                 _validate_history_operation(operation, index)
-            except HistoryFormatError:
-                continue
+            except HistoryFormatError as error:
+                raise HistoryFormatError(
+                    f"cannot migrate invalid recent_operations[{index}]: {error}"
+                ) from error
             recent_operations.append(operation)
         migrated = {
             "schema_version": CURRENT_HISTORY_SCHEMA,
@@ -476,12 +478,14 @@ def _atomic_replace_unlocked(path: Path, body: str):
         dir=path.parent,
     )
     temporary_path = Path(temporary)
+    replaced = False
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_path, path)
+        replaced = True
         if os.name != "nt":
             directory_fd = os.open(path.parent, os.O_RDONLY)
             try:
@@ -489,10 +493,11 @@ def _atomic_replace_unlocked(path: Path, body: str):
             finally:
                 os.close(directory_fd)
     finally:
-        try:
-            temporary_path.unlink()
-        except FileNotFoundError:
-            pass
+        if not replaced:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _atomic_write_locked(path: Path, body: str):

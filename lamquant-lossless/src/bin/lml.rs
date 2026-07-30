@@ -1491,7 +1491,7 @@ pub(crate) fn emit_progress(current: u64, total: u64, message: impl Into<String>
 
 /// Emit final codec diagnostic. Supervising PlanExecutor alone emits terminal
 /// receipt or failure after process exit.
-fn emit_terminal(_op_id: &str, code: i32, summary: &str) {
+fn emit_terminal(code: i32, summary: &str) {
     let level = if code == 0 {
         lamquant_ops::DiagnosticLevel::Info
     } else {
@@ -2072,7 +2072,7 @@ fn main() {
             Ok(()) => format!("{} completed", op_id_for_terminal),
             Err(e) => format!("{}: {}", op_id_for_terminal, e),
         };
-        emit_terminal(op_id_for_terminal, exit_code, &summary);
+        emit_terminal(exit_code, &summary);
     }
     if exit_code != 0 {
         std::process::exit(exit_code);

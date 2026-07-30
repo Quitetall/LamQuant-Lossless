@@ -75,6 +75,35 @@ fn direct_command() -> Command {
 }
 
 #[test]
+fn canonical_operation_ids_match_rust_schema_and_ui_spec() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../specs/plan-projections.schema.json"))
+            .expect("plan projection schema");
+    let schema_ids: Vec<&str> = schema["properties"]["operation"]["enum"]
+        .as_array()
+        .expect("operation enum")
+        .iter()
+        .map(|value| value.as_str().expect("operation id string"))
+        .collect();
+
+    let ui = include_str!("../../specs/ui-parity.md");
+    let marker = ui
+        .split_once("<!-- canonical-operation-ids:start -->")
+        .expect("operation marker start")
+        .1
+        .split_once("<!-- canonical-operation-ids:end -->")
+        .expect("operation marker end")
+        .0;
+    let ui_ids: Vec<&str> = marker
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- `")?.strip_suffix('`'))
+        .collect();
+
+    assert_eq!(lamquant_ops::canonical_operation_ids(), schema_ids);
+    assert_eq!(schema_ids, ui_ids);
+}
+
+#[test]
 fn direct_codec_stream_is_identity_bound_observations() {
     let output = direct_command().output().expect("spawn lml");
     assert!(!output.status.success());

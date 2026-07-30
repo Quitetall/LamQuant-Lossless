@@ -71,7 +71,7 @@ fn run_to_terminal(program: &str, arguments: Vec<String>, cancel: bool) -> Outpu
 #[test]
 fn cancelled_failure_marks_panel_cancelled_not_failed() {
     let started = Instant::now();
-    let panel = run_to_terminal("sleep", vec!["30".into()], true);
+    let panel = run_to_terminal("sleep", vec!["5".into()], true);
 
     assert!(panel.is_done());
     assert!(panel.is_cancelled());

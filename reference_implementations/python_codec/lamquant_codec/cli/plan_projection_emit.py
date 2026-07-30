@@ -337,8 +337,9 @@ def _emit(
         "projection": projection,
         **fields,
     }
-    parse_line(json.dumps(payload, separators=(",", ":")))
-    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    rendered = json.dumps(payload, separators=(",", ":"))
+    parse_line(rendered)
+    sys.stdout.write(rendered + "\n")
     sys.stdout.flush()
 
 

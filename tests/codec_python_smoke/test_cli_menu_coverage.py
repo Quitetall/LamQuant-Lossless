@@ -26,7 +26,23 @@ from unittest.mock import patch
 
 import pytest
 
-from lamquant_codec.cli import menu
+from lamquant_codec.cli import menu, plan_projection_emit
+
+
+def test_canonical_operation_ids_match_python_schema_and_ui_spec():
+    repo = Path(__file__).resolve().parents[2]
+    schema = json.loads((repo / "specs" / "plan-projections.schema.json").read_text())
+    schema_ids = schema["properties"]["operation"]["enum"]
+    ui = (repo / "specs" / "ui-parity.md").read_text()
+    marker = ui.split("<!-- canonical-operation-ids:start -->", 1)[1].split(
+        "<!-- canonical-operation-ids:end -->", 1
+    )[0]
+    ui_ids = [
+        line.strip()[3:-1]
+        for line in marker.splitlines()
+        if line.strip().startswith("- `") and line.strip().endswith("`")
+    ]
+    assert plan_projection_emit.CANONICAL_OPERATION_IDS == schema_ids == ui_ids
 
 
 # ----- terminal capability helpers -------------------------------------
@@ -237,13 +253,37 @@ def test_explicit_history_migration_preserves_compatible_fields(tmp_path):
         "schema_version": "1.0",
         "recent_inputs": ["/a"],
         "recent_outputs": ["/b"],
-        "recent_operations": [{"action": "verify"}],
+        "recent_operations": [
+            {
+                "action": "verify",
+                "target": "/a",
+                "when": "2026-07-30T12:00:00Z",
+                "result": "ok",
+            }
+        ],
     }))
     migrated = menu.migrate_history_to_current(p)
     assert migrated["schema_version"] == "2.0"
     assert migrated["parity_version"] == 2
     assert migrated["recent_paths"] == {"inputs": ["/a"], "outputs": ["/b"]}
+    assert migrated["recent_operations"][0]["action"] == "verify"
     assert json.loads(p.read_text())["parity_version"] == 2
+
+
+def test_explicit_history_migration_rejects_invalid_operations(tmp_path):
+    p = tmp_path / "h.json"
+    p.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "recent_inputs": ["/a"],
+                "recent_outputs": ["/b"],
+                "recent_operations": [{"action": "verify"}],
+            }
+        )
+    )
+    with pytest.raises(menu.HistoryFormatError, match="cannot migrate invalid"):
+        menu.migrate_history_to_current(p)
 
 
 # ----- load_history / update_history / add_recent_path ----------------
