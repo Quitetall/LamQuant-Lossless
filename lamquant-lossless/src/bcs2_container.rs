@@ -568,7 +568,8 @@ fn metadata(dataset: &AbirDataset) -> String {
             }
         }
     }
-    serde_json::to_string(&object).unwrap_or_else(|_| "{}".into())
+    serde_json::to_string(&object)
+        .expect("serde_json maps with String keys and Value entries are serializable")
 }
 
 fn source_value<'a>(keys: &'a [semantic_abir::SourceKey], namespace: &str) -> Option<&'a str> {
@@ -749,6 +750,16 @@ mod tests {
         assert_eq!(metadata["channels"], serde_json::json!(["Fp1", "Cz"]));
         assert_eq!(metadata["phys_min"], serde_json::json!([-100.0, -200.0]));
         assert_eq!(metadata["phys_dim"], "uV");
+    }
+
+    #[test]
+    fn malformed_numeric_source_metadata_remains_explicitly_unknown() {
+        let keys = [semantic_abir::SourceKey::new("source.physical-min", "not-a-number").unwrap()];
+
+        assert_eq!(
+            source_number(&keys, "source.physical-min"),
+            serde_json::Value::Null
+        );
     }
 
     #[test]

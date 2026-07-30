@@ -150,9 +150,9 @@ fn split_first_token(s: &str) -> (&str, &str) {
 
 /// Parse a Rust-`{:?}`-quoted param value. Precondition (checked by the
 /// only caller, [`parse_param`]): `s` starts with `"`. Mirrors
-/// `ir::parse_quoted`'s escape grammar (`" \ n t r 0 u{HEX}`) exactly, so
-/// a value written the same way a `to_ir_text` string field is written
-/// parses identically. Walks `s.chars()` (never raw byte indexing), so
+/// The retired narrow IR's escape grammar (`" \ n t r 0 u{HEX}`) exactly, so
+/// legacy text values parse identically without depending on that
+/// representation. Walks `s.chars()` (never raw byte indexing), so
 /// multi-byte UTF-8 is never split; every malformed/truncated escape is a
 /// typed [`PipelineDslError`], never a panic.
 fn parse_quoted_value(s: &str, line: usize) -> Result<(String, &str), PipelineDslError> {
