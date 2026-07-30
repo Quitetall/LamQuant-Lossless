@@ -1,8 +1,8 @@
 # LamQuant configuration — language-neutral schema.
 #
-# Mirrors lamquant-core/src/tui/config.rs::LamQuantConfig and
-# lamquant_codec/cli/config.py::LamQuantConfig. THIS document is canonical;
-# both Rust and Python regenerate their structs from it. Drift is detected
+# Mirrors the current Rust front-end configuration. THIS document is canonical;
+# current front ends consume it through the operation/schema boundary. The
+# retired Python mirror is preserved only in lamquant-legacy. Drift is detected
 # by crates/lamquant-ops/tests/schema_parity.rs.
 #
 # Sections, field names, and defaults are frozen — reorder/rename only with

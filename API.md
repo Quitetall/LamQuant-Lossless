@@ -119,7 +119,11 @@ Public API: `lamquant_lossless::{lml, container, lma, edf, backend, golomb, rans
 
 ## 4. Python bindings (PyO3)
 
-Module `lamquant_codec` (built from `lamquant-lossless`). Exposes encode/decode/container ops + entropy primitives. Used by BLUT's training pipeline to read LML entries out of an LMA (pure-LMA training). Neural ships its own bindings separately — the PyO3 surface here is lossless-only.
+Distribution `lamquant-core`, import module `lamquant_core`, built from
+`lamquant-py/`. It exposes current ABIR/BCS2 views, deterministic
+encode/decode/container operations, and entropy primitives through PyO3.
+Production trainers consume governed ABIR snapshots; retired LML1/LMA1 access
+requires the process-isolated `lamquant-legacy` Adapter.
 
 ---
 
