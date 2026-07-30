@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LAMQUANT_META_REV: 3debb0269c69ba5860461416a5b9916de0cc3509
+  LAMQUANT_META_REV: ce4424d004642d864fe11f73b4a9f2fe80b3fed1
 
 defaults:
   run:
