@@ -37,11 +37,11 @@ def test_canonical_operation_ids_match_python_schema_and_ui_spec():
     marker = ui.split("<!-- canonical-operation-ids:start -->", 1)[1].split(
         "<!-- canonical-operation-ids:end -->", 1
     )[0]
-    ui_ids = [
-        line.strip()[3:-1]
-        for line in marker.splitlines()
-        if line.strip().startswith("- `") and line.strip().endswith("`")
-    ]
+    ui_ids = []
+    for line in marker.splitlines():
+        line = line.strip()
+        if line.startswith("- `") and line.endswith("`"):
+            ui_ids.append(line.removeprefix("- `").removesuffix("`"))
     assert plan_projection_emit.CANONICAL_OPERATION_IDS == schema_ids == ui_ids
 
 
@@ -282,7 +282,10 @@ def test_explicit_history_migration_rejects_invalid_operations(tmp_path):
             }
         )
     )
-    with pytest.raises(menu.HistoryFormatError, match="cannot migrate invalid"):
+    with pytest.raises(
+        menu.HistoryFormatError,
+        match="cannot migrate invalid.*repair or remove.*rerun setup",
+    ):
         menu.migrate_history_to_current(p)
 
 

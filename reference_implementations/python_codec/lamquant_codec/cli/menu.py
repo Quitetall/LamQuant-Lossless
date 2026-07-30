@@ -378,7 +378,8 @@ def migrate_history_to_current(path: Path | None = None):
                 _validate_history_operation(operation, index)
             except HistoryFormatError as error:
                 raise HistoryFormatError(
-                    f"cannot migrate invalid recent_operations[{index}]: {error}"
+                    f"cannot migrate invalid recent_operations[{index}]: {error}; "
+                    f"repair or remove {target} and rerun setup"
                 ) from error
             recent_operations.append(operation)
         migrated = {
