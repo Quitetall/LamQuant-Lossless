@@ -40,7 +40,7 @@ Round-trip helpers:
 Build:
 
 ```bash
-maturin develop --release -m codec-lossless/lamquant-py/Cargo.toml
+maturin develop --release -m lamquant-py/Cargo.toml
 ```
 
 ## Compatibility and low-level/legacy APIs

@@ -4,12 +4,12 @@ version = "0.9.3"
 edition = "2021"
 rust-version = "1.81"
 authors = ["QuiteTall <briankhanglam@gmail.com>"]
-description = "Python bindings for the LamQuant LML lossless EEG codec (PyO3 + maturin)."
+description = "Canonical LamQuant ABIR/BCS2 and deterministic LML Python bindings"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/LamQuant-Lossless"
 homepage = "https://github.com/Quitetall/LamQuant-Lossless"
 readme = "README.md"
-keywords = ["eeg", "lossless", "codec", "python", "pyo3"]
+keywords = ["biosignal", "abir", "lossless", "codec", "python"]
 categories = ["science", "encoding"]
 publish = false
 
