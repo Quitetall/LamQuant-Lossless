@@ -255,11 +255,6 @@ impl SemanticLoweringOptions {
         self
     }
 
-    pub fn without_reader_sidecars(mut self) -> Self {
-        self.preserve_reader_sidecars = false;
-        self
-    }
-
     pub fn with_explicit_capsules(mut self, capsules: Vec<SemanticSourceCapsule>) -> Self {
         self.capsule_binding = SourceCapsuleBinding::Explicit(capsules);
         self
@@ -270,6 +265,9 @@ impl SemanticLoweringOptions {
         namespace_prefix: String,
         source_objects: Vec<SemanticSourceObject>,
     ) -> Self {
+        // Exact foreign objects supersede parser-specific preservation blobs.
+        // Lowering rejects an empty replacement set before exposing ABIR.
+        self.preserve_reader_sidecars = false;
         self.capsule_binding = SourceCapsuleBinding::InterchangeBound {
             namespace_prefix,
             source_objects,
@@ -567,6 +565,11 @@ fn lower_signal_parts(
             namespace_prefix,
             source_objects,
         } => {
+            if source_objects.is_empty() {
+                return Err(invalid(
+                    "interchange-bound source replacement requires at least one source object",
+                ));
+            }
             // Interchange identity excludes source capsules by contract. A
             // clone of semantic metadata is validated here; sample payload
             // buffers remain solely in `payloads` and are never copied.
@@ -952,5 +955,19 @@ mod tests {
             block.bytes(),
             &[1_i64, -2, 3].map(i64::to_le_bytes).concat()
         );
+    }
+
+    #[test]
+    fn interchange_bound_replacement_refuses_an_empty_source_set() {
+        let error = lower_parsed_uniform_signal(
+            fixture_signal(),
+            SemanticLoweringOptions::default()
+                .with_interchange_bound_sources("adapter.test.binding.".to_owned(), Vec::new()),
+        )
+        .expect_err("empty replacement cannot silently discard source preservation");
+
+        assert!(error
+            .to_string()
+            .contains("requires at least one source object"));
     }
 }

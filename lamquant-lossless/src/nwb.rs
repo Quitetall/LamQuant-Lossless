@@ -27,27 +27,25 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// One integer time-series dataset extracted from an HDF5/NWB file, in the
-/// codec's channel-major `i64` form, plus the metadata needed to put it back
-/// exactly as it was found.
+/// Private parser result for one integer HDF5/NWB dataset.
 #[derive(Debug, Clone)]
-pub struct H5IntSignal {
+struct H5IntSignal {
     /// Full HDF5 path of the dataset, e.g. `/acquisition/ElectricalSeries/data`.
-    pub h5_path: String,
+    h5_path: String,
     /// Channel-major signal `[n_ch][t]` — each inner `Vec` is one channel's
     /// time series (the codec's prediction axis).
-    pub signal: Vec<Vec<i64>>,
+    signal: Vec<Vec<i64>>,
     /// On-disk integer width in bytes: 1, 2, 4, or 8.
-    pub int_bytes: u8,
+    int_bytes: u8,
     /// On-disk signedness (`false` ⇒ the source was an unsigned integer type).
-    pub signed: bool,
+    signed: bool,
     /// `true` when the source was a 2-D dataset stored time-major (rows = time,
     /// the NWB `ElectricalSeries` convention) and we transposed it to
     /// channel-major. `false` for 1-D datasets (a single channel, no transpose).
-    pub time_major: bool,
+    time_major: bool,
     /// Original HDF5 dataset shape (pre-transpose), so a writer can restore the
     /// exact dimensionality and orientation.
-    pub orig_shape: Vec<usize>,
+    orig_shape: Vec<usize>,
 }
 
 /// Map an `hdf5_metno` error into the codec's error type with context.
@@ -161,7 +159,7 @@ fn read_int_dataset(ds: &Dataset) -> LmlResult<Option<H5IntSignal>> {
 ///
 /// The order is deterministic (depth-first over `hdf5-metno`'s name-sorted
 /// member iteration), so a downstream ingest manifest is stable.
-pub fn read_int_signals(path: &Path) -> LmlResult<Vec<H5IntSignal>> {
+fn read_int_signals(path: &Path) -> LmlResult<Vec<H5IntSignal>> {
     let file = h5(File::open(path), "open")?;
     let mut datasets = Vec::new();
     collect_datasets(&file, &mut datasets)?;
@@ -208,13 +206,28 @@ struct NwbSlot {
     n_ch: usize,
 }
 
+fn checked_narrow<T>(flat: &[i64], target: &str) -> LmlResult<Vec<T>>
+where
+    T: TryFrom<i64>,
+{
+    flat.iter()
+        .copied()
+        .map(|value| {
+            T::try_from(value).map_err(|_| {
+                LmlError::InvalidHeader(format!(
+                    "NWB tensor value {value} is outside source {target} range"
+                ))
+            })
+        })
+        .collect()
+}
+
 /// Write `flat` (i64, row-major over the dataset's dims) into `ds`, narrowed to
-/// the dataset's on-disk integer type. Two's-complement low bytes are identical
-/// for signed/unsigned, so `as` narrowing is exact for values that fit.
+/// the dataset's on-disk integer type without truncation.
 fn write_flat_i64(ds: &Dataset, int_bytes: u8, signed: bool, flat: &[i64]) -> LmlResult<()> {
     macro_rules! w {
         ($t:ty) => {{
-            let v: Vec<$t> = flat.iter().map(|&x| x as $t).collect();
+            let v: Vec<$t> = checked_narrow(flat, stringify!($t))?;
             h5(ds.write_raw(&v), "write_raw")?;
         }};
     }
@@ -381,7 +394,7 @@ pub fn write_semantic(read: &SemanticRead, out: &Path) -> LmlResult<()> {
 }
 
 /// Materialize NWB Tensor atoms as channel-major i64 vectors.
-pub fn signal_channels(read: &SemanticRead) -> LmlResult<Vec<Vec<i64>>> {
+fn signal_channels(read: &SemanticRead) -> LmlResult<Vec<Vec<i64>>> {
     let mut signal = Vec::with_capacity(read.mapping.channels.len());
     for channel in &read.mapping.channels {
         let view = read
@@ -621,7 +634,7 @@ fn nwb_id<T>(seed: &[u8; 32], domain: &[u8], index: u64) -> semantic::ObjectId<T
 
 #[cfg(test)]
 mod tests {
-    use super::flatten_slot;
+    use super::{checked_narrow, flatten_slot};
 
     #[test]
     fn flatten_slot_restores_time_major_storage() {
@@ -638,5 +651,16 @@ mod tests {
         assert!(flatten_slot(&[vec![1], vec![2]], &[2, 2], true).is_err());
         assert!(flatten_slot(&[vec![1, 2]], &[2, 1], false).is_err());
         assert!(flatten_slot(&[vec![1, 2]], &[1, 1, 2], true).is_err());
+    }
+
+    #[test]
+    fn integer_writeback_rejects_lossy_narrowing() {
+        assert_eq!(
+            checked_narrow::<i16>(&[i64::from(i16::MIN), 0, i64::from(i16::MAX)], "i16").unwrap(),
+            [i16::MIN, 0, i16::MAX]
+        );
+        assert!(checked_narrow::<i16>(&[i64::from(i16::MAX) + 1], "i16").is_err());
+        assert!(checked_narrow::<u8>(&[-1], "u8").is_err());
+        assert!(checked_narrow::<u8>(&[256], "u8").is_err());
     }
 }

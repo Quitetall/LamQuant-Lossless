@@ -24,6 +24,8 @@
 //!   LAMQUANT_REGEN_FRONTEND=1 cargo test --features nwb     --test front_end_bit_exact -- --nocapture  # + NWB
 //!   then paste the printed shas into the GOLDEN_* tables below.
 
+#[cfg(feature = "nwb")]
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "archive")]
@@ -49,6 +51,58 @@ fn sha_bytes(b: &[u8]) -> String {
 
 fn regen() -> bool {
     std::env::var("LAMQUANT_REGEN_FRONTEND").is_ok()
+}
+
+#[cfg(feature = "nwb")]
+#[derive(Debug, Deserialize)]
+struct NwbSlot {
+    h5_path: String,
+    first_ch: usize,
+    n_ch: usize,
+}
+
+#[cfg(feature = "nwb")]
+fn nwb_slots(read: &lamquant_core::source::SemanticRead) -> Vec<NwbSlot> {
+    let capsule = read
+        .opened
+        .dataset()
+        .source_capsules()
+        .iter()
+        .find(|capsule| {
+            capsule.source().namespace() == "source.nwb.capsule.1"
+                && capsule.source().value() == "nwb_slots"
+        })
+        .expect("slot metadata capsule present");
+    let bytes = read
+        .opened
+        .access()
+        .payload_bytes(capsule.content_id())
+        .expect("slot metadata payload available");
+    serde_json::from_slice(bytes).expect("slot metadata decodes")
+}
+
+#[cfg(feature = "nwb")]
+fn signal_from_read(read: &lamquant_core::source::SemanticRead) -> Vec<Vec<i64>> {
+    let mut signal = Vec::with_capacity(read.mapping.channels.len());
+    for channel in &read.mapping.channels {
+        let block = read
+            .opened
+            .block_view(channel.atom_id)
+            .expect("NWB tensor payload block view");
+        assert_eq!(
+            block.bytes().len() % 8,
+            0,
+            "NWB tensor payload is i64 bytes"
+        );
+        signal.push(
+            block
+                .bytes()
+                .chunks_exact(8)
+                .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("exact chunk")))
+                .collect(),
+        );
+    }
+    signal
 }
 
 /// Deterministic test signals — varied shapes the codec must encode identically.
@@ -139,7 +193,23 @@ sys.exit(0)
             return;
         }
         let read = lamquant_core::nwb::read_semantic(&fx).expect("read_semantic");
-        let signal = lamquant_core::nwb::signal_channels(&read).expect("tensor channels");
+        let read_dataset = read.opened.dataset();
+        assert_eq!(read_dataset.recordings().len(), 1);
+        assert_eq!(read_dataset.streams().len(), 1);
+        assert!(!read.mapping.channels.is_empty());
+        let slots = nwb_slots(&read);
+        assert!(!slots.is_empty(), "NWB fixture should yield slot metadata");
+        let mut total_slot_channels = 0usize;
+        for slot in slots {
+            assert!(!slot.h5_path.is_empty(), "slot path should be non-empty");
+            assert!(slot.n_ch > 0);
+            total_slot_channels = total_slot_channels
+                .checked_add(slot.n_ch)
+                .expect("slot channel count should not overflow");
+            assert!(slot.first_ch + slot.n_ch <= read.mapping.channel_count);
+        }
+        assert_eq!(total_slot_channels, read.mapping.channel_count);
+        let signal = signal_from_read(&read);
         let got = sha_signal(&signal);
         if regen() {
             println!("NWB signal = {got}");

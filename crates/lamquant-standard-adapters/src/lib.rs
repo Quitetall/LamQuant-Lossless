@@ -114,7 +114,6 @@ impl StandardFileAdapter {
             .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
         let options = SemanticLoweringOptions::default()
             .with_modality(modality)
-            .without_reader_sidecars()
             .with_interchange_bound_sources(
                 format!("adapter.{}.binding.", self.profile.id.0),
                 source_objects,

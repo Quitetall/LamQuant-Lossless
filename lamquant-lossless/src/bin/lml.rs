@@ -7483,26 +7483,35 @@ fn cmd_nwb_unpack(input: &Path, output: &Path, plugin_so: Option<&Path>) -> R {
 /// (same paths, same values). The strong lossless gate for pack.
 #[cfg(feature = "nwb")]
 fn verify_int_datasets_match(a: &Path, b: &Path) -> R {
-    use std::collections::BTreeMap;
-    let to_map = |p: &Path| -> Rt<BTreeMap<String, Vec<Vec<i64>>>> {
-        Ok(lamquant_core::nwb::read_int_signals(p)?
-            .into_iter()
-            .map(|s| (s.h5_path, s.signal))
-            .collect())
+    let a = lamquant_core::nwb::read_semantic(a)?;
+    let b = lamquant_core::nwb::read_semantic(b)?;
+    let a_id = semantic_abir::interchange_content_id(a.opened.dataset())?;
+    let b_id = semantic_abir::interchange_content_id(b.opened.dataset())?;
+    let slot_metadata = |read: &lamquant_core::source::SemanticRead| -> Rt<Vec<u8>> {
+        let capsule = read
+            .opened
+            .dataset()
+            .source_capsules()
+            .iter()
+            .find(|capsule| {
+                capsule.source().namespace() == "source.nwb.capsule.1"
+                    && capsule.source().value() == "nwb_slots"
+            })
+            .ok_or("NWB semantic read omitted integer-dataset slot metadata")?;
+        Ok(read
+            .opened
+            .access()
+            .payload_bytes(capsule.content_id())
+            .ok_or("NWB semantic read omitted integer-dataset slot payload")?
+            .to_vec())
     };
-    let (ma, mb) = (to_map(a)?, to_map(b)?);
-    if ma.keys().ne(mb.keys()) {
+    let (a_slots, b_slots) = (slot_metadata(&a)?, slot_metadata(&b)?);
+    if a_id != b_id || a_slots != b_slots {
         return Err(format!(
-            "integer-dataset set differs after pack: {:?} vs {:?}",
-            ma.keys().collect::<Vec<_>>(),
-            mb.keys().collect::<Vec<_>>()
+            "NWB integer datasets differ after pack: semantic {a_id} vs {b_id}, slot metadata equal={}",
+            a_slots == b_slots
         )
         .into());
-    }
-    for (k, va) in &ma {
-        if mb.get(k) != Some(va) {
-            return Err(format!("dataset {k} differs after pack — NOT lossless").into());
-        }
     }
     Ok(())
 }

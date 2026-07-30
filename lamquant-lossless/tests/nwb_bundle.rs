@@ -8,6 +8,7 @@
 //! python3+h5py absent.
 #![cfg(feature = "nwb")]
 
+use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 
@@ -70,6 +71,55 @@ eq("deref(object ref)", deref, b["acquisition/ElectricalSeries/data"][...])
 sys.exit(0 if ok else 1)
 "#;
 
+#[derive(Debug, Deserialize)]
+struct NwbSlot {
+    h5_path: String,
+    first_ch: usize,
+    n_ch: usize,
+}
+
+fn nwb_slots(read: &lamquant_core::source::SemanticRead) -> Vec<NwbSlot> {
+    let capsule = read
+        .opened
+        .dataset()
+        .source_capsules()
+        .iter()
+        .find(|capsule| {
+            capsule.source().namespace() == "source.nwb.capsule.1"
+                && capsule.source().value() == "nwb_slots"
+        })
+        .expect("slot metadata capsule present");
+    let bytes = read
+        .opened
+        .access()
+        .payload_bytes(capsule.content_id())
+        .expect("slot metadata payload available");
+    serde_json::from_slice(bytes).expect("slot metadata decodes")
+}
+
+fn signal_from_read(read: &lamquant_core::source::SemanticRead) -> Vec<Vec<i64>> {
+    let mut signal = Vec::with_capacity(read.mapping.channels.len());
+    for channel in &read.mapping.channels {
+        let block = read
+            .opened
+            .block_view(channel.atom_id)
+            .expect("NWB tensor payload block view");
+        assert_eq!(
+            block.bytes().len() % 8,
+            0,
+            "NWB tensor payload is i64 bytes"
+        );
+        signal.push(
+            block
+                .bytes()
+                .chunks_exact(8)
+                .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("exact chunk")))
+                .collect(),
+        );
+    }
+    signal
+}
+
 #[test]
 fn zero_skeleton_roundtrip_preserves_structure_and_data() {
     let dir = tempfile::tempdir().unwrap();
@@ -83,10 +133,33 @@ fn zero_skeleton_roundtrip_preserves_structure_and_data() {
     }
 
     let read = lamquant_core::nwb::read_semantic(&src).expect("read_semantic");
+    let dataset = read.opened.dataset();
     assert_eq!(read.mapping.source_capsule_count, 2);
-    assert!(!lamquant_core::nwb::signal_channels(&read)
-        .expect("tensor channels")
-        .is_empty());
+    assert_eq!(dataset.source_capsules().len(), 2);
+    assert_eq!(dataset.recordings().len(), 1);
+    assert_eq!(dataset.streams().len(), 1);
+
+    let slots = nwb_slots(&read);
+    assert!(!slots.is_empty());
+    for slot in &slots {
+        assert!(!slot.h5_path.is_empty());
+        assert!(slot.first_ch < read.mapping.channel_count);
+        assert!(slot.n_ch > 0);
+        assert!(slot.first_ch + slot.n_ch <= read.mapping.channel_count);
+    }
+
+    let signal = signal_from_read(&read);
+    let stream_atoms = &dataset.streams()[0].atoms();
+    for (channel, samples) in read.mapping.channels.iter().zip(signal.iter()) {
+        assert!(!samples.is_empty());
+        assert!(stream_atoms.contains(&channel.atom_id));
+    }
+    let data_slot = slots
+        .iter()
+        .find(|slot| slot.h5_path.ends_with("ElectricalSeries/data"))
+        .expect("data slot present");
+    assert_eq!(data_slot.n_ch, 4, "data slot should be 4 channels");
+
     lamquant_core::nwb::write_semantic(&read, &out).expect("write_semantic");
 
     match py(CHECK, &[&src, &out]) {
