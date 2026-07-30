@@ -31,6 +31,7 @@ use lamquant_core::golomb;
 use lamquant_core::lifting;
 use lamquant_core::lml;
 use lamquant_core::lpc::{self, LpcMode};
+use lamquant_core::source::{from_uniform_signal_view, SourceMetadata};
 
 // ─── Deterministic synthetic signal ────────────────────────────────
 
@@ -64,6 +65,48 @@ fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
         signal.push(ch);
     }
     signal
+}
+
+fn encode_semantic_container(
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    window_size: usize,
+    metadata_json: &str,
+    mode: LpcMode,
+) -> container::EncodedLml {
+    let n_channels = signal.len();
+    let total_samples = signal.first().map_or(0, Vec::len);
+    let semantic = from_uniform_signal_view(
+        signal,
+        sample_rate,
+        (0..n_channels).map(|index| format!("ch{index}")).collect(),
+        signal
+            .iter()
+            .map(|channel| channel.iter().copied().min().unwrap_or(0) as f64)
+            .collect(),
+        signal
+            .iter()
+            .map(|channel| channel.iter().copied().max().unwrap_or(0) as f64)
+            .collect(),
+        total_samples as f64 / sample_rate,
+        SourceMetadata {
+            source_file: String::new(),
+            format: "BCS2-LML".into(),
+            patient_id: String::new(),
+            recording_info: metadata_json.into(),
+            startdate: String::new(),
+            phys_dim: "digital".into(),
+        },
+        semantic_abir::ValidationLimits::default(),
+    )
+    .expect("benchmark signal lowers to ABIR");
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    container::encode_views_with_options(
+        semantic.opened.dataset(),
+        &views,
+        container::LmlEncodeOptions::new(window_size).with_lpc_mode(mode),
+    )
+    .expect("benchmark ABIR dataset encodes")
 }
 
 // ─── Benchmarks ────────────────────────────────────────────────────
@@ -210,34 +253,22 @@ fn bench_container_roundtrip(c: &mut Criterion) {
 
     group.bench_function("encode", |b| {
         b.iter(|| {
-            let mut sink = Vec::with_capacity(bytes / 2);
-            container::write_into(
-                &mut sink,
+            encode_semantic_container(
                 black_box(&signal),
                 sample_rate,
                 window,
-                LOSSLESS_NOISE_BITS,
                 metadata,
                 LpcMode::default(),
             )
-            .expect("write_into");
-            sink
+            .into_bytes()
         });
     });
 
     // Encode once for the decode side; the cost is amortised by
     // criterion's iter count so per-iter timing is decode only.
-    let mut encoded = Vec::with_capacity(bytes / 2);
-    container::write_into(
-        &mut encoded,
-        &signal,
-        sample_rate,
-        window,
-        LOSSLESS_NOISE_BITS,
-        metadata,
-        LpcMode::default(),
-    )
-    .expect("write_into for decode setup");
+    let encoded =
+        encode_semantic_container(&signal, sample_rate, window, metadata, LpcMode::default())
+            .into_bytes();
     group.bench_function("decode", |b| {
         b.iter(|| {
             let _ = container::read_bytes(black_box(&encoded)).expect("read_bytes");
@@ -264,35 +295,27 @@ fn bench_container_roundtrip_32ch_100k(c: &mut Criterion) {
     lamquant_core::backend::set_global_backend(ComputeBackend::Firmware);
     group.bench_function("firmware", |b| {
         b.iter(|| {
-            let mut sink = Vec::with_capacity(bytes / 2);
-            container::write_into(
-                black_box(&mut sink),
-                &signal,
+            encode_semantic_container(
+                black_box(&signal),
                 sample_rate,
                 window,
-                LOSSLESS_NOISE_BITS,
                 metadata,
                 LpcMode::default(),
             )
-            .expect("write_into (firmware)");
-            sink
+            .into_bytes()
         });
     });
     lamquant_core::backend::set_global_backend(ComputeBackend::Desktop);
     group.bench_function("desktop_parallel", |b| {
         b.iter(|| {
-            let mut sink = Vec::with_capacity(bytes / 2);
-            container::write_into(
-                black_box(&mut sink),
-                &signal,
+            encode_semantic_container(
+                black_box(&signal),
                 sample_rate,
                 window,
-                LOSSLESS_NOISE_BITS,
                 metadata,
                 LpcMode::default(),
             )
-            .expect("write_into (desktop)");
-            sink
+            .into_bytes()
         });
     });
 

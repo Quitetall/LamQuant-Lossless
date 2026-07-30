@@ -553,7 +553,6 @@ fn recover(
     method: Method,
     original_size: u64,
     synthetic_from: Option<&SyntheticFromInfo>,
-    tmp_dir: Option<&Path>,
 ) -> Result<Vec<u8>, Error> {
     let bytes = match method {
         Method::Store => stored.to_vec(),
@@ -564,7 +563,7 @@ fn recover(
             "lma capsule entry",
         )?,
         Method::Lml => {
-            let edf = crate::lma::decode_lml_to_edf(stored, Some(original_size), tmp_dir)?;
+            let edf = crate::lma::decode_lml_to_edf(stored, Some(original_size))?;
             match synthetic_from {
                 Some(info) => crate::lma::re_emit_synthetic(&edf, info)?,
                 None => edf,
@@ -630,13 +629,7 @@ pub fn unpack_capsule(
             .ok_or_else(|| format!("lma capsule: entry `{rel}` has no frame"))?;
         let original_size = entry.content_len.unwrap_or(0);
 
-        let recovered = match recover(
-            stored,
-            method,
-            original_size,
-            synthetic.as_ref(),
-            target.parent(),
-        ) {
+        let recovered = match recover(stored, method, original_size, synthetic.as_ref()) {
             Ok(bytes) => bytes,
             Err(e) => {
                 if verbose {
@@ -723,7 +716,6 @@ fn recover_for_conversion(
     lma_path: &Path,
     entry: &crate::lma::ArchiveEntry,
     zstd_level: i32,
-    tmp_dir: Option<&Path>,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let bytes = crate::lma::read_entry(lma_path, &entry.path)?;
     match entry.method {
@@ -734,7 +726,7 @@ fn recover_for_conversion(
             Ok((bytes, stored))
         }
         Method::Lml => {
-            let edf = crate::lma::decode_lml_to_edf(&bytes, Some(entry.original_size), tmp_dir)?;
+            let edf = crate::lma::decode_lml_to_edf(&bytes, Some(entry.original_size))?;
             let original = match entry.synthetic_from.as_ref() {
                 Some(info) => crate::lma::re_emit_synthetic(&edf, info)?,
                 None => edf,
@@ -778,14 +770,13 @@ pub fn convert_archive(
     let mut stored_bytes: u64 = 0;
 
     for entry in &manifest {
-        let (original, stored) =
-            match recover_for_conversion(lma_path, entry, zstd_level, output_path.parent()) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    summary.errors.push((entry.path.clone(), e.to_string()));
-                    continue;
-                }
-            };
+        let (original, stored) = match recover_for_conversion(lma_path, entry, zstd_level) {
+            Ok(pair) => pair,
+            Err(e) => {
+                summary.errors.push((entry.path.clone(), e.to_string()));
+                continue;
+            }
+        };
         let actual_sha = crate::lma::sha256_hex(&original);
         if actual_sha != entry.sha256 {
             summary.errors.push((

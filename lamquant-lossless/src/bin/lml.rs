@@ -2101,10 +2101,112 @@ struct EncodeMetrics {
     n_windows: u32,
 }
 
+fn read_lml_file(path: &Path) -> lamquant_core::error::LmlResult<(Vec<Vec<i64>>, String)> {
+    let bytes = std::fs::read(path).map_err(lamquant_core::error::LmlError::Io)?;
+    container::read_bytes(&bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_semantic_views(
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    mut metadata: lamquant_core::source::SourceMetadata,
+    metadata_json: &str,
+    window_size: usize,
+    noise_bits: u8,
+    lpc_mode: lamquant_core::lpc::LpcMode,
+) -> lamquant_core::error::LmlResult<container::EncodedLml> {
+    if noise_bits != 0 {
+        return Err(lamquant_core::error::LmlError::InvalidHeader(
+            "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
+                .into(),
+        ));
+    }
+    let total_samples = signal.first().map_or(0, Vec::len);
+    metadata.recording_info = metadata_json.into();
+    let semantic = lamquant_core::source::from_uniform_signal_view(
+        signal,
+        sample_rate,
+        channels,
+        phys_min,
+        phys_max,
+        total_samples as f64 / sample_rate,
+        metadata,
+        semantic_abir::ValidationLimits::default(),
+    )?;
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    container::encode_views_with_options(
+        semantic.opened.dataset(),
+        &views,
+        container::LmlEncodeOptions::new(window_size).with_lpc_mode(lpc_mode),
+    )
+}
+
+fn encode_source_bundle(
+    bundle: &lamquant_core::source::SignalBundle,
+    sample_rate: f64,
+    metadata_json: &str,
+    window_size: usize,
+    noise_bits: u8,
+    lpc_mode: lamquant_core::lpc::LpcMode,
+) -> lamquant_core::error::LmlResult<container::EncodedLml> {
+    encode_semantic_views(
+        &bundle.signal,
+        sample_rate,
+        bundle.channels.clone(),
+        bundle.phys_min.clone(),
+        bundle.phys_max.clone(),
+        bundle.metadata.clone(),
+        metadata_json,
+        window_size,
+        noise_bits,
+        lpc_mode,
+    )
+}
+
+fn encode_uniform_signal(
+    signal: &[Vec<i64>],
+    sample_rate: f64,
+    metadata_json: &str,
+    window_size: usize,
+    noise_bits: u8,
+    lpc_mode: lamquant_core::lpc::LpcMode,
+) -> lamquant_core::error::LmlResult<container::EncodedLml> {
+    let n_channels = signal.len();
+    encode_semantic_views(
+        signal,
+        sample_rate,
+        (0..n_channels).map(|index| format!("ch{index}")).collect(),
+        signal
+            .iter()
+            .map(|channel| channel.iter().copied().min().unwrap_or(0) as f64)
+            .collect(),
+        signal
+            .iter()
+            .map(|channel| channel.iter().copied().max().unwrap_or(0) as f64)
+            .collect(),
+        lamquant_core::source::SourceMetadata {
+            source_file: String::new(),
+            format: "BCS2-LML".into(),
+            patient_id: String::new(),
+            recording_info: String::new(),
+            startdate: String::new(),
+            phys_dim: "digital".into(),
+        },
+        metadata_json,
+        window_size,
+        noise_bits,
+        lpc_mode,
+    )
+}
+
 /// Phase 4.1 — encode a BrainVision (.vhdr/.eeg/.vmrk) recording.
 ///
 /// Goes through `BrainVisionReader::read_bundle` → `SignalBundle` →
-/// `container::write_into`. The full `.vhdr` and any `.vmrk` are
+/// canonical ABIR → fused LML encode. The full `.vhdr` and any `.vmrk` are
 /// preserved in metadata as base64+zstd-encoded blobs (`vhdr_b64` and
 /// `vmrk_b64`) so a future `lml decode --to-brainvision` can reverse
 /// the encode losslessly. Today there's no `--to-brainvision` flag;
@@ -2119,7 +2221,6 @@ fn encode_one_brainvision(
     window_size: usize,
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_core::container;
     use lamquant_core::source::BrainVisionReader;
     let t0 = Instant::now();
     let mut reader = BrainVisionReader::new(vhdr_path);
@@ -2192,15 +2293,16 @@ fn encode_one_brainvision(
         }
     }
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let stats = container::write_into(
-        &mut sink,
-        &bundle.signal,
+    let encoded = encode_source_bundle(
+        &bundle,
         sample_rate,
+        &metadata_json,
         window_size,
         noise_bits,
-        &metadata_json,
         lpc_mode,
     )?;
+    sink.write_all(encoded.as_bytes())?;
+    let stats = encoded.stats().clone();
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(
@@ -2221,7 +2323,7 @@ fn encode_one_brainvision(
 
     if verify {
         // Round-trip: decompress and compare i64 samples.
-        let (recovered, _meta) = container::read_file(lml_path)?;
+        let (recovered, _meta) = read_lml_file(lml_path)?;
         if recovered.len() != bundle.signal.len() {
             return Err(format!(
                 "verify (brainvision): channel count {} != {}",
@@ -2332,7 +2434,6 @@ fn encode_one_raw(
     window_size: usize,
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_core::container;
     use lamquant_core::source::RawReader;
     let t0 = Instant::now();
     let mut reader = RawReader::new(raw_path);
@@ -2400,15 +2501,16 @@ fn encode_one_raw(
         }
     }
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let stats = container::write_into(
-        &mut sink,
-        &bundle.signal,
+    let encoded = encode_source_bundle(
+        &bundle,
         sample_rate,
+        &metadata_json,
         window_size,
         noise_bits,
-        &metadata_json,
         lpc_mode,
     )?;
+    sink.write_all(encoded.as_bytes())?;
+    let stats = encoded.stats().clone();
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(kind, "encode raw: BufWriter flush failed before sync_all")
@@ -2424,7 +2526,7 @@ fn encode_one_raw(
     };
 
     if verify {
-        let (recovered, _meta) = container::read_file(lml_path)?;
+        let (recovered, _meta) = read_lml_file(lml_path)?;
         if recovered.len() != bundle.signal.len() {
             return Err(format!(
                 "verify (raw): channel count {} != {}",
@@ -2527,7 +2629,6 @@ fn encode_one_cnt(
     window_size: usize,
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_core::container;
     use lamquant_core::source::CntReader;
     let t0 = Instant::now();
     let mut reader = CntReader::new(cnt_path);
@@ -2589,15 +2690,16 @@ fn encode_one_cnt(
         }
     }
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let stats = container::write_into(
-        &mut sink,
-        &bundle.signal,
+    let encoded = encode_source_bundle(
+        &bundle,
         sample_rate,
+        &metadata_json,
         window_size,
         noise_bits,
-        &metadata_json,
         lpc_mode,
     )?;
+    sink.write_all(encoded.as_bytes())?;
+    let stats = encoded.stats().clone();
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(kind, "encode cnt: BufWriter flush failed before sync_all")
@@ -2613,7 +2715,7 @@ fn encode_one_cnt(
     };
 
     if verify {
-        let (recovered, _meta) = container::read_file(lml_path)?;
+        let (recovered, _meta) = read_lml_file(lml_path)?;
         for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
             if a != b {
                 return Err(format!(
@@ -2691,7 +2793,6 @@ fn encode_one_dicom(
     window_size: usize,
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_core::container;
     use lamquant_core::source::DicomWaveformReader;
     let t0 = Instant::now();
     let mut reader = DicomWaveformReader::new(dcm_path);
@@ -2753,15 +2854,16 @@ fn encode_one_dicom(
         }
     }
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let stats = container::write_into(
-        &mut sink,
-        &bundle.signal,
+    let encoded = encode_source_bundle(
+        &bundle,
         sample_rate,
+        &metadata_json,
         window_size,
         noise_bits,
-        &metadata_json,
         lpc_mode,
     )?;
+    sink.write_all(encoded.as_bytes())?;
+    let stats = encoded.stats().clone();
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(kind, "encode dicom: BufWriter flush failed before sync_all")
@@ -2777,7 +2879,7 @@ fn encode_one_dicom(
     };
 
     if verify {
-        let (recovered, _meta) = container::read_file(lml_path)?;
+        let (recovered, _meta) = read_lml_file(lml_path)?;
         for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
             if a != b {
                 return Err(format!(
@@ -2858,7 +2960,6 @@ fn encode_one_eeglab(
     lpc_mode: lamquant_core::lpc::LpcMode,
     lossy_int16: bool,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_core::container;
     use lamquant_core::source::EeglabReader;
     let t0 = Instant::now();
     let mut reader = EeglabReader::new(set_path).with_lossy_int16(lossy_int16);
@@ -2922,15 +3023,16 @@ fn encode_one_eeglab(
         }
     }
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let stats = container::write_into(
-        &mut sink,
-        &bundle.signal,
+    let encoded = encode_source_bundle(
+        &bundle,
         sample_rate,
+        &metadata_json,
         window_size,
         noise_bits,
-        &metadata_json,
         lpc_mode,
     )?;
+    sink.write_all(encoded.as_bytes())?;
+    let stats = encoded.stats().clone();
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(
@@ -2949,7 +3051,7 @@ fn encode_one_eeglab(
     };
 
     if verify {
-        let (recovered, _meta) = container::read_file(lml_path)?;
+        let (recovered, _meta) = read_lml_file(lml_path)?;
         for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
             if a != b {
                 return Err(format!(
@@ -3292,7 +3394,7 @@ fn encode_one_inner(
 
     let mut verified = false;
     if verify {
-        let (recovered, _) = container::read_file(lml_path)?;
+        let (recovered, _) = read_lml_file(lml_path)?;
         let mask = if noise_bits > 0 {
             !((1i64 << noise_bits) - 1)
         } else {
@@ -3313,7 +3415,7 @@ fn encode_one_inner(
 
     // Feature 4: Cross-validate — decode the written file, recompute SHA-256
     if cross_validate {
-        let (recovered, _) = container::read_file(lml_path)?;
+        let (recovered, _) = read_lml_file(lml_path)?;
         let mut dec_hasher = Sha256::new();
         let mask = if noise_bits > 0 {
             !((1i64 << noise_bits) - 1)
@@ -3612,7 +3714,7 @@ fn encode_one_descriptor(
     };
 
     if verify {
-        let (recovered, _meta) = container::read_file(lml_path)?;
+        let (recovered, _meta) = read_lml_file(lml_path)?;
         if expected_signal.as_ref() != Some(&recovered) {
             return Err("verify (descriptor): decoded signal != source bundle".into());
         }
@@ -4701,7 +4803,7 @@ fn decode_one_to_raw(
     )
     .entered();
 
-    let (signal, _) = container::read_file(lml_path)?;
+    let (signal, _) = read_lml_file(lml_path)?;
     let n_ch = signal.len();
     let total_samples = signal.first().map_or(0, Vec::len);
 
@@ -4807,7 +4909,7 @@ fn decode_one_to_edf(
     lml_path: &Path,
     out_path: &Path,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
-    let (signal, metadata) = container::read_file(lml_path)?;
+    let (signal, metadata) = read_lml_file(lml_path)?;
 
     // Pull every reconstruction input from the metadata. Using the
     // helpers from cmd_roundtrip below — same JSON-pulling primitives.
@@ -5006,7 +5108,7 @@ fn decode_one_partial_to_raw(
     channels: Option<&[usize]>,
     time_range: Option<(u32, u32)>,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
-    let (signal, _) = container::read_file(lml_path)?;
+    let (signal, _) = read_lml_file(lml_path)?;
     let total_samples = signal.first().map_or(0, Vec::len);
     let total_samples_u32: u32 = total_samples
         .try_into()
@@ -5125,7 +5227,7 @@ fn cmd_decode(
             );
         }
         if partial {
-            let (signal, _) = container::read_file(&lmls[0])?;
+            let (signal, _) = read_lml_file(&lmls[0])?;
             let total_samples = signal.first().map_or(0, Vec::len);
             let total_samples_u32: u32 = total_samples.try_into().map_err(|_| {
                 format!("decode --time-range: total_samples {total_samples} > u32::MAX")
@@ -5163,7 +5265,7 @@ fn cmd_decode(
             return Ok(());
         }
         use std::io::Write as _;
-        let (channels, _) = container::read_file(&lmls[0])?;
+        let (channels, _) = read_lml_file(&lmls[0])?;
         let n_ch = channels.len();
         let total_samples = channels.first().map_or(0, Vec::len);
         let mut out = std::io::stdout().lock();
@@ -5749,7 +5851,7 @@ fn cmd_verify(input: &Path, recursive: bool, explain: bool) -> R {
             }
             continue;
         }
-        match container::read_file(f) {
+        match read_lml_file(f) {
             Ok((sig, _)) => {
                 let n_ch = sig.len();
                 let t = if n_ch > 0 { sig[0].len() } else { 0 };
@@ -6317,7 +6419,7 @@ fn cmd_verify_manifest(manifest_path: &Path) -> R {
 
         // Decode and compute SHA-256 of signal
         if !expected_sha.is_empty() {
-            match container::read_file(&full_path) {
+            match read_lml_file(&full_path) {
                 Ok((signal, _)) => {
                     let mut hasher = Sha256::new();
                     for ch in &signal {
@@ -6424,7 +6526,7 @@ fn cmd_stats(input: &Path, recursive: bool) -> R {
     } else {
         // Single file: detailed per-channel stats table
         let lml_path = &lmls[0];
-        let (signal, metadata) = container::read_file(lml_path)?;
+        let (signal, metadata) = read_lml_file(lml_path)?;
         let n_ch = signal.len();
         let t = if n_ch > 0 { signal[0].len() } else { 0 };
 
@@ -6574,7 +6676,7 @@ fn cmd_export(input: &Path, output: Option<&Path>, format: &str, lossless_mode: 
             _ => {}
         }
     }
-    let (signal, metadata) = container::read_file(input)?;
+    let (signal, metadata) = read_lml_file(input)?;
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
 
@@ -7416,8 +7518,8 @@ fn verify_int_datasets_match(a: &Path, b: &Path) -> R {
 // ── Feature 8: diff ──
 
 fn cmd_diff(a_path: &Path, b_path: &Path) -> R {
-    let (sig_a, _meta_a) = container::read_file(a_path)?;
-    let (sig_b, _meta_b) = container::read_file(b_path)?;
+    let (sig_a, _meta_a) = read_lml_file(a_path)?;
+    let (sig_b, _meta_b) = read_lml_file(b_path)?;
 
     let n_ch_a = sig_a.len();
     let n_ch_b = sig_b.len();
@@ -8176,17 +8278,13 @@ fn cmd_verify_archive_explainer(input: &Path) -> R {
         let sha_prefix = &entry.sha256[..entry.sha256.len().min(12)];
 
         let (ok, decompressed_size, detail) = match entry.method {
-            lma::Method::Lml => {
-                let tmp = tempfile::NamedTempFile::new()?;
-                std::fs::write(tmp.path(), &payload)?;
-                match container::read_file(tmp.path()) {
-                    Ok((signal, _)) => {
-                        let bytes = signal.iter().map(|ch| ch.len() * 8).sum::<usize>() as u64;
-                        (true, bytes, "LML decode OK".to_string())
-                    }
-                    Err(e) => (false, 0, format!("LML decode error: {}", e)),
+            lma::Method::Lml => match container::read_bytes(&payload) {
+                Ok((signal, _)) => {
+                    let bytes = signal.iter().map(|ch| ch.len() * 8).sum::<usize>() as u64;
+                    (true, bytes, "LML decode OK".to_string())
                 }
-            }
+                Err(e) => (false, 0, format!("LML decode error: {}", e)),
+            },
             lma::Method::Zstd => match zstd::decode_all(payload.as_slice()) {
                 Ok(decompressed) => {
                     let hash = format!("{:x}", Sha256::digest(&decompressed));
@@ -8343,8 +8441,8 @@ fn cmd_verify_archive(input: &Path) -> R {
 
     // Verify entries IN PARALLEL: each rayon worker opens its OWN file handle and
     // decode-checks its payload independently (verify is read-only — no ordering
-    // constraint). The per-file LML verify uses a uniquely-named tempfile, so
-    // concurrent verifies never collide. `None` = pass; `Some(msg)` = fail.
+    // constraint). LML verification authenticates each payload directly in
+    // memory. `None` = pass; `Some(msg)` = fail.
     // Messages are printed IN MANIFEST ORDER below, so output stays deterministic.
     let verdicts: Vec<Option<String>> = entries
         .par_iter()
@@ -8363,15 +8461,8 @@ fn cmd_verify_archive(input: &Path) -> R {
 
             match entry.method {
                 lma::Method::Lml => {
-                    // Decodable LML payload (CRC checked inside container::read_file).
-                    let tmp = match tempfile::NamedTempFile::new() {
-                        Ok(t) => t,
-                        Err(e) => return Some(format!("  FAIL: {} — tempfile: {}", entry.path, e)),
-                    };
-                    if let Err(e) = std::fs::write(tmp.path(), &payload) {
-                        return Some(format!("  FAIL: {} — tempfile write: {}", entry.path, e));
-                    }
-                    match container::read_file(tmp.path()) {
+                    // Decodable LML payload (CRC/authenticity checked during byte-open).
+                    match container::read_bytes(&payload) {
                         Ok(_) => None,
                         Err(e) => Some(format!("  FAIL: {} — LML decode error: {}", entry.path, e)),
                     }
@@ -8818,7 +8909,7 @@ fn cmd_split(input: &Path, chunks: u32, output_dir: &Path, force: bool) -> R {
     }
 
     let sample_rate = read_sample_rate_from_header(input)?;
-    let (signal, metadata) = container::read_file(input)?;
+    let (signal, metadata) = read_lml_file(input)?;
     let n_ch = signal.len();
     let total_samples = if n_ch > 0 { signal[0].len() } else { 0 };
     if total_samples == 0 {
@@ -8861,15 +8952,15 @@ fn cmd_split(input: &Path, chunks: u32, output_dir: &Path, force: bool) -> R {
         lamquant_core::paths::ensure_can_write(&out_path, force)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
         let mut sink = std::io::BufWriter::new(std::fs::File::create(&out_path)?);
-        container::write_into(
-            &mut sink,
+        let encoded = encode_uniform_signal(
             &slice,
             sample_rate,
+            &meta,
             window_size,
             0,
-            &meta,
             LpcMode::default(),
         )?;
+        sink.write_all(encoded.as_bytes())?;
         let f = sink.into_inner().map_err(|e| {
             let kind = e.error().kind();
             std::io::Error::new(kind, "lml split: BufWriter flush failed before sync_all")
@@ -8999,7 +9090,7 @@ fn cmd_concat(inputs: &[PathBuf], output: &Path, force: bool) -> R {
     let mut loaded: Vec<(PathBuf, Vec<Vec<i64>>, String, f64, usize)> = Vec::new();
     for path in inputs {
         let sr = read_sample_rate_from_header(path)?;
-        let (sig, meta) = container::read_file(path)?;
+        let (sig, meta) = read_lml_file(path)?;
         let ws = container::parse_header(&std::fs::read(path)?)?.window_size;
         loaded.push((path.clone(), sig, meta, sr, ws));
     }
@@ -9099,15 +9190,15 @@ fn cmd_concat(inputs: &[PathBuf], output: &Path, force: bool) -> R {
     }
     let t0 = Instant::now();
     let mut sink = std::io::BufWriter::new(std::fs::File::create(output)?);
-    container::write_into(
-        &mut sink,
+    let encoded = encode_uniform_signal(
         &out_signal,
         sr_ref,
+        &out_meta,
         ws_ref,
         0,
-        &out_meta,
         LpcMode::default(),
     )?;
+    sink.write_all(encoded.as_bytes())?;
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(kind, "lml concat: BufWriter flush failed before sync_all")
@@ -9222,7 +9313,7 @@ fn cmd_strip_pii(
     }
 
     let t0 = Instant::now();
-    let (signal, metadata_json) = container::read_file(input)?;
+    let (signal, metadata_json) = read_lml_file(input)?;
     let header_bytes = match meta_b64_zstd_field(&metadata_json, "edf_header") {
         Some(bytes) if !bytes.is_empty() => bytes,
         _ => {
@@ -9261,15 +9352,15 @@ fn cmd_strip_pii(
     };
 
     let mut sink = std::io::BufWriter::new(std::fs::File::create(&target_path)?);
-    container::write_into(
-        &mut sink,
+    let encoded = encode_uniform_signal(
         &signal,
         sample_rate,
+        &new_metadata,
         window_size,
         0,
-        &new_metadata,
         LpcMode::default(),
     )?;
+    sink.write_all(encoded.as_bytes())?;
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(kind, "strip-pii: BufWriter flush failed before sync_all")
@@ -9353,7 +9444,7 @@ fn cmd_set_metadata(
     }
 
     let t0 = Instant::now();
-    let (signal, metadata_json) = container::read_file(input)?;
+    let (signal, metadata_json) = read_lml_file(input)?;
     let mut v: serde_json::Value = serde_json::from_str(&metadata_json).map_err(|e| {
         format!("set-metadata: existing metadata is not valid JSON ({e}); refuse to clobber")
     })?;
@@ -9412,15 +9503,15 @@ fn cmd_set_metadata(
     };
 
     let mut sink = std::io::BufWriter::new(std::fs::File::create(&target_path)?);
-    container::write_into(
-        &mut sink,
+    let encoded = encode_uniform_signal(
         &signal,
         sample_rate,
+        &new_metadata,
         window_size,
         0,
-        &new_metadata,
         LpcMode::default(),
     )?;
+    sink.write_all(encoded.as_bytes())?;
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(kind, "set-metadata: BufWriter flush failed before sync_all")
@@ -9482,7 +9573,7 @@ fn cmd_recompress(
     }
 
     let t0 = Instant::now();
-    let (signal, metadata_json) = container::read_file(input)?;
+    let (signal, metadata_json) = read_lml_file(input)?;
     let sample_rate = read_sample_rate_from_header(input)?;
     let src_window_size = container::parse_header(&std::fs::read(input)?)?.window_size;
     let src_size = std::fs::metadata(input)?.len();
@@ -9502,15 +9593,15 @@ fn cmd_recompress(
     };
 
     let mut sink = std::io::BufWriter::new(std::fs::File::create(&target_path)?);
-    container::write_into(
-        &mut sink,
+    let encoded = encode_uniform_signal(
         &signal,
         sample_rate,
+        &metadata_json,
         window_size,
         noise_bits,
-        &metadata_json,
         lpc_mode,
     )?;
+    sink.write_all(encoded.as_bytes())?;
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(kind, "recompress: BufWriter flush failed before sync_all")
@@ -9608,19 +9699,19 @@ fn cmd_self_test() -> R {
 
     println!("self-test: synth {} channels × {} samples", n_ch, n_samples);
 
-    // Encode into Vec sink (no filesystem dependency).
-    let mut sink: Vec<u8> = Vec::new();
+    // Encode semantic ABIR into memory (no filesystem dependency).
     let t0 = std::time::Instant::now();
-    let stats = container::write_into(
-        &mut sink,
+    let encoded = encode_uniform_signal(
         &sig,
         250.0,
+        "{\"source\":\"self-test\"}",
         256,
         0,
-        "{\"source\":\"self-test\"}",
         LpcMode::default(),
     )
     .map_err(|e| format!("encode failed: {e}"))?;
+    let stats = encoded.stats().clone();
+    let sink = encoded.into_bytes();
     let enc_ms = t0.elapsed().as_millis();
 
     println!(

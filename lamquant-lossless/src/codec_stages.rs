@@ -21,10 +21,10 @@
 //! richer `SignalBundle`.
 
 use crate::container;
-use crate::error::LmlResult;
+use crate::error::{LmlError, LmlResult};
 use crate::lpc::LpcMode;
 use crate::pipeline::Stage;
-use crate::source::SignalBundle;
+use crate::source::{from_uniform_signal_view, SignalBundle};
 
 /// Encoded LML container bytes. Distinct from raw `Vec<u8>` at the
 /// type level so a pipeline can't confuse "encoded container" with
@@ -133,18 +133,31 @@ impl Stage for CompressStage {
     fn process(&mut self, bundle: SignalBundle) -> LmlResult<EncodedContainer> {
         // Validate at the trust boundary — Bible R23.
         bundle.validate()?;
-        let mut sink: Vec<u8> = Vec::new();
-        let stats = container::write_into(
-            &mut sink,
+        if self.noise_bits != 0 {
+            return Err(LmlError::InvalidHeader(
+                "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
+                    .into(),
+            ));
+        }
+        let mut metadata = bundle.metadata.clone();
+        metadata.recording_info = self.metadata_json.clone();
+        let semantic = from_uniform_signal_view(
             &bundle.signal,
             self.sample_rate,
-            self.window_size,
-            self.noise_bits,
-            &self.metadata_json,
-            self.mode,
+            bundle.channels.clone(),
+            bundle.phys_min.clone(),
+            bundle.phys_max.clone(),
+            bundle.signal[0].len() as f64 / self.sample_rate,
+            metadata,
+            semantic_abir::ValidationLimits::default(),
         )?;
-        debug_assert_eq!(stats.compressed_size, sink.len());
-        Ok(EncodedContainer(sink))
+        let views = bundle.signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let encoded = container::encode_views_with_options(
+            semantic.opened.dataset(),
+            &views,
+            container::LmlEncodeOptions::new(self.window_size).with_lpc_mode(self.mode),
+        )?;
+        Ok(EncodedContainer(encoded.into_bytes()))
     }
 }
 

@@ -27,6 +27,62 @@ pub struct ContainerStats {
     pub duration_s: f64,
 }
 
+/// Explicit controls for semantic ABIR-to-LML encoding.
+#[derive(Clone, Copy, Debug)]
+pub struct LmlEncodeOptions {
+    window_size: usize,
+    lpc_mode: crate::lpc::LpcMode,
+}
+
+impl LmlEncodeOptions {
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            window_size,
+            lpc_mode: crate::lpc::LpcMode::default(),
+        }
+    }
+
+    pub const fn with_lpc_mode(mut self, lpc_mode: crate::lpc::LpcMode) -> Self {
+        self.lpc_mode = lpc_mode;
+        self
+    }
+
+    pub const fn window_size(self) -> usize {
+        self.window_size
+    }
+
+    pub const fn lpc_mode(self) -> crate::lpc::LpcMode {
+        self.lpc_mode
+    }
+}
+
+impl Default for LmlEncodeOptions {
+    fn default() -> Self {
+        Self::new(lamquant_abir_codec::MAX_PACKET_SAMPLES)
+    }
+}
+
+/// Encoded BCS2 LML bytes with shape and compression evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EncodedLml {
+    bytes: Vec<u8>,
+    stats: ContainerStats,
+}
+
+impl EncodedLml {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub const fn stats(&self) -> &ContainerStats {
+        &self.stats
+    }
+}
+
 /// Semantic shape extracted from an authenticated BCS2 LML bundle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContainerHeader {
@@ -40,8 +96,74 @@ pub struct ContainerHeader {
 
 /// Encode a canonical ABIR dataset as a BCS2 LML profile.
 pub fn encode<A: PayloadAccess>(dataset: &AbirDataset, access: &A) -> LmlResult<Vec<u8>> {
-    lamquant_abir_codec::encode_lml_bundle(dataset, access, ResourceBounds::default())
-        .map_err(bundle_error)
+    encode_with_options(dataset, access, LmlEncodeOptions::default()).map(EncodedLml::into_bytes)
+}
+
+/// Encode canonical ABIR semantics with explicit packet and predictor controls.
+pub fn encode_with_options<A: PayloadAccess>(
+    dataset: &AbirDataset,
+    access: &A,
+    options: LmlEncodeOptions,
+) -> LmlResult<EncodedLml> {
+    let (n_channels, total_samples) = semantic_signal_shape(dataset)?;
+    let sample_rate = sample_rate(dataset)?;
+    let packet_samples = options
+        .window_size()
+        .min(lamquant_abir_codec::MAX_PACKET_SAMPLES);
+    if packet_samples == 0 {
+        return Err(invalid("window size must be greater than zero"));
+    }
+    let bytes = lamquant_abir_codec::encode_lml_bundle_with_window_size_and_mode(
+        dataset,
+        access,
+        packet_samples,
+        options.lpc_mode(),
+        ResourceBounds::default(),
+    )
+    .map_err(bundle_error)?;
+    let stats = stats(
+        n_channels,
+        total_samples,
+        packet_samples,
+        bytes.len(),
+        sample_rate,
+    );
+    Ok(EncodedLml { bytes, stats })
+}
+
+/// Encode borrowed native sample views after proving they close over ABIR.
+///
+/// This is the fused host path: ABIR remains the semantic seam while callers
+/// avoid decoding a second sample matrix from an in-memory payload resolver.
+pub fn encode_views_with_options(
+    dataset: &AbirDataset,
+    signal: &[&[i64]],
+    options: LmlEncodeOptions,
+) -> LmlResult<EncodedLml> {
+    let (n_channels, total_samples) = semantic_signal_shape(dataset)?;
+    let sample_rate = sample_rate(dataset)?;
+    let packet_samples = options
+        .window_size()
+        .min(lamquant_abir_codec::MAX_PACKET_SAMPLES);
+    if packet_samples == 0 {
+        return Err(invalid("window size must be greater than zero"));
+    }
+    let bytes = lamquant_abir_codec::encode_lml_bundle_from_views_with_mode(
+        dataset,
+        signal,
+        packet_samples,
+        options.lpc_mode(),
+        ResourceBounds::default(),
+    )
+    .map_err(bundle_error)?;
+    let stats = stats(
+        n_channels,
+        total_samples,
+        packet_samples,
+        bytes.len(),
+        sample_rate,
+    );
+    Ok(EncodedLml { bytes, stats })
 }
 
 /// Authenticate and decode a BCS2 LML profile.
@@ -69,17 +191,14 @@ pub fn encode_signal_bundle_with_window_size(
     .map_err(bundle_error)
 }
 
-/// Convenience entry point for callers which already hold a uniform integer
-/// matrix. New Adapter and processing seams should prefer [`encode`].
-pub fn write_into<W: Write>(
-    sink: &mut W,
+fn encode_uniform_signal(
     signal: &[Vec<i64>],
     sample_rate: f64,
     window_size: usize,
     noise_bits: u8,
     metadata_json: &str,
     lpc_mode: crate::lpc::LpcMode,
-) -> LmlResult<ContainerStats> {
+) -> LmlResult<EncodedLml> {
     if noise_bits != 0 {
         return Err(LmlError::InvalidHeader(
             "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
@@ -118,23 +237,12 @@ pub fn write_into<W: Write>(
         },
         semantic_abir::ValidationLimits::default(),
     )?;
-    let packet_samples = window_size.min(lamquant_abir_codec::MAX_PACKET_SAMPLES);
-    let bytes = lamquant_abir_codec::encode_lml_bundle_from_signal_with_mode(
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    encode_views_with_options(
         semantic.opened.dataset(),
-        signal,
-        packet_samples,
-        lpc_mode,
-        ResourceBounds::default(),
+        &views,
+        LmlEncodeOptions::new(window_size).with_lpc_mode(lpc_mode),
     )
-    .map_err(bundle_error)?;
-    sink.write_all(&bytes).map_err(LmlError::Io)?;
-    Ok(stats(
-        n_channels,
-        total_samples,
-        packet_samples,
-        bytes.len(),
-        sample_rate,
-    ))
 }
 
 pub fn write_file(
@@ -170,9 +278,7 @@ pub fn write_file_with_mode(
     }
     let temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))
         .map_err(LmlError::Io)?;
-    let mut file = temporary.reopen().map_err(LmlError::Io)?;
-    let result = write_into(
-        &mut file,
+    let encoded = encode_uniform_signal(
         signal,
         sample_rate,
         window_size,
@@ -180,12 +286,14 @@ pub fn write_file_with_mode(
         metadata_json,
         lpc_mode,
     )?;
+    let mut file = temporary.reopen().map_err(LmlError::Io)?;
+    file.write_all(encoded.as_bytes()).map_err(LmlError::Io)?;
     file.sync_all().map_err(LmlError::Io)?;
     drop(file);
     temporary
         .persist(path)
         .map_err(|error| LmlError::Io(error.error))?;
-    Ok(result)
+    Ok(encoded.stats)
 }
 
 pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
@@ -196,11 +304,6 @@ pub fn read_bytes(data: &[u8]) -> LmlResult<(Vec<Vec<i64>>, String)> {
 pub fn read_from<R: Read>(source: &mut R) -> LmlResult<(Vec<Vec<i64>>, String)> {
     let mut data = Vec::new();
     source.read_to_end(&mut data).map_err(LmlError::Io)?;
-    read_bytes(&data)
-}
-
-pub fn read_file(path: &Path) -> LmlResult<(Vec<Vec<i64>>, String)> {
-    let data = std::fs::read(path).map_err(LmlError::Io)?;
     read_bytes(&data)
 }
 
@@ -365,6 +468,45 @@ fn sample_rate(dataset: &AbirDataset) -> LmlResult<f64> {
     Ok(numerator as f64 / denominator as f64)
 }
 
+fn semantic_signal_shape(dataset: &AbirDataset) -> LmlResult<(usize, usize)> {
+    let stream = dataset
+        .streams()
+        .first()
+        .ok_or_else(|| invalid("BCS2 LML dataset has no stream"))?;
+    let mut total_samples = None;
+    for atom_id in stream.atoms() {
+        let atom = dataset
+            .atoms()
+            .iter()
+            .find(|atom| atom.id() == *atom_id)
+            .ok_or_else(|| invalid("BCS2 LML stream atom is unresolved"))?;
+        let Atom::SignalBlock(_) = atom else {
+            return Err(invalid("BCS2 LML stream atom is not a signal block"));
+        };
+        let samples = atom
+            .payload()
+            .ok_or_else(|| invalid("BCS2 LML signal has no payload"))?
+            .shape()
+            .last()
+            .copied()
+            .and_then(|samples| usize::try_from(samples).ok())
+            .ok_or_else(|| invalid("BCS2 LML signal payload has invalid shape"))?;
+        if samples == 0 {
+            return Err(invalid("BCS2 LML signal payload is empty"));
+        }
+        if total_samples
+            .replace(samples)
+            .is_some_and(|old| old != samples)
+        {
+            return Err(invalid("BCS2 LML signal payloads are not uniform"));
+        }
+    }
+    Ok((
+        stream.atoms().len(),
+        total_samples.ok_or_else(|| invalid("BCS2 LML stream has no signal atom"))?,
+    ))
+}
+
 fn metadata(dataset: &AbirDataset) -> String {
     dataset
         .recordings()
@@ -442,9 +584,7 @@ mod tests {
     #[test]
     fn bcs2_round_trip_preserves_samples_and_metadata() {
         let signal = vec![vec![1, -2, 3, -4], vec![5, -6, 7, -8]];
-        let mut bytes = Vec::new();
-        let result = write_into(
-            &mut bytes,
+        let encoded = encode_uniform_signal(
             &signal,
             250.0,
             4,
@@ -453,12 +593,62 @@ mod tests {
             crate::lpc::LpcMode::Fixed,
         )
         .unwrap();
-        assert_eq!(&bytes[..4], b"ABIR");
-        assert_eq!(result.n_channels, 2);
-        assert_eq!(result.n_windows, 1);
-        let (decoded, metadata) = read_bytes(&bytes).unwrap();
+        assert_eq!(&encoded.as_bytes()[..4], b"ABIR");
+        assert_eq!(encoded.stats().n_channels, 2);
+        assert_eq!(encoded.stats().n_windows, 1);
+        let (decoded, metadata) = read_bytes(encoded.as_bytes()).unwrap();
         assert_eq!(decoded, signal);
         assert_eq!(metadata, "{\"source\":\"test\"}");
+    }
+
+    #[test]
+    fn semantic_encode_options_honor_packet_size_and_round_trip() {
+        let signal = vec![
+            vec![1, -2, 3, -4, 5, -6, 7],
+            vec![8, -9, 10, -11, 12, -13, 14],
+        ];
+        let semantic = from_uniform_signal_view(
+            &signal,
+            250.0,
+            vec!["Fp1".into(), "Cz".into()],
+            vec![-100.0, -200.0],
+            vec![100.0, 200.0],
+            7.0 / 250.0,
+            SourceMetadata {
+                source_file: "fixture.edf".into(),
+                format: "EDF".into(),
+                patient_id: String::new(),
+                recording_info: "{\"source\":\"semantic-test\"}".into(),
+                startdate: String::new(),
+                phys_dim: "uV".into(),
+            },
+            semantic_abir::ValidationLimits::default(),
+        )
+        .unwrap();
+        let expected_dataset_id = semantic.opened.dataset().id();
+
+        let encoded = encode_with_options(
+            semantic.opened.dataset(),
+            semantic.opened.access(),
+            LmlEncodeOptions::new(3).with_lpc_mode(crate::lpc::LpcMode::Fixed),
+        )
+        .unwrap();
+
+        assert_eq!(encoded.stats().n_channels, 2);
+        assert_eq!(encoded.stats().total_samples, 7);
+        assert_eq!(encoded.stats().n_windows, 3);
+        let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let fused = encode_views_with_options(
+            semantic.opened.dataset(),
+            &views,
+            LmlEncodeOptions::new(3).with_lpc_mode(crate::lpc::LpcMode::Fixed),
+        )
+        .unwrap();
+        assert_eq!(fused, encoded);
+        let opened = open(encoded.as_bytes()).unwrap();
+        assert_eq!(opened.packet_sample_counts(), &[3, 3, 1]);
+        assert_eq!(opened.signal(), signal);
+        assert_eq!(opened.dataset().id(), expected_dataset_id);
     }
 
     #[test]
@@ -467,21 +657,12 @@ mod tests {
             (0..10).map(i64::from).collect::<Vec<_>>(),
             (100..110).map(i64::from).collect::<Vec<_>>(),
         ];
-        let mut bytes = Vec::new();
-        let result = write_into(
-            &mut bytes,
-            &signal,
-            250.0,
-            4,
-            0,
-            "{}",
-            crate::lpc::LpcMode::Fixed,
-        )
-        .unwrap();
-        assert_eq!(result.n_windows, 3);
-        let (decoded, _) = read_bytes(&bytes).unwrap();
+        let encoded =
+            encode_uniform_signal(&signal, 250.0, 4, 0, "{}", crate::lpc::LpcMode::Fixed).unwrap();
+        assert_eq!(encoded.stats().n_windows, 3);
+        let (decoded, _) = read_bytes(encoded.as_bytes()).unwrap();
         assert_eq!(decoded, signal);
-        let (middle, header) = read_window_from_bytes(&bytes, 1).unwrap();
+        let (middle, header) = read_window_from_bytes(encoded.as_bytes(), 1).unwrap();
         assert_eq!(middle, vec![vec![4, 5, 6, 7], vec![104, 105, 106, 107]]);
         assert_eq!(header.n_windows, 3);
         assert_eq!(header.window_size, 4);
@@ -508,9 +689,8 @@ mod tests {
             crate::lpc::LpcMode::Fixed,
             crate::lpc::LpcMode::Adaptive { max_order: 16 },
         ] {
-            let mut bytes = Vec::new();
-            write_into(&mut bytes, &signal, 250.0, 32, 0, "{}", mode).unwrap();
-            let opened = open(&bytes).unwrap();
+            let encoded = encode_uniform_signal(&signal, 250.0, 32, 0, "{}", mode).unwrap();
+            let opened = open(encoded.as_bytes()).unwrap();
             let actual = opened.packets().collect::<Vec<_>>();
             let expected = signal[0]
                 .chunks(32)
@@ -540,16 +720,9 @@ mod tests {
 
     #[test]
     fn lossy_knob_requires_a_registered_profile() {
-        let error = write_into(
-            &mut Vec::new(),
-            &[vec![1, 2]],
-            250.0,
-            2,
-            1,
-            "{}",
-            crate::lpc::LpcMode::Fixed,
-        )
-        .unwrap_err();
+        let error =
+            encode_uniform_signal(&[vec![1, 2]], 250.0, 2, 1, "{}", crate::lpc::LpcMode::Fixed)
+                .unwrap_err();
         assert!(error.to_string().contains("registered lossy profile"));
     }
 }

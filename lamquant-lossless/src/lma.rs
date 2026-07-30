@@ -649,36 +649,19 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 
 /// Decode LML bytes back to original EDF bytes (bit-exact reconstruction).
 ///
-/// Writes the LML payload to a temp file, reads it with container::read_file,
-/// parses the metadata to recover the original EDF header and non-EEG channels,
-/// then interleaves everything back into the original EDF byte layout.
+/// Authenticates the LML payload in memory, parses its metadata to recover the
+/// original EDF header and non-EEG channels, then interleaves everything back
+/// into the original EDF byte layout.
 /// If `original_size` is provided, pads output to match (preserves trailing zeros).
 pub(crate) fn decode_lml_to_edf(
     lml_bytes: &[u8],
     original_size: Option<u64>,
-    tmp_dir_hint: Option<&Path>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
 
-    // Write LML to temp, read back signal + metadata. Caller-supplied
-    // `tmp_dir_hint` co-locates the tempfile on the output volume to
-    // avoid the tmpfs ENOSPC failure mode that bit the corpus-wide
-    // unpack path (a 30 GB tmpfs caps out before a multi-GB single
-    // EDF finishes decoding). `None` falls back to $TMPDIR for
-    // single-file flows where the tempfile is short-lived + small.
-    let tmp = match tmp_dir_hint {
-        Some(dir) => tempfile::Builder::new()
-            .prefix(".lamquant-decode-")
-            .tempfile_in(dir)?,
-        None => tempfile::NamedTempFile::new()?,
-    };
-    let tmp_path = tmp.path().to_path_buf();
-    std::fs::write(&tmp_path, lml_bytes)?;
-
     let (signal, meta_str) =
-        crate::container::read_file(&tmp_path).map_err(|e| format!("LML decode failed: {}", e))?;
-    drop(tmp);
+        crate::container::read_bytes(lml_bytes).map_err(|e| format!("LML decode failed: {}", e))?;
 
     let meta: serde_json::Value = serde_json::from_str(&meta_str)?;
 
@@ -2417,18 +2400,7 @@ pub fn extract_entry(
     f.read_exact(&mut compressed)?;
 
     let data = match entry.method {
-        // extract_entry handles one file at a time; tempfile is
-        // short-lived. Co-locate on the destination volume so
-        // decoding a pathologically large entry doesn't blow up
-        // tmpfs when the caller picked a roomy output disk. When
-        // output_path is a bare filename (no parent component),
-        // `.parent()` returns None -- fall back to "." (cwd) so
-        // we still get same-volume co-location rather than
-        // sliding to $TMPDIR. V4 Pro review of 1923e44.
-        Method::Lml => {
-            let hint = output_path.parent().unwrap_or_else(|| Path::new("."));
-            decode_lml_to_edf(&compressed, Some(entry.original_size), Some(hint))?
-        }
+        Method::Lml => decode_lml_to_edf(&compressed, Some(entry.original_size))?,
         Method::Store => compressed,
         Method::Zstd => decode_zstd_bounded(
             &compressed,
@@ -3246,11 +3218,6 @@ pub fn unpack_archive(
         // Decompress based on method
         let data = match entry.method {
             Method::Lml => {
-                // Reconstruct original EDF from LML payload. Hint
-                // the scratch tempfile at the unpack destination
-                // volume to dodge tmpfs ENOSPC on corpus-wide
-                // unpacks of multi-GB archives.
-                //
                 // ADR 0023 Track A-3: For ingest-synthesised entries
                 // (e.g. Bonn ASCII), the manifest's `original_size`
                 // is the ASCII byte count, NOT the synthesised EDF
@@ -3261,19 +3228,15 @@ pub fn unpack_archive(
                 } else {
                     Some(entry.original_size)
                 };
-                let edf_bytes =
-                    match decode_lml_to_edf(&compressed, original_size_hint, Some(output_dir)) {
-                        Ok(edf_bytes) => edf_bytes,
-                        Err(e) => {
-                            eprintln!("  FAIL EDF reconstruct {}: {}", entry.path, e);
-                            errors.push((
-                                entry.path.clone(),
-                                format!("EDF reconstruct failed: {}", e),
-                            ));
-                            failed += 1;
-                            continue;
-                        }
-                    };
+                let edf_bytes = match decode_lml_to_edf(&compressed, original_size_hint) {
+                    Ok(edf_bytes) => edf_bytes,
+                    Err(e) => {
+                        eprintln!("  FAIL EDF reconstruct {}: {}", entry.path, e);
+                        errors.push((entry.path.clone(), format!("EDF reconstruct failed: {}", e)));
+                        failed += 1;
+                        continue;
+                    }
+                };
                 // If this entry was ingest-synthesised, re-emit the
                 // original non-EDF bytes from the recovered samples
                 // + manifest template. SHA-256 verify below catches
@@ -3908,17 +3871,7 @@ pub fn read_entry_decoded(
             entry.original_size.min(MAX_ENTRY_ORIGINAL_SIZE) as usize,
             &entry.path,
         )?,
-        // In-memory decode used by callers who want bytes back, not
-        // a file output. ADR 0021 Tier 2 N6: pass `archive_path
-        // .parent()` as the tmp-dir hint so the LML scratch
-        // tempfile lands on the same volume as the input archive
-        // (not /tmp/tmpfs which the audit found hits ENOSPC on
-        // multi-GB extracts).
-        Method::Lml => decode_lml_to_edf(
-            &compressed,
-            Some(entry.original_size),
-            archive_path.parent(),
-        )?,
+        Method::Lml => decode_lml_to_edf(&compressed, Some(entry.original_size))?,
     };
 
     // ADR 0021 Tier 2 audit (N6): SHA-256 verify the reconstructed

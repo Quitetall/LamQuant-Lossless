@@ -14,14 +14,14 @@
 //! see `encode_one` in `src/bin/lml.rs`): synthesize (or load, for DICOM) a
 //! tiny deterministic fixture, run the REAL `lml encode` binary against it
 //! with `--no-bundle --i-understand-data-loss` (bare `.lml`, no `.lma`
-//! wrapping so `container::read_file` can read it straight back), pull the
-//! embedded metadata string via `lamquant_core::container::read_file`,
+//! wrapping so authenticated byte-open can read it straight back), pull the
+//! embedded metadata string via `lamquant_core::container::read_bytes`,
 //! normalize the fields that are inherently run-to-run volatile (tempdir
 //! path, crate version), and pin `sha256(normalized)`.
 //!
 //! The current profile stores the caller-provided metadata string as a
 //! semantic source key without routing it through the retired BCS1 metadata
-//! augmenter. We hash exactly what `lml encode` + `container::read_file`
+//! augmenter. We hash exactly what `lml encode` + authenticated byte-open
 //! return, so field order, names, and values remain observable behavior.
 //!
 //! Volatile fields normalized before hashing (see `NORMALIZED FIELDS` note
@@ -94,7 +94,7 @@ fn lml_bin() -> PathBuf {
 
 /// Run the real `lml encode` CLI: bare `.lml` output (`--no-bundle`, ack'd
 /// via `--i-understand-data-loss`), no `.lma` wrapping, so the resulting
-/// file is exactly what `lamquant_core::container::read_file` expects.
+/// file is exactly what authenticated `container::read_bytes` expects.
 /// Every other flag stays at its CLI default (lossless, `--lpc-mode auto`,
 /// `--window-size 2500`) — this pins actual `lml encode <input> -o <out>`
 /// behavior, not some hand-tuned invocation.
@@ -117,6 +117,11 @@ fn run_encode(input: &Path, output: &Path) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+}
+
+fn read_lml(path: &Path) -> (Vec<Vec<i64>>, String) {
+    let bytes = std::fs::read(path).expect("read encoded LML");
+    lamquant_core::container::read_bytes(&bytes).expect("authenticate and decode LML")
 }
 
 /// Replace the value of a top-level JSON string field `"field":"..."` with
@@ -375,7 +380,7 @@ fn edf_metadata_locked() {
     let input = edf_fixture(dir.path());
     let output = dir.path().join("out").join("synth.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = lamquant_core::container::read_file(&output).unwrap();
+    let (_signal, meta) = read_lml(&output);
     // EDF's `source_file` is basename-only (see module doc) — deliberately
     // NOT normalized so a future regression to full-path source_file still
     // flips this golden. Assert the fixed literal survived before hashing.
@@ -393,7 +398,7 @@ fn brainvision_metadata_locked() {
     let input = brainvision_fixture(dir.path());
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = lamquant_core::container::read_file(&output).unwrap();
+    let (_signal, meta) = read_lml(&output);
     let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
     let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
     check("brainvision", &sha_bytes(normalized.as_bytes()));
@@ -405,7 +410,7 @@ fn raw_metadata_locked() {
     let input = raw_fixture(dir.path());
     let output = dir.path().join("out").join("data.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = lamquant_core::container::read_file(&output).unwrap();
+    let (_signal, meta) = read_lml(&output);
     let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
     let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
     check("raw", &sha_bytes(normalized.as_bytes()));
@@ -417,7 +422,7 @@ fn cnt_metadata_locked() {
     let input = cnt_fixture(dir.path());
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = lamquant_core::container::read_file(&output).unwrap();
+    let (_signal, meta) = read_lml(&output);
     let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
     let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
     check("cnt", &sha_bytes(normalized.as_bytes()));
@@ -430,7 +435,7 @@ fn dicom_metadata_locked() {
     let input = dicom_fixture();
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = lamquant_core::container::read_file(&output).unwrap();
+    let (_signal, meta) = read_lml(&output);
     let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
     let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
     check("dicom", &sha_bytes(normalized.as_bytes()));
@@ -451,7 +456,7 @@ fn eeglab_metadata_locked() {
     let input = eeglab_fixture(dir.path());
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = lamquant_core::container::read_file(&output).unwrap();
+    let (_signal, meta) = read_lml(&output);
     let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
     let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
     check("eeglab", &sha_bytes(normalized.as_bytes()));

@@ -31,7 +31,7 @@ use core::fmt;
 
 use semantic_abir::{
     canonical_debug_json, verify_payload_content, AbirDataset, Atom, ByteOrder, ContentId,
-    ElementType, Layout, PayloadAccess, PayloadDescriptor, PayloadLease, Presence,
+    ElementType, Layout, PayloadAccess, PayloadDescriptor, PayloadLease, Presence, TimeAxis,
 };
 use semantic_abir_bcs::{
     encode_codec_bundle, Bcs2View, CodecBundleError, CodecBundleInput, CodecBundleView,
@@ -190,6 +190,24 @@ pub fn encode_lml_bundle_with_window_size<A: PayloadAccess>(
     window_size: usize,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
+    encode_lml_bundle_with_window_size_and_mode(
+        dataset,
+        access,
+        window_size,
+        lamquant_lml_mcu::lpc::LpcMode::default(),
+        bounds,
+    )
+}
+
+/// Encode a uniform integer dataset into bounded LML1 packets using an
+/// explicit predictor mode.
+pub fn encode_lml_bundle_with_window_size_and_mode<A: PayloadAccess>(
+    dataset: &AbirDataset,
+    access: &A,
+    window_size: usize,
+    mode: lamquant_lml_mcu::lpc::LpcMode,
+    bounds: ResourceBounds,
+) -> Result<Vec<u8>, LmlBundleError> {
     if window_size == 0 {
         return Err(LmlBundleError::PacketExtent);
     }
@@ -208,7 +226,7 @@ pub fn encode_lml_bundle_with_window_size<A: PayloadAccess>(
         dataset,
         &views,
         window_size,
-        lamquant_lml_mcu::lpc::LpcMode::default(),
+        mode,
         EncoderSelection::Ambient,
         bounds,
     )
@@ -946,6 +964,7 @@ fn ordered_descriptors(dataset: &AbirDataset) -> Result<Vec<&PayloadDescriptor>,
     }
     let mut descriptors = Vec::with_capacity(stream.atoms().len());
     let mut samples = None;
+    let mut sample_rate = None;
     for atom_id in stream.atoms() {
         if descriptors.iter().any(|(id, _)| *id == atom_id) {
             return Err(LmlBundleError::UnsupportedSemantics(
@@ -959,9 +978,28 @@ fn ordered_descriptors(dataset: &AbirDataset) -> Result<Vec<&PayloadDescriptor>,
             .ok_or(LmlBundleError::UnsupportedSemantics(
                 "unresolved stream atom",
             ))?;
-        if !matches!(atom, Atom::SignalBlock(_)) || atom.presence() != Presence::Present {
+        let Atom::SignalBlock(signal) = atom else {
             return Err(LmlBundleError::UnsupportedSemantics(
                 "only present SignalBlock atoms are supported",
+            ));
+        };
+        if atom.presence() != Presence::Present {
+            return Err(LmlBundleError::UnsupportedSemantics(
+                "only present SignalBlock atoms are supported",
+            ));
+        }
+        let TimeAxis::Regular(segment) = signal.time_axis() else {
+            return Err(LmlBundleError::UnsupportedSemantics(
+                "LML requires one regular sample rate",
+            ));
+        };
+        let rate = segment.rate().parts();
+        if sample_rate
+            .replace(rate)
+            .is_some_and(|old_rate| old_rate != rate)
+        {
+            return Err(LmlBundleError::UnsupportedSemantics(
+                "LML requires one regular sample rate",
             ));
         }
         let descriptor = atom.payload().ok_or(LmlBundleError::UnsupportedSemantics(
@@ -1323,7 +1361,16 @@ mod tests {
     fn fixture_from_signal(
         signal: &[(ElementType, Vec<i64>)],
     ) -> OpenedDataset<InMemoryPayloadAccess> {
+        let rates = vec![256_u64; signal.len()];
+        fixture_from_signal_with_rates(signal, &rates)
+    }
+
+    fn fixture_from_signal_with_rates(
+        signal: &[(ElementType, Vec<i64>)],
+        rates: &[u64],
+    ) -> OpenedDataset<InMemoryPayloadAccess> {
         assert!(!signal.is_empty());
+        assert_eq!(signal.len(), rates.len());
         let sample_count = signal[0].1.len();
         assert!(
             sample_count > 0
@@ -1372,7 +1419,7 @@ mod tests {
                 TimeAxis::Regular(
                     TimeSegment::new(
                         Rational::new(0, 1).unwrap(),
-                        Rational::new(256, 1).unwrap(),
+                        Rational::new(rates[index] as i128, 1).unwrap(),
                         samples.len() as u64,
                     )
                     .unwrap(),
@@ -1391,6 +1438,23 @@ mod tests {
             None,
         ));
         OpenedDataset::new(draft.validate(ValidationLimits::default()).unwrap(), access)
+    }
+
+    #[test]
+    fn lml_profile_rejects_mixed_sample_rates() {
+        let opened = fixture_from_signal_with_rates(
+            &[
+                (ElementType::I16, vec![1, 2, 3, 4]),
+                (ElementType::I16, vec![5, 6, 7, 8]),
+            ],
+            &[256, 128],
+        );
+
+        let error = encode_lml_bundle(opened.dataset(), opened.access(), ResourceBounds::default())
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires one regular sample rate"));
     }
 
     #[cfg(feature = "optimum")]
