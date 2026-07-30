@@ -527,7 +527,7 @@ fn ingest_skips_non_matching_files() {
     .unwrap();
     fs::write(
         src.path().join("data.bin"),
-        &[0u8, 1, 2, 3, 4, 5, 0xFF, 0xFE],
+        [0u8, 1, 2, 3, 4, 5, 0xFF, 0xFE],
     )
     .unwrap();
 

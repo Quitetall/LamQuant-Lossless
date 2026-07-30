@@ -184,9 +184,11 @@ fn the_custody_anchor_is_the_file_not_the_stored_bytes() {
     capsule_of(source.path(), &capsule);
 
     let bytes = std::fs::read(&capsule).unwrap();
-    let mut bounds = ResourceBounds::default();
-    bounds.max_frame_bytes = u32::MAX;
-    bounds.max_catalog_bytes = u32::MAX;
+    let bounds = ResourceBounds {
+        max_frame_bytes: u32::MAX,
+        max_catalog_bytes: u32::MAX,
+        ..ResourceBounds::default()
+    };
     let view =
         ForensicTreeView::parse(&bytes, READER_CAPABILITIES, bounds).expect("capsule parses");
 
@@ -229,9 +231,11 @@ fn a_reader_missing_a_capability_is_refused_rather_than_misled() {
     capsule_of(source.path(), &capsule);
 
     let bytes = std::fs::read(&capsule).unwrap();
-    let mut bounds = ResourceBounds::default();
-    bounds.max_frame_bytes = u32::MAX;
-    bounds.max_catalog_bytes = u32::MAX;
+    let bounds = ResourceBounds {
+        max_frame_bytes: u32::MAX,
+        max_catalog_bytes: u32::MAX,
+        ..ResourceBounds::default()
+    };
 
     // The archive contains both LML and zstd frames, so a reader offering
     // neither must be refused at the envelope.

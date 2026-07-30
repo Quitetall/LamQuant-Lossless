@@ -101,11 +101,6 @@ pub mod async_io;
 // Retired containers are reachable only through the supervised legacy Adapter.
 #[cfg(feature = "archive")]
 pub mod bcs2_container;
-// ADR 0069 S7b: the LMQ training normalization pipeline (channel-select →
-// resample → 0.5 Hz zero-phase HP → Q31), hoisted from Python. Host-only Lossy
-// DSP — see module docs (non-causal filtfilt ⇒ no MCU variant).
-#[cfg(feature = "archive")]
-pub mod codec_stages;
 #[cfg(feature = "archive")]
 pub mod normalize;
 /// ADR 0075 — the LQTP1 training tensor pack (BFP window store). Host-only.
@@ -142,19 +137,6 @@ pub mod ir;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).
 #[cfg(feature = "archive")]
 pub use lamquant_common::paths;
-#[cfg(feature = "archive")]
-pub mod pipeline;
-// ADR 0069 Pillar 3 / S3c: the Reversible/Lossy `Pass` framework built on
-// top of `pipeline::Stage`. Same gate as `pipeline` — a `Pass` IS a
-// `Stage`, so it needs everything `archive` already turns on.
-#[cfg(feature = "archive")]
-pub mod pass;
-// ADR 0069 Pillar 3 / S5 Increment 2 (task #20): the textual pass-pipeline
-// DSL built on top of `pass` — parses a pipeline-text config into a
-// `PipelineSpec` and resolves it against a `PassRegistry`, reusing
-// `run_in_lml`/`DynPass` UNCHANGED (including the runtime Lossy refusal).
-#[cfg(feature = "archive")]
-pub mod pipeline_dsl;
 // `source::descriptor` (ADR 0069 Pillar 3 / S5 Increment 3, task #20) is
 // declared inside `source/mod.rs`, not here — it's a submodule of
 // `source` (file lives at `src/source/descriptor.rs`), gated by this

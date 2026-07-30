@@ -110,7 +110,7 @@ std = ["lamquant-lml-mcu/std"]
 
 # ── Level 1: archive — file I/O + LMA/EDF/container r/w ────────────────────
 # Enables: lma, container, edf, io, offset_table, range, stream, source,
-#          codec_stages, pipeline, backend::Desktop (rayon parallel path).
+#          backend::Desktop (rayon parallel path).
 # Use this for OS plugins and 3rd-party readers (e.g. lml-os/lmafs).
 archive = [
     "std",

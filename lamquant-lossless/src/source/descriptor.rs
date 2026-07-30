@@ -266,8 +266,8 @@ impl FormatDescriptor {
 // ─── Errors ──────────────────────────────────────────────────────────────
 
 /// Typed error for descriptor validation AND interpretation. Local to
-/// this crate (house style, like `ir::IrParseError` /
-/// `pipeline_dsl::PipelineDslError`) — `crate::error::LmlError` is the
+/// this crate (house style, like `ir::IrParseError` and older
+/// text-configuration parsers) — `crate::error::LmlError` is the
 /// no_std-sibling wire-format error type shared with firmware and stays
 /// out of scope; the interpreter entry points convert a `DescriptorError`
 /// into `LmlError::InvalidHeader` at their boundary (`to_lml_err`) so
@@ -919,8 +919,8 @@ mod tests {
 
     // ─── Gate 5: panic-free on malformed/truncated input ────────────
 
-    /// Mirrors `ir.rs`'s / `pipeline_dsl.rs`'s truncation-sweep
-    /// convention: truncating a fully valid payload (or its sidecar JSON
+    /// Mirrors the IR parser's truncation-sweep convention: truncating a
+    /// fully valid payload (or its sidecar JSON
     /// text) at every byte offset must never panic, regardless of
     /// whether the result is `Ok` or a typed `Err`.
     #[test]

@@ -154,9 +154,11 @@ fn a_consumer_without_the_capability_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (snapshot_path, _) = convert(dir.path(), PackDtype::Int16);
     let bytes = std::fs::read(&snapshot_path).unwrap();
-    let mut bounds = ResourceBounds::default();
-    bounds.max_frame_bytes = u32::MAX;
-    bounds.max_catalog_bytes = u32::MAX;
+    let bounds = ResourceBounds {
+        max_frame_bytes: u32::MAX,
+        max_catalog_bytes: u32::MAX,
+        ..ResourceBounds::default()
+    };
 
     assert!(
         Bcs2View::parse(&bytes, 0, bounds).is_err(),
