@@ -30,8 +30,8 @@ python = [
 
 [dependencies]
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
-semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "4083198d644fb8bcb98df71cd830bf46a59fca45", default-features = false, features = ["alloc"] }
-semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "4083198d644fb8bcb98df71cd830bf46a59fca45", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", default-features = false, features = ["alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true, features = ["raw_value"] }
