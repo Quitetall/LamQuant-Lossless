@@ -139,6 +139,9 @@ impl Stage for CompressStage {
                     .into(),
             ));
         }
+        let total_samples = bundle.signal.first().map(Vec::len).ok_or_else(|| {
+            LmlError::InvalidHeader("SignalBundle must contain at least one channel".into())
+        })?;
         let mut metadata = bundle.metadata.clone();
         metadata.recording_info = self.metadata_json.clone();
         let semantic = from_uniform_signal_view(
@@ -147,7 +150,7 @@ impl Stage for CompressStage {
             bundle.channels.clone(),
             bundle.phys_min.clone(),
             bundle.phys_max.clone(),
-            bundle.signal[0].len() as f64 / self.sample_rate,
+            total_samples as f64 / self.sample_rate,
             metadata,
             semantic_abir::ValidationLimits::default(),
         )?;
@@ -262,6 +265,15 @@ mod tests {
             .process(bundle)
             .expect_err("unregistered lossy profile");
         assert!(error.to_string().contains("registered lossy profile"));
+    }
+
+    #[test]
+    fn compress_rejects_empty_signal_without_panicking() {
+        let bundle = synth_bundle(0, 0);
+        let error = CompressStage::new(250.0)
+            .process(bundle)
+            .expect_err("empty signal must fail closed");
+        assert!(error.to_string().contains("at least one channel"));
     }
 
     #[test]
