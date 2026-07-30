@@ -1,4 +1,4 @@
-//! Textual biosignal-IR form — the LLVM `.ll` analogue for [`SignalBundle`]
+//! Textual biosignal-IR form — the LLVM `.ll` analogue for semantic reads
 //! (ADR 0069). A **deterministic manifest** of the IR a frontend produced:
 //! recording metadata, per-channel facts, a signal digest, and sidecar
 //! keys/sizes/digests. Its purpose is **golden-diffing and debugging** — you
@@ -6,11 +6,11 @@
 //! It is NOT a user authoring language, and (deliberately) it digests the large
 //! tensors rather than dumping every sample.
 //!
-//! Determinism contract: same `SignalBundle` ⇒ byte-identical text, on every
+//! Determinism contract: same read/view ⇒ byte-identical text, on every
 //! run and platform. No map iteration; floats via `{:?}` (round-trippable);
 //! sidecar order is the reader's (already deterministic).
 
-use crate::source::SignalBundle;
+use crate::source::UniformSignalView;
 use core::fmt::Write as _;
 use sha2::{Digest, Sha256};
 
@@ -32,9 +32,9 @@ fn signal_digest(signal: &[Vec<i64>]) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Render a [`SignalBundle`] to the deterministic textual IR (v1).
-pub fn to_ir_text(b: &SignalBundle) -> String {
-    let m = &b.metadata;
+/// Render a semantic read/view to the deterministic textual IR (v1).
+pub fn to_ir_text(v: UniformSignalView<'_>) -> String {
+    let m = v.source_metadata();
     let mut s = String::new();
     // `write!` to a String is infallible; ignore the Result.
     let _ = writeln!(s, "; lamquant biosignal IR v1");
@@ -45,35 +45,37 @@ pub fn to_ir_text(b: &SignalBundle) -> String {
     let _ = writeln!(s, "  start = {:?}", m.startdate);
     let _ = writeln!(s, "  info = {:?}", m.recording_info);
     let _ = writeln!(s, "  phys_dim = {:?}", m.phys_dim);
-    let _ = writeln!(s, "  sample_rate = {:?}", b.sample_rate);
-    let _ = writeln!(s, "  duration_s = {:?}", b.duration_s);
+    let _ = writeln!(s, "  sample_rate = {:?}", v.sample_rate());
+    let _ = writeln!(s, "  duration_s = {:?}", v.duration_s());
     let _ = writeln!(s, "}}");
 
-    let _ = writeln!(s, "channels [{}] {{", b.channels.len());
-    for (i, name) in b.channels.iter().enumerate() {
-        let pmin = b.phys_min.get(i).copied().unwrap_or(0.0);
-        let pmax = b.phys_max.get(i).copied().unwrap_or(0.0);
-        let n = b.signal.get(i).map(Vec::len).unwrap_or(0);
+    let _ = writeln!(s, "channels [{}] {{", v.channels().len());
+    for (i, name) in v.channels().iter().enumerate() {
+        let pmin = v.physical_minima().get(i).copied().unwrap_or(0.0);
+        let pmax = v.physical_maxima().get(i).copied().unwrap_or(0.0);
+        let n = v.signal().get(i).map(Vec::len).unwrap_or(0);
         let _ = writeln!(s, "  {i}: {name:?} phys[{pmin:?},{pmax:?}] n={n}");
     }
     let _ = writeln!(s, "}}");
 
+    let sidecars: Vec<_> = v.sidecars().collect();
+
     let _ = writeln!(
         s,
         "signal {{ channels={} digest=sha256:{} }}",
-        b.signal.len(),
-        signal_digest(&b.signal)
+        v.signal().len(),
+        signal_digest(v.signal())
     );
 
-    let _ = writeln!(s, "sidecar [{}] {{", b.sidecar.len());
-    for sc in &b.sidecar {
+    let _ = writeln!(s, "sidecar [{}] {{", sidecars.len());
+    for sc in sidecars {
         let _ = writeln!(
             s,
             "  {:?} aux={:?} {} bytes digest=sha256:{}",
             sc.key,
             sc.aux,
             sc.bytes.len(),
-            sha_hex(&sc.bytes)
+            sha_hex(sc.bytes)
         );
     }
     let _ = writeln!(s, "}}");
@@ -84,14 +86,14 @@ pub fn to_ir_text(b: &SignalBundle) -> String {
 //
 // `to_ir_text` is lossy by construction (it digests samples + sidecar bytes
 // and never emits provenance beyond `SourceMetadata`), so a literal
-// `parse(text) -> SignalBundle` inverse is impossible: the bytes aren't in
+// `parse(text) -> UniformSignalView` inverse is impossible: the bytes aren't in
 // the text to recover. What IS recoverable is exactly what the text
 // carries — that's `IrManifest`, and the contract this module proves is a
 // **projection** round-trip:
 //
-//     parse_ir_text(&to_ir_text(b)) == project(b)
+//     parse_ir_text(&to_ir_text(v)) == project(v)
 //
-// `project` builds the manifest from a `SignalBundle` using the same
+// `project` builds the manifest from a semantic read/view using the same
 // digest functions `to_ir_text` reads (`signal_digest`, `sha_hex`);
 // `parse_ir_text` is the hand-written recursive-descent inverse of the
 // `to_ir_text` grammar (magic line, `recording { }`, `channels [N] { }`,
@@ -102,7 +104,7 @@ pub fn to_ir_text(b: &SignalBundle) -> String {
 /// Bit-pattern equality for `f64` — NaN-safe (`NaN.to_bits() ==
 /// NaN.to_bits()` for identical payloads), unlike `==`. Used by
 /// [`IrManifest`]'s `PartialEq`/`Eq` impls so the round-trip check holds
-/// even if a bundle ever carries a non-finite phys/sample-rate/duration
+/// even if a read/view ever carries a non-finite phys/sample-rate/duration
 /// value. The corpus this module tests against uses finite values only —
 /// `to_ir_text`'s `{:?}` float rendering collapses all NaN payloads to the
 /// single canonical `"NaN"` token, so a NaN *specifically* does not survive
@@ -180,9 +182,9 @@ pub struct IrSidecarEntry {
 }
 
 /// The full projected manifest — exactly what [`to_ir_text`] carries.
-/// This is the round-trip target: `parse_ir_text(&to_ir_text(b)) ==
-/// project(b)`. It is a *projection* of [`SignalBundle`], not the bundle
-/// itself (see module-level note above).
+/// This is the round-trip target: `parse_ir_text(&to_ir_text(v)) ==
+/// project(v)`. It is a *projection* of the semantic read/view, not a semantic
+/// reconstruction of bytes (see module-level note above).
 #[derive(Debug, Clone)]
 pub struct IrManifest {
     pub recording: IrRecording,
@@ -201,19 +203,19 @@ impl PartialEq for IrManifest {
 }
 impl Eq for IrManifest {}
 
-/// Build the [`IrManifest`] projection of a [`SignalBundle`] — the same
+/// Build the [`IrManifest`] projection of a semantic view — the same
 /// fields, read the same way (including the `get(i).unwrap_or` shape
-/// tolerance for a not-yet-`validate`d bundle), that [`to_ir_text`] reads.
-pub fn project(b: &SignalBundle) -> IrManifest {
-    let m = &b.metadata;
-    let channels = b
-        .channels
+/// tolerance for a not-yet-validated read), that [`to_ir_text`] reads.
+pub fn project(v: UniformSignalView<'_>) -> IrManifest {
+    let m = v.source_metadata();
+    let channels = v
+        .channels()
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let phys_min = b.phys_min.get(i).copied().unwrap_or(0.0);
-            let phys_max = b.phys_max.get(i).copied().unwrap_or(0.0);
-            let n = b.signal.get(i).map(Vec::len).unwrap_or(0);
+            let phys_min = v.physical_minima().get(i).copied().unwrap_or(0.0);
+            let phys_max = v.physical_maxima().get(i).copied().unwrap_or(0.0);
+            let n = v.signal().get(i).map(Vec::len).unwrap_or(0);
             IrChannel {
                 index: i,
                 name: name.clone(),
@@ -223,14 +225,13 @@ pub fn project(b: &SignalBundle) -> IrManifest {
             }
         })
         .collect();
-    let sidecar = b
-        .sidecar
-        .iter()
+    let sidecar = v
+        .sidecars()
         .map(|sc| IrSidecarEntry {
-            key: sc.key.clone(),
+            key: sc.key.to_string(),
             aux: sc.aux,
             len: sc.bytes.len(),
-            digest: sha_hex(&sc.bytes),
+            digest: sha_hex(sc.bytes),
         })
         .collect();
     IrManifest {
@@ -241,13 +242,13 @@ pub fn project(b: &SignalBundle) -> IrManifest {
             start: m.startdate.clone(),
             info: m.recording_info.clone(),
             phys_dim: m.phys_dim.clone(),
-            sample_rate: b.sample_rate,
-            duration_s: b.duration_s,
+            sample_rate: v.sample_rate(),
+            duration_s: v.duration_s(),
         },
         channels,
         signal: IrSignal {
-            n_channels: b.signal.len(),
-            digest: signal_digest(&b.signal),
+            n_channels: v.signal().len(),
+            digest: signal_digest(v.signal()),
         },
         sidecar,
     }
@@ -546,7 +547,7 @@ fn parse_sidecar_line(line: &str, idx: usize) -> Result<IrSidecarEntry, IrParseE
 /// input (malformed, truncated, or adversarial): every failure is a typed
 /// [`IrParseError`], never an unwrap/index panic.
 ///
-/// This is a *projection* parse, not a `SignalBundle` reconstruction —
+/// This is a *projection* parse, not a `SemanticRead` reconstruction —
 /// `to_ir_text` never emits the samples or sidecar bytes (only their
 /// digests), so there is nothing to parse them back from. See the
 /// module-level note above and `project`.
@@ -619,10 +620,13 @@ pub fn parse_ir_text(input: &str) -> Result<IrManifest, IrParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{SidecarBlob, SourceMetadata};
+    use crate::source::{
+        semantic::{lower_parsed_uniform_signal, SemanticLoweringOptions, SemanticRead},
+        ParsedUniformSignal, SidecarBlob, SourceMetadata,
+    };
 
-    fn sample_bundle() -> SignalBundle {
-        SignalBundle {
+    fn sample_signal() -> ParsedUniformSignal {
+        ParsedUniformSignal {
             signal: vec![vec![0, 1, 2, 3], vec![10, 11, 12, 13]],
             sample_rate: 256.0,
             channels: vec!["Fp1".into(), "Fp2".into()],
@@ -645,10 +649,15 @@ mod tests {
         }
     }
 
+    fn sample_read() -> SemanticRead {
+        lower_parsed_uniform_signal(sample_signal(), SemanticLoweringOptions::default()).unwrap()
+    }
+
     #[test]
     fn ir_text_is_deterministic() {
-        let b = sample_bundle();
-        assert_eq!(to_ir_text(&b), to_ir_text(&b));
+        let read = sample_read();
+        let view = read.uniform_signal().expect("uniform view available");
+        assert_eq!(to_ir_text(view), to_ir_text(view));
     }
 
     /// Frozen golden for the textual IR form — locks the v1 layout so a refactor
@@ -676,10 +685,12 @@ sidecar [1] {
   \"raw_header\" aux=None 3 bytes digest=sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81
 }
 ";
-        let got = to_ir_text(&sample_bundle());
+        let read = sample_read();
+        let view = read.uniform_signal().expect("uniform view available");
+        let got = to_ir_text(view);
         // Replace the data-derived signal digest with a placeholder for the
         // structural comparison, then assert the digest line is present + stable.
-        let digest = signal_digest(&sample_bundle().signal);
+        let digest = signal_digest(view.signal());
         let normalized = got.replace(&digest, "CHANNELDIGEST");
         assert_eq!(normalized, expected, "IR text layout drifted");
     }
@@ -688,9 +699,9 @@ sidecar [1] {
 
     /// Multi-channel corpus shape (4 channels, mixed sidecar aux/None,
     /// negative + fractional phys bounds) — a second, richer shape beyond
-    /// `sample_bundle` for the round-trip proof.
-    fn multi_channel_bundle() -> SignalBundle {
-        SignalBundle {
+    /// `sample_signal` for the round-trip proof.
+    fn multi_channel_signal() -> ParsedUniformSignal {
+        ParsedUniformSignal {
             signal: vec![
                 vec![0, 1, 2, 3, 4],
                 vec![-5, -4, -3, -2, -1],
@@ -735,15 +746,21 @@ sidecar [1] {
         }
     }
 
+    fn multi_channel_read() -> SemanticRead {
+        lower_parsed_uniform_signal(multi_channel_signal(), SemanticLoweringOptions::default())
+            .unwrap()
+    }
+
     /// Odd-name corpus shape: a channel name AND a sidecar key containing a
     /// quote, a `]`, and a `,` — the exact lexical hazard the channel-line
     /// grammar warns about (`phys[` must be found only after the quoted
     /// name is fully consumed by the unescaper, not by naive splitting).
-    /// Also exercises backslash/newline/tab/CR/NUL escapes and a `\u{..}`
-    /// control-char escape, all in the same string.
-    fn odd_name_bundle() -> SignalBundle {
-        let hazard = "Fp1 \"we\\ird\"[1,2],3]\ttab\nline\r\0\u{7}";
-        SignalBundle {
+    /// Control characters are excluded because ABIR source keys intentionally
+    /// reject them; `quoted_parser_decodes_control_escapes` covers their text
+    /// grammar without constructing an invalid semantic dataset.
+    fn odd_name_signal() -> ParsedUniformSignal {
+        let hazard = "Fp1 \"we\\ird\"[1,2],3]";
+        ParsedUniformSignal {
             signal: vec![vec![0, -1, 2], vec![3, 4, 5]],
             sample_rate: 250.0,
             channels: vec![hazard.to_string(), "normal".into()],
@@ -766,34 +783,51 @@ sidecar [1] {
         }
     }
 
-    fn corpus() -> Vec<SignalBundle> {
-        vec![sample_bundle(), multi_channel_bundle(), odd_name_bundle()]
+    fn odd_name_read() -> SemanticRead {
+        lower_parsed_uniform_signal(odd_name_signal(), SemanticLoweringOptions::default()).unwrap()
     }
 
-    /// The projection round-trip contract: `parse_ir_text(&to_ir_text(b))
-    /// == project(b)` for every corpus shape, including the escape/hazard
+    fn corpus() -> Vec<SemanticRead> {
+        vec![sample_read(), multi_channel_read(), odd_name_read()]
+    }
+
+    #[test]
+    fn quoted_parser_decodes_control_escapes() {
+        let expected = "tab\tline\nreturn\rnul\0bell\u{7}";
+        let encoded = format!("{expected:?}tail");
+        let (decoded, remainder) =
+            parse_quoted(&encoded, IrParseError::BadRecordingField { field: "test" }).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(remainder, "tail");
+    }
+
+    /// The projection round-trip contract: `parse_ir_text(&to_ir_text(v)) ==
+    /// project(v)` for every corpus shape, including the escape/hazard
     /// corpus.
     #[test]
     fn round_trip() {
         for b in corpus() {
-            let text = to_ir_text(&b);
+            let view = b.uniform_signal().expect("uniform view available");
+            let text = to_ir_text(view);
             let parsed = parse_ir_text(&text)
                 .unwrap_or_else(|e| panic!("parse_ir_text failed on:\n{text}\nerror: {e}"));
-            assert_eq!(parsed, project(&b), "round-trip mismatch for:\n{text}");
+            assert_eq!(parsed, project(view), "round-trip mismatch for:\n{text}");
         }
     }
 
     /// The parsed `signal.digest` is exactly what `signal_digest`
-    /// recomputes from the bundle — the round-trip isn't just structurally
+    /// recomputes from the semantic view — the round-trip isn't just structurally
     /// equal, the hash itself made it through unchanged.
     #[test]
     fn digest_matches() {
         for b in corpus() {
-            let text = to_ir_text(&b);
+            let view = b.uniform_signal().expect("uniform view available");
+            let sidecars: Vec<_> = view.sidecars().collect();
+            let text = to_ir_text(view);
             let parsed = parse_ir_text(&text).expect("parse_ir_text");
-            assert_eq!(parsed.signal.digest, signal_digest(&b.signal));
-            for (sc, entry) in b.sidecar.iter().zip(parsed.sidecar.iter()) {
-                assert_eq!(entry.digest, sha_hex(&sc.bytes));
+            assert_eq!(parsed.signal.digest, signal_digest(view.signal()));
+            for (sc, entry) in sidecars.iter().zip(parsed.sidecar.iter()) {
+                assert_eq!(entry.digest, sha_hex(sc.bytes));
             }
         }
     }
@@ -923,13 +957,14 @@ sidecar [1] {
     /// Bounds-safety sweep (mirrors `oracle_diff.rs`'s `container::read_bytes`
     /// truncation sweep): truncating a fully valid rendering at every byte
     /// offset `0..len` must never panic. The corpus is ASCII-only (see
-    /// `odd_name_bundle`'s hazard string — quote/bracket/comma/backslash/
+    /// `odd_name_signal`'s hazard string — quote/bracket/comma/backslash/
     /// control chars are all single-byte), so every offset is a valid `str`
     /// char boundary and the harness itself can't panic on the slice.
     #[test]
     fn truncation_sweep_never_panics() {
         for b in corpus() {
-            let text = to_ir_text(&b);
+            let view = b.uniform_signal().expect("uniform view available");
+            let text = to_ir_text(view);
             assert!(
                 text.is_ascii(),
                 "truncation sweep corpus must be ASCII-safe to slice"

@@ -52,9 +52,9 @@
 use crate::error::{LmlError, LmlResult};
 use std::path::{Path, PathBuf};
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::bundle::{ParsedUniformSignal, SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::{from_signal_bundle, SemanticRead};
+use super::semantic::{lower_parsed_uniform_signal, SemanticLoweringOptions, SemanticRead};
 
 const MAX_META_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum bytes we'll buffer for the original `.set` MAT v5 file when
@@ -197,13 +197,15 @@ impl EeglabReader {
 
 impl SignalSourceReader for EeglabReader {
     fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
+        lower_parsed_uniform_signal(
+            self.read_parsed_signal()?,
+            SemanticLoweringOptions::default(),
         )
     }
+}
 
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+impl EeglabReader {
+    fn read_parsed_signal(&mut self) -> LmlResult<ParsedUniformSignal> {
         let meta_path = self
             .meta_override
             .clone()
@@ -341,7 +343,7 @@ impl SignalSourceReader for EeglabReader {
         // above. Clone instead of re-reading from disk.
         let fdt_raw = raw.clone();
 
-        let bundle = SignalBundle {
+        let parsed = ParsedUniformSignal {
             signal,
             sample_rate: meta.sample_rate,
             channels: meta.channels,
@@ -389,8 +391,8 @@ impl SignalSourceReader for EeglabReader {
                 },
             ],
         };
-        bundle.validate()?;
-        Ok(bundle)
+        parsed.validate()?;
+        Ok(parsed)
     }
 }
 
@@ -429,16 +431,16 @@ mod tests {
         std::fs::write(&set, b"").unwrap(); // .set body unused in v1
         std::fs::write(&fdt, synth_fdt(n_ch, n_samp)).unwrap();
         std::fs::write(&meta, synth_meta(n_ch, n_samp)).unwrap();
-        let mut r = EeglabReader::new(&set);
-        let b = r.read_bundle().unwrap();
-        assert_eq!(b.signal.len(), n_ch);
-        assert_eq!(b.signal[0].len(), n_samp);
+        let parsed_abir = EeglabReader::new(&set).lower_to_abir().unwrap();
+        let parsed = parsed_abir.uniform_signal().unwrap();
+        assert_eq!(parsed.signal().len(), n_ch);
+        assert_eq!(parsed.signal()[0].len(), n_samp);
         // Bit-cast invariant: reading bits back via f32::from_bits
         // recovers the exact f32 we wrote.
         for ch in 0..n_ch {
             for s in 0..n_samp {
                 let expected = (s as f32) * 0.1 + (ch as f32);
-                let stored_i = b.signal[ch][s];
+                let stored_i = parsed.signal()[ch][s];
                 let recovered = f32::from_bits(stored_i as u32);
                 assert_eq!(
                     recovered.to_bits(),
@@ -447,7 +449,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(b.metadata.format, "EEGLAB_LOSSLESS_F32");
+        assert_eq!(parsed.source_metadata().format, "EEGLAB_LOSSLESS_F32");
     }
 
     #[test]
@@ -460,9 +462,10 @@ mod tests {
         std::fs::write(tmp.path().join("a.fdt"), synth_fdt(n_ch, n_samp)).unwrap();
         std::fs::write(tmp.path().join("a.lml-meta.json"), synth_meta(n_ch, n_samp)).unwrap();
         let mut r = EeglabReader::new(&set).with_lossy_int16(true);
-        let b = r.read_bundle().unwrap();
+        let abir = r.lower_to_abir().unwrap();
+        let b = abir.uniform_signal().unwrap();
         // Values stored should be within i16 range (clamp invariant).
-        for ch in &b.signal {
+        for ch in b.signal() {
             for &v in ch {
                 assert!(
                     v >= i16::MIN as i64 && v <= i16::MAX as i64,
@@ -470,7 +473,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(b.metadata.format, "EEGLAB_LOSSY_I16");
+        assert_eq!(b.source_metadata().format, "EEGLAB_LOSSY_I16");
     }
 
     #[test]
@@ -485,17 +488,16 @@ mod tests {
              \"channels\":[\"Fp1\",\"Cz\"],\"phys_dim\":\"uV\"}",
         )
         .unwrap();
-        let mut r = EeglabReader::new(&set);
-        let b = r.read_bundle().unwrap();
-        assert_eq!(b.channels, vec!["Fp1".to_string(), "Cz".to_string()]);
-        assert!((b.sample_rate - 250.0).abs() < 1e-9);
+        let parsed_abir = EeglabReader::new(&set).lower_to_abir().unwrap();
+        let parsed = parsed_abir.uniform_signal().unwrap();
+        assert_eq!(parsed.channels(), vec!["Fp1".to_string(), "Cz".to_string()]);
+        assert!((parsed.sample_rate() - 250.0).abs() < 1e-9);
     }
 
     // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
     //
-    // EeglabReader is the one reader that stays on `SignalSourceReader`'s
-    // DEFAULT `lower_to_legacy_recording` (see `source/reader.rs` docs) — this test
-    // exercises that shared default path, not a reader-specific override.
+    // EeglabReader uses a reader-side parsed layout and the shared
+    // `lower_to_abir` lowering path. This test exercises that shared path.
 
     #[test]
     fn missing_fdt_errors_explicitly() {
@@ -504,7 +506,7 @@ mod tests {
         std::fs::write(&set, b"").unwrap();
         std::fs::write(tmp.path().join("c.lml-meta.json"), synth_meta(1, 1)).unwrap();
         let mut r = EeglabReader::new(&set);
-        match r.read_bundle() {
+        match r.lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("no .fdt found")),
             other => panic!("expected InvalidHeader('no .fdt'), got {other:?}"),
         }
@@ -521,7 +523,7 @@ mod tests {
         std::fs::write(tmp.path().join("d.fdt"), &fdt).unwrap();
         std::fs::write(tmp.path().join("d.lml-meta.json"), synth_meta(1, 4)).unwrap();
         let mut r = EeglabReader::new(&set);
-        match r.read_bundle() {
+        match r.lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("non-finite")),
             other => panic!("expected InvalidHeader('non-finite'), got {other:?}"),
         }

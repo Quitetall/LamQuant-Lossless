@@ -1,4 +1,4 @@
-//! Zero-skeleton NWB ⇄ SignalBundle round-trip (ADR 0051 Track 3, Phase B).
+//! Zero-skeleton NWB ⇄ ABIR Tensor round-trip (ADR 0051 Track 3, Phase B).
 //!
 //! Proves the headline claim: integer datasets round-trip byte-exact through the
 //! bundle, AND everything LML doesn't touch — float datasets, attributes, and
@@ -82,11 +82,12 @@ fn zero_skeleton_roundtrip_preserves_structure_and_data() {
         None => return, // toolchain absent — skip
     }
 
-    let bundle = lamquant_core::nwb::read_bundle(&src).expect("read_bundle");
-    // sidecar carries skeleton + slots; signal carries the two integer datasets.
-    assert!(bundle.sidecar.iter().any(|s| s.key == "nwb_skeleton"));
-    assert!(!bundle.signal.is_empty());
-    lamquant_core::nwb::write_bundle(&bundle, &out).expect("write_bundle");
+    let read = lamquant_core::nwb::read_semantic(&src).expect("read_semantic");
+    assert_eq!(read.mapping.source_capsule_count, 2);
+    assert!(!lamquant_core::nwb::signal_channels(&read)
+        .expect("tensor channels")
+        .is_empty());
+    lamquant_core::nwb::write_semantic(&read, &out).expect("write_semantic");
 
     match py(CHECK, &[&src, &out]) {
         Some(true) => {}

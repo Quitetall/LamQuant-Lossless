@@ -1,6 +1,6 @@
 use abir_adapter::{Adapter, ForeignEntry, ForeignObject, PayloadResolver, ProfileId};
 use lamquant_core::source::{
-    from_signal_bundle_with_semantics, SemanticSourceCapsule, SignalBundle, SourceMetadata,
+    from_owned_uniform_signal, SemanticLoweringOptions, SemanticSourceCapsule, SourceMetadata,
 };
 use lamquant_standard_adapters::{BidsAdapter, BidsEventsAdapter};
 use semantic_abir::{ContentId, ValidationLimits};
@@ -80,33 +80,32 @@ fn bids_events_source() -> ForeignObject {
 }
 
 fn dataset_with_bids_capsule_paths(paths: &[&str]) -> semantic_abir::AbirDataset {
-    let bundle = SignalBundle {
-        signal: vec![vec![1, 2, 3, 4]],
-        sample_rate: 250.0,
-        channels: vec!["EEG".to_owned()],
-        phys_min: vec![-1.0],
-        phys_max: vec![1.0],
-        duration_s: 4.0 / 250.0,
-        metadata: SourceMetadata {
-            source_file: "recording.edf".to_owned(),
-            format: "EDF".to_owned(),
-            patient_id: String::new(),
-            recording_info: String::new(),
-            startdate: String::new(),
-            phys_dim: "uV".to_owned(),
-        },
-        sidecar: vec![],
+    let signal = vec![vec![1, 2, 3, 4]];
+    let sample_rate = 250.0;
+    let channels = vec!["EEG".to_owned()];
+    let metadata = SourceMetadata {
+        source_file: "recording.edf".to_owned(),
+        format: "EDF".to_owned(),
+        patient_id: String::new(),
+        recording_info: String::new(),
+        startdate: String::new(),
+        phys_dim: "uV".to_owned(),
     };
     let modality = semantic_abir::ConceptId::new("abir:modality/eeg").unwrap();
-    let unbound = from_signal_bundle_with_semantics(
-        bundle.clone(),
-        modality.clone(),
-        vec![],
-        vec![],
-        ValidationLimits::default(),
+    let seed = from_owned_uniform_signal(
+        signal.clone(),
+        sample_rate,
+        channels.clone(),
+        vec![-1.0],
+        vec![1.0],
+        4.0 / sample_rate,
+        metadata.clone(),
+        SemanticLoweringOptions::default()
+            .with_modality(modality.clone())
+            .with_limits(ValidationLimits::default()),
     )
     .unwrap();
-    let semantic = semantic_abir::interchange_content_id(unbound.opened.dataset()).unwrap();
+    let semantic = semantic_abir::interchange_content_id(seed.opened.dataset()).unwrap();
     let namespace = format!("adapter.bids.1.11.1.single-edf-eeg.binding.{semantic}");
     let capsules = paths
         .iter()
@@ -118,12 +117,18 @@ fn dataset_with_bids_capsule_paths(paths: &[&str]) -> semantic_abir::AbirDataset
             media_type: None,
         })
         .collect();
-    from_signal_bundle_with_semantics(
-        bundle,
-        modality,
-        capsules,
-        vec![],
-        ValidationLimits::default(),
+    from_owned_uniform_signal(
+        signal,
+        sample_rate,
+        channels,
+        vec![-1.0],
+        vec![1.0],
+        4.0 / sample_rate,
+        metadata,
+        SemanticLoweringOptions::default()
+            .with_modality(modality)
+            .with_explicit_capsules(capsules)
+            .with_limits(ValidationLimits::default()),
     )
     .unwrap()
     .opened

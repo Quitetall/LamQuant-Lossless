@@ -10,8 +10,7 @@
 //! Submodules:
 //! - `ascii`       — Phase 0.2: parse_usize, parse_i64, parse_float
 //! - `bitstream`   — Phase 0.2: read_i24_le
-//! - `bundle`      — Phase 0.3: `SignalBundle`, `SourceMetadata`,
-//!   `SidecarBlob` (the codec-agnostic carrier)
+//! - `bundle`      — private native parse storage plus `SourceMetadata`
 //! - `reader`      — Phase 0.3: `SignalSourceReader` trait
 //! - `edf_reader`  — Phase 0.3: `EdfReader` (first impl); the legacy
 //!   free function `crate::edf::read_edf` continues to exist for
@@ -20,12 +19,12 @@
 pub mod ascii;
 pub mod bitstream;
 pub mod brainvision;
-pub mod bundle;
+mod bundle;
 pub mod cnt;
 // ADR 0069 Pillar 3 / S5 Increment 3 (task #20): the format-description
 // DSL — declares a fixed-layout reader as `serde`-derivable DATA
 // (`FormatDescriptor`) instead of hand-written Rust, interpreted by
-// `read_bundle_from_descriptor`. Same
+// `lower_descriptor_to_abir`. Same
 // `archive`-feature gate as every other module here (inherited from
 // `pub mod source;` in lib.rs); no additional cfg needed.
 pub mod descriptor;
@@ -42,12 +41,14 @@ pub mod reader;
 pub mod semantic;
 
 pub use brainvision::BrainVisionReader;
-pub use bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+pub use bundle::SourceMetadata;
+#[cfg(test)]
+pub(crate) use bundle::{ParsedUniformSignal, SidecarBlob};
 pub use cnt::CntReader;
 pub use descriptor::{
-    read_bundle_from_descriptor, ChannelCount, ChannelModality, ChannelModalityRule,
-    DescriptorDtype, DescriptorError, DescriptorOrientation, Endian, FormatDescriptor,
-    SampleRateSpec,
+    lower_descriptor_to_abir, lower_descriptor_to_abir_with_options, ChannelCount, ChannelModality,
+    ChannelModalityRule, DescriptorDtype, DescriptorError, DescriptorOrientation, Endian,
+    FormatDescriptor, SampleRateSpec,
 };
 #[cfg(feature = "dicom")]
 pub use dicom::DicomWaveformReader;
@@ -56,8 +57,8 @@ pub use eeglab::EeglabReader;
 pub use raw::RawReader;
 pub use reader::SignalSourceReader;
 pub use semantic::{
-    from_signal_bundle, from_signal_bundle_with_interchange_bound_sources,
-    from_signal_bundle_with_overlays, from_signal_bundle_with_semantics, from_uniform_signal_view,
-    SemanticChannelMapping, SemanticEventMapping, SemanticFidelityReport, SemanticMappingReport,
-    SemanticRead, SemanticSourceCapsule, SemanticSourceObject, SemanticTimedEvent,
+    from_owned_uniform_signal, from_uniform_signal_view, SemanticChannelMapping,
+    SemanticEventMapping, SemanticFidelityReport, SemanticLoweringOptions, SemanticMappingReport,
+    SemanticRead, SemanticSidecarView, SemanticSourceCapsule, SemanticSourceObject,
+    SemanticTimedEvent, UniformSignalView,
 };

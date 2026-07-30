@@ -13,7 +13,7 @@ use semantic_abir::{AbirDataset, Atom, PayloadAccess, TimeAxis};
 use semantic_abir_bcs::ResourceBounds;
 
 use crate::error::{LmlError, LmlResult};
-use crate::source::{from_signal_bundle, from_uniform_signal_view, SignalBundle, SourceMetadata};
+use crate::source::{from_uniform_signal_view, SourceMetadata};
 
 /// Summary of one emitted BCS2 LML bundle.
 #[derive(Clone, Debug, PartialEq)]
@@ -132,26 +132,6 @@ pub fn encode_from_signal_with_options(
 /// Authenticate and decode a BCS2 LML profile.
 pub fn open(data: &[u8]) -> LmlResult<lamquant_abir_codec::OpenedLmlBundle<'_>> {
     lamquant_abir_codec::open_lml_bundle(data, ResourceBounds::default()).map_err(bundle_error)
-}
-
-/// Encode a validated source-neutral signal bundle as canonical ABIR + BCS2.
-pub fn encode_signal_bundle(bundle: SignalBundle) -> LmlResult<Vec<u8>> {
-    encode_signal_bundle_with_window_size(bundle, lamquant_abir_codec::MAX_PACKET_SAMPLES)
-}
-
-/// Encode a source-neutral signal bundle using bounded ordered LML1 packets.
-pub fn encode_signal_bundle_with_window_size(
-    bundle: SignalBundle,
-    window_size: usize,
-) -> LmlResult<Vec<u8>> {
-    let semantic = from_signal_bundle(bundle, semantic_abir::ValidationLimits::default())?;
-    lamquant_abir_codec::encode_lml_bundle_with_window_size(
-        semantic.opened.dataset(),
-        semantic.opened.access(),
-        window_size,
-        ResourceBounds::default(),
-    )
-    .map_err(bundle_error)
 }
 
 fn encode_uniform_signal(

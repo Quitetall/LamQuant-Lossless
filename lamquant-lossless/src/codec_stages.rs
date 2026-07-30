@@ -11,20 +11,19 @@
 //! Topology:
 //!
 //! ```text
-//! SignalBundle ── CompressStage ──► EncodedContainer
+//! SemanticRead ── CompressStage ──► EncodedContainer
 //! EncodedContainer ── DecompressStage ──► DecodedSignal
 //! ```
 //!
 //! `EncodedContainer ≠ Vec<u8>` even though they share representation —
 //! the strong type forces callers to be explicit about which kind of
-//! bytes they hold. Same for `DecodedSignal ≠ Vec<Vec<i64>>` and the
-//! richer `SignalBundle`.
+//! bytes they hold. Decoded samples remain distinct from validated ABIR input.
 
 use crate::container;
 use crate::error::LmlResult;
 use crate::lpc::LpcMode;
 use crate::pipeline::Stage;
-use crate::source::{from_uniform_signal_view, SignalBundle, SourceMetadata};
+use crate::source::SemanticRead;
 
 /// Encoded LML container bytes. Distinct from raw `Vec<u8>` at the
 /// type level so a pipeline can't confuse "encoded container" with
@@ -57,10 +56,8 @@ impl From<EncodedContainer> for Vec<u8> {
 }
 
 /// Decoded signal + the raw metadata JSON the container carried.
-/// Distinct from `SignalBundle` because container-decode never has
-/// the source-format sidecar (EDF raw_header etc.) — reconstructing
-/// that lives in format-specific stages (e.g. an `EdfReconstruct`
-/// stage downstream of `DecompressStage`).
+/// Distinct from validated semantic input because decoding yields a native
+/// matrix projection plus metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedSignal {
     pub signal: Vec<Vec<i64>>,
@@ -78,36 +75,32 @@ impl DecodedSignal {
 
 // ─── Compress ────────────────────────────────────────────────────────
 
-/// Config-bearing compress stage. Config lives in the struct;
-/// `process` takes one `SignalBundle`, returns one `EncodedContainer`.
+/// Packetization-bearing compress stage.
 ///
-/// Bible R6: per-call argument carries data only; config (window
-/// size, noise bits, LPC mode, metadata) travels with the stage.
+/// Sample rate and recording metadata belong to the validated ABIR input. The
+/// stage owns only codec-profile choices.
 #[derive(Debug, Clone)]
 pub struct CompressStage {
-    pub sample_rate: f64,
     pub window_size: usize,
     pub noise_bits: u8,
     pub mode: LpcMode,
-    pub metadata_json: String,
+}
+
+impl Default for CompressStage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CompressStage {
     /// Convenience constructor with sensible defaults — adaptive LPC,
     /// lossless (noise_bits=0), 2500-sample windows.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new() -> Self {
         Self {
-            sample_rate,
             window_size: 2500,
             noise_bits: 0,
             mode: LpcMode::default(),
-            metadata_json: "{}".into(),
         }
-    }
-
-    pub fn with_metadata(mut self, metadata_json: impl Into<String>) -> Self {
-        self.metadata_json = metadata_json.into();
-        self
     }
 
     pub fn with_window_size(mut self, window_size: usize) -> Self {
@@ -127,39 +120,15 @@ impl CompressStage {
 }
 
 impl Stage for CompressStage {
-    type Input = SignalBundle;
+    type Input = SemanticRead;
     type Output = EncodedContainer;
 
-    fn process(&mut self, bundle: SignalBundle) -> LmlResult<EncodedContainer> {
-        // Validate at the trust boundary — Bible R23.
-        bundle.validate()?;
-        let n_channels = bundle.signal.len();
-        let total_samples = bundle.signal.first().map_or(0, Vec::len);
-        let semantic = from_uniform_signal_view(
-            &bundle.signal,
-            self.sample_rate,
-            (0..n_channels).map(|index| format!("ch{index}")).collect(),
-            bundle
-                .signal
-                .iter()
-                .map(|channel| channel.iter().copied().min().unwrap_or(0) as f64)
-                .collect(),
-            bundle
-                .signal
-                .iter()
-                .map(|channel| channel.iter().copied().max().unwrap_or(0) as f64)
-                .collect(),
-            total_samples as f64 / self.sample_rate,
-            SourceMetadata {
-                source_file: String::new(),
-                format: "BCS2-LML".into(),
-                patient_id: String::new(),
-                recording_info: self.metadata_json.clone(),
-                startdate: String::new(),
-                phys_dim: "digital".into(),
-            },
-            semantic_abir::ValidationLimits::default(),
-        )?;
+    fn process(&mut self, read: SemanticRead) -> LmlResult<EncodedContainer> {
+        let signal = read.uniform_signal().ok_or_else(|| {
+            crate::error::LmlError::InvalidHeader(
+                "compress stage requires a validated uniform native ABIR view".into(),
+            )
+        })?;
         if self.noise_bits != 0 {
             return Err(crate::error::LmlError::InvalidHeader(
                 "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
@@ -167,8 +136,8 @@ impl Stage for CompressStage {
             ));
         }
         let encoded = container::encode_from_signal_with_options(
-            semantic.opened.dataset(),
-            &bundle.signal,
+            read.opened.dataset(),
+            signal.signal(),
             container::LmlEncodeOptions {
                 window_size: self.window_size,
                 lpc_mode: self.mode,
@@ -206,9 +175,9 @@ impl Stage for DecompressStage {
 mod tests {
     use super::*;
     use crate::pipeline::StageExt;
-    use crate::source::SourceMetadata;
+    use crate::source::{from_owned_uniform_signal, SemanticLoweringOptions, SourceMetadata};
 
-    fn synth_bundle(n_ch: usize, n_samples: usize) -> SignalBundle {
+    fn synth_read(n_ch: usize, n_samples: usize, metadata_json: &str) -> SemanticRead {
         let mut state: u64 = 0x00C0_FFEE_BABE_DEAD;
         let mut signal: Vec<Vec<i64>> = (0..n_ch).map(|_| Vec::with_capacity(n_samples)).collect();
         for ch in &mut signal {
@@ -219,40 +188,41 @@ mod tests {
                 ch.push(((state >> 33) as i32) as i64 % 8000);
             }
         }
-        SignalBundle {
+        from_owned_uniform_signal(
             signal,
-            sample_rate: 250.0,
-            channels: (0..n_ch).map(|i| format!("ch{i}")).collect(),
-            phys_min: vec![-200.0; n_ch],
-            phys_max: vec![200.0; n_ch],
-            duration_s: n_samples as f64 / 250.0,
-            metadata: SourceMetadata {
+            250.0,
+            (0..n_ch).map(|i| format!("ch{i}")).collect(),
+            vec![-200.0; n_ch],
+            vec![200.0; n_ch],
+            n_samples as f64 / 250.0,
+            SourceMetadata {
                 source_file: "synth.edf".into(),
                 format: "EDF".into(),
                 patient_id: "anon".into(),
-                recording_info: String::new(),
+                recording_info: metadata_json.into(),
                 startdate: "2026-05-17".into(),
                 phys_dim: "uV".into(),
             },
-            sidecar: vec![],
-        }
+            SemanticLoweringOptions::default(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn compress_yields_current_abir_bcs2_container() {
         // ADR 0139/0143: the current archive is an authenticated ABIR/BCS2
         // codec bundle. The deterministic LML1 packet is sealed inside it.
-        let bundle = synth_bundle(2, 256);
-        let mut stage = CompressStage::new(250.0);
-        let encoded = stage.process(bundle).unwrap();
+        let read = synth_read(2, 256, "");
+        let mut stage = CompressStage::new();
+        let encoded = stage.process(read).unwrap();
         assert_eq!(&encoded.as_bytes()[0..4], b"ABIR");
     }
 
     #[test]
     fn decompress_yields_decoded_signal_byte_exact() {
-        let bundle = synth_bundle(3, 512);
-        let original = bundle.signal.clone();
-        let encoded = CompressStage::new(250.0).process(bundle).unwrap();
+        let read = synth_read(3, 512, "");
+        let original = read.uniform_signal().unwrap().signal().to_vec();
+        let encoded = CompressStage::new().process(read).unwrap();
         let mut decompress = DecompressStage;
         let decoded = decompress.process(encoded).unwrap();
         assert_eq!(decoded.signal, original);
@@ -261,36 +231,29 @@ mod tests {
     #[test]
     fn compress_then_decompress_chain_round_trips() {
         // The whole point: compose stages, type-checked by the compiler.
-        let bundle = synth_bundle(4, 384);
-        let original = bundle.signal.clone();
-        let mut chain = CompressStage::new(250.0)
-            .with_metadata("{\"src\":\"unit-test\"}")
-            .then(DecompressStage);
-        let decoded = chain.process(bundle).unwrap();
+        let read = synth_read(4, 384, "{\"src\":\"unit-test\"}");
+        let original = read.uniform_signal().unwrap().signal().to_vec();
+        let mut chain = CompressStage::new().then(DecompressStage);
+        let decoded = chain.process(read).unwrap();
         assert_eq!(decoded.signal, original);
         assert_eq!(decoded.metadata_json, "{\"src\":\"unit-test\"}");
     }
 
     #[test]
     fn compress_refuses_unregistered_lossy_profile() {
-        let bundle = synth_bundle(1, 128);
-        let mut stage = CompressStage::new(250.0).with_noise_bits(4);
-        let error = stage
-            .process(bundle)
-            .expect_err("unregistered lossy profile");
+        let read = synth_read(1, 128, "");
+        let mut stage = CompressStage::new().with_noise_bits(4);
+        let error = stage.process(read).expect_err("unregistered lossy profile");
         assert!(error.to_string().contains("registered lossy profile"));
     }
 
     #[test]
     fn config_with_builder_pattern() {
-        let stage = CompressStage::new(500.0)
+        let stage = CompressStage::new()
             .with_window_size(1024)
-            .with_noise_bits(2)
-            .with_metadata("{\"k\":1}");
-        assert_eq!(stage.sample_rate, 500.0);
+            .with_noise_bits(2);
         assert_eq!(stage.window_size, 1024);
         assert_eq!(stage.noise_bits, 2);
-        assert_eq!(stage.metadata_json, "{\"k\":1}");
     }
 
     #[test]

@@ -2165,7 +2165,7 @@ struct EncodeMetrics {
 
 /// Phase 4.1 — encode a BrainVision (.vhdr/.eeg/.vmrk) recording.
 ///
-/// Goes through `BrainVisionReader::read_bundle` → `SignalBundle` →
+/// Goes through `BrainVisionReader::lower_to_abir` → fused native signal view →
 /// `encode_abir_uniform`. The full `.vhdr` and any `.vmrk` are
 /// preserved in metadata as base64+zstd-encoded blobs (`vhdr_b64` and
 /// `vmrk_b64`) so a future `lml decode --to-brainvision` can reverse
@@ -2184,15 +2184,22 @@ fn encode_one_brainvision(
     use lamquant_core::source::{BrainVisionReader, SignalSourceReader};
     let t0 = Instant::now();
     let mut reader = BrainVisionReader::new(vhdr_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
+    let read = reader.lower_to_abir()?;
+    let uniform_signal = read.uniform_signal().ok_or(
+        "brainvision encode: non-fused signal; expected uniform_native signal".to_string(),
+    )?;
+    let n_channels = uniform_signal.signal().len() as u32;
+    let n_samples = uniform_signal
+        .signal()
+        .first()
+        .map(|c| c.len())
+        .unwrap_or(0);
+    let sample_rate = uniform_signal.sample_rate();
 
     // SHA-256 of the i64 LE sample matrix — same convention as EDF
     // encode for cross-format checksum compatibility.
     let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
+    for ch in uniform_signal.signal() {
         for &sample in ch {
             hasher.update(sample.to_le_bytes());
         }
@@ -2208,7 +2215,7 @@ fn encode_one_brainvision(
 
     // JSON encode channel labels + phys_min / phys_max.
     let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
+    for (i, name) in uniform_signal.channels().iter().enumerate() {
         if i > 0 {
             ch_json.push(',');
         }
@@ -2223,16 +2230,24 @@ fn encode_one_brainvision(
         ch_json.push('"');
     }
     ch_json.push(']');
-    let pmin: Vec<String> = bundle.phys_min.iter().map(|v| format!("{v}")).collect();
-    let pmax: Vec<String> = bundle.phys_max.iter().map(|v| format!("{v}")).collect();
+    let pmin: Vec<String> = uniform_signal
+        .physical_minima()
+        .iter()
+        .map(|v| format!("{v}"))
+        .collect();
+    let pmax: Vec<String> = uniform_signal
+        .physical_maxima()
+        .iter()
+        .map(|v| format!("{v}"))
+        .collect();
 
     let metadata_json = format!(
         "{{\"source_file\":\"{}\",\"format\":\"BRAINVISION\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
          \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
          \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
+        uniform_signal
+            .source_metadata()
             .source_file
             .replace('\\', "\\\\")
             .replace('"', "\\\""),
@@ -2241,7 +2256,10 @@ fn encode_one_brainvision(
         ch_json,
         pmin.join(","),
         pmax.join(","),
-        bundle.metadata.phys_dim.replace('"', "\\\""),
+        uniform_signal
+            .source_metadata()
+            .phys_dim
+            .replace('"', "\\\""),
         sha256_hex,
         env!("CARGO_PKG_VERSION"),
         noise_bits,
@@ -2255,7 +2273,7 @@ fn encode_one_brainvision(
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
     let stats = encode_abir_uniform(
         &mut sink,
-        &bundle.signal,
+        uniform_signal.signal(),
         sample_rate,
         window_size,
         noise_bits,
@@ -2272,7 +2290,7 @@ fn encode_one_brainvision(
     f.sync_all()?;
 
     let original_size = std::fs::metadata(vhdr_path).map(|m| m.len()).unwrap_or(0)
-        + bundle.signal.len() as u64 * n_samples as u64 * 2; // .eeg bytes (int16 ≈ baseline)
+        + uniform_signal.signal().len() as u64 * n_samples as u64 * 2; // .eeg bytes (int16 ≈ baseline)
     let compressed_size = stats.compressed_size as u64;
     let cr = if compressed_size > 0 {
         original_size as f64 / compressed_size as f64
@@ -2283,15 +2301,19 @@ fn encode_one_brainvision(
     if verify {
         // Round-trip: decompress and compare i64 samples.
         let (recovered, _meta) = decode_lml_file(lml_path)?;
-        if recovered.len() != bundle.signal.len() {
+        if recovered.len() != uniform_signal.signal().len() {
             return Err(format!(
                 "verify (brainvision): channel count {} != {}",
                 recovered.len(),
-                bundle.signal.len()
+                uniform_signal.signal().len()
             )
             .into());
         }
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
+        for (i, (a, b)) in recovered
+            .iter()
+            .zip(uniform_signal.signal().iter())
+            .enumerate()
+        {
             if a != b {
                 return Err(format!(
                     "verify (brainvision): channel {i} mismatch ({} vs {} samples)",
@@ -2320,12 +2342,12 @@ fn encode_one_brainvision(
     };
     if !same_dir {
         // Copy `.vhdr` -- exact filename of the source.
-        if let Some(vhdr_blob) = bundle.sidecar_first("vhdr_raw") {
+        if let Some(vhdr_blob) = uniform_signal.sidecar_first("vhdr_raw") {
             let vhdr_name = vhdr_path
                 .file_name()
                 .ok_or("brainvision encode: vhdr_path has no file_name")?;
             let dest = lml_parent.join(vhdr_name);
-            std::fs::write(&dest, &vhdr_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, vhdr_blob.bytes).map_err(|e| {
                 format!(
                     "brainvision encode: failed to write `.vhdr` preservation copy to {}: {}",
                     dest.display(),
@@ -2337,13 +2359,13 @@ fn encode_one_brainvision(
         // source .vhdr so the byte-equal .vhdr post-extract still
         // points at a real file.
         if let (Some(eeg_blob), Some(name_blob)) = (
-            bundle.sidecar_first("eeg_raw"),
-            bundle.sidecar_first("eeg_filename"),
+            uniform_signal.sidecar_first("eeg_raw"),
+            uniform_signal.sidecar_first("eeg_filename"),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob.bytes)
                 .map_err(|e| format!("brainvision encode: eeg_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &eeg_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, eeg_blob.bytes).map_err(|e| {
                 format!(
                     "brainvision encode: failed to write `.eeg` preservation copy to {}: {}",
                     dest.display(),
@@ -2353,13 +2375,13 @@ fn encode_one_brainvision(
         }
         // Copy `.vmrk` if it exists -- name comes from `MarkerFile=`.
         if let (Some(vmrk_blob), Some(name_blob)) = (
-            bundle.sidecar_first("vmrk_raw"),
-            bundle.sidecar_first("vmrk_filename"),
+            uniform_signal.sidecar_first("vmrk_raw"),
+            uniform_signal.sidecar_first("vmrk_filename"),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob.bytes)
                 .map_err(|e| format!("brainvision encode: vmrk_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &vmrk_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, vmrk_blob.bytes).map_err(|e| {
                 format!(
                     "brainvision encode: failed to write `.vmrk` preservation copy to {}: {}",
                     dest.display(),
@@ -2377,7 +2399,7 @@ fn encode_one_brainvision(
         sha256: sha256_hex,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
+        duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
         n_windows: stats.n_windows as u32,
@@ -2396,14 +2418,21 @@ fn encode_one_raw(
     use lamquant_core::source::{RawReader, SignalSourceReader};
     let t0 = Instant::now();
     let mut reader = RawReader::new(raw_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
+    let read = reader.lower_to_abir()?;
+    let uniform_signal = read
+        .uniform_signal()
+        .ok_or("raw encode: non-fused signal; expected uniform_native signal".to_string())?;
+    let n_channels = uniform_signal.signal().len() as u32;
+    let n_samples = uniform_signal
+        .signal()
+        .first()
+        .map(|c| c.len())
+        .unwrap_or(0);
+    let sample_rate = uniform_signal.sample_rate();
 
     // SHA-256 of the i64 LE sample matrix.
     let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
+    for ch in uniform_signal.signal() {
         for &sample in ch {
             hasher.update(sample.to_le_bytes());
         }
@@ -2415,7 +2444,7 @@ fn encode_one_raw(
     // to embed it as a b64-zstd blob inside metadata JSON.
 
     let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
+    for (i, name) in uniform_signal.channels().iter().enumerate() {
         if i > 0 {
             ch_json.push(',');
         }
@@ -2430,16 +2459,24 @@ fn encode_one_raw(
         ch_json.push('"');
     }
     ch_json.push(']');
-    let pmin: Vec<String> = bundle.phys_min.iter().map(|v| format!("{v}")).collect();
-    let pmax: Vec<String> = bundle.phys_max.iter().map(|v| format!("{v}")).collect();
+    let pmin: Vec<String> = uniform_signal
+        .physical_minima()
+        .iter()
+        .map(|v| format!("{v}"))
+        .collect();
+    let pmax: Vec<String> = uniform_signal
+        .physical_maxima()
+        .iter()
+        .map(|v| format!("{v}"))
+        .collect();
 
     let metadata_json = format!(
         "{{\"source_file\":\"{}\",\"format\":\"RAW\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
          \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
          \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
+        uniform_signal
+            .source_metadata()
             .source_file
             .replace('\\', "\\\\")
             .replace('"', "\\\""),
@@ -2448,7 +2485,10 @@ fn encode_one_raw(
         ch_json,
         pmin.join(","),
         pmax.join(","),
-        bundle.metadata.phys_dim.replace('"', "\\\""),
+        uniform_signal
+            .source_metadata()
+            .phys_dim
+            .replace('"', "\\\""),
         sha256_hex,
         env!("CARGO_PKG_VERSION"),
         noise_bits,
@@ -2462,7 +2502,7 @@ fn encode_one_raw(
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
     let stats = encode_abir_uniform(
         &mut sink,
-        &bundle.signal,
+        uniform_signal.signal(),
         sample_rate,
         window_size,
         noise_bits,
@@ -2485,15 +2525,19 @@ fn encode_one_raw(
 
     if verify {
         let (recovered, _meta) = decode_lml_file(lml_path)?;
-        if recovered.len() != bundle.signal.len() {
+        if recovered.len() != uniform_signal.signal().len() {
             return Err(format!(
                 "verify (raw): channel count {} != {}",
                 recovered.len(),
-                bundle.signal.len()
+                uniform_signal.signal().len()
             )
             .into());
         }
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
+        for (i, (a, b)) in recovered
+            .iter()
+            .zip(uniform_signal.signal().iter())
+            .enumerate()
+        {
             if a != b {
                 return Err(format!(
                     "verify (raw): channel {i} mismatch ({} vs {} samples)",
@@ -2519,13 +2563,13 @@ fn encode_one_raw(
     };
     if !same_dir {
         if let (Some(payload_blob), Some(name_blob)) = (
-            bundle.sidecar_first("raw_payload_raw"),
-            bundle.sidecar_first("raw_payload_filename"),
+            uniform_signal.sidecar_first("raw_payload_raw"),
+            uniform_signal.sidecar_first("raw_payload_filename"),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob.bytes)
                 .map_err(|e| format!("raw encode: raw_payload_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &payload_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, payload_blob.bytes).map_err(|e| {
                 format!(
                     "raw encode: failed to write `.raw` preservation copy to {}: {}",
                     dest.display(),
@@ -2534,13 +2578,13 @@ fn encode_one_raw(
             })?;
         }
         if let (Some(sidecar_blob), Some(name_blob)) = (
-            bundle.sidecar_first("raw_sidecar_json"),
-            bundle.sidecar_first("raw_sidecar_filename"),
+            uniform_signal.sidecar_first("raw_sidecar_json"),
+            uniform_signal.sidecar_first("raw_sidecar_filename"),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob.bytes)
                 .map_err(|e| format!("raw encode: raw_sidecar_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &sidecar_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, sidecar_blob.bytes).map_err(|e| {
                 format!(
                     "raw encode: failed to write sidecar JSON preservation copy to {}: {}",
                     dest.display(),
@@ -2571,7 +2615,7 @@ fn encode_one_raw(
         sha256: sha256_hex,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
+        duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
         n_windows: stats.n_windows as u32,
@@ -2590,13 +2634,20 @@ fn encode_one_cnt(
     use lamquant_core::source::{CntReader, SignalSourceReader};
     let t0 = Instant::now();
     let mut reader = CntReader::new(cnt_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
+    let read = reader.lower_to_abir()?;
+    let uniform_signal = read
+        .uniform_signal()
+        .ok_or("cnt encode: non-fused signal; expected uniform_native signal".to_string())?;
+    let n_channels = uniform_signal.signal().len() as u32;
+    let n_samples = uniform_signal
+        .signal()
+        .first()
+        .map(|c| c.len())
+        .unwrap_or(0);
+    let sample_rate = uniform_signal.sample_rate();
 
     let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
+    for ch in uniform_signal.signal() {
         for &sample in ch {
             hasher.update(sample.to_le_bytes());
         }
@@ -2609,7 +2660,7 @@ fn encode_one_cnt(
     // .lml header; legacy v1 reader fallback handles old archives.
 
     let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
+    for (i, name) in uniform_signal.channels().iter().enumerate() {
         if i > 0 {
             ch_json.push(',');
         }
@@ -2629,8 +2680,8 @@ fn encode_one_cnt(
         "{{\"source_file\":\"{}\",\"format\":\"CNT\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\
          \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
+        uniform_signal
+            .source_metadata()
             .source_file
             .replace('\\', "\\\\")
             .replace('"', "\\\""),
@@ -2650,7 +2701,7 @@ fn encode_one_cnt(
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
     let stats = encode_abir_uniform(
         &mut sink,
-        &bundle.signal,
+        uniform_signal.signal(),
         sample_rate,
         window_size,
         noise_bits,
@@ -2673,7 +2724,11 @@ fn encode_one_cnt(
 
     if verify {
         let (recovered, _meta) = decode_lml_file(lml_path)?;
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
+        for (i, (a, b)) in recovered
+            .iter()
+            .zip(uniform_signal.signal().iter())
+            .enumerate()
+        {
             if a != b {
                 return Err(format!(
                     "verify (cnt): channel {i} mismatch ({} vs {} samples)",
@@ -2697,12 +2752,12 @@ fn encode_one_cnt(
         _ => false,
     };
     if !same_dir {
-        if let Some(cnt_blob) = bundle.sidecar_first("cnt_raw") {
+        if let Some(cnt_blob) = uniform_signal.sidecar_first("cnt_raw") {
             let cnt_name = cnt_path
                 .file_name()
                 .ok_or("cnt encode: cnt_path has no file_name")?;
             let dest = lml_parent.join(cnt_name);
-            std::fs::write(&dest, &cnt_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, cnt_blob.bytes).map_err(|e| {
                 format!(
                     "cnt encode: failed to write `.cnt` preservation copy to {}: {}",
                     dest.display(),
@@ -2733,7 +2788,7 @@ fn encode_one_cnt(
         sha256: sha256_hex,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
+        duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
         n_windows: stats.n_windows as u32,
@@ -2753,13 +2808,20 @@ fn encode_one_dicom(
     use lamquant_core::source::{DicomWaveformReader, SignalSourceReader};
     let t0 = Instant::now();
     let mut reader = DicomWaveformReader::new(dcm_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
+    let read = reader.lower_to_abir()?;
+    let uniform_signal = read
+        .uniform_signal()
+        .ok_or("dicom encode: non-fused signal; expected uniform_native signal".to_string())?;
+    let n_channels = uniform_signal.signal().len() as u32;
+    let n_samples = uniform_signal
+        .signal()
+        .first()
+        .map(|c| c.len())
+        .unwrap_or(0);
+    let sample_rate = uniform_signal.sample_rate();
 
     let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
+    for ch in uniform_signal.signal() {
         for &sample in ch {
             hasher.update(sample.to_le_bytes());
         }
@@ -2772,7 +2834,7 @@ fn encode_one_dicom(
     // double their footprint in the .lml header.
 
     let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
+    for (i, name) in uniform_signal.channels().iter().enumerate() {
         if i > 0 {
             ch_json.push(',');
         }
@@ -2792,8 +2854,8 @@ fn encode_one_dicom(
         "{{\"source_file\":\"{}\",\"format\":\"DICOM_WAVEFORM\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\
          \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
+        uniform_signal
+            .source_metadata()
             .source_file
             .replace('\\', "\\\\")
             .replace('"', "\\\""),
@@ -2813,7 +2875,7 @@ fn encode_one_dicom(
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
     let stats = encode_abir_uniform(
         &mut sink,
-        &bundle.signal,
+        uniform_signal.signal(),
         sample_rate,
         window_size,
         noise_bits,
@@ -2836,7 +2898,11 @@ fn encode_one_dicom(
 
     if verify {
         let (recovered, _meta) = decode_lml_file(lml_path)?;
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
+        for (i, (a, b)) in recovered
+            .iter()
+            .zip(uniform_signal.signal().iter())
+            .enumerate()
+        {
             if a != b {
                 return Err(format!(
                     "verify (dicom): channel {i} mismatch ({} vs {} samples)",
@@ -2859,12 +2925,12 @@ fn encode_one_dicom(
         _ => false,
     };
     if !same_dir {
-        if let Some(dicom_blob) = bundle.sidecar_first("dicom_raw") {
+        if let Some(dicom_blob) = uniform_signal.sidecar_first("dicom_raw") {
             let dcm_name = dcm_path
                 .file_name()
                 .ok_or("dicom encode: dcm_path has no file_name")?;
             let dest = lml_parent.join(dcm_name);
-            std::fs::write(&dest, &dicom_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, dicom_blob.bytes).map_err(|e| {
                 format!(
                     "dicom encode: failed to write `.dcm` preservation copy to {}: {}",
                     dest.display(),
@@ -2895,7 +2961,7 @@ fn encode_one_dicom(
         sha256: sha256_hex,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
+        duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
         n_windows: stats.n_windows as u32,
@@ -2919,13 +2985,20 @@ fn encode_one_eeglab(
     use lamquant_core::source::{EeglabReader, SignalSourceReader};
     let t0 = Instant::now();
     let mut reader = EeglabReader::new(set_path).with_lossy_int16(lossy_int16);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
+    let read = reader.lower_to_abir()?;
+    let uniform_signal = read
+        .uniform_signal()
+        .ok_or("eeglab encode: non-fused signal; expected uniform_native signal".to_string())?;
+    let n_channels = uniform_signal.signal().len() as u32;
+    let n_samples = uniform_signal
+        .signal()
+        .first()
+        .map(|c| c.len())
+        .unwrap_or(0);
+    let sample_rate = uniform_signal.sample_rate();
 
     let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
+    for ch in uniform_signal.signal() {
         for &sample in ch {
             hasher.update(sample.to_le_bytes());
         }
@@ -2933,7 +3006,7 @@ fn encode_one_eeglab(
     let sha256_hex = format!("{:x}", hasher.finalize());
 
     let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
+    for (i, name) in uniform_signal.channels().iter().enumerate() {
         if i > 0 {
             ch_json.push(',');
         }
@@ -2958,12 +3031,12 @@ fn encode_one_eeglab(
         "{{\"source_file\":\"{}\",\"format\":\"{}\",\"n_channels\":{},\
          \"sample_rate\":{},\"channels\":{},\"eeglab_dtype\":\"{}\",\
          \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
+        uniform_signal
+            .source_metadata()
             .source_file
             .replace('\\', "\\\\")
             .replace('"', "\\\""),
-        bundle.metadata.format,
+        uniform_signal.source_metadata().format,
         n_channels,
         sample_rate,
         ch_json,
@@ -2981,7 +3054,7 @@ fn encode_one_eeglab(
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
     let stats = encode_abir_uniform(
         &mut sink,
-        &bundle.signal,
+        uniform_signal.signal(),
         sample_rate,
         window_size,
         noise_bits,
@@ -3007,7 +3080,11 @@ fn encode_one_eeglab(
 
     if verify {
         let (recovered, _meta) = decode_lml_file(lml_path)?;
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
+        for (i, (a, b)) in recovered
+            .iter()
+            .zip(uniform_signal.signal().iter())
+            .enumerate()
+        {
             if a != b {
                 return Err(format!(
                     "verify (eeglab): channel {i} mismatch ({} vs {} samples)",
@@ -3044,12 +3121,12 @@ fn encode_one_eeglab(
     };
     if !same_dir {
         // Copy `.set`.
-        if let Some(set_blob) = bundle.sidecar_first("set_raw") {
+        if let Some(set_blob) = uniform_signal.sidecar_first("set_raw") {
             let set_name = set_path
                 .file_name()
                 .ok_or("eeglab encode: set_path has no file_name")?;
             let set_dest = lml_parent.join(set_name);
-            std::fs::write(&set_dest, &set_blob.bytes).map_err(|e| {
+            std::fs::write(&set_dest, set_blob.bytes).map_err(|e| {
                 format!(
                     "eeglab encode: failed to write `.set` preservation copy to {}: {}",
                     set_dest.display(),
@@ -3059,12 +3136,12 @@ fn encode_one_eeglab(
         }
         // Copy `.fdt`. Stem matches `.set` stem; rebuild the path so
         // we don't fight the SignalSourceReader internal locator.
-        if let Some(fdt_blob) = bundle.sidecar_first("fdt_raw") {
+        if let Some(fdt_blob) = uniform_signal.sidecar_first("fdt_raw") {
             let stem = set_path
                 .file_stem()
                 .ok_or("eeglab encode: set_path has no stem")?;
             let fdt_dest = lml_parent.join(format!("{}.fdt", stem.to_string_lossy()));
-            std::fs::write(&fdt_dest, &fdt_blob.bytes).map_err(|e| {
+            std::fs::write(&fdt_dest, fdt_blob.bytes).map_err(|e| {
                 format!(
                     "eeglab encode: failed to write `.fdt` preservation copy to {}: {}",
                     fdt_dest.display(),
@@ -3082,7 +3159,7 @@ fn encode_one_eeglab(
         sha256: sha256_hex,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
+        duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
         n_windows: stats.n_windows as u32,
@@ -3536,24 +3613,11 @@ fn resolve_entry_for<'a>(
     manifest.and_then(|m| m.resolve_entry(path))
 }
 
-/// Minimal JSON string-body escaper (backslash, quote, and the C0 controls the
-/// spec requires escaped). The descriptor encoder builds its metadata JSON from
-/// USER-supplied sidecar strings (channel names, unit, path), so every one is run
-/// through this — a stray `\` in a unit like `mV\s` can't emit invalid JSON.
-fn escape_json_str(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
-
 /// ADR 0074 I3 — encode a file whose byte layout is declared by a manifest
 /// [`FormatDescriptor`](lamquant_core::source::FormatDescriptor) (a data-driven
 /// reader for a custom fixed-layout binary), bypassing the file-extension
-/// dispatch. Mirrors `encode_one_raw`'s bundle→lml path but sources the bundle
-/// from `read_bundle_from_descriptor` and types it at write time via
-/// `write_into_with_modality` (so no post-hoc byte patch).
+/// dispatch. Descriptor parsing returns validated ABIR and preserves its fused
+/// native matrix only for checksum and verification work.
 #[allow(clippy::too_many_arguments)]
 fn encode_one_descriptor(
     path: &Path,
@@ -3566,58 +3630,39 @@ fn encode_one_descriptor(
     modality: Option<&str>,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::container;
-    use lamquant_core::source::read_bundle_from_descriptor;
+    use lamquant_core::source::{lower_descriptor_to_abir_with_options, SemanticLoweringOptions};
     let data = std::fs::read(path)?;
     // The descriptor interpreter always parses the sidecar as JSON (to resolve any
     // `FromSidecarField` channel-count / sample-rate). Use a sibling `<path>.json`
     // if present, else a valid empty object — a Fixed-only descriptor needs no
     // sidecar but still requires parseable JSON (empty bytes are an EOF error).
     let sidecar = std::fs::read(path.with_extension("json")).unwrap_or_else(|_| b"{}".to_vec());
-    let mut bundle = read_bundle_from_descriptor(descriptor, &data, &sidecar)?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
+    let read = lower_descriptor_to_abir_with_options(
+        descriptor,
+        &data,
+        &sidecar,
+        SemanticLoweringOptions::default().with_modality(
+            semantic_abir::ConceptId::new(modality.unwrap_or("abir:modality/unknown"))
+                .map_err(|error| format!("invalid ingest modality concept: {error}"))?,
+        ),
+    )?;
+    let uniform_signal = read
+        .uniform_signal()
+        .ok_or("descriptor encode: expected uniform native signal")?;
+    let n_channels = uniform_signal.signal().len() as u32;
+    let n_samples = uniform_signal.signal().first().map(Vec::len).unwrap_or(0);
+    let sample_rate = uniform_signal.sample_rate();
 
     let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
+    for ch in uniform_signal.signal() {
         for &sample in ch {
             hasher.update(sample.to_le_bytes());
         }
     }
     let sha256_hex = format!("{:x}", hasher.finalize());
 
-    let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
-        if i > 0 {
-            ch_json.push(',');
-        }
-        ch_json.push('"');
-        ch_json.push_str(&escape_json_str(name));
-        ch_json.push('"');
-    }
-    ch_json.push(']');
-    let pmin: Vec<String> = bundle.phys_min.iter().map(|v| format!("{v}")).collect();
-    let pmax: Vec<String> = bundle.phys_max.iter().map(|v| format!("{v}")).collect();
-
-    let metadata_json = format!(
-        "{{\"source_file\":\"{}\",\"format\":\"DESCRIPTOR\",\"n_channels\":{},\
-         \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
-         \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
-         \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        escape_json_str(&bundle.metadata.source_file),
-        n_channels,
-        sample_rate,
-        ch_json,
-        pmin.join(","),
-        pmax.join(","),
-        escape_json_str(&bundle.metadata.phys_dim),
-        sha256_hex,
-        env!("CARGO_PKG_VERSION"),
-        noise_bits,
-    );
-    bundle.metadata.recording_info = metadata_json;
-    let expected_signal = verify.then(|| bundle.signal.clone());
-    let duration_s = bundle.duration_s;
+    let expected_signal = verify.then(|| uniform_signal.signal().to_vec());
+    let duration_s = uniform_signal.duration_s();
     let _ = (window_size, lpc_mode);
 
     if let Some(parent) = lml_path.parent() {
@@ -3630,15 +3675,7 @@ fn encode_one_descriptor(
             "descriptor ingest into the exact BCS2 LML profile requires --noise-bits 0".into(),
         );
     }
-    let semantic = lamquant_core::source::from_signal_bundle_with_semantics(
-        bundle,
-        semantic_abir::ConceptId::new(modality.unwrap_or("abir:modality/unknown"))
-            .map_err(|error| format!("invalid ingest modality concept: {error}"))?,
-        Vec::new(),
-        Vec::new(),
-        semantic_abir::ValidationLimits::default(),
-    )?;
-    let bytes = container::encode(semantic.opened.dataset(), semantic.opened.access())?;
+    let bytes = container::encode(read.opened.dataset(), read.opened.access())?;
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
     use std::io::Write as _;
     sink.write_all(&bytes)?;
@@ -3671,7 +3708,7 @@ fn encode_one_descriptor(
     if verify {
         let (recovered, _meta) = decode_lml_file(lml_path)?;
         if expected_signal.as_ref() != Some(&recovered) {
-            return Err("verify (descriptor): decoded signal != source bundle".into());
+            return Err("verify (descriptor): decoded signal != source ABIR view".into());
         }
     }
 

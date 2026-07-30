@@ -39,9 +39,9 @@
 
 #![cfg(feature = "dicom")]
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::bundle::{ParsedUniformSignal, SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::{from_signal_bundle, SemanticRead};
+use super::semantic::{lower_parsed_uniform_signal, SemanticLoweringOptions, SemanticRead};
 use crate::error::{LmlError, LmlResult};
 use std::path::PathBuf;
 
@@ -68,17 +68,23 @@ impl DicomWaveformReader {
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         Self { path: path.into() }
     }
+
+    pub fn lower_to_abir_with_options(
+        &mut self,
+        options: SemanticLoweringOptions,
+    ) -> LmlResult<SemanticRead> {
+        lower_parsed_uniform_signal(self.read_parsed_signal()?, options)
+    }
 }
 
 impl SignalSourceReader for DicomWaveformReader {
     fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
-        )
+        self.lower_to_abir_with_options(SemanticLoweringOptions::default())
     }
+}
 
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+impl DicomWaveformReader {
+    fn read_parsed_signal(&mut self) -> LmlResult<ParsedUniformSignal> {
         let obj = open_file(&self.path).map_err(|e| {
             LmlError::InvalidHeader(format!("dicom: open {}: {e}", self.path.display()))
         })?;
@@ -221,7 +227,7 @@ impl SignalSourceReader for DicomWaveformReader {
         // though we ignored sensitivity decoding on the read path.
         let raw_bytes = std::fs::read(&self.path).map_err(LmlError::Io)?;
 
-        let bundle = SignalBundle {
+        let parsed = ParsedUniformSignal {
             signal,
             sample_rate: base_rate,
             channels,
@@ -242,8 +248,8 @@ impl SignalSourceReader for DicomWaveformReader {
                 aux: None,
             }],
         };
-        bundle.validate()?;
-        Ok(bundle)
+        parsed.validate()?;
+        Ok(parsed)
     }
 }
 
@@ -386,7 +392,8 @@ mod tests {
 
     // ─── Task #33 (ADR 0069 L9 hardening): negative-path refusal ───────
     //
-    // `parse_group_meta` (called by BOTH `read_bundle` and `lower_to_legacy_recording`)
+    // `parse_group_meta` (called by both `read_parsed_signal` and
+    // `lower_to_abir`)
     // refuses any group whose `WaveformBitsAllocated != 16` or
     // `WaveformSampleInterpretation != "SS"` BEFORE a single sample byte
     // is decoded — that check is what keeps `lower_to_legacy_recording`'s unconditional

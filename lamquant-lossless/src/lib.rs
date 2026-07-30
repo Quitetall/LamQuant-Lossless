@@ -136,7 +136,7 @@ pub mod lma_forensic;
 #[cfg(feature = "nwb")]
 pub mod nwb;
 // Textual biosignal-IR form (ADR 0069) — the golden/debug serialization of the
-// SignalBundle IR. Needs the bundle (archive feature).
+// uniform-native reader intermediate. Requires the bundle feature.
 #[cfg(feature = "archive")]
 pub mod ir;
 // Re-exported from lamquant-common during the 8-repo decomposition (Phase 2).

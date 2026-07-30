@@ -24,7 +24,7 @@
 //!
 //! Bible alignment:
 //!   - R1 — one format per file under `source/`
-//!   - R6 — emit `SignalBundle`, never expose BrainVision-specific
+//!   - R6 — emit `ParsedUniformSignal`, never expose BrainVision-specific
 //!     types upstream
 //!   - R23 — validate header invariants before allocating sample buffers
 //!   - R30 — refuse unsupported sub-formats explicitly with typed errors
@@ -32,9 +32,9 @@
 use crate::error::{LmlError, LmlResult};
 use std::path::{Path, PathBuf};
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::bundle::{ParsedUniformSignal, SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::{from_signal_bundle, SemanticRead};
+use super::semantic::{lower_parsed_uniform_signal, SemanticLoweringOptions, SemanticRead};
 
 /// Maximum `.vhdr` size we'll trust (text headers are tiny in practice;
 /// 4 MiB is a paranoid ceiling for adversarial inputs).
@@ -274,13 +274,15 @@ impl BrainVisionReader {
 
 impl SignalSourceReader for BrainVisionReader {
     fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
+        lower_parsed_uniform_signal(
+            self.read_parsed_signal()?,
+            SemanticLoweringOptions::default(),
         )
     }
+}
 
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+impl BrainVisionReader {
+    fn read_parsed_signal(&mut self) -> LmlResult<ParsedUniformSignal> {
         // 1. Read + parse the .vhdr.
         let vhdr_meta = std::fs::metadata(&self.vhdr_path).map_err(LmlError::Io)?;
         if vhdr_meta.len() > MAX_VHDR_BYTES {
@@ -459,7 +461,7 @@ impl SignalSourceReader for BrainVisionReader {
             }
         }
 
-        let bundle = SignalBundle {
+        let parsed = ParsedUniformSignal {
             signal,
             sample_rate,
             channels,
@@ -476,8 +478,8 @@ impl SignalSourceReader for BrainVisionReader {
             },
             sidecar,
         };
-        bundle.validate()?;
-        Ok(bundle)
+        parsed.validate()?;
+        Ok(parsed)
     }
 }
 
@@ -545,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn read_bundle_int16_multiplexed_round_trip() {
+    fn lower_to_abir_int16_multiplexed_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let n_ch = 3usize;
         let n_samples = 100usize;
@@ -564,23 +566,28 @@ mod tests {
         // .vmrk a few stub bytes.
         std::fs::write(tmp.path().join("test.vmrk"), b"; vmrk stub").unwrap();
         let mut reader = BrainVisionReader::new(tmp.path().join("test.vhdr"));
-        let b = reader.read_bundle().unwrap();
-        assert_eq!(b.signal.len(), n_ch);
-        assert_eq!(b.signal[0].len(), n_samples);
+        let abir = reader.lower_to_abir().unwrap();
+        let parsed = abir.uniform_signal().unwrap();
+        assert_eq!(parsed.signal().len(), n_ch);
+        assert_eq!(parsed.signal()[0].len(), n_samples);
         for s in 0..n_samples {
             for ch in 0..n_ch {
-                assert_eq!(b.signal[ch][s], (s as i64) * (ch as i64 + 1));
+                assert_eq!(parsed.signal()[ch][s], (s as i64) * (ch as i64 + 1));
             }
         }
-        assert!((b.sample_rate - 250.0).abs() < 1e-9, "sr={}", b.sample_rate);
-        assert_eq!(b.metadata.format, "BRAINVISION");
+        assert!(
+            (parsed.sample_rate() - 250.0).abs() < 1e-9,
+            "sr={}",
+            parsed.sample_rate()
+        );
+        assert_eq!(parsed.source_metadata().format, "BRAINVISION");
         // Sidecars present.
-        assert!(b.sidecar_first("vhdr_raw").is_some());
-        assert!(b.sidecar_first("vmrk_raw").is_some());
+        assert!(parsed.sidecar_first("vhdr_raw").is_some());
+        assert!(parsed.sidecar_first("vmrk_raw").is_some());
     }
 
     #[test]
-    fn read_bundle_handles_missing_marker_file() {
+    fn lower_to_abir_handles_missing_marker_file() {
         let tmp = tempfile::tempdir().unwrap();
         let n_ch = 1usize;
         let n_samples = 8usize;
@@ -604,12 +611,13 @@ mod tests {
         let p = tmp.path().join("a.vhdr");
         std::fs::write(&p, vhdr.as_bytes()).unwrap();
         let mut reader = BrainVisionReader::new(&p);
-        let b = reader.read_bundle().unwrap();
-        assert!(b.sidecar_first("vmrk_raw").is_none());
+        let abir = reader.lower_to_abir().unwrap();
+        let parsed = abir.uniform_signal().unwrap();
+        assert!(parsed.sidecar_first("vmrk_raw").is_none());
     }
 
     #[test]
-    fn read_bundle_rejects_eeg_length_mismatch() {
+    fn lower_to_abir_rejects_eeg_length_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
         // .vhdr expects 2 channels INT_16, but .eeg has an odd byte count.
         let vhdr = synth_vhdr_int16_multiplexed(2, 4000.0);
@@ -619,7 +627,7 @@ mod tests {
         let mut w = std::fs::File::create(tmp.path().join("test.vmrk")).unwrap();
         let _ = w.write_all(b";");
         let mut reader = BrainVisionReader::new(&p);
-        match reader.read_bundle() {
+        match reader.lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("multiple of")),
             other => panic!("expected InvalidHeader, got {other:?}"),
         }

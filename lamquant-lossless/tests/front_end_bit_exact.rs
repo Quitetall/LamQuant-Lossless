@@ -10,7 +10,7 @@
 //!     ABIR/BCS2 bundle whose enclosed LML1 packets match the frozen kernel.
 //!   * **EDF→container** (`--features archive`): a synth EDF → `edf::read_edf` →
 //!     the same `.lml` sink. Locks that the EDF front-end serializes identically.
-//!   * **front-end (NWB)** (`--features nwb`): an h5py fixture → `nwb::read_bundle`
+//!   * **front-end (NWB)** (`--features nwb`): an h5py fixture → ABIR tensors
 //!     → sha256 of the parsed IR signal. Skips when python3+h5py absent.
 //!
 //! Scope note (deliberate): the container/EDF locks pin metadata to `"{}"`, so they
@@ -22,7 +22,7 @@
 //! + pinned Cargo.lock; record the why in the commit message):
 //!   LAMQUANT_REGEN_FRONTEND=1 cargo test --features archive --test front_end_bit_exact -- --nocapture  # LML1 wire
 //!   LAMQUANT_REGEN_FRONTEND=1 cargo test --features nwb     --test front_end_bit_exact -- --nocapture  # + NWB
-//! then paste the printed shas into the GOLDEN_* tables below.
+//!   then paste the printed shas into the GOLDEN_* tables below.
 
 use sha2::{Digest, Sha256};
 
@@ -138,8 +138,9 @@ sys.exit(0)
             eprintln!("SKIP nwb_reader_signal_locked: h5py unavailable");
             return;
         }
-        let bundle = lamquant_core::nwb::read_bundle(&fx).expect("read_bundle");
-        let got = sha_signal(&bundle.signal);
+        let read = lamquant_core::nwb::read_semantic(&fx).expect("read_semantic");
+        let signal = lamquant_core::nwb::signal_channels(&read).expect("tensor channels");
+        let got = sha_signal(&signal);
         if regen() {
             println!("NWB signal = {got}");
             return;

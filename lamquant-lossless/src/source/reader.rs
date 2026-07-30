@@ -1,8 +1,8 @@
 //! `SignalSourceReader` — the trait every physiology reader implements.
 //!
-//! ABIR is the public source boundary. Readers may use native parser layouts or
-//! the temporary `SignalBundle` carrier internally, but every implementation
-//! must return one validated semantic dataset plus payload resolver.
+//! ABIR is the public source boundary. Readers may use private native parser
+//! layouts internally, but every implementation returns one validated semantic
+//! dataset plus payload resolver.
 //!
 //! Bible alignment:
 //! - R1  Each impl does ONE format. Composition over inheritance.
@@ -10,9 +10,8 @@
 //! - R23 Validate at both ends: reader checks its input bytes, caller
 //!   receives only validated ABIR.
 
-use super::bundle::SignalBundle;
 use super::semantic::SemanticRead;
-use crate::error::{LmlError, LmlResult};
+use crate::error::LmlResult;
 
 /// Lower a physiology recording into canonical semantic ABIR.
 ///
@@ -27,33 +26,22 @@ pub trait SignalSourceReader {
     /// Read this source into a validated `AbirDataset` plus owned payload
     /// resolver. Every source implementation must define this semantic seam.
     fn lower_to_abir(&mut self) -> LmlResult<SemanticRead>;
-
-    /// Transitional carrier used only by callers not yet migrated to ABIR.
-    ///
-    /// Package 26 removes this method with `SignalBundle`. New readers must not
-    /// implement it and new callers must use [`Self::lower_to_abir`].
-    #[doc(hidden)]
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
-        Err(LmlError::InvalidHeader(
-            "legacy SignalBundle projection is unavailable; use lower_to_abir".into(),
-        ))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::source::{
-        bundle::{SignalBundle, SourceMetadata},
-        from_signal_bundle,
+        bundle::{ParsedUniformSignal, SourceMetadata},
+        semantic::{lower_parsed_uniform_signal, SemanticLoweringOptions},
     };
 
     struct SemanticOnlyReader;
 
     impl SignalSourceReader for SemanticOnlyReader {
         fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
-            from_signal_bundle(
-                SignalBundle {
+            lower_parsed_uniform_signal(
+                ParsedUniformSignal {
                     signal: vec![vec![1, 2, 3]],
                     sample_rate: 250.0,
                     channels: vec!["Cz".into()],
@@ -70,7 +58,7 @@ mod tests {
                     },
                     sidecar: Vec::new(),
                 },
-                semantic_abir::ValidationLimits::default(),
+                SemanticLoweringOptions::default(),
             )
         }
     }

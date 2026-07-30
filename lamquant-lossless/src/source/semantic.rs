@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{LmlError, LmlResult};
 
-use super::bundle::{SignalBundle, SourceMetadata};
+use super::bundle::{ParsedUniformSignal, SidecarBlob, SourceMetadata};
 
 /// Owned semantic result returned by biosignal source readers.
 #[derive(Debug)]
@@ -18,6 +18,140 @@ pub struct SemanticRead {
     pub opened: semantic::OpenedDataset<semantic::InMemoryPayloadAccess>,
     pub mapping: SemanticMappingReport,
     pub fidelity: SemanticFidelityReport,
+    native_uniform: Option<NativeUniformSignal>,
+    native_sidecars: Vec<NativeSidecarIndex>,
+}
+
+impl SemanticRead {
+    /// Borrow the parser's validated native matrix when this source entered as
+    /// one uniform integer recording.
+    ///
+    /// `opened.dataset()` remains semantic authority. This view is only a
+    /// fused execution cache created by the same lowering transaction.
+    pub fn uniform_signal(&self) -> Option<UniformSignalView<'_>> {
+        self.native_uniform
+            .as_ref()
+            .map(|native| UniformSignalView { read: self, native })
+    }
+
+    #[cfg(feature = "nwb")]
+    pub(crate) fn from_opened_dataset(
+        opened: semantic::OpenedDataset<semantic::InMemoryPayloadAccess>,
+        mapping: SemanticMappingReport,
+        fidelity: SemanticFidelityReport,
+    ) -> Self {
+        Self {
+            opened,
+            mapping,
+            fidelity,
+            native_uniform: None,
+            native_sidecars: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NativeUniformSignal {
+    signal: Vec<Vec<i64>>,
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    duration_s: f64,
+    metadata: SourceMetadata,
+}
+
+#[derive(Debug)]
+struct NativeSidecarIndex {
+    key: String,
+    aux: Option<i64>,
+    content_id: semantic::ContentId,
+}
+
+/// Borrowed fused view tied to a validated semantic dataset.
+#[derive(Clone, Copy, Debug)]
+pub struct UniformSignalView<'a> {
+    read: &'a SemanticRead,
+    native: &'a NativeUniformSignal,
+}
+
+impl<'a> UniformSignalView<'a> {
+    pub fn dataset(&self) -> &'a semantic::AbirDataset {
+        self.read.opened.dataset()
+    }
+
+    pub fn signal(&self) -> &'a [Vec<i64>] {
+        &self.native.signal
+    }
+
+    pub const fn sample_rate(&self) -> f64 {
+        self.native.sample_rate
+    }
+
+    pub fn channels(&self) -> &'a [String] {
+        &self.native.channels
+    }
+
+    pub fn physical_minima(&self) -> &'a [f64] {
+        &self.native.phys_min
+    }
+
+    pub fn physical_maxima(&self) -> &'a [f64] {
+        &self.native.phys_max
+    }
+
+    pub const fn duration_s(&self) -> f64 {
+        self.native.duration_s
+    }
+
+    pub const fn source_metadata(&self) -> &'a SourceMetadata {
+        &self.native.metadata
+    }
+
+    pub fn sidecar_first(&self, key: &str) -> Option<SemanticSidecarView<'a>> {
+        self.read
+            .native_sidecars
+            .iter()
+            .find(|sidecar| sidecar.key == key)
+            .and_then(|sidecar| self.read.sidecar_view(sidecar))
+    }
+
+    pub fn sidecar_all(&self, key: &'a str) -> impl Iterator<Item = SemanticSidecarView<'a>> + 'a {
+        self.read
+            .native_sidecars
+            .iter()
+            .filter(move |sidecar| sidecar.key == key)
+            .filter_map(|sidecar| self.read.sidecar_view(sidecar))
+    }
+
+    pub fn sidecars(&self) -> impl Iterator<Item = SemanticSidecarView<'a>> + 'a {
+        self.read
+            .native_sidecars
+            .iter()
+            .filter_map(|sidecar| self.read.sidecar_view(sidecar))
+    }
+}
+
+/// Content-addressed source-preservation payload borrowed from ABIR storage.
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticSidecarView<'a> {
+    pub key: &'a str,
+    pub bytes: &'a [u8],
+    pub aux: Option<i64>,
+}
+
+impl SemanticRead {
+    fn sidecar_view<'a>(
+        &'a self,
+        sidecar: &'a NativeSidecarIndex,
+    ) -> Option<SemanticSidecarView<'a>> {
+        let bytes = self.opened.access().payload_bytes(sidecar.content_id)?;
+        Some(SemanticSidecarView {
+            key: &sidecar.key,
+            bytes,
+            aux: sidecar.aux,
+        })
+    }
 }
 
 /// Auditable source-to-ABIR mapping summary.
@@ -82,19 +216,76 @@ pub struct SemanticFidelityReport {
     pub source_capsules_content_bound: bool,
 }
 
-/// Lower a validated format-agnostic reader result into canonical semantic
-/// ABIR. Payload bytes move into the returned in-memory resolver exactly once.
-pub fn from_signal_bundle(
-    bundle: SignalBundle,
+/// Semantic controls applied by a source parser during its single lowering
+/// transaction.
+#[derive(Clone, Debug)]
+pub struct SemanticLoweringOptions {
+    modality: semantic::ConceptId,
+    preserve_reader_sidecars: bool,
+    capsule_binding: SourceCapsuleBinding,
+    events: Vec<SemanticTimedEvent>,
     limits: semantic::ValidationLimits,
-) -> LmlResult<SemanticRead> {
-    from_signal_bundle_with_semantics(
-        bundle,
-        semantic::ConceptId::new("abir:modality/unknown").expect("static concept is canonical"),
-        Vec::new(),
-        Vec::new(),
-        limits,
-    )
+}
+
+#[derive(Clone, Debug)]
+enum SourceCapsuleBinding {
+    Explicit(Vec<SemanticSourceCapsule>),
+    InterchangeBound {
+        namespace_prefix: String,
+        source_objects: Vec<SemanticSourceObject>,
+    },
+}
+
+impl Default for SemanticLoweringOptions {
+    fn default() -> Self {
+        Self {
+            modality: semantic::ConceptId::new("abir:modality/unknown")
+                .expect("static concept is canonical"),
+            preserve_reader_sidecars: true,
+            capsule_binding: SourceCapsuleBinding::Explicit(Vec::new()),
+            events: Vec::new(),
+            limits: semantic::ValidationLimits::default(),
+        }
+    }
+}
+
+impl SemanticLoweringOptions {
+    pub fn with_modality(mut self, modality: semantic::ConceptId) -> Self {
+        self.modality = modality;
+        self
+    }
+
+    pub fn without_reader_sidecars(mut self) -> Self {
+        self.preserve_reader_sidecars = false;
+        self
+    }
+
+    pub fn with_explicit_capsules(mut self, capsules: Vec<SemanticSourceCapsule>) -> Self {
+        self.capsule_binding = SourceCapsuleBinding::Explicit(capsules);
+        self
+    }
+
+    pub fn with_interchange_bound_sources(
+        mut self,
+        namespace_prefix: String,
+        source_objects: Vec<SemanticSourceObject>,
+    ) -> Self {
+        self.capsule_binding = SourceCapsuleBinding::InterchangeBound {
+            namespace_prefix,
+            source_objects,
+        };
+        self
+    }
+
+    pub fn with_events(mut self, events: Vec<SemanticTimedEvent>) -> Self {
+        self.events = events;
+        self
+    }
+
+    pub const fn with_limits(mut self, limits: semantic::ValidationLimits) -> Self {
+        self.limits = limits;
+        self
+    }
 }
 
 /// Lower a caller-owned uniform signal without cloning its channel matrix.
@@ -121,140 +312,107 @@ pub fn from_uniform_signal_view(
         duration_s,
     )?;
     lower_signal_parts(
-        SignalInput::Borrowed(signal),
+        signal,
         sample_rate,
-        channels,
-        phys_min,
-        phys_max,
-        metadata,
+        &channels,
+        &phys_min,
+        &phys_max,
+        &metadata,
         Vec::new(),
         semantic::ConceptId::new("abir:modality/unknown").expect("static concept is canonical"),
-        CapsuleBinding::Explicit(Vec::new()),
+        SourceCapsuleBinding::Explicit(Vec::new()),
         Vec::new(),
         limits,
     )
 }
 
-pub fn from_signal_bundle_with_overlays(
-    bundle: SignalBundle,
-    extra_capsules: Vec<SemanticSourceCapsule>,
-    events: Vec<SemanticTimedEvent>,
-    limits: semantic::ValidationLimits,
+/// Lower caller-owned native channels once and retain them only as a
+/// non-authoritative fused view tied to the validated dataset.
+#[allow(clippy::too_many_arguments)]
+pub fn from_owned_uniform_signal(
+    signal: Vec<Vec<i64>>,
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    duration_s: f64,
+    metadata: SourceMetadata,
+    options: SemanticLoweringOptions,
 ) -> LmlResult<SemanticRead> {
-    from_signal_bundle_with_semantics(
-        bundle,
-        semantic::ConceptId::new("abir:modality/unknown").expect("static concept is canonical"),
-        extra_capsules,
-        events,
-        limits,
-    )
-}
-
-pub fn from_signal_bundle_with_semantics(
-    bundle: SignalBundle,
-    modality: semantic::ConceptId,
-    extra_capsules: Vec<SemanticSourceCapsule>,
-    events: Vec<SemanticTimedEvent>,
-    limits: semantic::ValidationLimits,
-) -> LmlResult<SemanticRead> {
-    lower_signal_bundle(
-        bundle,
-        modality,
-        CapsuleBinding::Explicit(extra_capsules),
-        events,
-        limits,
-    )
-}
-
-/// Lower a signal bundle once and bind foreign objects to its capsule-free
-/// interchange identity. The `namespace_prefix` is prepended to that identity.
-///
-/// This avoids the adapter anti-pattern of lowering an unbound copy solely to
-/// discover the identity and then lowering the full sample payload again.
-pub fn from_signal_bundle_with_interchange_bound_sources(
-    bundle: SignalBundle,
-    modality: semantic::ConceptId,
-    namespace_prefix: String,
-    source_objects: Vec<SemanticSourceObject>,
-    events: Vec<SemanticTimedEvent>,
-    limits: semantic::ValidationLimits,
-) -> LmlResult<SemanticRead> {
-    lower_signal_bundle(
-        bundle,
-        modality,
-        CapsuleBinding::InterchangeBound {
-            namespace_prefix,
-            source_objects,
+    lower_parsed_uniform_signal(
+        ParsedUniformSignal {
+            signal,
+            sample_rate,
+            channels,
+            phys_min,
+            phys_max,
+            duration_s,
+            metadata,
+            sidecar: Vec::new(),
         },
-        events,
-        limits,
+        options,
     )
 }
 
-enum CapsuleBinding {
-    Explicit(Vec<SemanticSourceCapsule>),
-    InterchangeBound {
-        namespace_prefix: String,
-        source_objects: Vec<SemanticSourceObject>,
-    },
-}
-
-enum SignalInput<'a> {
-    Owned(Vec<Vec<i64>>),
-    Borrowed(&'a [Vec<i64>]),
-}
-
-fn lower_signal_bundle(
-    bundle: SignalBundle,
-    modality: semantic::ConceptId,
-    capsule_binding: CapsuleBinding,
-    events: Vec<SemanticTimedEvent>,
-    limits: semantic::ValidationLimits,
+pub(crate) fn lower_parsed_uniform_signal(
+    mut parsed: ParsedUniformSignal,
+    options: SemanticLoweringOptions,
 ) -> LmlResult<SemanticRead> {
-    bundle.validate()?;
-    let SignalBundle {
+    parsed.validate()?;
+    if !options.preserve_reader_sidecars {
+        parsed.sidecar.clear();
+    }
+    let ParsedUniformSignal {
         signal,
         sample_rate,
         channels,
         phys_min,
         phys_max,
-        duration_s: _,
+        duration_s,
         metadata,
         sidecar,
-    } = bundle;
-    lower_signal_parts(
-        SignalInput::Owned(signal),
+    } = parsed;
+    let mut read = lower_signal_parts(
+        &signal,
+        sample_rate,
+        &channels,
+        &phys_min,
+        &phys_max,
+        &metadata,
+        sidecar,
+        options.modality,
+        options.capsule_binding,
+        options.events,
+        options.limits,
+    )?;
+    read.native_uniform = Some(NativeUniformSignal {
+        signal,
         sample_rate,
         channels,
         phys_min,
         phys_max,
+        duration_s,
         metadata,
-        sidecar,
-        modality,
-        capsule_binding,
-        events,
-        limits,
-    )
+    });
+    Ok(read)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn lower_signal_parts(
-    signal: SignalInput<'_>,
+    signal: &[Vec<i64>],
     sample_rate: f64,
-    channels: Vec<String>,
-    phys_min: Vec<f64>,
-    phys_max: Vec<f64>,
-    metadata: SourceMetadata,
-    sidecar: Vec<super::bundle::SidecarBlob>,
+    channels: &[String],
+    phys_min: &[f64],
+    phys_max: &[f64],
+    metadata: &SourceMetadata,
+    sidecar: Vec<SidecarBlob>,
     modality: semantic::ConceptId,
-    capsule_binding: CapsuleBinding,
+    capsule_binding: SourceCapsuleBinding,
     events: Vec<SemanticTimedEvent>,
     limits: semantic::ValidationLimits,
 ) -> LmlResult<SemanticRead> {
-    let (channel_count, sample_count) = match &signal {
-        SignalInput::Owned(channels) => (channels.len(), channels.first().map_or(0, Vec::len)),
-        SignalInput::Borrowed(channels) => (channels.len(), channels.first().map_or(0, Vec::len)),
-    };
+    let channel_count = signal.len();
+    let sample_count = signal.first().map_or(0, Vec::len);
     if channel_count == 0 || sample_count == 0 {
         return Err(invalid(
             "semantic ABIR requires at least one non-empty channel",
@@ -275,26 +433,17 @@ fn lower_signal_parts(
         payloads.insert(content_id, bytes);
         channel_payloads.push(content_id);
     };
-    match signal {
-        SignalInput::Owned(channels) => {
-            for channel in channels {
-                add_channel(&channel);
-            }
-        }
-        SignalInput::Borrowed(channels) => {
-            for channel in channels {
-                add_channel(channel);
-            }
-        }
+    for channel in signal {
+        add_channel(channel);
     }
 
     let seed = semantic_seed(
         &channel_payloads,
         sample_rate,
-        &channels,
-        &phys_min,
-        &phys_max,
-        &metadata,
+        channels,
+        phys_min,
+        phys_max,
+        metadata,
         &modality,
         &events,
     );
@@ -413,8 +562,8 @@ fn lower_signal_parts(
     }
 
     let extra_capsules = match capsule_binding {
-        CapsuleBinding::Explicit(capsules) => capsules,
-        CapsuleBinding::InterchangeBound {
+        SourceCapsuleBinding::Explicit(capsules) => capsules,
+        SourceCapsuleBinding::InterchangeBound {
             namespace_prefix,
             source_objects,
         } => {
@@ -439,18 +588,22 @@ fn lower_signal_parts(
         }
     };
     let source_capsule_count = sidecar.len().saturating_add(extra_capsules.len());
+    let mut native_sidecars = Vec::with_capacity(sidecar.len());
     for (index, capsule) in sidecar.into_iter().enumerate() {
-        let content_id = semantic::payload_content_id(semantic::ElementType::Bytes, &capsule.bytes);
-        payloads.insert(content_id, capsule.bytes);
-        let value = capsule.aux.map_or_else(
-            || capsule.key.clone(),
-            |aux| format!("{}#{aux}", capsule.key),
-        );
+        let SidecarBlob { key, bytes, aux } = capsule;
+        let content_id = semantic::payload_content_id(semantic::ElementType::Bytes, &bytes);
+        payloads.insert(content_id, bytes);
+        let value = aux.map_or_else(|| key.clone(), |aux| format!("{key}#{aux}"));
         draft.add_source_capsule(semantic::SourceCapsule::new(
             source_key(&format!("source.sidecar.{index}"), &value)?,
             content_id,
             Some("application/octet-stream"),
         ));
+        native_sidecars.push(NativeSidecarIndex {
+            key,
+            aux,
+            content_id,
+        });
     }
     for capsule in extra_capsules {
         let content_id = semantic::payload_content_id(semantic::ElementType::Bytes, &capsule.bytes);
@@ -468,7 +621,7 @@ fn lower_signal_parts(
     Ok(SemanticRead {
         opened: semantic::OpenedDataset::new(dataset, payloads),
         mapping: SemanticMappingReport {
-            source_format: metadata.format,
+            source_format: metadata.format.clone(),
             recording_count: 1,
             stream_count: 1,
             channel_count: channel_payloads.len(),
@@ -485,6 +638,8 @@ fn lower_signal_parts(
             calibration_promoted: false,
             source_capsules_content_bound: true,
         },
+        native_uniform: None,
+        native_sidecars,
     })
 }
 
@@ -638,10 +793,10 @@ fn invalid(message: &str) -> LmlError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{SidecarBlob, SourceMetadata};
+    use crate::source::SourceMetadata;
 
-    fn fixture_bundle() -> SignalBundle {
-        SignalBundle {
+    fn fixture_signal() -> ParsedUniformSignal {
+        ParsedUniformSignal {
             signal: vec![vec![1, -2, 3], vec![4, 5, 6]],
             sample_rate: 250.0,
             channels: vec!["Fp1".to_owned(), "Cz".to_owned()],
@@ -665,9 +820,10 @@ mod tests {
     }
 
     #[test]
-    fn bundle_lowering_returns_valid_owned_semantics() {
+    fn parsed_lowering_returns_valid_owned_semantics() {
         let read =
-            from_signal_bundle(fixture_bundle(), semantic::ValidationLimits::default()).unwrap();
+            lower_parsed_uniform_signal(fixture_signal(), SemanticLoweringOptions::default())
+                .unwrap();
 
         assert_eq!(read.opened.dataset().recordings().len(), 1);
         assert_eq!(read.opened.dataset().streams().len(), 1);
@@ -680,19 +836,35 @@ mod tests {
     }
 
     #[test]
+    fn owned_lowering_retains_a_non_authoritative_native_view_without_copy() {
+        let parsed = fixture_signal();
+        let first_channel = parsed.signal[0].as_ptr();
+        let read = lower_parsed_uniform_signal(parsed, SemanticLoweringOptions::default()).unwrap();
+        let native = read
+            .uniform_signal()
+            .expect("owned uniform sources retain their fused native form");
+
+        assert_eq!(native.signal()[0].as_ptr(), first_channel);
+        assert_eq!(native.sample_rate(), 250.0);
+        assert_eq!(native.channels(), ["Fp1", "Cz"]);
+        assert_eq!(native.source_metadata().format, "EDF");
+        assert_eq!(native.sidecar_first("raw_header").unwrap().bytes, [1, 2, 3]);
+    }
+
+    #[test]
     fn borrowed_uniform_lowering_matches_owned_semantics() {
-        let mut bundle = fixture_bundle();
-        bundle.sidecar.clear();
-        let owned =
-            from_signal_bundle(bundle.clone(), semantic::ValidationLimits::default()).unwrap();
+        let mut parsed = fixture_signal();
+        parsed.sidecar.clear();
+        let owned = lower_parsed_uniform_signal(parsed.clone(), SemanticLoweringOptions::default())
+            .unwrap();
         let borrowed = from_uniform_signal_view(
-            &bundle.signal,
-            bundle.sample_rate,
-            bundle.channels.clone(),
-            bundle.phys_min.clone(),
-            bundle.phys_max.clone(),
-            bundle.duration_s,
-            bundle.metadata.clone(),
+            &parsed.signal,
+            parsed.sample_rate,
+            parsed.channels.clone(),
+            parsed.phys_min.clone(),
+            parsed.phys_max.clone(),
+            parsed.duration_s,
+            parsed.metadata.clone(),
             semantic::ValidationLimits::default(),
         )
         .unwrap();
@@ -712,23 +884,21 @@ mod tests {
             end: semantic::Rational::new(3, 5).unwrap(),
             uncertainty: semantic::Rational::new(0, 1).unwrap(),
         };
-        let baseline = from_signal_bundle_with_overlays(
-            fixture_bundle(),
-            vec![],
-            vec![event.clone()],
-            semantic::ValidationLimits::default(),
+        let baseline = lower_parsed_uniform_signal(
+            fixture_signal(),
+            SemanticLoweringOptions::default().with_events(vec![event.clone()]),
         )
         .unwrap();
-        let with_source = from_signal_bundle_with_overlays(
-            fixture_bundle(),
-            vec![SemanticSourceCapsule {
-                namespace: "adapter.edf.binding".to_owned(),
-                value: "fixture.edf".to_owned(),
-                bytes: vec![9, 8, 7],
-                media_type: Some("application/edf".to_owned()),
-            }],
-            vec![event],
-            semantic::ValidationLimits::default(),
+        let with_source = lower_parsed_uniform_signal(
+            fixture_signal(),
+            SemanticLoweringOptions::default()
+                .with_explicit_capsules(vec![SemanticSourceCapsule {
+                    namespace: "adapter.edf.binding".to_owned(),
+                    value: "fixture.edf".to_owned(),
+                    bytes: vec![9, 8, 7],
+                    media_type: Some("application/edf".to_owned()),
+                }])
+                .with_events(vec![event]),
         )
         .unwrap();
         assert_eq!(
@@ -740,10 +910,12 @@ mod tests {
         assert_eq!(with_source.opened.dataset().clocks().len(), 1);
 
         let unmodified =
-            from_signal_bundle(fixture_bundle(), semantic::ValidationLimits::default()).unwrap();
-        let mut changed = fixture_bundle();
+            lower_parsed_uniform_signal(fixture_signal(), SemanticLoweringOptions::default())
+                .unwrap();
+        let mut changed = fixture_signal();
         changed.phys_max[0] += 1.0;
-        let changed = from_signal_bundle(changed, semantic::ValidationLimits::default()).unwrap();
+        let changed =
+            lower_parsed_uniform_signal(changed, SemanticLoweringOptions::default()).unwrap();
         assert_ne!(
             unmodified.opened.dataset().id(),
             changed.opened.dataset().id()
@@ -752,17 +924,18 @@ mod tests {
 
     #[test]
     fn interchange_bound_sources_use_the_final_capsule_free_identity() {
-        let read = from_signal_bundle_with_interchange_bound_sources(
-            fixture_bundle(),
-            semantic::ConceptId::new("abir:modality/eeg").unwrap(),
-            "adapter.test.binding.".to_owned(),
-            vec![SemanticSourceObject {
-                value: "fixture.edf".to_owned(),
-                bytes: vec![9, 8, 7],
-                media_type: Some("application/edf".to_owned()),
-            }],
-            vec![],
-            semantic::ValidationLimits::default(),
+        let read = lower_parsed_uniform_signal(
+            fixture_signal(),
+            SemanticLoweringOptions::default()
+                .with_modality(semantic::ConceptId::new("abir:modality/eeg").unwrap())
+                .with_interchange_bound_sources(
+                    "adapter.test.binding.".to_owned(),
+                    vec![SemanticSourceObject {
+                        value: "fixture.edf".to_owned(),
+                        bytes: vec![9, 8, 7],
+                        media_type: Some("application/edf".to_owned()),
+                    }],
+                ),
         )
         .unwrap();
         let semantic_id = semantic::interchange_content_id(read.opened.dataset()).unwrap();

@@ -3,29 +3,26 @@
 //! Today this wraps the existing `crate::edf::read_edf` (which parses
 //! a `&Path` directly). Phase 0.5 generalises to `&mut dyn LmlSource`
 //! so stdin and S3 sources work. The current implementation keeps the
-//! existing byte-parser intact — no logic motion — and adds the bundle
-//! shape on top as the canonical typed boundary.
+//! existing byte-parser intact and lowers its private native form into ABIR.
 //!
-//! Bidirectional conversion:
-//! - `From<EdfFile> for SignalBundle`     (encode path: EDF → bundle)
-//! - `TryFrom<SignalBundle> for EdfFile`  (decode path: bundle → EDF
-//!   reconstruction; fails when sidecar entries are missing or malformed)
+//! Reconstruction consumes a validated `UniformSignalView`; source-preservation
+//! bytes remain content-addressed inside ABIR.
 
 use std::path::{Path, PathBuf};
 
 use crate::edf::{read_edf, EdfFile};
 use crate::error::{LmlError, LmlResult};
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::bundle::{ParsedUniformSignal, SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::{from_signal_bundle, SemanticRead};
+use super::semantic::{
+    lower_parsed_uniform_signal, SemanticLoweringOptions, SemanticRead, UniformSignalView,
+};
 
 /// Reader for EDF / EDF+ / BDF files.
 ///
-/// Holds the path at construction. `read_bundle` consumes the underlying
-/// bytes once; calling it twice on the same `EdfReader` re-parses (the
-/// underlying `read_edf` is idempotent for an unchanged file — Bible
-/// R31).
+/// Holds the path at construction. Repeated lowering re-parses the unchanged
+/// file; `read_edf` is idempotent for unchanged bytes.
 #[derive(Debug, Clone)]
 pub struct EdfReader {
     path: PathBuf,
@@ -41,25 +38,30 @@ impl EdfReader {
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
 
-impl SignalSourceReader for EdfReader {
-    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
-        )
+    /// Lower once with Adapter-provided semantic overlays and source binding.
+    pub fn lower_to_abir_with_options(
+        &mut self,
+        options: SemanticLoweringOptions,
+    ) -> LmlResult<SemanticRead> {
+        lower_parsed_uniform_signal(self.read_parsed_signal()?, options)
     }
 
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    fn read_parsed_signal(&mut self) -> LmlResult<ParsedUniformSignal> {
         let edf = read_edf(&self.path)?;
         Ok(edf.into())
     }
 }
 
-// ─── Lossless EdfFile ↔ SignalBundle conversion ───────────────────────
+impl SignalSourceReader for EdfReader {
+    fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
+        self.lower_to_abir_with_options(SemanticLoweringOptions::default())
+    }
+}
 
-/// `EdfFile` → `SignalBundle`. Infallible because:
+// ─── Lossless EdfFile ↔ semantic native view conversion ───────────────
+
+/// `EdfFile` → private parsed signal. Infallible because:
 ///   - All numeric fields (`n_signals_total`, `n_data_records`,
 ///     `dig_min/max`) are integers that serde_json serialises trivially.
 ///   - `record_duration: f64` is finite by construction — `read_edf`
@@ -72,7 +74,7 @@ impl SignalSourceReader for EdfReader {
 ///
 /// If any invariant above weakens, this expect would panic — a future
 /// audit should re-check this list before changing the ASCII parsers.
-impl From<EdfFile> for SignalBundle {
+impl From<EdfFile> for ParsedUniformSignal {
     fn from(e: EdfFile) -> Self {
         let mut sidecar = Vec::with_capacity(2 + e.non_eeg_data.len() + 1);
         sidecar.push(SidecarBlob {
@@ -134,50 +136,39 @@ impl From<EdfFile> for SignalBundle {
     }
 }
 
-/// `SignalBundle` → `EdfFile`. Fails when the bundle wasn't produced by
-/// an EDF reader (sidecar `"edf_meta"` missing) or has been tampered
-/// with (JSON parse error, missing fields).
-impl TryFrom<SignalBundle> for EdfFile {
+/// ABIR-tied native signal → `EdfFile`. Fails when preservation capsules are
+/// missing or malformed.
+impl TryFrom<UniformSignalView<'_>> for EdfFile {
     type Error = LmlError;
 
-    fn try_from(b: SignalBundle) -> LmlResult<Self> {
-        // Trust boundary — Bible R23 (validate at both ends). A
-        // malformed bundle (ragged signal, mismatched channel counts,
-        // non-finite sample_rate) would otherwise produce an EdfFile
-        // with silently inconsistent internal state.
-        b.validate()?;
-        let raw_header = b
+    fn try_from(signal: UniformSignalView<'_>) -> LmlResult<Self> {
+        let raw_header = signal
             .sidecar_first("raw_header")
-            .ok_or_else(|| {
-                LmlError::InvalidHeader("SignalBundle → EdfFile: raw_header missing".into())
-            })?
+            .ok_or_else(|| LmlError::InvalidHeader("ABIR → EdfFile: raw_header missing".into()))?
             .bytes
-            .clone();
-        let trailing_data = b
+            .to_vec();
+        let trailing_data = signal
             .sidecar_first("trailing_data")
-            .ok_or_else(|| {
-                LmlError::InvalidHeader("SignalBundle → EdfFile: trailing_data missing".into())
-            })?
+            .ok_or_else(|| LmlError::InvalidHeader("ABIR → EdfFile: trailing_data missing".into()))?
             .bytes
-            .clone();
+            .to_vec();
         let mut non_eeg_data: Vec<(usize, Vec<u8>)> = Vec::new();
-        for chunk in b.sidecar_all("non_eeg_chunk") {
+        for chunk in signal.sidecar_all("non_eeg_chunk") {
             let ch_idx = chunk.aux.ok_or_else(|| {
                 LmlError::InvalidHeader(
-                    "SignalBundle → EdfFile: non_eeg_chunk sidecar missing aux index".into(),
+                    "ABIR → EdfFile: non_eeg_chunk capsule missing aux index".into(),
                 )
             })? as usize;
-            non_eeg_data.push((ch_idx, chunk.bytes.clone()));
+            non_eeg_data.push((ch_idx, chunk.bytes.to_vec()));
         }
-        let edf_meta_bytes = &b
+        let edf_meta_bytes = signal
             .sidecar_first("edf_meta")
             .ok_or_else(|| {
-                LmlError::InvalidHeader("SignalBundle → EdfFile: edf_meta sidecar missing".into())
+                LmlError::InvalidHeader("ABIR → EdfFile: edf_meta capsule missing".into())
             })?
             .bytes;
-        let meta: serde_json::Value = serde_json::from_slice(edf_meta_bytes).map_err(|e| {
-            LmlError::InvalidHeader(format!("SignalBundle → EdfFile: edf_meta json: {e}"))
-        })?;
+        let meta: serde_json::Value = serde_json::from_slice(edf_meta_bytes)
+            .map_err(|e| LmlError::InvalidHeader(format!("ABIR → EdfFile: edf_meta json: {e}")))?;
         let get_usize = |k: &str| -> LmlResult<usize> {
             meta[k].as_u64().map(|v| v as usize).ok_or_else(|| {
                 LmlError::InvalidHeader(format!("edf_meta.{k}: missing or not a u64"))
@@ -241,17 +232,18 @@ impl TryFrom<SignalBundle> for EdfFile {
         // spec requires to be uniform across channels. After Phase 0.2,
         // `read_edf` already enforces this; we recompute here so the
         // round-trip preserves it instead of leaving it 0.
-        let total_samples = b.signal.first().map(|ch| ch.len()).unwrap_or(0);
-        let n_channels = b.signal.len();
+        let total_samples = signal.signal().first().map(Vec::len).unwrap_or(0);
+        let n_channels = signal.signal().len();
+        let metadata = signal.source_metadata();
         Ok(EdfFile {
-            signal: b.signal,
-            channels: b.channels,
-            sample_rate: b.sample_rate,
+            signal: signal.signal().to_vec(),
+            channels: signal.channels().to_vec(),
+            sample_rate: signal.sample_rate(),
             n_channels,
             total_samples,
-            duration_s: b.duration_s,
-            source_file: b.metadata.source_file,
-            patient_id: b.metadata.patient_id,
+            duration_s: signal.duration_s(),
+            source_file: metadata.source_file.clone(),
+            patient_id: metadata.patient_id.clone(),
             raw_header,
             non_eeg_data,
             n_signals_total: get_usize("n_signals_total")?,
@@ -260,14 +252,14 @@ impl TryFrom<SignalBundle> for EdfFile {
             all_labels: get_str_vec("all_labels")?,
             all_ns_per_rec: get_usize_vec("all_ns_per_rec")?,
             eeg_indices: get_usize_vec("eeg_indices")?,
-            recording_info: b.metadata.recording_info,
-            startdate: b.metadata.startdate,
-            format: b.metadata.format,
-            phys_min: b.phys_min,
-            phys_max: b.phys_max,
+            recording_info: metadata.recording_info.clone(),
+            startdate: metadata.startdate.clone(),
+            format: metadata.format.clone(),
+            phys_min: signal.physical_minima().to_vec(),
+            phys_max: signal.physical_maxima().to_vec(),
             dig_min: get_i32_vec("dig_min")?,
             dig_max: get_i32_vec("dig_max")?,
-            phys_dim: b.metadata.phys_dim,
+            phys_dim: metadata.phys_dim.clone(),
             trailing_data,
             is_bdf: get_bool("is_bdf")?,
         })
@@ -310,39 +302,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn edf_to_bundle_preserves_signal() {
-        let edf = make_edf();
-        let bundle: SignalBundle = edf.into();
-        assert_eq!(bundle.signal, vec![vec![1i64, 2, 3, 4]]);
-        assert_eq!(bundle.sample_rate, 256.0);
-        assert_eq!(bundle.channels, vec!["Fp1"]);
+    fn lower_fixture(edf: EdfFile) -> SemanticRead {
+        lower_parsed_uniform_signal(edf.into(), SemanticLoweringOptions::default()).unwrap()
     }
 
     #[test]
-    fn edf_to_bundle_populates_sidecar() {
-        let edf = make_edf();
-        let bundle: SignalBundle = edf.into();
-        let h = bundle.sidecar_first("raw_header").unwrap();
+    fn edf_to_abir_preserves_signal() {
+        let read = lower_fixture(make_edf());
+        let signal = read.uniform_signal().unwrap();
+        assert_eq!(signal.signal(), [vec![1i64, 2, 3, 4]]);
+        assert_eq!(signal.sample_rate(), 256.0);
+        assert_eq!(signal.channels(), ["Fp1"]);
+    }
+
+    #[test]
+    fn edf_to_abir_populates_content_addressed_capsules() {
+        let read = lower_fixture(make_edf());
+        let signal = read.uniform_signal().unwrap();
+        let h = signal.sidecar_first("raw_header").unwrap();
         assert_eq!(h.bytes.len(), 512);
-        let trailing = bundle.sidecar_first("trailing_data").unwrap();
+        let trailing = signal.sidecar_first("trailing_data").unwrap();
         assert_eq!(trailing.bytes, vec![0xCC, 0xDD]);
-        let chunks: Vec<&SidecarBlob> = bundle.sidecar_all("non_eeg_chunk").collect();
+        let chunks: Vec<_> = signal.sidecar_all("non_eeg_chunk").collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].aux, Some(2));
         assert_eq!(chunks[0].bytes.len(), 16);
-        assert!(bundle.sidecar_first("edf_meta").is_some());
+        assert!(signal.sidecar_first("edf_meta").is_some());
     }
 
     #[test]
-    fn roundtrip_edf_to_bundle_to_edf() {
+    fn roundtrip_edf_to_abir_to_edf() {
         // `EdfFile` is not `Clone` (intentional — it owns large header
         // buffers). Build a fresh fixture for the comparison so we
         // don't need to derive Clone on the public struct.
         let edf = make_edf();
         let reference = make_edf();
-        let bundle: SignalBundle = edf.into();
-        let rt: EdfFile = bundle.try_into().expect("bundle → EdfFile must succeed");
+        let read = lower_fixture(edf);
+        let rt: EdfFile = read
+            .uniform_signal()
+            .unwrap()
+            .try_into()
+            .expect("ABIR → EdfFile must succeed");
         // Total_samples is preserved: the TryFrom recomputes it from
         // the per-channel sample count (EDF spec guarantees uniformity).
         assert_eq!(rt.total_samples, reference.total_samples);
@@ -372,56 +372,46 @@ mod tests {
     }
 
     #[test]
-    fn bundle_to_edf_calls_validate_at_trust_boundary() {
-        // Construct a bundle that has all sidecar entries present but
-        // a ragged signal — TryFrom must reject via validate() before
-        // touching sidecar.
-        let edf = make_edf();
-        let mut bundle: SignalBundle = edf.into();
-        bundle.signal.push(vec![999i64]); // second channel, wrong length
-                                          // Also tweak channels/phys_min/phys_max so the channel-count
-                                          // checks pass; the ragged-length check is the one that should
-                                          // fire.
-        bundle.channels.push("Fp2".into());
-        bundle.phys_min.push(-200.0);
-        bundle.phys_max.push(200.0);
-        // EdfFile doesn't impl Debug, so unwrap_err won't compile.
-        let err = match EdfFile::try_from(bundle) {
-            Err(e) => e.to_string(),
-            Ok(_) => panic!("ragged signal must be rejected by validate()"),
-        };
+    fn ragged_native_signal_never_exposes_an_abir_view() {
+        let mut parsed: ParsedUniformSignal = make_edf().into();
+        parsed.signal.push(vec![999i64]);
+        parsed.channels.push("Fp2".into());
+        parsed.phys_min.push(-200.0);
+        parsed.phys_max.push(200.0);
+        let err =
+            lower_parsed_uniform_signal(parsed, SemanticLoweringOptions::default()).unwrap_err();
         assert!(
-            err.contains("ragged") || err.contains("samples"),
+            err.to_string().contains("ragged") || err.to_string().contains("samples"),
             "expected validate() to reject ragged signal, got: {err}"
         );
     }
 
     #[test]
-    fn bundle_to_edf_missing_raw_header_errs() {
-        let edf = make_edf();
-        let mut bundle: SignalBundle = edf.into();
-        bundle.sidecar.retain(|s| s.key != "raw_header");
-        let r: LmlResult<EdfFile> = bundle.try_into();
+    fn abir_to_edf_missing_raw_header_errs() {
+        let mut parsed: ParsedUniformSignal = make_edf().into();
+        parsed.sidecar.retain(|s| s.key != "raw_header");
+        let read = lower_parsed_uniform_signal(parsed, SemanticLoweringOptions::default()).unwrap();
+        let r: LmlResult<EdfFile> = read.uniform_signal().unwrap().try_into();
         assert!(r.is_err());
     }
 
     #[test]
-    fn bundle_to_edf_missing_edf_meta_errs() {
-        let edf = make_edf();
-        let mut bundle: SignalBundle = edf.into();
-        bundle.sidecar.retain(|s| s.key != "edf_meta");
-        let r: LmlResult<EdfFile> = bundle.try_into();
+    fn abir_to_edf_missing_edf_meta_errs() {
+        let mut parsed: ParsedUniformSignal = make_edf().into();
+        parsed.sidecar.retain(|s| s.key != "edf_meta");
+        let read = lower_parsed_uniform_signal(parsed, SemanticLoweringOptions::default()).unwrap();
+        let r: LmlResult<EdfFile> = read.uniform_signal().unwrap().try_into();
         assert!(r.is_err());
     }
 
     #[test]
-    fn bundle_to_edf_corrupt_edf_meta_errs() {
-        let edf = make_edf();
-        let mut bundle: SignalBundle = edf.into();
-        if let Some(s) = bundle.sidecar.iter_mut().find(|s| s.key == "edf_meta") {
+    fn abir_to_edf_corrupt_edf_meta_errs() {
+        let mut parsed: ParsedUniformSignal = make_edf().into();
+        if let Some(s) = parsed.sidecar.iter_mut().find(|s| s.key == "edf_meta") {
             s.bytes = b"not valid json".to_vec();
         }
-        let r: LmlResult<EdfFile> = bundle.try_into();
+        let read = lower_parsed_uniform_signal(parsed, SemanticLoweringOptions::default()).unwrap();
+        let r: LmlResult<EdfFile> = read.uniform_signal().unwrap().try_into();
         assert!(r.is_err());
     }
 }

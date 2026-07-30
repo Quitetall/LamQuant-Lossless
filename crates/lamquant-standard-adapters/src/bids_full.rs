@@ -29,7 +29,7 @@ use abir_adapter::{
     MappingReport, PayloadObject, PayloadResolver, ProfileId, ProfileStatus, SemanticCoverage,
     ValidationArtifact,
 };
-use lamquant_core::source::{EdfReader, SignalBundle, SignalSourceReader};
+use lamquant_core::source::{EdfReader, SemanticRead, SignalSourceReader};
 use semantic_abir::{
     interchange_content_id, payload_content_id as abir_payload_id, AbirDataset, Atom, AtomTag,
     ByteOrder, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock, ClockTag, ConceptId,
@@ -496,7 +496,7 @@ fn column<'a>(header: &[String], row: &'a [String], name: &str) -> Option<&'a st
         .map(String::as_str)
 }
 
-fn read_edf_bundle(bytes: &[u8]) -> Result<SignalBundle, AdapterError> {
+fn read_edf_semantic(bytes: &[u8]) -> Result<SemanticRead, AdapterError> {
     let temporary = tempfile::tempdir().map_err(invalid)?;
     let extension = if bytes.first() == Some(&0xff) {
         "bdf"
@@ -505,7 +505,7 @@ fn read_edf_bundle(bytes: &[u8]) -> Result<SignalBundle, AdapterError> {
     };
     let path = temporary.path().join(format!("recording.{extension}"));
     fs::write(&path, bytes).map_err(invalid)?;
-    EdfReader::new(&path).read_bundle().map_err(invalid)
+    EdfReader::new(&path).lower_to_abir().map_err(invalid)
 }
 
 fn read_gzip_bounded(bytes: &[u8], limit: u64) -> Result<Vec<u8>, AdapterError> {
@@ -716,9 +716,14 @@ fn parse_bids(
                     "recording {path} sits in no BIDS datatype directory"
                 ))
             })?;
-            let bundle = read_edf_bundle(&entry.bytes)?;
-            let decoded_bytes = bundle
-                .signal
+            let semantic = read_edf_semantic(&entry.bytes)?;
+            let uniform = semantic.uniform_signal().ok_or_else(|| {
+                AdapterError::UnsupportedMeaning(
+                    "BIDS EDF recording did not lower to a uniform signal".to_owned(),
+                )
+            })?;
+            let decoded_bytes = uniform
+                .signal()
                 .iter()
                 .try_fold(0_u64, |total, channel| {
                     total.checked_add(
@@ -743,10 +748,10 @@ fn parse_bids(
                 datatype,
                 subject: subject_of(path),
                 session: session_of(path),
-                rate: format!("{}", bundle.sample_rate),
+                rate: format!("{}", uniform.sample_rate()),
                 start: "0".to_owned(),
-                channels: bundle.channels.clone(),
-                signal: RecordedSignal::Integer(bundle.signal),
+                channels: uniform.channels().to_vec(),
+                signal: RecordedSignal::Integer(uniform.signal().to_vec()),
             });
             continue;
         }

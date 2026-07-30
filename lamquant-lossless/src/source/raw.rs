@@ -30,9 +30,9 @@
 use crate::error::{LmlError, LmlResult};
 use std::path::{Path, PathBuf};
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::bundle::{ParsedUniformSignal, SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::{from_signal_bundle, SemanticRead};
+use super::semantic::{lower_parsed_uniform_signal, SemanticLoweringOptions, SemanticRead};
 
 const MAX_SIDECAR_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -225,13 +225,15 @@ impl RawReader {
 
 impl SignalSourceReader for RawReader {
     fn lower_to_abir(&mut self) -> LmlResult<SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
+        lower_parsed_uniform_signal(
+            self.read_parsed_signal()?,
+            SemanticLoweringOptions::default(),
         )
     }
+}
 
-    fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+impl RawReader {
+    fn read_parsed_signal(&mut self) -> LmlResult<ParsedUniformSignal> {
         let sidecar_path = self
             .sidecar_override
             .clone()
@@ -334,7 +336,7 @@ impl SignalSourceReader for RawReader {
             0.0
         };
 
-        let bundle = SignalBundle {
+        let parsed = ParsedUniformSignal {
             signal,
             sample_rate: sc.sample_rate,
             channels: sc.channels,
@@ -393,8 +395,8 @@ impl SignalSourceReader for RawReader {
                 },
             ],
         };
-        bundle.validate()?;
-        Ok(bundle)
+        parsed.validate()?;
+        Ok(parsed)
     }
 }
 
@@ -441,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn read_bundle_int16_multiplexed_round_trip() {
+    fn lower_to_abir_int16_multiplexed_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let n_ch = 3usize;
         let n_samples = 200usize;
@@ -457,24 +459,25 @@ mod tests {
         std::fs::write(&raw, &bytes).unwrap();
         std::fs::write(&json, good_sidecar(n_ch, "int16", "multiplexed")).unwrap();
         let mut reader = RawReader::new(&raw);
-        let b = reader.read_bundle().unwrap();
-        assert_eq!(b.signal.len(), n_ch);
-        assert_eq!(b.signal[0].len(), n_samples);
+        let abir = reader.lower_to_abir().unwrap();
+        let parsed = abir.uniform_signal().unwrap();
+        assert_eq!(parsed.signal().len(), n_ch);
+        assert_eq!(parsed.signal()[0].len(), n_samples);
         for s in 0..n_samples {
             for ch in 0..n_ch {
-                assert_eq!(b.signal[ch][s], (s as i64) * (ch as i64 + 1));
+                assert_eq!(parsed.signal()[ch][s], (s as i64) * (ch as i64 + 1));
             }
         }
-        assert_eq!(b.metadata.format, "RAW");
+        assert_eq!(parsed.source_metadata().format, "RAW");
     }
 
     #[test]
-    fn read_bundle_missing_sidecar_errors() {
+    fn lower_to_abir_missing_sidecar_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let raw = tmp.path().join("nope.raw");
         std::fs::write(&raw, b"\0\0\0\0").unwrap();
         let mut reader = RawReader::new(&raw);
-        match reader.read_bundle() {
+        match reader.lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("no sidecar JSON")),
             other => panic!("expected InvalidHeader, got {other:?}"),
         }
