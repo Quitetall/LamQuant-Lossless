@@ -8,9 +8,26 @@ use crate::mix1::{Mix1Codec, Mix1Decoded};
 use crate::OptimumV2Error;
 
 pub const PEER_KERNEL_ID: &str = "org.quitetall.lamquant.lml-optimum-v2.peer-v4";
+pub const PEER_SOURCE_ID: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_SOURCE_ID");
+pub const PEER_BUILD_ID: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_BUILD_ID");
 pub const PEER_MAX_CHANNELS: usize = crate::mix1::MAX_CHANNELS;
 pub const PEER_MAX_SAMPLES: usize = crate::mix1::MAX_SAMPLES;
 pub const PEER_MAX_VALUES: usize = crate::mix1::MAX_VALUES;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerImplementationIdentity {
+    pub kernel_id: &'static str,
+    pub source_id: &'static str,
+    pub build_id: &'static str,
+}
+
+pub const fn peer_implementation_identity() -> PeerImplementationIdentity {
+    PeerImplementationIdentity {
+        kernel_id: PEER_KERNEL_ID,
+        source_id: PEER_SOURCE_ID,
+        build_id: PEER_BUILD_ID,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerEncodeContext {
@@ -198,5 +215,18 @@ mod tests {
         assert_eq!(report.selected_kind, PeerPacketKind::Mix1);
         assert_eq!(report.channel_count, 2);
         assert_eq!(report.sample_count, 64);
+    }
+
+    #[test]
+    fn standalone_identity_is_complete_and_sha256_bound() {
+        let identity = super::peer_implementation_identity();
+        assert_eq!(identity.kernel_id, super::PEER_KERNEL_ID);
+        assert_eq!(identity.source_id.len(), 64);
+        assert_eq!(identity.build_id.len(), 64);
+        assert!(identity
+            .source_id
+            .bytes()
+            .chain(identity.build_id.bytes())
+            .all(|byte| byte.is_ascii_hexdigit()));
     }
 }

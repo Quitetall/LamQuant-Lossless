@@ -2427,6 +2427,79 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "optimum-v2")]
+    #[test]
+    fn optimum_v2_open_rejects_missing_capability_and_wrong_profile() {
+        use lamquant_lml_optimum_v2::{PeerCodec, PeerEncodeContext};
+        use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
+
+        let signal = optimum_v2_fixture_signal();
+        let mapped = fixture_from_signal(&[
+            (ElementType::I16, signal[0].clone()),
+            (ElementType::I24, signal[1].clone()),
+            (ElementType::I32, signal[2].clone()),
+        ]);
+        let packet = PeerCodec
+            .encode_window(
+                &signal,
+                PeerEncodeContext {
+                    sample_rate_mhz: 256_000,
+                    bit_depth: 24,
+                },
+            )
+            .expect("encode peer packet");
+        let semantics = canonical_debug_json(mapped.dataset()).unwrap();
+        let packets = [packet.as_slice()];
+        let missing_capability = encode_codec_bundle(
+            CodecBundleInput {
+                required_capabilities: 0,
+                canonical_semantics: &semantics,
+                fidelity: exact_fidelity(),
+                implementation: optimum_v2_implementation_identity(),
+                model_provenance: None,
+                packets: &packets,
+                parameters: optimum_v2_parameters(),
+                profile: CodecProfile::LmlLossless,
+            },
+            ResourceBounds::default(),
+        )
+        .expect("missing-capability negative-control bundle");
+        assert!(matches!(
+            open_optimum_v2_bundle(&missing_capability, ResourceBounds::default()),
+            Err(LmlBundleError::CatalogContract)
+        ));
+
+        let wrong_profile = encode_codec_bundle(
+            CodecBundleInput {
+                required_capabilities: CAP_LML_OPTIMUM_V1,
+                canonical_semantics: &semantics,
+                fidelity: CodecFidelity {
+                    bound: None,
+                    contract_id: ContentId::from_bytes([0x41; 32]),
+                    kind: CodecFidelityKind::Transformed,
+                    metric: Some("test-only".into()),
+                },
+                implementation: optimum_v2_implementation_identity(),
+                model_provenance: Some(semantic_abir_bcs::ModelProvenance {
+                    checkpoint_content_id: ContentId::from_bytes([0x42; 32]),
+                    checkpoint_sha256: [0x43; 32],
+                    pccp_change_id: "test-only".into(),
+                    pccp_evidence_id: ContentId::from_bytes([0x44; 32]),
+                    pccp_status: semantic_abir_bcs::PccpStatus::Candidate,
+                }),
+                packets: &packets,
+                parameters: optimum_v2_parameters(),
+                profile: CodecProfile::LmqProgressive,
+            },
+            ResourceBounds::default(),
+        )
+        .expect("wrong-profile negative-control bundle");
+        assert!(matches!(
+            open_optimum_v2_bundle(&wrong_profile, ResourceBounds::default()),
+            Err(LmlBundleError::CatalogContract)
+        ));
+    }
+
     #[cfg(all(feature = "optimum", feature = "optimum-v2"))]
     #[test]
     fn optimum_generations_reject_each_others_kernel_contract() {

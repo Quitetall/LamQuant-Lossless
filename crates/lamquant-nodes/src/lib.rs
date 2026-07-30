@@ -78,8 +78,11 @@ const MAX_PARALLEL_CHANNELS: u16 = 1024;
 const PEER_MAX_SIGNAL_BYTES: u64 = (PEER_MAX_VALUES * core::mem::size_of::<i64>()) as u64;
 #[cfg(feature = "optimum-v2")]
 const PEER_MAX_PACKET_BYTES: u64 = 64 * 1024 * 1024;
+// Graph-core v3 requires the rectangular maximum shape to fit max_elements;
+// it cannot express the standalone codec's coupled C*T <= 131_072 domain.
+// This initial Node profile covers common 21-channel, 10-second EEG windows.
 #[cfg(feature = "optimum-v2")]
-const PEER_NODE_MAX_CHANNELS: usize = 64;
+const PEER_NODE_MAX_CHANNELS: usize = 32;
 #[cfg(feature = "optimum-v2")]
 const PEER_NODE_MAX_SAMPLES: usize = PEER_MAX_VALUES / PEER_NODE_MAX_CHANNELS;
 const SOURCE_ID: &str = env!("LAMQUANT_NODES_SOURCE_ID");

@@ -51,6 +51,7 @@ fn main() {
     }
     if env::var_os("CARGO_FEATURE_OPTIMUM_V2").is_some() {
         files.push(repository.join("lamquant-lml-optimum-v2/Cargo.toml"));
+        files.push(repository.join("lamquant-lml-optimum-v2/build.rs"));
         collect_files(&repository.join("lamquant-lml-optimum-v2/src"), &mut files);
     }
     files.sort();

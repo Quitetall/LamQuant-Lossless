@@ -37,8 +37,9 @@ pub mod model_pack;
 mod peer;
 
 pub use peer::{
-    PeerCodec, PeerDecodedWindow, PeerEncodeContext, PeerEncodeReport, PeerEncodedWindow,
-    PeerPacketKind, PEER_KERNEL_ID, PEER_MAX_CHANNELS, PEER_MAX_SAMPLES, PEER_MAX_VALUES,
+    peer_implementation_identity, PeerCodec, PeerDecodedWindow, PeerEncodeContext,
+    PeerEncodeReport, PeerEncodedWindow, PeerImplementationIdentity, PeerPacketKind, PEER_BUILD_ID,
+    PEER_KERNEL_ID, PEER_MAX_CHANNELS, PEER_MAX_SAMPLES, PEER_MAX_VALUES, PEER_SOURCE_ID,
 };
 
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";

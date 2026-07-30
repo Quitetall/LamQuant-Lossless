@@ -3,6 +3,7 @@ use lamquant_lml_optimum_v2::{
     PeerCodec, PeerEncodeContext, PeerPacketKind, PEER_KERNEL_ID, PEER_MAX_CHANNELS,
     PEER_MAX_SAMPLES, PEER_MAX_VALUES,
 };
+use sha2::{Digest, Sha256};
 
 fn fixture() -> Vec<Vec<i64>> {
     vec![
@@ -31,6 +32,14 @@ fn production_facade_is_byte_equal_to_frozen_peer_portfolio() {
         .expect("encode through frozen peer portfolio");
 
     assert_eq!(encoded.packet, direct);
+    let packet_digest = Sha256::digest(&encoded.packet)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        packet_digest,
+        "edd9427620badeee8b239a90f4800fb772a4af3826499605284eb07b04349377"
+    );
     assert_eq!(encoded.report.packet_bytes, encoded.packet.len());
     assert_eq!(encoded.report.source_value_count, 256);
     assert_eq!(encoded.report.channel_count, 2);
