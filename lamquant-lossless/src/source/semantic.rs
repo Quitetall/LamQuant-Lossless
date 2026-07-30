@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{LmlError, LmlResult};
 
-use super::bundle::{SignalBundle, SourceMetadata};
+use super::metadata::{SidecarBlob, SourceMetadata};
 
 /// Owned semantic result returned by biosignal source readers.
 #[derive(Debug)]
@@ -18,6 +18,46 @@ pub struct SemanticRead {
     pub opened: semantic::OpenedDataset<semantic::InMemoryPayloadAccess>,
     pub mapping: SemanticMappingReport,
     pub fidelity: SemanticFidelityReport,
+    native_i64: Option<Vec<Vec<i64>>>,
+}
+
+impl SemanticRead {
+    /// Reader-native channel-major samples retained for fused host kernels.
+    ///
+    /// This cache is a physical optimization only. Dataset identity and public
+    /// semantics remain owned by [`Self::opened`]; callers must fall back to
+    /// [`semantic::PayloadAccess`] when the source arrived without native i64
+    /// buffers.
+    pub fn native_i64(&self) -> Option<&[Vec<i64>]> {
+        self.native_i64.as_deref()
+    }
+
+    /// Move the optional reader-native cache out while retaining semantic ABIR.
+    ///
+    /// Multi-recording adapters use this when one parsed recording becomes an
+    /// atom inside a larger dataset. ABIR payloads remain available through
+    /// [`Self::opened`].
+    pub fn take_native_i64(&mut self) -> Option<Vec<Vec<i64>>> {
+        self.native_i64.take()
+    }
+
+    /// Borrow retained source-capsule bytes by reader key and optional tag.
+    ///
+    /// Bytes remain owned by ABIR's content-addressed payload resolver. This
+    /// accessor does not recreate the retired sidecar carrier or copy data.
+    pub fn source_capsule_bytes(&self, key: &str, aux: Option<i64>) -> Option<&[u8]> {
+        let value = aux.map_or_else(|| key.to_owned(), |aux| format!("{key}#{aux}"));
+        let capsule = self
+            .opened
+            .dataset()
+            .source_capsules()
+            .iter()
+            .find(|capsule| {
+                capsule.source().namespace().starts_with("source.sidecar.")
+                    && capsule.source().value() == value
+            })?;
+        self.opened.access().bytes(capsule.content_id())
+    }
 }
 
 /// Auditable source-to-ABIR mapping summary.
@@ -70,6 +110,128 @@ pub struct SemanticTimedEvent {
     pub uncertainty: semantic::Rational,
 }
 
+/// Bind exact foreign objects and optional events to an existing semantic read.
+///
+/// Existing semantic catalogs and payload buffers move into a reopened
+/// [`semantic::DatasetDraft`] without cloning. Events become mapped ABIR
+/// meaning first; source-capsule namespaces then bind to the resulting
+/// interchange identity, which excludes capsules by contract.
+pub fn with_interchange_bound_sources(
+    read: SemanticRead,
+    modality: Option<semantic::ConceptId>,
+    namespace_prefix: String,
+    source_objects: Vec<SemanticSourceObject>,
+    events: Vec<SemanticTimedEvent>,
+    limits: semantic::ValidationLimits,
+) -> LmlResult<SemanticRead> {
+    let SemanticRead {
+        opened,
+        mut mapping,
+        mut fidelity,
+        native_i64,
+    } = read;
+    let (dataset, mut payloads) = opened.into_parts();
+    let base_id =
+        semantic::interchange_content_id(&dataset).map_err(|error| invalid(&error.to_string()))?;
+    let event_offset = dataset.events().len();
+    let mut draft = dataset.into_draft();
+
+    if let Some(modality) = modality {
+        if draft.streams().len() != 1 {
+            return Err(invalid(
+                "modality projection requires exactly one semantic stream",
+            ));
+        }
+        let stream = &draft.streams()[0];
+        let projected = semantic::Stream::new(
+            stream.id(),
+            stream.recording_id(),
+            modality,
+            stream.atoms().to_vec(),
+            stream.clock_id(),
+            stream.channel_basis_id(),
+            stream.policy_id(),
+        );
+        draft.streams_mut()[0] = projected;
+    }
+
+    if !events.is_empty() {
+        if draft.streams().len() != 1 {
+            return Err(invalid(
+                "event augmentation requires exactly one semantic stream",
+            ));
+        }
+        let clock_id = if let Some(clock_id) = draft.streams()[0].clock_id() {
+            clock_id
+        } else {
+            let clock_id = object_id(base_id.as_bytes(), b"bound-event-clock", 0);
+            draft.add_clock(semantic::Clock::new(
+                clock_id,
+                semantic::ConceptId::new("abir:clock/recording-relative-seconds")
+                    .expect("static concept is canonical"),
+                None,
+                semantic::Rational::new(0, 1).expect("zero is canonical"),
+                semantic::Rational::new(1, 1).expect("one is canonical"),
+                semantic::Rational::new(0, 1).expect("zero is canonical"),
+            ));
+            draft.streams_mut()[0].set_clock_id(Some(clock_id));
+            clock_id
+        };
+        for (index, event) in events.into_iter().enumerate() {
+            let mapped_index = event_offset
+                .checked_add(index)
+                .ok_or_else(|| invalid("event mapping index overflow"))?;
+            let event_id = object_id(
+                base_id.as_bytes(),
+                b"bound-event",
+                u64::try_from(mapped_index)
+                    .map_err(|_| invalid("event mapping index exceeds u64"))?,
+            );
+            draft.add_event(semantic::Event::new(
+                event_id,
+                event.kind,
+                clock_id,
+                event.start,
+                event.end,
+                event.uncertainty,
+            ));
+            mapping.events.push(SemanticEventMapping {
+                index: mapped_index,
+                event_id,
+            });
+        }
+    }
+
+    let semantic_root = draft
+        .validate(limits)
+        .map_err(|report| invalid(&format!("semantic ABIR validation failed: {report:?}")))?;
+    let semantic_id = semantic::interchange_content_id(&semantic_root)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let namespace = format!("{namespace_prefix}{semantic_id}");
+    let mut draft = semantic_root.into_draft();
+    for source in source_objects {
+        let content_id = semantic::payload_content_id(semantic::ElementType::Bytes, &source.bytes);
+        payloads.insert(content_id, source.bytes);
+        draft.add_source_capsule(semantic::SourceCapsule::new(
+            source_key(&namespace, &source.value)?,
+            content_id,
+            source.media_type.as_deref(),
+        ));
+    }
+    let dataset = draft
+        .validate(limits)
+        .map_err(|report| invalid(&format!("semantic ABIR validation failed: {report:?}")))?;
+    mapping.source_capsule_count = dataset.source_capsules().len();
+    fidelity.source_capsules_content_bound = true;
+
+    Ok(SemanticRead {
+        opened: semantic::OpenedDataset::new(dataset, payloads),
+        mapping,
+        fidelity,
+        native_i64,
+    })
+}
+
 /// Honest fidelity claims for the generic reader lowering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticFidelityReport {
@@ -82,14 +244,32 @@ pub struct SemanticFidelityReport {
     pub source_capsules_content_bound: bool,
 }
 
-/// Lower a validated format-agnostic reader result into canonical semantic
-/// ABIR. Payload bytes move into the returned in-memory resolver exactly once.
-pub fn from_signal_bundle(
-    bundle: SignalBundle,
+/// Lower caller-owned uniform signal parts into canonical semantic ABIR.
+///
+/// This is an ingest construction API, not a second public representation:
+/// successful calls expose only validated [`SemanticRead`] values. Payload
+/// bytes move into the returned in-memory resolver exactly once.
+#[allow(clippy::too_many_arguments)]
+pub fn from_owned_uniform_signal(
+    signal: Vec<Vec<i64>>,
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    duration_s: f64,
+    metadata: SourceMetadata,
+    sidecar: Vec<SidecarBlob>,
     limits: semantic::ValidationLimits,
 ) -> LmlResult<SemanticRead> {
-    from_signal_bundle_with_semantics(
-        bundle,
+    from_owned_uniform_signal_with_semantics(
+        signal,
+        sample_rate,
+        channels,
+        phys_min,
+        phys_max,
+        duration_s,
+        metadata,
+        sidecar,
         semantic::ConceptId::new("abir:modality/unknown").expect("static concept is canonical"),
         Vec::new(),
         Vec::new(),
@@ -112,37 +292,46 @@ pub fn from_uniform_signal_view(
     metadata: SourceMetadata,
     limits: semantic::ValidationLimits,
 ) -> LmlResult<SemanticRead> {
-    validate_signal_view(
-        signal,
-        sample_rate,
-        &channels,
-        &phys_min,
-        &phys_max,
-        duration_s,
-    )?;
-    lower_signal_parts(
-        SignalInput::Borrowed(signal),
+    lower_signal_parts(UniformSignalDraft {
+        signal: SignalInput::Borrowed(signal),
         sample_rate,
         channels,
         phys_min,
         phys_max,
+        duration_s,
         metadata,
-        Vec::new(),
-        semantic::ConceptId::new("abir:modality/unknown").expect("static concept is canonical"),
-        CapsuleBinding::Explicit(Vec::new()),
-        Vec::new(),
+        sidecar: Vec::new(),
+        modality: semantic::ConceptId::new("abir:modality/unknown")
+            .expect("static concept is canonical"),
+        capsule_binding: CapsuleBinding::Explicit(Vec::new()),
+        events: Vec::new(),
         limits,
-    )
+    })
 }
 
-pub fn from_signal_bundle_with_overlays(
-    bundle: SignalBundle,
+#[allow(clippy::too_many_arguments)]
+pub fn from_owned_uniform_signal_with_overlays(
+    signal: Vec<Vec<i64>>,
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    duration_s: f64,
+    metadata: SourceMetadata,
+    sidecar: Vec<SidecarBlob>,
     extra_capsules: Vec<SemanticSourceCapsule>,
     events: Vec<SemanticTimedEvent>,
     limits: semantic::ValidationLimits,
 ) -> LmlResult<SemanticRead> {
-    from_signal_bundle_with_semantics(
-        bundle,
+    from_owned_uniform_signal_with_semantics(
+        signal,
+        sample_rate,
+        channels,
+        phys_min,
+        phys_max,
+        duration_s,
+        metadata,
+        sidecar,
         semantic::ConceptId::new("abir:modality/unknown").expect("static concept is canonical"),
         extra_capsules,
         events,
@@ -150,45 +339,75 @@ pub fn from_signal_bundle_with_overlays(
     )
 }
 
-pub fn from_signal_bundle_with_semantics(
-    bundle: SignalBundle,
+#[allow(clippy::too_many_arguments)]
+pub fn from_owned_uniform_signal_with_semantics(
+    signal: Vec<Vec<i64>>,
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    duration_s: f64,
+    metadata: SourceMetadata,
+    sidecar: Vec<SidecarBlob>,
     modality: semantic::ConceptId,
     extra_capsules: Vec<SemanticSourceCapsule>,
     events: Vec<SemanticTimedEvent>,
     limits: semantic::ValidationLimits,
 ) -> LmlResult<SemanticRead> {
-    lower_signal_bundle(
-        bundle,
+    lower_signal_parts(UniformSignalDraft {
+        signal: SignalInput::Owned(signal),
+        sample_rate,
+        channels,
+        phys_min,
+        phys_max,
+        duration_s,
+        metadata,
+        sidecar,
         modality,
-        CapsuleBinding::Explicit(extra_capsules),
+        capsule_binding: CapsuleBinding::Explicit(extra_capsules),
         events,
         limits,
-    )
+    })
 }
 
-/// Lower a signal bundle once and bind foreign objects to its capsule-free
+/// Lower owned signal parts once and bind foreign objects to their capsule-free
 /// interchange identity. The `namespace_prefix` is prepended to that identity.
 ///
 /// This avoids the adapter anti-pattern of lowering an unbound copy solely to
 /// discover the identity and then lowering the full sample payload again.
-pub fn from_signal_bundle_with_interchange_bound_sources(
-    bundle: SignalBundle,
+#[allow(clippy::too_many_arguments)]
+pub fn from_owned_uniform_signal_with_interchange_bound_sources(
+    signal: Vec<Vec<i64>>,
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    duration_s: f64,
+    metadata: SourceMetadata,
+    sidecar: Vec<SidecarBlob>,
     modality: semantic::ConceptId,
     namespace_prefix: String,
     source_objects: Vec<SemanticSourceObject>,
     events: Vec<SemanticTimedEvent>,
     limits: semantic::ValidationLimits,
 ) -> LmlResult<SemanticRead> {
-    lower_signal_bundle(
-        bundle,
+    lower_signal_parts(UniformSignalDraft {
+        signal: SignalInput::Owned(signal),
+        sample_rate,
+        channels,
+        phys_min,
+        phys_max,
+        duration_s,
+        metadata,
+        sidecar,
         modality,
-        CapsuleBinding::InterchangeBound {
+        capsule_binding: CapsuleBinding::InterchangeBound {
             namespace_prefix,
             source_objects,
         },
         events,
         limits,
-    )
+    })
 }
 
 enum CapsuleBinding {
@@ -204,53 +423,52 @@ enum SignalInput<'a> {
     Borrowed(&'a [Vec<i64>]),
 }
 
-fn lower_signal_bundle(
-    bundle: SignalBundle,
+/// Private construction state consumed at the DatasetDraft validation seam.
+///
+/// This prevents the retired owned carrier from reappearing as positional
+/// field clumps inside lowering helpers. It never crosses the public boundary.
+struct UniformSignalDraft<'a> {
+    signal: SignalInput<'a>,
+    sample_rate: f64,
+    channels: Vec<String>,
+    phys_min: Vec<f64>,
+    phys_max: Vec<f64>,
+    duration_s: f64,
+    metadata: SourceMetadata,
+    sidecar: Vec<SidecarBlob>,
     modality: semantic::ConceptId,
     capsule_binding: CapsuleBinding,
     events: Vec<SemanticTimedEvent>,
     limits: semantic::ValidationLimits,
-) -> LmlResult<SemanticRead> {
-    bundle.validate()?;
-    let SignalBundle {
+}
+
+fn lower_signal_parts(input: UniformSignalDraft<'_>) -> LmlResult<SemanticRead> {
+    let UniformSignalDraft {
         signal,
         sample_rate,
         channels,
         phys_min,
         phys_max,
-        duration_s: _,
-        metadata,
-        sidecar,
-    } = bundle;
-    lower_signal_parts(
-        SignalInput::Owned(signal),
-        sample_rate,
-        channels,
-        phys_min,
-        phys_max,
+        duration_s,
         metadata,
         sidecar,
         modality,
         capsule_binding,
         events,
         limits,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_signal_parts(
-    signal: SignalInput<'_>,
-    sample_rate: f64,
-    channels: Vec<String>,
-    phys_min: Vec<f64>,
-    phys_max: Vec<f64>,
-    metadata: SourceMetadata,
-    sidecar: Vec<super::bundle::SidecarBlob>,
-    modality: semantic::ConceptId,
-    capsule_binding: CapsuleBinding,
-    events: Vec<SemanticTimedEvent>,
-    limits: semantic::ValidationLimits,
-) -> LmlResult<SemanticRead> {
+    } = input;
+    let signal_view = match &signal {
+        SignalInput::Owned(channels) => channels.as_slice(),
+        SignalInput::Borrowed(channels) => channels,
+    };
+    validate_signal_view(
+        signal_view,
+        sample_rate,
+        &channels,
+        &phys_min,
+        &phys_max,
+        duration_s,
+    )?;
     let (channel_count, sample_count) = match &signal {
         SignalInput::Owned(channels) => (channels.len(), channels.first().map_or(0, Vec::len)),
         SignalInput::Borrowed(channels) => (channels.len(), channels.first().map_or(0, Vec::len)),
@@ -275,18 +493,20 @@ fn lower_signal_parts(
         payloads.insert(content_id, bytes);
         channel_payloads.push(content_id);
     };
-    match signal {
+    let native_i64 = match signal {
         SignalInput::Owned(channels) => {
-            for channel in channels {
-                add_channel(&channel);
+            for channel in &channels {
+                add_channel(channel);
             }
+            Some(channels)
         }
         SignalInput::Borrowed(channels) => {
             for channel in channels {
                 add_channel(channel);
             }
+            None
         }
-    }
+    };
 
     let seed = semantic_seed(
         &channel_payloads,
@@ -485,6 +705,7 @@ fn lower_signal_parts(
             calibration_promoted: false,
             source_capsules_content_bound: true,
         },
+        native_i64,
     })
 }
 
@@ -640,8 +861,20 @@ mod tests {
     use super::*;
     use crate::source::{SidecarBlob, SourceMetadata};
 
-    fn fixture_bundle() -> SignalBundle {
-        SignalBundle {
+    #[derive(Clone)]
+    struct FixtureSignal {
+        signal: Vec<Vec<i64>>,
+        sample_rate: f64,
+        channels: Vec<String>,
+        phys_min: Vec<f64>,
+        phys_max: Vec<f64>,
+        duration_s: f64,
+        metadata: SourceMetadata,
+        sidecar: Vec<SidecarBlob>,
+    }
+
+    fn fixture_signal() -> FixtureSignal {
+        FixtureSignal {
             signal: vec![vec![1, -2, 3], vec![4, 5, 6]],
             sample_rate: 250.0,
             channels: vec!["Fp1".to_owned(), "Cz".to_owned()],
@@ -664,16 +897,38 @@ mod tests {
         }
     }
 
+    fn lower_fixture(fixture: FixtureSignal) -> LmlResult<SemanticRead> {
+        from_owned_uniform_signal(
+            fixture.signal,
+            fixture.sample_rate,
+            fixture.channels,
+            fixture.phys_min,
+            fixture.phys_max,
+            fixture.duration_s,
+            fixture.metadata,
+            fixture.sidecar,
+            semantic::ValidationLimits::default(),
+        )
+    }
+
     #[test]
-    fn bundle_lowering_returns_valid_owned_semantics() {
-        let read =
-            from_signal_bundle(fixture_bundle(), semantic::ValidationLimits::default()).unwrap();
+    fn owned_signal_lowering_returns_valid_owned_semantics() {
+        let read = lower_fixture(fixture_signal()).unwrap();
 
         assert_eq!(read.opened.dataset().recordings().len(), 1);
         assert_eq!(read.opened.dataset().streams().len(), 1);
         assert_eq!(read.opened.dataset().atoms().len(), 2);
         assert_eq!(read.mapping.channel_count, 2);
         assert!(read.fidelity.sample_values_exact);
+        assert_eq!(
+            read.native_i64(),
+            Some(&[vec![1, -2, 3], vec![4, 5, 6]][..])
+        );
+        assert_eq!(
+            read.source_capsule_bytes("raw_header", None),
+            Some(&[1, 2, 3][..])
+        );
+        assert_eq!(read.source_capsule_bytes("missing", None), None);
         let atom_id = read.opened.dataset().streams()[0].atoms()[0];
         let block = read.opened.block_view(atom_id).unwrap();
         assert_eq!(block.bytes().len(), 24);
@@ -681,18 +936,17 @@ mod tests {
 
     #[test]
     fn borrowed_uniform_lowering_matches_owned_semantics() {
-        let mut bundle = fixture_bundle();
-        bundle.sidecar.clear();
-        let owned =
-            from_signal_bundle(bundle.clone(), semantic::ValidationLimits::default()).unwrap();
+        let mut fixture = fixture_signal();
+        fixture.sidecar.clear();
+        let owned = lower_fixture(fixture.clone()).unwrap();
         let borrowed = from_uniform_signal_view(
-            &bundle.signal,
-            bundle.sample_rate,
-            bundle.channels.clone(),
-            bundle.phys_min.clone(),
-            bundle.phys_max.clone(),
-            bundle.duration_s,
-            bundle.metadata.clone(),
+            &fixture.signal,
+            fixture.sample_rate,
+            fixture.channels.clone(),
+            fixture.phys_min.clone(),
+            fixture.phys_max.clone(),
+            fixture.duration_s,
+            fixture.metadata.clone(),
             semantic::ValidationLimits::default(),
         )
         .unwrap();
@@ -702,6 +956,7 @@ mod tests {
         );
         assert_eq!(owned.mapping, borrowed.mapping);
         assert_eq!(owned.fidelity, borrowed.fidelity);
+        assert!(borrowed.native_i64().is_none());
     }
 
     #[test]
@@ -712,15 +967,30 @@ mod tests {
             end: semantic::Rational::new(3, 5).unwrap(),
             uncertainty: semantic::Rational::new(0, 1).unwrap(),
         };
-        let baseline = from_signal_bundle_with_overlays(
-            fixture_bundle(),
+        let fixture = fixture_signal();
+        let baseline = from_owned_uniform_signal_with_overlays(
+            fixture.signal.clone(),
+            fixture.sample_rate,
+            fixture.channels.clone(),
+            fixture.phys_min.clone(),
+            fixture.phys_max.clone(),
+            fixture.duration_s,
+            fixture.metadata.clone(),
+            fixture.sidecar.clone(),
             vec![],
             vec![event.clone()],
             semantic::ValidationLimits::default(),
         )
         .unwrap();
-        let with_source = from_signal_bundle_with_overlays(
-            fixture_bundle(),
+        let with_source = from_owned_uniform_signal_with_overlays(
+            fixture.signal.clone(),
+            fixture.sample_rate,
+            fixture.channels.clone(),
+            fixture.phys_min.clone(),
+            fixture.phys_max.clone(),
+            fixture.duration_s,
+            fixture.metadata.clone(),
+            fixture.sidecar.clone(),
             vec![SemanticSourceCapsule {
                 namespace: "adapter.edf.binding".to_owned(),
                 value: "fixture.edf".to_owned(),
@@ -739,11 +1009,10 @@ mod tests {
         assert_eq!(with_source.opened.dataset().events().len(), 1);
         assert_eq!(with_source.opened.dataset().clocks().len(), 1);
 
-        let unmodified =
-            from_signal_bundle(fixture_bundle(), semantic::ValidationLimits::default()).unwrap();
-        let mut changed = fixture_bundle();
+        let unmodified = lower_fixture(fixture.clone()).unwrap();
+        let mut changed = fixture;
         changed.phys_max[0] += 1.0;
-        let changed = from_signal_bundle(changed, semantic::ValidationLimits::default()).unwrap();
+        let changed = lower_fixture(changed).unwrap();
         assert_ne!(
             unmodified.opened.dataset().id(),
             changed.opened.dataset().id()
@@ -752,8 +1021,16 @@ mod tests {
 
     #[test]
     fn interchange_bound_sources_use_the_final_capsule_free_identity() {
-        let read = from_signal_bundle_with_interchange_bound_sources(
-            fixture_bundle(),
+        let fixture = fixture_signal();
+        let read = from_owned_uniform_signal_with_interchange_bound_sources(
+            fixture.signal,
+            fixture.sample_rate,
+            fixture.channels,
+            fixture.phys_min,
+            fixture.phys_max,
+            fixture.duration_s,
+            fixture.metadata,
+            fixture.sidecar,
             semantic::ConceptId::new("abir:modality/eeg").unwrap(),
             "adapter.test.binding.".to_owned(),
             vec![SemanticSourceObject {
@@ -779,5 +1056,46 @@ mod tests {
             block.bytes(),
             &[1_i64, -2, 3].map(i64::to_le_bytes).concat()
         );
+    }
+
+    #[test]
+    fn existing_semantic_read_binds_context_without_copying_native_samples() {
+        let read = lower_fixture(fixture_signal()).unwrap();
+        let native_pointer = read.native_i64().unwrap()[0].as_ptr();
+        let event = SemanticTimedEvent {
+            kind: semantic::ConceptId::new("bids:event/stimulus").unwrap(),
+            start: semantic::Rational::new(1, 2).unwrap(),
+            end: semantic::Rational::new(3, 5).unwrap(),
+            uncertainty: semantic::Rational::new(0, 1).unwrap(),
+        };
+
+        let rebound = with_interchange_bound_sources(
+            read,
+            Some(semantic::ConceptId::new("abir:modality/eeg").unwrap()),
+            "adapter.test.binding.".to_owned(),
+            vec![SemanticSourceObject {
+                value: "fixture.edf".to_owned(),
+                bytes: vec![9, 8, 7],
+                media_type: Some("application/edf".to_owned()),
+            }],
+            vec![event],
+            semantic::ValidationLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(rebound.native_i64().unwrap()[0].as_ptr(), native_pointer);
+        assert_eq!(rebound.opened.dataset().events().len(), 1);
+        assert_eq!(
+            rebound.opened.dataset().streams()[0].modality().as_str(),
+            "abir:modality/eeg"
+        );
+        let semantic_id = semantic::interchange_content_id(rebound.opened.dataset()).unwrap();
+        assert!(rebound
+            .opened
+            .dataset()
+            .source_capsules()
+            .iter()
+            .any(|capsule| capsule.source().namespace()
+                == format!("adapter.test.binding.{semantic_id}")));
     }
 }

@@ -9,12 +9,12 @@ use abir_adapter::{
 #[cfg(feature = "nwb")]
 use hdf5_metno::types::{IntSize, TypeDescriptor};
 #[cfg(feature = "nwb")]
-use lamquant_core::source::SourceMetadata;
+use lamquant_core::source::{from_owned_uniform_signal, SourceMetadata};
 use lamquant_core::source::{
-    from_signal_bundle_with_interchange_bound_sources, DicomWaveformReader, EdfReader,
-    SemanticSourceObject, SemanticTimedEvent, SignalBundle,
+    with_interchange_bound_sources, DicomWaveformReader, EdfReader, SemanticRead,
+    SemanticSourceObject, SemanticTimedEvent, SignalSourceReader,
 };
-use semantic_abir::{AbirDataset, ContentId, PayloadAccess, PayloadLease, ValidationLimits};
+use semantic_abir::{AbirDataset, ContentId, ValidationLimits};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
@@ -79,7 +79,7 @@ impl StandardFileAdapter {
         Ok(entry)
     }
 
-    fn read_bundle(&self, entry: &ForeignEntry) -> Result<SignalBundle, AdapterError> {
+    fn read_semantic(&self, entry: &ForeignEntry) -> Result<SemanticRead, AdapterError> {
         let temporary =
             tempfile::tempdir().map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
         let extension = match self.parser {
@@ -91,35 +91,37 @@ impl StandardFileAdapter {
         let path = temporary.path().join(format!("source.{extension}"));
         fs::write(&path, &entry.bytes)
             .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
-        let mut bundle = match self.parser {
+        let semantic = match self.parser {
             ParserKind::Edf => EdfReader::new(&path)
-                .read_bundle()
+                .lower_to_abir()
                 .map_err(|error| AdapterError::InvalidSource(error.to_string())),
             ParserKind::Dicom => DicomWaveformReader::new(&path)
-                .read_bundle()
+                .lower_to_abir()
                 .map_err(|error| AdapterError::InvalidSource(error.to_string())),
             #[cfg(feature = "nwb")]
-            ParserKind::Nwb => read_bounded_nwb_bundle(&path, self.max_source_bytes),
+            ParserKind::Nwb => read_bounded_nwb_semantic(&path, self.max_source_bytes),
         }?;
-        if matches!(self.parser, ParserKind::Edf) && bundle.metadata.format == "EDF+D" {
+        if matches!(self.parser, ParserKind::Edf)
+            && recording_source_value(&semantic, "source.format") == Some("EDF+D")
+        {
             return Err(AdapterError::UnsupportedMeaning(
                 "EDF+D discontinuities require a piecewise ABIR time-axis mapping".to_owned(),
             ));
         }
-        if bundle
-            .signal
+        let signal = semantic.native_i64().ok_or_else(|| {
+            AdapterError::UnsupportedMeaning(
+                "standard-file profile requires native uniform integer samples".to_owned(),
+            )
+        })?;
+        if signal
             .iter()
-            .any(|channel| channel.len() != bundle.signal.first().map_or(0, Vec::len))
+            .any(|channel| channel.len() != signal.first().map_or(0, Vec::len))
         {
             return Err(AdapterError::UnsupportedMeaning(
                 "mixed-length NWB integer series require direct mixed-rate ABIR mapping".to_owned(),
             ));
         }
-        // The adapter binds the complete foreign object as one exact source
-        // capsule below. Reader-private reconstruction fragments would be
-        // redundant payloads and must not become additional adapter exports.
-        bundle.sidecar.clear();
-        Ok(bundle)
+        Ok(semantic)
     }
 
     fn modality(&self) -> semantic_abir::ConceptId {
@@ -145,6 +147,53 @@ impl StandardFileAdapter {
     }
 }
 
+fn recording_source_value<'a>(read: &'a SemanticRead, namespace: &str) -> Option<&'a str> {
+    read.opened
+        .dataset()
+        .recordings()
+        .first()?
+        .source_keys()
+        .iter()
+        .find(|key| key.namespace() == namespace)
+        .map(semantic_abir::SourceKey::value)
+}
+
+fn semantic_dimensions(read: &SemanticRead) -> Result<(u64, u64), AdapterError> {
+    let signal = read.native_i64().ok_or_else(|| {
+        AdapterError::UnsupportedMeaning(
+            "semantic source does not retain native uniform integer samples".to_owned(),
+        )
+    })?;
+    let channels = u64::try_from(signal.len()).map_err(|_| AdapterError::SourceTooLarge)?;
+    let samples = u64::try_from(signal.first().map_or(0, Vec::len))
+        .map_err(|_| AdapterError::SourceTooLarge)?;
+    Ok((channels, samples))
+}
+
+fn semantic_payloads(read: &SemanticRead) -> Result<BTreeMap<ContentId, Vec<u8>>, AdapterError> {
+    let dataset = read.opened.dataset();
+    let mut ids = dataset.payload_content_ids();
+    ids.extend(
+        dataset
+            .source_capsules()
+            .iter()
+            .map(semantic_abir::SourceCapsule::content_id),
+    );
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter()
+        .map(|content_id| {
+            let bytes = read
+                .opened
+                .access()
+                .bytes(content_id)
+                .ok_or(AdapterError::MissingPayload(content_id))?
+                .to_vec();
+            Ok((content_id, bytes))
+        })
+        .collect()
+}
+
 impl Adapter for StandardFileAdapter {
     fn profile(&self) -> &AdapterProfile {
         &self.profile
@@ -152,7 +201,8 @@ impl Adapter for StandardFileAdapter {
 
     fn inspect(&self, source: &ForeignObject) -> Result<InspectReport, AdapterError> {
         let entry = self.check(source)?;
-        let bundle = self.read_bundle(entry)?;
+        let semantic = self.read_semantic(entry)?;
+        let (channels, samples) = semantic_dimensions(&semantic)?;
         Ok(InspectReport {
             profile: self.profile.id.clone(),
             entry_count: 1,
@@ -162,11 +212,8 @@ impl Adapter for StandardFileAdapter {
             ],
             required_resources: BTreeMap::from([
                 ("max-source-bytes".to_owned(), self.max_source_bytes),
-                ("channels".to_owned(), bundle.n_channels() as u64),
-                (
-                    "samples".to_owned(),
-                    bundle.signal.first().map_or(0, Vec::len) as u64,
-                ),
+                ("channels".to_owned(), channels),
+                ("samples".to_owned(), samples),
             ]),
         })
     }
@@ -177,40 +224,23 @@ impl Adapter for StandardFileAdapter {
         limits: ValidationLimits,
     ) -> Result<ImportOutcome, AdapterError> {
         let entry = self.check(source)?;
-        let bundle = self.read_bundle(entry)?;
+        let semantic = self.read_semantic(entry)?;
         let source_id = payload_content_id(&entry.bytes);
         let capsule = SemanticSourceObject {
             value: entry.path.clone(),
             bytes: entry.bytes.clone(),
             media_type: entry.media_type.clone(),
         };
-        let mapped = from_signal_bundle_with_interchange_bound_sources(
-            bundle,
-            self.modality(),
+        let mapped = with_interchange_bound_sources(
+            semantic,
+            Some(self.modality()),
             format!("adapter.{}.binding.", self.profile.id.0),
             vec![capsule],
             vec![],
             limits,
         )
         .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
-        let mut payloads = BTreeMap::new();
-        for channel in &mapped.mapping.channels {
-            let descriptor = mapped
-                .opened
-                .dataset()
-                .atoms()
-                .iter()
-                .find(|atom| atom.id() == channel.atom_id)
-                .and_then(|atom| atom.payload())
-                .ok_or(AdapterError::MissingPayload(channel.content_id))?;
-            let lease = mapped
-                .opened
-                .access()
-                .lease(descriptor)
-                .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
-            payloads.insert(channel.content_id, lease.bytes().to_vec());
-        }
-        payloads.insert(source_id, entry.bytes.clone());
+        let payloads = semantic_payloads(&mapped)?;
         let mut entries = vec![MappingEntry {
             source_path: entry.path.clone(),
             target: format!("source-capsule:{source_id}"),
@@ -310,7 +340,7 @@ impl Adapter for StandardFileAdapter {
     fn validate(&self, source: &ForeignObject) -> ValidationArtifact {
         let result = self
             .check(source)
-            .and_then(|entry| self.read_bundle(entry).map(|_| ()));
+            .and_then(|entry| self.read_semantic(entry).map(|_| ()));
         ValidationArtifact {
             profile: self.profile.id.clone(),
             internal_valid: result.is_ok(),
@@ -578,7 +608,8 @@ impl Adapter for BidsAdapter {
         let events = self.events(source, signal)?;
         let parser =
             StandardFileAdapter::new(self.profile.clone(), ParserKind::Edf, self.max_source_bytes);
-        let bundle = parser.read_bundle(signal)?;
+        let semantic = parser.read_semantic(signal)?;
+        let (channels, samples) = semantic_dimensions(&semantic)?;
         Ok(InspectReport {
             profile: self.profile.id.clone(),
             entry_count: source.entries.len(),
@@ -598,12 +629,9 @@ impl Adapter for BidsAdapter {
             ],
             required_resources: BTreeMap::from([
                 ("max-source-bytes".to_owned(), self.max_source_bytes),
-                ("channels".to_owned(), bundle.n_channels() as u64),
+                ("channels".to_owned(), channels),
                 ("events".to_owned(), events.len() as u64),
-                (
-                    "samples".to_owned(),
-                    bundle.signal.first().map_or(0, Vec::len) as u64,
-                ),
+                ("samples".to_owned(), samples),
             ]),
         })
     }
@@ -621,7 +649,7 @@ impl Adapter for BidsAdapter {
             .collect::<Vec<_>>();
         let parser =
             StandardFileAdapter::new(self.profile.clone(), ParserKind::Edf, self.max_source_bytes);
-        let bundle = parser.read_bundle(signal)?;
+        let semantic = parser.read_semantic(signal)?;
         let capsules = source
             .entries
             .iter()
@@ -631,36 +659,19 @@ impl Adapter for BidsAdapter {
                 media_type: entry.media_type.clone(),
             })
             .collect::<Vec<_>>();
-        let mapped = from_signal_bundle_with_interchange_bound_sources(
-            bundle,
-            semantic_abir::ConceptId::new("abir:modality/eeg")
-                .expect("static modality concept is canonical"),
+        let mapped = with_interchange_bound_sources(
+            semantic,
+            Some(
+                semantic_abir::ConceptId::new("abir:modality/eeg")
+                    .expect("static modality concept is canonical"),
+            ),
             format!("adapter.{}.binding.", self.profile.id.0),
             capsules,
             semantic_events,
             limits,
         )
         .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
-        let mut payloads = BTreeMap::new();
-        for channel in &mapped.mapping.channels {
-            let descriptor = mapped
-                .opened
-                .dataset()
-                .atoms()
-                .iter()
-                .find(|atom| atom.id() == channel.atom_id)
-                .and_then(|atom| atom.payload())
-                .ok_or(AdapterError::MissingPayload(channel.content_id))?;
-            let lease = mapped
-                .opened
-                .access()
-                .lease(descriptor)
-                .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
-            payloads.insert(channel.content_id, lease.bytes().to_vec());
-        }
-        for entry in &source.entries {
-            payloads.insert(payload_content_id(&entry.bytes), entry.bytes.clone());
-        }
+        let payloads = semantic_payloads(&mapped)?;
         let mut entries = source
             .entries
             .iter()
@@ -813,7 +824,7 @@ impl Adapter for BidsAdapter {
         let result = self.check(source).and_then(|signal| {
             self.events(source, signal)?;
             StandardFileAdapter::new(self.profile.clone(), ParserKind::Edf, self.max_source_bytes)
-                .read_bundle(signal)
+                .read_semantic(signal)
                 .map(|_| ())
         });
         ValidationArtifact {
@@ -1127,10 +1138,10 @@ fn rational_add(
 }
 
 #[cfg(feature = "nwb")]
-fn read_bounded_nwb_bundle(
+fn read_bounded_nwb_semantic(
     path: &std::path::Path,
     max_expanded_bytes: u64,
-) -> Result<SignalBundle, AdapterError> {
+) -> Result<SemanticRead, AdapterError> {
     let file = hdf5_metno::File::open(path)
         .map_err(|error| AdapterError::InvalidSource(error.to_string()))?;
     let acquisition = file
@@ -1239,14 +1250,14 @@ fn read_bounded_nwb_bundle(
     let channels = (0..signal.len())
         .map(|index| format!("acquisition/{}/data/{index}", members[0]))
         .collect::<Vec<_>>();
-    Ok(SignalBundle {
+    from_owned_uniform_signal(
         signal,
-        sample_rate: rate,
+        rate,
         channels,
-        phys_min: vec![0.0; shape.get(1).copied().unwrap_or(1)],
-        phys_max: vec![0.0; shape.get(1).copied().unwrap_or(1)],
-        duration_s: samples as f64 / rate,
-        metadata: SourceMetadata {
+        vec![0.0; shape.get(1).copied().unwrap_or(1)],
+        vec![0.0; shape.get(1).copied().unwrap_or(1)],
+        samples as f64 / rate,
+        SourceMetadata {
             source_file: path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1257,8 +1268,10 @@ fn read_bounded_nwb_bundle(
             startdate: String::new(),
             phys_dim: String::new(),
         },
-        sidecar: vec![],
-    })
+        vec![],
+        ValidationLimits::default(),
+    )
+    .map_err(|error| AdapterError::InvalidSource(error.to_string()))
 }
 
 #[cfg(feature = "nwb")]

@@ -10,8 +10,9 @@
 //!     ABIR/BCS2 bundle whose enclosed LML1 packets match the frozen kernel.
 //!   * **EDF→container** (`--features archive`): a synth EDF → `edf::read_edf` →
 //!     the same `.lml` sink. Locks that the EDF front-end serializes identically.
-//!   * **front-end (NWB)** (`--features nwb`): an h5py fixture → `nwb::read_bundle`
-//!     → sha256 of the parsed IR signal. Skips when python3+h5py absent.
+//!   * **front-end (NWB)** (`--features nwb`): an h5py fixture →
+//!     `nwb::read_dataset` → sha256 of ABIR tensor shapes and payloads. Skips
+//!     when python3+h5py is absent.
 //!
 //! Scope note (deliberate): the container/EDF locks pin metadata to `"{}"`, so they
 //! freeze the shared IR→container byte path the ABIR refactor touches — NOT the
@@ -29,16 +30,22 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "archive")]
 mod support;
 
-/// sha256 over channel-major signal: count, then per-channel (len + i64-LE samples).
+/// SHA-256 over ordered ABIR tensor shapes and logical payload bytes.
 #[cfg(feature = "nwb")]
-fn sha_signal(signal: &[Vec<i64>]) -> String {
+fn sha_nwb_tensors(
+    opened: &semantic_abir::OpenedDataset<semantic_abir::InMemoryPayloadAccess>,
+) -> String {
     let mut h = Sha256::new();
-    h.update((signal.len() as u64).to_le_bytes());
-    for ch in signal {
-        h.update((ch.len() as u64).to_le_bytes());
-        for &sample in ch {
-            h.update(sample.to_le_bytes());
+    let stream = &opened.dataset().streams()[0];
+    h.update((stream.atoms().len() as u64).to_le_bytes());
+    for atom_id in stream.atoms() {
+        let view = opened.tensor_view(*atom_id).expect("NWB tensor view");
+        h.update((view.descriptor().shape().len() as u64).to_le_bytes());
+        for extent in view.descriptor().shape() {
+            h.update(extent.to_le_bytes());
         }
+        h.update((view.bytes().len() as u64).to_le_bytes());
+        h.update(view.bytes());
     }
     format!("{:x}", h.finalize())
 }
@@ -103,8 +110,8 @@ mod nwb_frontend {
     use super::*;
     use std::process::Command;
 
-    const GOLDEN_NWB_SIGNAL: &str =
-        "7dbf6db220c3e098e3a07b22f3e8a27d8d8fe88ab4e27665677f7c76cb7ca102";
+    const GOLDEN_NWB_TENSORS: &str =
+        "a8a94792684eb0857bc6bccbbf54846011d71d7f8e0763e6529e867c7a03df27";
 
     fn make_fixture(path: &std::path::Path) -> bool {
         let script = format!(
@@ -131,20 +138,24 @@ sys.exit(0)
     }
 
     #[test]
-    fn nwb_reader_signal_locked() {
+    fn nwb_reader_tensors_locked() {
         let dir = tempfile::tempdir().unwrap();
         let fx = dir.path().join("fx.nwb");
         if !make_fixture(&fx) {
-            eprintln!("SKIP nwb_reader_signal_locked: h5py unavailable");
+            eprintln!("SKIP nwb_reader_tensors_locked: h5py unavailable");
             return;
         }
-        let bundle = lamquant_core::nwb::read_bundle(&fx).expect("read_bundle");
-        let got = sha_signal(&bundle.signal);
+        let opened = lamquant_core::nwb::read_dataset(&fx).expect("read_dataset");
+        let got = sha_nwb_tensors(&opened);
         if regen() {
-            println!("NWB signal = {got}");
+            println!("NWB tensors = {got}");
             return;
         }
-        assert_eq!(got, GOLDEN_NWB_SIGNAL, "NWB reader signal changed");
+        assert_ne!(
+            GOLDEN_NWB_TENSORS, "REGEN",
+            "run with LAMQUANT_REGEN_FRONTEND=1 and freeze NWB tensor hash"
+        );
+        assert_eq!(got, GOLDEN_NWB_TENSORS, "NWB reader tensors changed");
     }
 }
 

@@ -1,57 +1,14 @@
-//! CLI embedded-metadata snapshot — the **L5(a) safety net** for the ABIR
-//! migration (ADR 0069). Freezes the EXACT metadata JSON string the `lml`
-//! binary embeds in a current ABIR/BCS2 `.lml` bundle, per input format.
+//! CLI semantic-root snapshots for Package 26.
 //!
-//! `front_end_bit_exact.rs`'s container/EDF locks deliberately pin
-//! `metadata_json = "{}"` — they lock the shared IR→container byte path, NOT
-//! the `bin/lml.rs` CLI's per-format `metadata_json` builders (the big inline
-//! `format!` blocks around `encode_one_brainvision` / `encode_one_raw` /
-//! `encode_one_cnt` / `encode_one_dicom` / `encode_one_eeglab` /
-//! `cmd_encode`'s EDF tail). Those builders are exactly what a Step-2+ ABIR
-//! relocation would move — so they need their own guard. This file is it.
+//! Each supported source runs through real `lml encode`, authenticated BCS2
+//! reopen, and RFC 8785 ABIR canonical debug serialization. Frozen hashes guard
+//! typed source metadata, channel semantics, payload identity, and retained
+//! capsule identity without reviving a second JSON metadata carrier.
 //!
-//! For each of the 6 auto-detected input formats (dispatch is by extension —
-//! see `encode_one` in `src/bin/lml.rs`): synthesize (or load, for DICOM) a
-//! tiny deterministic fixture, run the REAL `lml encode` binary against it
-//! with `--no-bundle --i-understand-data-loss` (bare `.lml`, no `.lma`
-//! wrapping so authenticated byte-open can read it straight back), pull the
-//! embedded metadata string via `lamquant_core::container::read_bytes`,
-//! normalize the fields that are inherently run-to-run volatile (tempdir
-//! path, crate version), and pin `sha256(normalized)`.
-//!
-//! The current profile stores the caller-provided metadata string as a
-//! semantic source key without routing it through the retired BCS1 metadata
-//! augmenter. We hash exactly what `lml encode` + authenticated byte-open
-//! return, so field order, names, and values remain observable behavior.
-//!
-//! Volatile fields normalized before hashing (see `NORMALIZED FIELDS` note
-//! on each fixture fn below):
-//!   - `source_file` — BrainVision/Raw/CNT/DICOM/EEGLAB embed the FULL
-//!     encode-time path (`<reader>.rs`: `.display().to_string()`), which
-//!     bakes in the tempdir. EDF is the one exception: `edf.rs::read_edf`
-//!     stores `path.file_name()` only (basename), so with a fixed literal
-//!     input filename it is ALREADY deterministic — deliberately left
-//!     un-normalized so a future accidental switch to a full-path EDF
-//!     `source_file` still flips this golden instead of being masked.
-//!   - `encoder` (BrainVision/Raw/CNT/DICOM/EEGLAB) / `encoder_version`
-//!     (EDF) — `lml/<CARGO_PKG_VERSION>`, changes on every version bump.
-//!
-//! Everything else scanned and found deterministic given a fixed fixture:
-//! `signal_sha256` / `edf_header_sha256` / `trailing_data_sha256` (hash of
-//! content we control), `edf_header` / `trailing_data` (zstd level 9 is a
-//! pure function of its input bytes — no embedded timestamp), `codec_mode`
-//! / `lossless_mode` / `lpc_mode` (CLI defaults resolve to
-//! `LosslessMode::Mcu.default_lpc_mode()` = `LpcMode::Fixed`, which carries
-//! no `Instant` — see `resolve_lpc_mode` / `LosslessMode::default_lpc_mode`
-//! in `lamquant-lml-mcu/src/deployment.rs`).
-//!
-//! Regenerate after an INTENTIONAL change to a metadata builder (record the
-//! why in the commit message):
-//!   LAMQUANT_REGEN_CLI_META=1 cargo test -p lamquant-lml --features archive,dicom \
-//!     --test cli_metadata_snapshot -- --nocapture
-//! then paste the printed shas into `FROZEN` below. `assert_clean_env` is
-//! EXPECTED to fail during a regen run (see its doc comment) — that failure
-//! is the reminder to unset the var afterward, not a real regression.
+//! Regenerate only after an intentional semantic change:
+//! `LAMQUANT_REGEN_CLI_SEMANTICS=1 cargo test -p lamquant-lml \
+//! --features archive,dicom --test cli_semantic_snapshot -- --nocapture \
+//! --skip assert_clean_env`.
 #![cfg(feature = "archive")]
 
 use sha2::{Digest, Sha256};
@@ -65,7 +22,7 @@ fn sha_bytes(b: &[u8]) -> String {
 }
 
 fn regen() -> bool {
-    std::env::var("LAMQUANT_REGEN_CLI_META").is_ok()
+    std::env::var("LAMQUANT_REGEN_CLI_SEMANTICS").is_ok()
 }
 
 /// Locate the `lml` binary cargo just built for THIS invocation's feature
@@ -119,35 +76,10 @@ fn run_encode(input: &Path, output: &Path) {
     );
 }
 
-fn read_lml(path: &Path) -> (Vec<Vec<i64>>, String) {
+fn read_semantics(path: &Path) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("read encoded LML");
-    lamquant_core::container::read_bytes(&bytes).expect("authenticate and decode LML")
-}
-
-/// Replace the value of a top-level JSON string field `"field":"..."` with
-/// `replacement`, leaving every other byte of `json` untouched. Escape-aware
-/// (walks `\`-escapes so a value containing an escaped quote doesn't
-/// truncate early) but otherwise a raw byte scan — deliberately NOT a
-/// parse-then-reserialize round-trip, so it can't accidentally normalize
-/// away a real formatting regression in an unrelated field (key order,
-/// number formatting, whitespace, ...).
-fn replace_json_string_field(json: &str, field: &str, replacement: &str) -> String {
-    let needle = format!("\"{field}\":\"");
-    let start = json
-        .find(&needle)
-        .unwrap_or_else(|| panic!("field `{field}` not found in metadata JSON: {json}"));
-    let val_start = start + needle.len();
-    let bytes = json.as_bytes();
-    let mut i = val_start;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            b'"' => break,
-            _ => i += 1,
-        }
-    }
-    assert!(i < bytes.len(), "unterminated string value for `{field}`");
-    format!("{}{}{}", &json[..val_start], replacement, &json[i..])
+    let opened = lamquant_core::container::open(&bytes).expect("authenticate BCS2 LML");
+    semantic_abir::canonical_debug_json(opened.dataset()).expect("canonical ABIR semantics")
 }
 
 // ───────────────────────── fixtures ─────────────────────────
@@ -158,9 +90,8 @@ fn replace_json_string_field(json: &str, field: &str, replacement: &str) -> Stri
 
 /// EDF. `lamquant_core::ingest::synth_single_channel_edf` (shared with
 /// `front_end_bit_exact.rs`) fixes every ASCII header field (patient_id,
-/// startdate "01.01.01", starttime "00.00.00", ...) — no normalization
-/// needed beyond `encoder_version`. Filename is a fixed literal so EDF's
-/// basename-only `source_file` (see module doc) is deterministic too.
+/// startdate "01.01.01", starttime "00.00.00", ...). Filename is fixed, so
+/// source identity remains deterministic.
 fn edf_fixture(dir: &Path) -> PathBuf {
     let samples: Vec<i16> = (0..500).map(|t| ((t % 97) - 48) as i16).collect();
     let bytes = lamquant_core::ingest::synth_single_channel_edf(&samples, 250.0);
@@ -171,10 +102,10 @@ fn edf_fixture(dir: &Path) -> PathBuf {
 
 /// BrainVision (`.vhdr` + `.eeg` + `.vmrk`). Mirrors
 /// `src/source/brainvision.rs`'s own `#[cfg(test)] synth_vhdr_int16_multiplexed`
-/// and `read_bundle_int16_multiplexed_round_trip` fixture shape (that helper
+/// and `lower_int16_multiplexed_round_trip` fixture shape (that helper
 /// is `#[cfg(test)]`-private to the lib crate, so an external integration
 /// test can't reuse it directly — reproduced here byte-for-byte equivalent).
-/// NORMALIZED: `source_file` (full `.vhdr` path), `encoder`.
+/// Reader records basename-only source identity.
 fn brainvision_fixture(dir: &Path) -> PathBuf {
     let n_ch = 2usize;
     let n_samples = 50usize;
@@ -208,7 +139,7 @@ fn brainvision_fixture(dir: &Path) -> PathBuf {
 }
 
 /// Raw binary + JSON sidecar. Mirrors `src/source/raw.rs`'s
-/// `#[cfg(test)] good_sidecar` shape. NORMALIZED: `source_file`, `encoder`.
+/// `#[cfg(test)] good_sidecar` shape.
 fn raw_fixture(dir: &Path) -> PathBuf {
     let n_ch = 2usize;
     let n_samples = 50usize;
@@ -231,7 +162,7 @@ fn raw_fixture(dir: &Path) -> PathBuf {
 }
 
 /// NeuroScan CNT. Mirrors `src/source/cnt.rs`'s `#[cfg(test)] synth_cnt`.
-/// NORMALIZED: `source_file`, `encoder`.
+/// Source facts lower into ABIR recording/channel keys.
 fn cnt_fixture(dir: &Path) -> PathBuf {
     const SETUP_HEADER_LEN: usize = 900;
     const ELECTLOC_LEN: usize = 75;
@@ -265,7 +196,7 @@ fn cnt_fixture(dir: &Path) -> PathBuf {
 /// committed `tests/fixtures/dicom/general_ecg.dcm` — synthesized
 /// deterministically by `tools/make_general_ecg_fixture.py`, already the
 /// basis of `dicom_parity.rs::parse_general_ecg_fixture_matches_synthetic_golden`.
-/// NORMALIZED: `source_file`, `encoder`.
+/// Source facts lower into ABIR recording/channel keys.
 #[cfg(feature = "dicom")]
 fn dicom_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -278,7 +209,7 @@ fn dicom_fixture() -> PathBuf {
 /// EEGLAB `.set` + `.fdt` + `.lml-meta.json`. The v1 reader (`src/source/
 /// eeglab.rs`) never parses the MAT struct — only the sidecar JSON + `.fdt`
 /// matter, so `.set` can be an arbitrary stub (it's preserved byte-exact as
-/// a sidecar, never decoded). NORMALIZED: `source_file`, `encoder`.
+/// a sidecar, never decoded).
 fn eeglab_fixture(dir: &Path) -> PathBuf {
     let n_ch = 2usize;
     let n_samples = 50usize;
@@ -298,7 +229,7 @@ fn eeglab_fixture(dir: &Path) -> PathBuf {
     let set_path = dir.join("rec.set");
     std::fs::write(
         &set_path,
-        b"MATLAB 5.0 MAT-file, stub for cli_metadata_snapshot",
+        b"MATLAB 5.0 MAT-file, stub for cli_semantic_snapshot",
     )
     .expect("write .set stub");
     set_path
@@ -306,40 +237,37 @@ fn eeglab_fixture(dir: &Path) -> PathBuf {
 
 // ───────────────────────── frozen goldens ─────────────────────────
 
-/// sha256(normalized metadata JSON) per format. Frozen via
-/// `LAMQUANT_REGEN_CLI_META=1 cargo test -p lamquant-lml --features archive,dicom \
-///  --test cli_metadata_snapshot -- --nocapture` on a clean env (see
-/// `assert_clean_env`), Linux x86_64, `lml` v0.9.3.
+/// SHA-256 of canonical ABIR semantics per source format.
 const FROZEN: &[(&str, &str)] = &[
     (
         "edf",
-        "6302641dafd8ce1c25ce6f796fa30c1dc9c56a502d01cd094faabbff6f898fce",
+        "652ea055d7bc87bc1dbf86c4dfbb6630463ec229f222d1caa5bdf1f628ce4367",
     ),
     (
         "brainvision",
-        "f82285495af85b120cd36f728395546def520d00261d30ea638db3792deaa8f8",
+        "fbb699088aee50d38775af9162656fb207be2cb93210253263e3c507dcdcd38d",
     ),
     (
         "raw",
-        "f88beda507ad61de1f127c87e9cb286e18ffa1d7b03dba7910a88c51f40812fe",
+        "e991e97288ef9d31a45d8984978d87fa707662056a66edeb3c7b1aa753876ccc",
     ),
     (
         "cnt",
-        "0b953f37383aad5fa8dd03a45a4d3834c4fb5bae6dc9e22571af7dac8a8613f9",
+        "efed98b906d580d7cab32d0b52a0f7752f3bcf93d5313c23742f423a04a83196",
     ),
     (
         "dicom",
-        "ede6f12a370997145a602645198bb7286b28789a8e0720c7876c3885b15a614b",
+        "2c6d5a89af85c6b4fc873d1704dcc63afc5a4971ddbb7af6481bf4f3f4d82ade",
     ),
     (
         "eeglab",
-        "5a8933b8bc4a24ce9e2b911d31e0ae44c8c1920cf057dcc86c19744153014811",
+        "5c0976e32a09f3c0b31c40067df77d29eaff5147e67a4be847cd8ef03ceae9a7",
     ),
 ];
 
 fn check(name: &str, got: &str) {
     if regen() {
-        println!("CLI_META {name} = {got}");
+        println!("CLI_SEMANTICS {name} = {got}");
         return;
     }
     let want = FROZEN
@@ -349,15 +277,15 @@ fn check(name: &str, got: &str) {
         .unwrap_or_else(|| panic!("no FROZEN entry for `{name}`"));
     assert_ne!(
         want, "REGEN",
-        "`{name}` still has a REGEN placeholder — run with LAMQUANT_REGEN_CLI_META=1 \
+        "`{name}` still has a REGEN placeholder — run with LAMQUANT_REGEN_CLI_SEMANTICS=1 \
          and paste the printed sha into FROZEN"
     );
-    assert_eq!(got, want, "CLI embedded-metadata JSON drifted for `{name}`");
+    assert_eq!(got, want, "CLI ABIR semantics drifted for `{name}`");
 }
 
 // ───────────────────────── tests ─────────────────────────
 
-/// Guards the regen footgun: if a dev runs `LAMQUANT_REGEN_CLI_META=1 cargo
+/// Guards the regen footgun: if a dev runs `LAMQUANT_REGEN_CLI_SEMANTICS=1 cargo
 /// test -- --nocapture` to harvest fresh shas and forgets to unset the var
 /// before a normal `cargo test`, every `check()` call above silently
 /// degrades into a `println!` and the whole file would report a false
@@ -368,96 +296,78 @@ fn check(name: &str, got: &str) {
 #[test]
 fn assert_clean_env() {
     assert!(
-        std::env::var("LAMQUANT_REGEN_CLI_META").is_err(),
-        "LAMQUANT_REGEN_CLI_META is set — every snapshot assertion in this file just \
+        std::env::var("LAMQUANT_REGEN_CLI_SEMANTICS").is_err(),
+        "LAMQUANT_REGEN_CLI_SEMANTICS is set — every snapshot assertion in this file just \
          printed instead of asserting. Unset it before trusting a green run."
     );
 }
 
 #[test]
-fn edf_metadata_locked() {
+fn edf_semantics_locked() {
     let dir = tempfile::tempdir().unwrap();
     let input = edf_fixture(dir.path());
     let output = dir.path().join("out").join("synth.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = read_lml(&output);
-    // EDF's `source_file` is basename-only (see module doc) — deliberately
-    // NOT normalized so a future regression to full-path source_file still
-    // flips this golden. Assert the fixed literal survived before hashing.
-    assert!(
-        meta.contains("\"source_file\":\"synth.edf\""),
-        "EDF source_file expected to be the basename literal, got: {meta}"
-    );
-    let normalized = replace_json_string_field(&meta, "encoder_version", "lml/NORMALIZED");
-    check("edf", &sha_bytes(normalized.as_bytes()));
+    let semantics = read_semantics(&output);
+    check("edf", &sha_bytes(&semantics));
 }
 
 #[test]
-fn brainvision_metadata_locked() {
+fn brainvision_semantics_locked() {
     let dir = tempfile::tempdir().unwrap();
     let input = brainvision_fixture(dir.path());
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = read_lml(&output);
-    let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
-    let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
-    check("brainvision", &sha_bytes(normalized.as_bytes()));
+    let semantics = read_semantics(&output);
+    check("brainvision", &sha_bytes(&semantics));
 }
 
 #[test]
-fn raw_metadata_locked() {
+fn raw_semantics_locked() {
     let dir = tempfile::tempdir().unwrap();
     let input = raw_fixture(dir.path());
     let output = dir.path().join("out").join("data.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = read_lml(&output);
-    let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
-    let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
-    check("raw", &sha_bytes(normalized.as_bytes()));
+    let semantics = read_semantics(&output);
+    check("raw", &sha_bytes(&semantics));
 }
 
 #[test]
-fn cnt_metadata_locked() {
+fn cnt_semantics_locked() {
     let dir = tempfile::tempdir().unwrap();
     let input = cnt_fixture(dir.path());
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = read_lml(&output);
-    let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
-    let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
-    check("cnt", &sha_bytes(normalized.as_bytes()));
+    let semantics = read_semantics(&output);
+    check("cnt", &sha_bytes(&semantics));
 }
 
 #[cfg(feature = "dicom")]
 #[test]
-fn dicom_metadata_locked() {
+fn dicom_semantics_locked() {
     let dir = tempfile::tempdir().unwrap();
     let input = dicom_fixture();
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = read_lml(&output);
-    let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
-    let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
-    check("dicom", &sha_bytes(normalized.as_bytes()));
+    let semantics = read_semantics(&output);
+    check("dicom", &sha_bytes(&semantics));
 }
 
 #[cfg(not(feature = "dicom"))]
 #[test]
-fn dicom_metadata_locked() {
+fn dicom_semantics_locked() {
     eprintln!(
-        "SKIP dicom_metadata_locked: built without `--features dicom` \
+        "SKIP dicom_semantics_locked: built without `--features dicom` \
          (lml refuses .dcm input without it)"
     );
 }
 
 #[test]
-fn eeglab_metadata_locked() {
+fn eeglab_semantics_locked() {
     let dir = tempfile::tempdir().unwrap();
     let input = eeglab_fixture(dir.path());
     let output = dir.path().join("out").join("rec.lml");
     run_encode(&input, &output);
-    let (_signal, meta) = read_lml(&output);
-    let normalized = replace_json_string_field(&meta, "source_file", "NORMALIZED_SOURCE_FILE");
-    let normalized = replace_json_string_field(&normalized, "encoder", "lml/NORMALIZED");
-    check("eeglab", &sha_bytes(normalized.as_bytes()));
+    let semantics = read_semantics(&output);
+    check("eeglab", &sha_bytes(&semantics));
 }

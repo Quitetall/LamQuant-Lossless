@@ -9,6 +9,7 @@
 
 use clap::{Parser, Subcommand};
 use lamquant_core::deployment::LosslessMode;
+use lamquant_core::source::SignalSourceReader;
 use lamquant_core::{container, edf, lma, lma_forensic, lml, tui};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -2145,26 +2146,134 @@ fn encode_semantic_views(
     )
 }
 
-fn encode_source_bundle(
-    bundle: &lamquant_core::source::SignalBundle,
-    sample_rate: f64,
-    metadata_json: &str,
+fn encode_source_read(
+    semantic: &lamquant_core::source::SemanticRead,
     window_size: usize,
     noise_bits: u8,
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> lamquant_core::error::LmlResult<container::EncodedLml> {
-    encode_semantic_views(
-        &bundle.signal,
-        sample_rate,
-        bundle.channels.clone(),
-        bundle.phys_min.clone(),
-        bundle.phys_max.clone(),
-        bundle.metadata.clone(),
-        metadata_json,
-        window_size,
-        noise_bits,
-        lpc_mode,
+    if noise_bits != 0 {
+        return Err(lamquant_core::error::LmlError::InvalidHeader(
+            "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
+                .into(),
+        ));
+    }
+    container::encode_semantic_read_with_options(
+        semantic,
+        container::LmlEncodeOptions::new(window_size).with_lpc_mode(lpc_mode),
     )
+}
+
+struct SemanticEncodeRequest<'a> {
+    format: &'static str,
+    semantic: &'a lamquant_core::source::SemanticRead,
+    lml_path: &'a Path,
+    raw_size: u64,
+    verify: bool,
+    noise_bits: u8,
+    window_size: usize,
+    lpc_mode: lamquant_core::lpc::LpcMode,
+}
+
+fn encode_semantic_source(
+    request: SemanticEncodeRequest<'_>,
+) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
+    let signal = request.semantic.native_i64().ok_or_else(|| {
+        format!(
+            "{} lowering did not retain native i64 samples",
+            request.format
+        )
+    })?;
+    let n_channels = u32::try_from(signal.len())
+        .map_err(|_| format!("{} channel count exceeds u32", request.format))?;
+    let n_samples = signal.first().map_or(0, Vec::len);
+
+    let mut hasher = Sha256::new();
+    for channel in signal {
+        for sample in channel {
+            hasher.update(sample.to_le_bytes());
+        }
+    }
+    let sha256 = format!("{:x}", hasher.finalize());
+
+    if let Some(parent) = request.lml_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut sink = std::io::BufWriter::new(std::fs::File::create(request.lml_path)?);
+    let encoded = encode_source_read(
+        request.semantic,
+        request.window_size,
+        request.noise_bits,
+        request.lpc_mode,
+    )?;
+    sink.write_all(encoded.as_bytes())?;
+    let stats = encoded.stats().clone();
+    let file = sink.into_inner().map_err(|error| {
+        let kind = error.error().kind();
+        std::io::Error::new(
+            kind,
+            format!(
+                "encode {}: BufWriter flush failed before sync_all",
+                request.format
+            ),
+        )
+    })?;
+    file.sync_all()?;
+
+    if request.verify {
+        let (recovered, _) = read_lml_file(request.lml_path)?;
+        if recovered.len() != signal.len() {
+            return Err(format!(
+                "verify ({}): channel count {} != {}",
+                request.format,
+                recovered.len(),
+                signal.len()
+            )
+            .into());
+        }
+        for (index, (actual, expected)) in recovered.iter().zip(signal).enumerate() {
+            if actual != expected {
+                return Err(format!(
+                    "verify ({}): channel {index} mismatch ({} vs {} samples)",
+                    request.format,
+                    actual.len(),
+                    expected.len()
+                )
+                .into());
+            }
+        }
+    }
+
+    let compressed_size = u64::try_from(stats.compressed_size)
+        .map_err(|_| format!("{} compressed size exceeds u64", request.format))?;
+    let cr = if compressed_size > 0 {
+        request.raw_size as f64 / compressed_size as f64
+    } else {
+        0.0
+    };
+    Ok(EncodeMetrics {
+        raw_size: usize::try_from(request.raw_size)
+            .map_err(|_| format!("{} source size exceeds usize", request.format))?,
+        compressed_size: stats.compressed_size,
+        cr,
+        sha256,
+        verified: request.verify,
+        samples: u64::from(n_channels).saturating_mul(
+            u64::try_from(n_samples)
+                .map_err(|_| format!("{} sample count exceeds u64", request.format))?,
+        ),
+        duration_s: stats.duration_s,
+        n_channels,
+        sample_rate: if stats.duration_s > 0.0 {
+            (n_samples as f64 / stats.duration_s) as f32
+        } else {
+            0.0
+        },
+        n_windows: u32::try_from(stats.n_windows)
+            .map_err(|_| format!("{} window count exceeds u32", request.format))?,
+    })
 }
 
 fn encode_uniform_signal(
@@ -2205,14 +2314,9 @@ fn encode_uniform_signal(
 
 /// Phase 4.1 — encode a BrainVision (.vhdr/.eeg/.vmrk) recording.
 ///
-/// Goes through `BrainVisionReader::read_bundle` → `SignalBundle` →
-/// canonical ABIR → fused LML encode. The full `.vhdr` and any `.vmrk` are
-/// preserved in metadata as base64+zstd-encoded blobs (`vhdr_b64` and
-/// `vmrk_b64`) so a future `lml decode --to-brainvision` can reverse
-/// the encode losslessly. Today there's no `--to-brainvision` flag;
-/// the round-trip target is round-tripping the integer sample matrix
-/// (decode → raw int32 LE matches the original .eeg byte-for-byte for
-/// INT_16 sources, modulo the sample-major i64 widen).
+/// Goes through `BrainVisionReader::lower_to_abir` → semantic ABIR
+/// → fused LML encode. Preservation uses source capsules for the tri-file
+/// (`vhdr`/`eeg`/`vmrk`) without sidecar JSON hand-packing.
 fn encode_one_brainvision(
     vhdr_path: &Path,
     lml_path: &Path,
@@ -2222,127 +2326,24 @@ fn encode_one_brainvision(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::source::BrainVisionReader;
-    let t0 = Instant::now();
     let mut reader = BrainVisionReader::new(vhdr_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
-
-    // SHA-256 of the i64 LE sample matrix — same convention as EDF
-    // encode for cross-format checksum compatibility.
-    let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
-
-    // v1.1: source `.vhdr` + `.vmrk` are now preserved as separate
-    // LMA entries (in default mode) or sibling files (in --no-bundle
-    // mode), not as b64-zstd blobs inside metadata JSON. The metadata
-    // shrinks substantially; the legacy reader fallback in v1 .lml
-    // files still works because the fields just resolve to empty
-    // strings on absence.
-
-    // JSON encode channel labels + phys_min / phys_max.
-    let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
-        if i > 0 {
-            ch_json.push(',');
-        }
-        let safe = name
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        ch_json.push('"');
-        ch_json.push_str(&safe);
-        ch_json.push('"');
-    }
-    ch_json.push(']');
-    let pmin: Vec<String> = bundle.phys_min.iter().map(|v| format!("{v}")).collect();
-    let pmax: Vec<String> = bundle.phys_max.iter().map(|v| format!("{v}")).collect();
-
-    let metadata_json = format!(
-        "{{\"source_file\":\"{}\",\"format\":\"BRAINVISION\",\"n_channels\":{},\
-         \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
-         \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
-         \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
-            .source_file
-            .replace('\\', "\\\\")
-            .replace('"', "\\\""),
-        n_channels,
-        sample_rate,
-        ch_json,
-        pmin.join(","),
-        pmax.join(","),
-        bundle.metadata.phys_dim.replace('"', "\\\""),
-        sha256_hex,
-        env!("CARGO_PKG_VERSION"),
-        noise_bits,
-    );
-
-    if let Some(parent) = lml_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let encoded = encode_source_bundle(
-        &bundle,
-        sample_rate,
-        &metadata_json,
-        window_size,
-        noise_bits,
-        lpc_mode,
-    )?;
-    sink.write_all(encoded.as_bytes())?;
-    let stats = encoded.stats().clone();
-    let f = sink.into_inner().map_err(|e| {
-        let kind = e.error().kind();
-        std::io::Error::new(
-            kind,
-            "encode brainvision: BufWriter flush failed before sync_all",
-        )
-    })?;
-    f.sync_all()?;
-
+    let semantic = reader.lower_to_abir()?;
+    let signal = semantic
+        .native_i64()
+        .ok_or("BrainVision lowering did not retain native i64 samples")?;
+    let n_samples = signal.first().map(|c| c.len()).unwrap_or(0);
     let original_size = std::fs::metadata(vhdr_path).map(|m| m.len()).unwrap_or(0)
-        + bundle.signal.len() as u64 * n_samples as u64 * 2; // .eeg bytes (int16 ≈ baseline)
-    let compressed_size = stats.compressed_size as u64;
-    let cr = if compressed_size > 0 {
-        original_size as f64 / compressed_size as f64
-    } else {
-        0.0
-    };
-
-    if verify {
-        // Round-trip: decompress and compare i64 samples.
-        let (recovered, _meta) = read_lml_file(lml_path)?;
-        if recovered.len() != bundle.signal.len() {
-            return Err(format!(
-                "verify (brainvision): channel count {} != {}",
-                recovered.len(),
-                bundle.signal.len()
-            )
-            .into());
-        }
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
-            if a != b {
-                return Err(format!(
-                    "verify (brainvision): channel {i} mismatch ({} vs {} samples)",
-                    a.len(),
-                    b.len()
-                )
-                .into());
-            }
-        }
-    }
+        + signal.len() as u64 * n_samples as u64 * 2; // .eeg bytes (int16 ≈ baseline)
+    let metrics = encode_semantic_source(SemanticEncodeRequest {
+        format: "brainvision",
+        semantic: &semantic,
+        lml_path,
+        raw_size: original_size,
+        verify,
+        noise_bits,
+        window_size,
+        lpc_mode,
+    })?;
 
     // Byte-exact preservation of the BrainVision tri-file (.vhdr +
     // .vmrk + .eeg). The b64-in-metadata embed above is kept for
@@ -2361,12 +2362,12 @@ fn encode_one_brainvision(
     };
     if !same_dir {
         // Copy `.vhdr` -- exact filename of the source.
-        if let Some(vhdr_blob) = bundle.sidecar_first("vhdr_raw") {
+        if let Some(vhdr_blob) = semantic.source_capsule_bytes("vhdr_raw", None) {
             let vhdr_name = vhdr_path
                 .file_name()
                 .ok_or("brainvision encode: vhdr_path has no file_name")?;
             let dest = lml_parent.join(vhdr_name);
-            std::fs::write(&dest, &vhdr_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, vhdr_blob).map_err(|e| {
                 format!(
                     "brainvision encode: failed to write `.vhdr` preservation copy to {}: {}",
                     dest.display(),
@@ -2378,13 +2379,13 @@ fn encode_one_brainvision(
         // source .vhdr so the byte-equal .vhdr post-extract still
         // points at a real file.
         if let (Some(eeg_blob), Some(name_blob)) = (
-            bundle.sidecar_first("eeg_raw"),
-            bundle.sidecar_first("eeg_filename"),
+            semantic.source_capsule_bytes("eeg_raw", None),
+            semantic.source_capsule_bytes("eeg_filename", None),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob)
                 .map_err(|e| format!("brainvision encode: eeg_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &eeg_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, eeg_blob).map_err(|e| {
                 format!(
                     "brainvision encode: failed to write `.eeg` preservation copy to {}: {}",
                     dest.display(),
@@ -2394,13 +2395,13 @@ fn encode_one_brainvision(
         }
         // Copy `.vmrk` if it exists -- name comes from `MarkerFile=`.
         if let (Some(vmrk_blob), Some(name_blob)) = (
-            bundle.sidecar_first("vmrk_raw"),
-            bundle.sidecar_first("vmrk_filename"),
+            semantic.source_capsule_bytes("vmrk_raw", None),
+            semantic.source_capsule_bytes("vmrk_filename", None),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob)
                 .map_err(|e| format!("brainvision encode: vmrk_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &vmrk_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, vmrk_blob).map_err(|e| {
                 format!(
                     "brainvision encode: failed to write `.vmrk` preservation copy to {}: {}",
                     dest.display(),
@@ -2410,19 +2411,7 @@ fn encode_one_brainvision(
         }
     }
 
-    let _ = t0; // elapsed not in EncodeMetrics today; caller times via outer Instant
-    Ok(EncodeMetrics {
-        raw_size: original_size as usize,
-        compressed_size: compressed_size as usize,
-        cr,
-        sha256: sha256_hex,
-        verified: verify,
-        samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
-        n_channels,
-        sample_rate: sample_rate as f32,
-        n_windows: stats.n_windows as u32,
-    })
+    Ok(metrics)
 }
 
 /// Phase 4.4 — encode a custom raw binary (`.raw` + sidecar JSON).
@@ -2435,117 +2424,19 @@ fn encode_one_raw(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::source::RawReader;
-    let t0 = Instant::now();
     let mut reader = RawReader::new(raw_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
-
-    // SHA-256 of the i64 LE sample matrix.
-    let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
-
-    // v1.1: sidecar JSON now preserved as a real sibling file on
-    // disk (named via `raw_sidecar_filename` blob in v1.0); no need
-    // to embed it as a b64-zstd blob inside metadata JSON.
-
-    let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
-        if i > 0 {
-            ch_json.push(',');
-        }
-        let safe = name
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        ch_json.push('"');
-        ch_json.push_str(&safe);
-        ch_json.push('"');
-    }
-    ch_json.push(']');
-    let pmin: Vec<String> = bundle.phys_min.iter().map(|v| format!("{v}")).collect();
-    let pmax: Vec<String> = bundle.phys_max.iter().map(|v| format!("{v}")).collect();
-
-    let metadata_json = format!(
-        "{{\"source_file\":\"{}\",\"format\":\"RAW\",\"n_channels\":{},\
-         \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
-         \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
-         \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
-            .source_file
-            .replace('\\', "\\\\")
-            .replace('"', "\\\""),
-        n_channels,
-        sample_rate,
-        ch_json,
-        pmin.join(","),
-        pmax.join(","),
-        bundle.metadata.phys_dim.replace('"', "\\\""),
-        sha256_hex,
-        env!("CARGO_PKG_VERSION"),
-        noise_bits,
-    );
-
-    if let Some(parent) = lml_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let encoded = encode_source_bundle(
-        &bundle,
-        sample_rate,
-        &metadata_json,
-        window_size,
-        noise_bits,
-        lpc_mode,
-    )?;
-    sink.write_all(encoded.as_bytes())?;
-    let stats = encoded.stats().clone();
-    let f = sink.into_inner().map_err(|e| {
-        let kind = e.error().kind();
-        std::io::Error::new(kind, "encode raw: BufWriter flush failed before sync_all")
-    })?;
-    f.sync_all()?;
-
+    let semantic = reader.lower_to_abir()?;
     let original_size = std::fs::metadata(raw_path).map(|m| m.len()).unwrap_or(0);
-    let compressed_size = stats.compressed_size as u64;
-    let cr = if compressed_size > 0 {
-        original_size as f64 / compressed_size as f64
-    } else {
-        0.0
-    };
-
-    if verify {
-        let (recovered, _meta) = read_lml_file(lml_path)?;
-        if recovered.len() != bundle.signal.len() {
-            return Err(format!(
-                "verify (raw): channel count {} != {}",
-                recovered.len(),
-                bundle.signal.len()
-            )
-            .into());
-        }
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
-            if a != b {
-                return Err(format!(
-                    "verify (raw): channel {i} mismatch ({} vs {} samples)",
-                    a.len(),
-                    b.len()
-                )
-                .into());
-            }
-        }
-    }
+    let metrics = encode_semantic_source(SemanticEncodeRequest {
+        format: "raw",
+        semantic: &semantic,
+        lml_path,
+        raw_size: original_size,
+        verify,
+        noise_bits,
+        window_size,
+        lpc_mode,
+    })?;
 
     // Byte-exact preservation of the `.raw` payload + its sidecar
     // JSON + any stem-matched siblings. Same pattern as the other
@@ -2561,13 +2452,13 @@ fn encode_one_raw(
     };
     if !same_dir {
         if let (Some(payload_blob), Some(name_blob)) = (
-            bundle.sidecar_first("raw_payload_raw"),
-            bundle.sidecar_first("raw_payload_filename"),
+            semantic.source_capsule_bytes("raw_payload_raw", None),
+            semantic.source_capsule_bytes("raw_payload_filename", None),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob)
                 .map_err(|e| format!("raw encode: raw_payload_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &payload_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, payload_blob).map_err(|e| {
                 format!(
                     "raw encode: failed to write `.raw` preservation copy to {}: {}",
                     dest.display(),
@@ -2576,13 +2467,13 @@ fn encode_one_raw(
             })?;
         }
         if let (Some(sidecar_blob), Some(name_blob)) = (
-            bundle.sidecar_first("raw_sidecar_json"),
-            bundle.sidecar_first("raw_sidecar_filename"),
+            semantic.source_capsule_bytes("raw_sidecar_json", None),
+            semantic.source_capsule_bytes("raw_sidecar_filename", None),
         ) {
-            let name = std::str::from_utf8(&name_blob.bytes)
+            let name = std::str::from_utf8(name_blob)
                 .map_err(|e| format!("raw encode: raw_sidecar_filename not UTF-8: {e}"))?;
             let dest = lml_parent.join(name);
-            std::fs::write(&dest, &sidecar_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, sidecar_blob).map_err(|e| {
                 format!(
                     "raw encode: failed to write sidecar JSON preservation copy to {}: {}",
                     dest.display(),
@@ -2605,19 +2496,7 @@ fn encode_one_raw(
         }
     }
 
-    let _ = t0;
-    Ok(EncodeMetrics {
-        raw_size: original_size as usize,
-        compressed_size: compressed_size as usize,
-        cr,
-        sha256: sha256_hex,
-        verified: verify,
-        samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
-        n_channels,
-        sample_rate: sample_rate as f32,
-        n_windows: stats.n_windows as u32,
-    })
+    Ok(metrics)
 }
 
 /// Phase 4.4 — encode a NeuroScan CNT (`.cnt`) recording.
@@ -2630,103 +2509,19 @@ fn encode_one_cnt(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::source::CntReader;
-    let t0 = Instant::now();
     let mut reader = CntReader::new(cnt_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
-
-    let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
-
-    // v1.1: source `.cnt` is now preserved as a separate LMA entry
-    // (default mode) or sibling file (--no-bundle), not as a b64-zstd
-    // blob inside metadata JSON. Drops cnt-sized payloads from the
-    // .lml header; legacy v1 reader fallback handles old archives.
-
-    let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
-        if i > 0 {
-            ch_json.push(',');
-        }
-        let safe = name
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        ch_json.push('"');
-        ch_json.push_str(&safe);
-        ch_json.push('"');
-    }
-    ch_json.push(']');
-
-    let metadata_json = format!(
-        "{{\"source_file\":\"{}\",\"format\":\"CNT\",\"n_channels\":{},\
-         \"sample_rate\":{},\"channels\":{},\
-         \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
-            .source_file
-            .replace('\\', "\\\\")
-            .replace('"', "\\\""),
-        n_channels,
-        sample_rate,
-        ch_json,
-        sha256_hex,
-        env!("CARGO_PKG_VERSION"),
-        noise_bits,
-    );
-
-    if let Some(parent) = lml_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let encoded = encode_source_bundle(
-        &bundle,
-        sample_rate,
-        &metadata_json,
-        window_size,
-        noise_bits,
-        lpc_mode,
-    )?;
-    sink.write_all(encoded.as_bytes())?;
-    let stats = encoded.stats().clone();
-    let f = sink.into_inner().map_err(|e| {
-        let kind = e.error().kind();
-        std::io::Error::new(kind, "encode cnt: BufWriter flush failed before sync_all")
-    })?;
-    f.sync_all()?;
-
+    let semantic = reader.lower_to_abir()?;
     let original_size = std::fs::metadata(cnt_path).map(|m| m.len()).unwrap_or(0);
-    let compressed_size = stats.compressed_size as u64;
-    let cr = if compressed_size > 0 {
-        original_size as f64 / compressed_size as f64
-    } else {
-        0.0
-    };
-
-    if verify {
-        let (recovered, _meta) = read_lml_file(lml_path)?;
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
-            if a != b {
-                return Err(format!(
-                    "verify (cnt): channel {i} mismatch ({} vs {} samples)",
-                    a.len(),
-                    b.len()
-                )
-                .into());
-            }
-        }
-    }
+    let metrics = encode_semantic_source(SemanticEncodeRequest {
+        format: "cnt",
+        semantic: &semantic,
+        lml_path,
+        raw_size: original_size,
+        verify,
+        noise_bits,
+        window_size,
+        lpc_mode,
+    })?;
 
     // Byte-exact preservation of the source `.cnt` plus any stem-
     // matched sibling annotation files (e.g. `recording_events.csv`,
@@ -2740,12 +2535,12 @@ fn encode_one_cnt(
         _ => false,
     };
     if !same_dir {
-        if let Some(cnt_blob) = bundle.sidecar_first("cnt_raw") {
+        if let Some(cnt_blob) = semantic.source_capsule_bytes("cnt_raw", None) {
             let cnt_name = cnt_path
                 .file_name()
                 .ok_or("cnt encode: cnt_path has no file_name")?;
             let dest = lml_parent.join(cnt_name);
-            std::fs::write(&dest, &cnt_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, cnt_blob).map_err(|e| {
                 format!(
                     "cnt encode: failed to write `.cnt` preservation copy to {}: {}",
                     dest.display(),
@@ -2768,19 +2563,7 @@ fn encode_one_cnt(
         }
     }
 
-    let _ = t0;
-    Ok(EncodeMetrics {
-        raw_size: original_size as usize,
-        compressed_size: compressed_size as usize,
-        cr,
-        sha256: sha256_hex,
-        verified: verify,
-        samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
-        n_channels,
-        sample_rate: sample_rate as f32,
-        n_windows: stats.n_windows as u32,
-    })
+    Ok(metrics)
 }
 
 /// Phase 8 / Item A — encode a DICOM Waveform recording (`.dcm`).
@@ -2794,103 +2577,19 @@ fn encode_one_dicom(
     lpc_mode: lamquant_core::lpc::LpcMode,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::source::DicomWaveformReader;
-    let t0 = Instant::now();
     let mut reader = DicomWaveformReader::new(dcm_path);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
-
-    let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
-
-    // v1.1: source `.dcm` is now preserved as a separate LMA entry
-    // (default mode) or sibling file (--no-bundle), not as a b64-zstd
-    // blob inside metadata JSON. Multi-MB DICOM files no longer
-    // double their footprint in the .lml header.
-
-    let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
-        if i > 0 {
-            ch_json.push(',');
-        }
-        let safe = name
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        ch_json.push('"');
-        ch_json.push_str(&safe);
-        ch_json.push('"');
-    }
-    ch_json.push(']');
-
-    let metadata_json = format!(
-        "{{\"source_file\":\"{}\",\"format\":\"DICOM_WAVEFORM\",\"n_channels\":{},\
-         \"sample_rate\":{},\"channels\":{},\
-         \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
-            .source_file
-            .replace('\\', "\\\\")
-            .replace('"', "\\\""),
-        n_channels,
-        sample_rate,
-        ch_json,
-        sha256_hex,
-        env!("CARGO_PKG_VERSION"),
-        noise_bits,
-    );
-
-    if let Some(parent) = lml_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let encoded = encode_source_bundle(
-        &bundle,
-        sample_rate,
-        &metadata_json,
-        window_size,
-        noise_bits,
-        lpc_mode,
-    )?;
-    sink.write_all(encoded.as_bytes())?;
-    let stats = encoded.stats().clone();
-    let f = sink.into_inner().map_err(|e| {
-        let kind = e.error().kind();
-        std::io::Error::new(kind, "encode dicom: BufWriter flush failed before sync_all")
-    })?;
-    f.sync_all()?;
-
+    let semantic = reader.lower_to_abir()?;
     let original_size = std::fs::metadata(dcm_path).map(|m| m.len()).unwrap_or(0);
-    let compressed_size = stats.compressed_size as u64;
-    let cr = if compressed_size > 0 {
-        original_size as f64 / compressed_size as f64
-    } else {
-        0.0
-    };
-
-    if verify {
-        let (recovered, _meta) = read_lml_file(lml_path)?;
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
-            if a != b {
-                return Err(format!(
-                    "verify (dicom): channel {i} mismatch ({} vs {} samples)",
-                    a.len(),
-                    b.len()
-                )
-                .into());
-            }
-        }
-    }
+    let metrics = encode_semantic_source(SemanticEncodeRequest {
+        format: "dicom",
+        semantic: &semantic,
+        lml_path,
+        raw_size: original_size,
+        verify,
+        noise_bits,
+        window_size,
+        lpc_mode,
+    })?;
 
     // Byte-exact preservation of the source `.dcm` plus stem-matched
     // siblings (rare for DICOM but possible -- e.g. structured-report
@@ -2903,12 +2602,12 @@ fn encode_one_dicom(
         _ => false,
     };
     if !same_dir {
-        if let Some(dicom_blob) = bundle.sidecar_first("dicom_raw") {
+        if let Some(dicom_blob) = semantic.source_capsule_bytes("dicom_raw", None) {
             let dcm_name = dcm_path
                 .file_name()
                 .ok_or("dicom encode: dcm_path has no file_name")?;
             let dest = lml_parent.join(dcm_name);
-            std::fs::write(&dest, &dicom_blob.bytes).map_err(|e| {
+            std::fs::write(&dest, dicom_blob).map_err(|e| {
                 format!(
                     "dicom encode: failed to write `.dcm` preservation copy to {}: {}",
                     dest.display(),
@@ -2931,19 +2630,7 @@ fn encode_one_dicom(
         }
     }
 
-    let _ = t0;
-    Ok(EncodeMetrics {
-        raw_size: original_size as usize,
-        compressed_size: compressed_size as usize,
-        cr,
-        sha256: sha256_hex,
-        verified: verify,
-        samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
-        n_channels,
-        sample_rate: sample_rate as f32,
-        n_windows: stats.n_windows as u32,
-    })
+    Ok(metrics)
 }
 
 /// Phase 8 / Item B — encode an EEGLAB `.set + .fdt + .lml-meta.json`
@@ -2961,114 +2648,25 @@ fn encode_one_eeglab(
     lossy_int16: bool,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
     use lamquant_core::source::EeglabReader;
-    let t0 = Instant::now();
     let mut reader = EeglabReader::new(set_path).with_lossy_int16(lossy_int16);
-    let bundle = reader.read_bundle()?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
-
-    let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
-
-    let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
-        if i > 0 {
-            ch_json.push(',');
-        }
-        let safe = name
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        ch_json.push('"');
-        ch_json.push_str(&safe);
-        ch_json.push('"');
-    }
-    ch_json.push(']');
-
-    let eeglab_dtype = if lossy_int16 {
-        "lossy_i16_scaled"
-    } else {
-        "lossless_f32_bitcast"
-    };
-    let metadata_json = format!(
-        "{{\"source_file\":\"{}\",\"format\":\"{}\",\"n_channels\":{},\
-         \"sample_rate\":{},\"channels\":{},\"eeglab_dtype\":\"{}\",\
-         \"signal_sha256\":\"{}\",\"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        bundle
-            .metadata
-            .source_file
-            .replace('\\', "\\\\")
-            .replace('"', "\\\""),
-        bundle.metadata.format,
-        n_channels,
-        sample_rate,
-        ch_json,
-        eeglab_dtype,
-        sha256_hex,
-        env!("CARGO_PKG_VERSION"),
-        noise_bits,
-    );
-
-    if let Some(parent) = lml_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
-    let encoded = encode_source_bundle(
-        &bundle,
-        sample_rate,
-        &metadata_json,
-        window_size,
-        noise_bits,
-        lpc_mode,
-    )?;
-    sink.write_all(encoded.as_bytes())?;
-    let stats = encoded.stats().clone();
-    let f = sink.into_inner().map_err(|e| {
-        let kind = e.error().kind();
-        std::io::Error::new(
-            kind,
-            "encode eeglab: BufWriter flush failed before sync_all",
-        )
-    })?;
-    f.sync_all()?;
-
+    let semantic = reader.lower_to_abir()?;
     let original_size = std::fs::metadata(set_path).map(|m| m.len()).unwrap_or(0);
-    let compressed_size = stats.compressed_size as u64;
-    let cr = if compressed_size > 0 {
-        original_size as f64 / compressed_size as f64
-    } else {
-        0.0
-    };
-
-    if verify {
-        let (recovered, _meta) = read_lml_file(lml_path)?;
-        for (i, (a, b)) in recovered.iter().zip(bundle.signal.iter()).enumerate() {
-            if a != b {
-                return Err(format!(
-                    "verify (eeglab): channel {i} mismatch ({} vs {} samples)",
-                    a.len(),
-                    b.len()
-                )
-                .into());
-            }
-        }
-    }
+    let metrics = encode_semantic_source(SemanticEncodeRequest {
+        format: "eeglab",
+        semantic: &semantic,
+        lml_path,
+        raw_size: original_size,
+        verify,
+        noise_bits,
+        window_size,
+        lpc_mode,
+    })?;
 
     // Byte-exact preservation of the original `.set` + `.fdt`. The v1
     // reader only persisted a few JSON fields (nbchan, pnts, srate,
     // channel labels) and silently dropped every other `EEG.*` field
     // -- events, urevent, chanlocs xyz, icaweights, icasphere, reject,
-    // history, etc. The bundle now carries the raw bytes; emit them
+    // history, etc. ABIR source capsules carry raw bytes; emit them
     // alongside the `.lml` so the outer `pack_archive` pulls them
     // into the per-recording `.lma` (default) or so the `--no-bundle`
     // operator gets them as siblings of the bare `.lml`. Either way,
@@ -3089,12 +2687,12 @@ fn encode_one_eeglab(
     };
     if !same_dir {
         // Copy `.set`.
-        if let Some(set_blob) = bundle.sidecar_first("set_raw") {
+        if let Some(set_blob) = semantic.source_capsule_bytes("set_raw", None) {
             let set_name = set_path
                 .file_name()
                 .ok_or("eeglab encode: set_path has no file_name")?;
             let set_dest = lml_parent.join(set_name);
-            std::fs::write(&set_dest, &set_blob.bytes).map_err(|e| {
+            std::fs::write(&set_dest, set_blob).map_err(|e| {
                 format!(
                     "eeglab encode: failed to write `.set` preservation copy to {}: {}",
                     set_dest.display(),
@@ -3104,12 +2702,12 @@ fn encode_one_eeglab(
         }
         // Copy `.fdt`. Stem matches `.set` stem; rebuild the path so
         // we don't fight the SignalSourceReader internal locator.
-        if let Some(fdt_blob) = bundle.sidecar_first("fdt_raw") {
+        if let Some(fdt_blob) = semantic.source_capsule_bytes("fdt_raw", None) {
             let stem = set_path
                 .file_stem()
                 .ok_or("eeglab encode: set_path has no stem")?;
             let fdt_dest = lml_parent.join(format!("{}.fdt", stem.to_string_lossy()));
-            std::fs::write(&fdt_dest, &fdt_blob.bytes).map_err(|e| {
+            std::fs::write(&fdt_dest, fdt_blob).map_err(|e| {
                 format!(
                     "eeglab encode: failed to write `.fdt` preservation copy to {}: {}",
                     fdt_dest.display(),
@@ -3119,19 +2717,7 @@ fn encode_one_eeglab(
         }
     }
 
-    let _ = t0;
-    Ok(EncodeMetrics {
-        raw_size: original_size as usize,
-        compressed_size: compressed_size as usize,
-        cr,
-        sha256: sha256_hex,
-        verified: verify,
-        samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s: bundle.duration_s,
-        n_channels,
-        sample_rate: sample_rate as f32,
-        n_windows: stats.n_windows as u32,
-    })
+    Ok(metrics)
 }
 
 fn encode_one_inner(
@@ -3153,9 +2739,10 @@ fn encode_one_inner(
         lpc_mode = ?lpc_mode,
     )
     .entered();
-    // Phase 4.1 + 4.4 — dispatch on extension. BrainVision (.vhdr)
-    // and Raw (.raw + sidecar) go through the bundle path; EDF/BDF
-    // stays on the legacy raw-header + non-EEG-pairs path so
+    // Phase 4.1 + 4.4 — dispatch on extension. BrainVision (.vhdr),
+    // Raw (.raw + sidecar), CNT, DICOM, and EEGLAB (.set) use the
+    // native `SignalSourceReader::lower_to_abir` path; EDF/BDF stays on
+    // the legacy raw-header + non-EEG-pairs path so
     // byte-exact `--to-edf` reconstruction is preserved.
     if let Some(ext) = edf_path.extension() {
         if ext.eq_ignore_ascii_case("vhdr") {
@@ -3581,24 +3168,10 @@ fn resolve_entry_for<'a>(
     manifest.and_then(|m| m.resolve_entry(path))
 }
 
-/// Minimal JSON string-body escaper (backslash, quote, and the C0 controls the
-/// spec requires escaped). The descriptor encoder builds its metadata JSON from
-/// USER-supplied sidecar strings (channel names, unit, path), so every one is run
-/// through this — a stray `\` in a unit like `mV\s` can't emit invalid JSON.
-fn escape_json_str(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
-
 /// ADR 0074 I3 — encode a file whose byte layout is declared by a manifest
 /// [`FormatDescriptor`](lamquant_core::source::FormatDescriptor) (a data-driven
 /// reader for a custom fixed-layout binary), bypassing the file-extension
-/// dispatch. Mirrors `encode_one_raw`'s bundle→lml path but sources the bundle
-/// from `read_bundle_from_descriptor` and types it at write time via
-/// `write_into_with_modality` (so no post-hoc byte patch).
+/// dispatch. Descriptor semantics lower directly into typed ABIR before encode.
 #[allow(clippy::too_many_arguments)]
 fn encode_one_descriptor(
     path: &Path,
@@ -3610,92 +3183,45 @@ fn encode_one_descriptor(
     lpc_mode: lamquant_core::lpc::LpcMode,
     modality: Option<&str>,
 ) -> Result<EncodeMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    use lamquant_core::container;
-    use lamquant_core::source::read_bundle_from_descriptor;
     let data = std::fs::read(path)?;
     // The descriptor interpreter always parses the sidecar as JSON (to resolve any
     // `FromSidecarField` channel-count / sample-rate). Use a sibling `<path>.json`
     // if present, else a valid empty object — a Fixed-only descriptor needs no
     // sidecar but still requires parseable JSON (empty bytes are an EOF error).
     let sidecar = std::fs::read(path.with_extension("json")).unwrap_or_else(|_| b"{}".to_vec());
-    let mut bundle = read_bundle_from_descriptor(descriptor, &data, &sidecar)?;
-    let n_channels = bundle.signal.len() as u32;
-    let n_samples = bundle.signal.first().map(|c| c.len()).unwrap_or(0);
-    let sample_rate = bundle.sample_rate;
+    let semantic = lamquant_core::source::lower_descriptor_to_abir_with_modality(
+        descriptor,
+        &data,
+        &sidecar,
+        semantic_abir::ConceptId::new(modality.unwrap_or("abir:modality/unknown"))
+            .map_err(|error| format!("invalid ingest modality concept: {error}"))?,
+    )?;
+    let signal = semantic
+        .native_i64()
+        .ok_or("descriptor lowering did not retain native i64 samples")?;
+    let n_channels = signal.len() as u32;
+    let n_samples = signal.first().map_or(0, Vec::len);
 
     let mut hasher = Sha256::new();
-    for ch in &bundle.signal {
+    for ch in signal {
         for &sample in ch {
             hasher.update(sample.to_le_bytes());
         }
     }
     let sha256_hex = format!("{:x}", hasher.finalize());
-
-    let mut ch_json = String::from("[");
-    for (i, name) in bundle.channels.iter().enumerate() {
-        if i > 0 {
-            ch_json.push(',');
-        }
-        ch_json.push('"');
-        ch_json.push_str(&escape_json_str(name));
-        ch_json.push('"');
-    }
-    ch_json.push(']');
-    let pmin: Vec<String> = bundle.phys_min.iter().map(|v| format!("{v}")).collect();
-    let pmax: Vec<String> = bundle.phys_max.iter().map(|v| format!("{v}")).collect();
-
-    let metadata_json = format!(
-        "{{\"source_file\":\"{}\",\"format\":\"DESCRIPTOR\",\"n_channels\":{},\
-         \"sample_rate\":{},\"channels\":{},\"phys_min\":[{}],\"phys_max\":[{}],\
-         \"phys_dim\":\"{}\",\"signal_sha256\":\"{}\",\
-         \"encoder\":\"lml/{}\",\"noise_bits\":{}}}",
-        escape_json_str(&bundle.metadata.source_file),
-        n_channels,
-        sample_rate,
-        ch_json,
-        pmin.join(","),
-        pmax.join(","),
-        escape_json_str(&bundle.metadata.phys_dim),
-        sha256_hex,
-        env!("CARGO_PKG_VERSION"),
-        noise_bits,
-    );
-    bundle.metadata.recording_info = metadata_json;
-    let expected_signal = verify.then(|| bundle.signal.clone());
-    let duration_s = bundle.duration_s;
-    let _ = (window_size, lpc_mode);
+    let expected_signal = verify.then(|| signal.to_vec());
 
     if let Some(parent) = lml_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    if noise_bits != 0 {
-        return Err(
-            "descriptor ingest into the exact BCS2 LML profile requires --noise-bits 0".into(),
-        );
-    }
-    let semantic = lamquant_core::source::from_signal_bundle_with_semantics(
-        bundle,
-        semantic_abir::ConceptId::new(modality.unwrap_or("abir:modality/unknown"))
-            .map_err(|error| format!("invalid ingest modality concept: {error}"))?,
-        Vec::new(),
-        Vec::new(),
-        semantic_abir::ValidationLimits::default(),
-    )?;
-    let bytes = container::encode(semantic.opened.dataset(), semantic.opened.access())?;
+    let encoded = encode_source_read(&semantic, window_size, noise_bits, lpc_mode)?;
+    let stats = encoded.stats().clone();
+    let bytes = encoded.as_bytes();
     let mut sink = std::io::BufWriter::new(std::fs::File::create(lml_path)?);
     use std::io::Write as _;
-    sink.write_all(&bytes)?;
-    let stats = container::ContainerStats {
-        n_windows: 1,
-        n_channels: n_channels as usize,
-        total_samples: n_samples,
-        compressed_size: bytes.len(),
-        raw_size: n_channels as usize * n_samples * 8,
-        cr: (n_channels as usize * n_samples * 8) as f64 / bytes.len().max(1) as f64,
-        duration_s: n_samples as f64 / sample_rate,
-    };
+    sink.write_all(bytes)?;
     let f = sink.into_inner().map_err(|e| {
         let kind = e.error().kind();
         std::io::Error::new(
@@ -3716,10 +3242,15 @@ fn encode_one_descriptor(
     if verify {
         let (recovered, _meta) = read_lml_file(lml_path)?;
         if expected_signal.as_ref() != Some(&recovered) {
-            return Err("verify (descriptor): decoded signal != source bundle".into());
+            return Err("verify (descriptor): decoded signal != source ABIR payload".into());
         }
     }
 
+    let sample_rate = if stats.duration_s > 0.0 {
+        n_samples as f64 / stats.duration_s
+    } else {
+        0.0
+    };
     Ok(EncodeMetrics {
         raw_size: original_size as usize,
         compressed_size: compressed_size as usize,
@@ -3727,7 +3258,7 @@ fn encode_one_descriptor(
         sha256: sha256_hex,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
-        duration_s,
+        duration_s: stats.duration_s,
         n_channels,
         sample_rate: sample_rate as f32,
         n_windows: stats.n_windows as u32,
@@ -9727,7 +9258,7 @@ fn cmd_self_test() -> R {
     let dec_ms = t1.elapsed().as_millis();
 
     // The codec stamps provenance (codec_mode, lossless_mode, lpc_mode, ...) onto the
-    // caller's metadata (see cli_metadata_snapshot), so verify the caller's field
+    // caller's metadata (see cli_semantic_snapshot), so verify the caller's field
     // SURVIVED the round-trip rather than asserting exact-string equality (which the
     // stamp intentionally breaks).
     let parsed: serde_json::Value = serde_json::from_str(&meta)

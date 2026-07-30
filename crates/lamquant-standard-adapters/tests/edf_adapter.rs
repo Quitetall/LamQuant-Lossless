@@ -1,6 +1,6 @@
 use abir_adapter::{Adapter, ForeignEntry, ForeignObject, PayloadResolver, ProfileId};
 use lamquant_core::source::{
-    from_signal_bundle_with_overlays, SemanticSourceCapsule, SignalBundle, SourceMetadata,
+    from_owned_uniform_signal_with_overlays, SemanticSourceCapsule, SourceMetadata,
 };
 use lamquant_standard_adapters::{payload_content_id, EdfAdapter};
 use semantic_abir::{ContentId, ValidationLimits};
@@ -306,22 +306,13 @@ fn stale_source_capsule_cannot_authorize_semantic_equivalence() {
         .expect("semantic EDF import");
     let capsule = &imported.dataset.source_capsules()[0];
 
-    let changed = SignalBundle {
-        signal: vec![vec![99, 100, 101, 102]],
-        sample_rate: 250.0,
-        channels: vec!["EEG".to_owned()],
-        phys_min: vec![-1.0],
-        phys_max: vec![1.0],
-        duration_s: 4.0 / 250.0,
-        metadata: SourceMetadata {
-            source_file: "changed.edf".to_owned(),
-            format: "EDF".to_owned(),
-            patient_id: String::new(),
-            recording_info: String::new(),
-            startdate: String::new(),
-            phys_dim: "uV".to_owned(),
-        },
-        sidecar: vec![],
+    let changed_metadata = SourceMetadata {
+        source_file: "changed.edf".to_owned(),
+        format: "EDF".to_owned(),
+        patient_id: String::new(),
+        recording_info: String::new(),
+        startdate: String::new(),
+        phys_dim: "uV".to_owned(),
     };
     let stale = SemanticSourceCapsule {
         namespace: capsule.source().namespace().to_owned(),
@@ -329,9 +320,20 @@ fn stale_source_capsule_cannot_authorize_semantic_equivalence() {
         bytes,
         media_type: capsule.media_type().map(str::to_owned),
     };
-    let remapped =
-        from_signal_bundle_with_overlays(changed, vec![stale], vec![], ValidationLimits::default())
-            .expect("changed semantic dataset with retained stale capsule");
+    let remapped = from_owned_uniform_signal_with_overlays(
+        vec![vec![99, 100, 101, 102]],
+        250.0,
+        vec!["EEG".to_owned()],
+        vec![-1.0],
+        vec![1.0],
+        4.0 / 250.0,
+        changed_metadata,
+        vec![],
+        vec![stale],
+        vec![],
+        ValidationLimits::default(),
+    )
+    .expect("changed semantic dataset with retained stale capsule");
     let plan = adapter.plan_export(remapped.opened.dataset()).unwrap();
     assert!(plan.unsupported);
     assert!(!plan.accepts_without_loss());

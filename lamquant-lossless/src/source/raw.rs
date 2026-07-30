@@ -30,9 +30,9 @@
 use crate::error::{LmlError, LmlResult};
 use std::path::{Path, PathBuf};
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::metadata::{SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::from_signal_bundle;
+use super::semantic::from_owned_uniform_signal;
 
 const MAX_SIDECAR_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -222,7 +222,7 @@ impl RawReader {
         self
     }
 
-    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    fn lower_to_abir_inner(&mut self) -> LmlResult<super::semantic::SemanticRead> {
         let sidecar_path = self
             .sidecar_override
             .clone()
@@ -325,22 +325,22 @@ impl RawReader {
             0.0
         };
 
-        let bundle = SignalBundle {
+        from_owned_uniform_signal(
             signal,
-            sample_rate: sc.sample_rate,
-            channels: sc.channels,
-            phys_min: sc.phys_min,
-            phys_max: sc.phys_max,
+            sc.sample_rate,
+            sc.channels,
+            sc.phys_min,
+            sc.phys_max,
             duration_s,
-            metadata: SourceMetadata {
-                source_file: crate::source::bundle::source_basename(&self.raw_path),
+            SourceMetadata {
+                source_file: crate::source::metadata::source_basename(&self.raw_path),
                 format: "RAW".to_string(),
                 patient_id: String::new(),
                 recording_info: String::new(),
                 startdate: String::new(),
                 phys_dim: sc.phys_dim,
             },
-            sidecar: vec![
+            vec![
                 SidecarBlob {
                     key: "raw_sidecar_json".to_string(),
                     bytes: sidecar_bytes,
@@ -383,18 +383,14 @@ impl RawReader {
                     aux: None,
                 },
             ],
-        };
-        bundle.validate()?;
-        Ok(bundle)
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 }
 
 impl SignalSourceReader for RawReader {
     fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
-        )
+        self.lower_to_abir_inner()
     }
 }
 
@@ -441,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn read_bundle_int16_multiplexed_round_trip() {
+    fn lower_int16_multiplexed_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let n_ch = 3usize;
         let n_samples = 200usize;
@@ -457,24 +453,26 @@ mod tests {
         std::fs::write(&raw, &bytes).unwrap();
         std::fs::write(&json, good_sidecar(n_ch, "int16", "multiplexed")).unwrap();
         let mut reader = RawReader::new(&raw);
-        let b = reader.read_bundle().unwrap();
-        assert_eq!(b.signal.len(), n_ch);
-        assert_eq!(b.signal[0].len(), n_samples);
+        let read = reader.lower_to_abir().unwrap();
+        let signal = read.native_i64().unwrap();
+        assert_eq!(signal.len(), n_ch);
+        assert_eq!(signal[0].len(), n_samples);
+        assert_eq!(read.mapping.source_format, "RAW");
+        assert_eq!(read.mapping.source_capsule_count, 4);
         for s in 0..n_samples {
             for ch in 0..n_ch {
-                assert_eq!(b.signal[ch][s], (s as i64) * (ch as i64 + 1));
+                assert_eq!(signal[ch][s], (s as i64) * (ch as i64 + 1));
             }
         }
-        assert_eq!(b.metadata.format, "RAW");
     }
 
     #[test]
-    fn read_bundle_missing_sidecar_errors() {
+    fn lower_missing_sidecar_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let raw = tmp.path().join("nope.raw");
         std::fs::write(&raw, b"\0\0\0\0").unwrap();
         let mut reader = RawReader::new(&raw);
-        match reader.read_bundle() {
+        match reader.lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("no sidecar JSON")),
             other => panic!("expected InvalidHeader, got {other:?}"),
         }

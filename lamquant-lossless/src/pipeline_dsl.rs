@@ -16,10 +16,9 @@
 //!     space-separated `key=value` params;
 //!   - a param `value` is either a **bareword** (runs to the next
 //!     whitespace, no escaping) or a Rust-`{:?}`-quoted string (`"..."`),
-//!     unescaped with the exact same grammar as [`crate::ir::parse_quoted`]
-//!     (`\" \\ \n \t \r \0 \u{HEX}`) — see [`parse_quoted_value`], which
-//!     mirrors that function's algorithm so a value written the same way a
-//!     `to_ir_text` string field is written parses identically.
+//!     unescaped with the Rust-debug string grammar
+//!     (`\" \\ \n \t \r \0 \u{HEX}`) implemented by
+//!     [`parse_quoted_value`].
 //!
 //! [`parse_pipeline`] turns DSL text into a [`PipelineSpec`] — pure syntax,
 //! no registry lookup, so it never fails on an unknown pass name.

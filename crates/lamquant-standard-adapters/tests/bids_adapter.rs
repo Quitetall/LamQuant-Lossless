@@ -1,6 +1,6 @@
 use abir_adapter::{Adapter, ForeignEntry, ForeignObject, PayloadResolver, ProfileId};
 use lamquant_core::source::{
-    from_signal_bundle_with_semantics, SemanticSourceCapsule, SignalBundle, SourceMetadata,
+    from_owned_uniform_signal_with_semantics, SemanticSourceCapsule, SourceMetadata,
 };
 use lamquant_standard_adapters::{BidsAdapter, BidsEventsAdapter};
 use semantic_abir::{ContentId, ValidationLimits};
@@ -80,26 +80,28 @@ fn bids_events_source() -> ForeignObject {
 }
 
 fn dataset_with_bids_capsule_paths(paths: &[&str]) -> semantic_abir::AbirDataset {
-    let bundle = SignalBundle {
-        signal: vec![vec![1, 2, 3, 4]],
-        sample_rate: 250.0,
-        channels: vec!["EEG".to_owned()],
-        phys_min: vec![-1.0],
-        phys_max: vec![1.0],
-        duration_s: 4.0 / 250.0,
-        metadata: SourceMetadata {
-            source_file: "recording.edf".to_owned(),
-            format: "EDF".to_owned(),
-            patient_id: String::new(),
-            recording_info: String::new(),
-            startdate: String::new(),
-            phys_dim: "uV".to_owned(),
-        },
-        sidecar: vec![],
+    let signal = vec![vec![1, 2, 3, 4]];
+    let channels = vec!["EEG".to_owned()];
+    let phys_min = vec![-1.0];
+    let phys_max = vec![1.0];
+    let metadata = SourceMetadata {
+        source_file: "recording.edf".to_owned(),
+        format: "EDF".to_owned(),
+        patient_id: String::new(),
+        recording_info: String::new(),
+        startdate: String::new(),
+        phys_dim: "uV".to_owned(),
     };
     let modality = semantic_abir::ConceptId::new("abir:modality/eeg").unwrap();
-    let unbound = from_signal_bundle_with_semantics(
-        bundle.clone(),
+    let unbound = from_owned_uniform_signal_with_semantics(
+        signal.clone(),
+        250.0,
+        channels.clone(),
+        phys_min.clone(),
+        phys_max.clone(),
+        4.0 / 250.0,
+        metadata.clone(),
+        vec![],
         modality.clone(),
         vec![],
         vec![],
@@ -118,8 +120,15 @@ fn dataset_with_bids_capsule_paths(paths: &[&str]) -> semantic_abir::AbirDataset
             media_type: None,
         })
         .collect();
-    from_signal_bundle_with_semantics(
-        bundle,
+    from_owned_uniform_signal_with_semantics(
+        signal,
+        250.0,
+        channels,
+        phys_min,
+        phys_max,
+        4.0 / 250.0,
+        metadata,
+        vec![],
         modality,
         capsules,
         vec![],

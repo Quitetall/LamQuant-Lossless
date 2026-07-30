@@ -39,9 +39,9 @@
 
 #![cfg(feature = "dicom")]
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::metadata::{SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::from_signal_bundle;
+use super::semantic::from_owned_uniform_signal;
 use crate::error::{LmlError, LmlResult};
 use std::path::PathBuf;
 
@@ -69,7 +69,7 @@ impl DicomWaveformReader {
         Self { path: path.into() }
     }
 
-    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    fn lower_to_abir_inner(&mut self) -> LmlResult<super::semantic::SemanticRead> {
         let obj = open_file(&self.path).map_err(|e| {
             LmlError::InvalidHeader(format!("dicom: open {}: {e}", self.path.display()))
         })?;
@@ -212,38 +212,34 @@ impl DicomWaveformReader {
         // though we ignored sensitivity decoding on the read path.
         let raw_bytes = std::fs::read(&self.path).map_err(LmlError::Io)?;
 
-        let bundle = SignalBundle {
+        from_owned_uniform_signal(
             signal,
-            sample_rate: base_rate,
+            base_rate,
             channels,
             phys_min,
             phys_max,
             duration_s,
-            metadata: SourceMetadata {
-                source_file: crate::source::bundle::source_basename(&self.path),
+            SourceMetadata {
+                source_file: crate::source::metadata::source_basename(&self.path),
                 format: "DICOM_WAVEFORM".to_string(),
                 patient_id: String::new(),
                 recording_info: String::new(),
                 startdate: String::new(),
                 phys_dim: "raw_int16".to_string(),
             },
-            sidecar: vec![SidecarBlob {
+            vec![SidecarBlob {
                 key: "dicom_raw".to_string(),
                 bytes: raw_bytes,
                 aux: None,
             }],
-        };
-        bundle.validate()?;
-        Ok(bundle)
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 }
 
 impl SignalSourceReader for DicomWaveformReader {
     fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
-        )
+        self.lower_to_abir_inner()
     }
 }
 
@@ -386,7 +382,7 @@ mod tests {
 
     // ─── Task #33 (ADR 0069 L9 hardening): negative-path refusal ───────
     //
-    // `parse_group_meta` (called by BOTH `read_bundle` and `lower_to_legacy_recording`)
+    // `parse_group_meta` is shared by ABIR and supervised legacy lowering.
     // refuses any group whose `WaveformBitsAllocated != 16` or
     // `WaveformSampleInterpretation != "SS"` BEFORE a single sample byte
     // is decoded — that check is what keeps `lower_to_legacy_recording`'s unconditional

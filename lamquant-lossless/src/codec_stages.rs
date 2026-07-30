@@ -11,20 +11,20 @@
 //! Topology:
 //!
 //! ```text
-//! SignalBundle ── CompressStage ──► EncodedContainer
+//! SemanticRead ── CompressStage ──► EncodedContainer
 //! EncodedContainer ── DecompressStage ──► DecodedSignal
 //! ```
 //!
 //! `EncodedContainer ≠ Vec<u8>` even though they share representation —
 //! the strong type forces callers to be explicit about which kind of
-//! bytes they hold. Same for `DecodedSignal ≠ Vec<Vec<i64>>` and the
-//! richer `SignalBundle`.
+//! bytes they hold. Same for `DecodedSignal ≠ Vec<Vec<i64>>` and validated
+//! semantic ABIR.
 
 use crate::container;
 use crate::error::{LmlError, LmlResult};
 use crate::lpc::LpcMode;
 use crate::pipeline::Stage;
-use crate::source::{from_uniform_signal_view, SignalBundle};
+use crate::source::SemanticRead;
 
 /// Encoded LML container bytes. Distinct from raw `Vec<u8>` at the
 /// type level so a pipeline can't confuse "encoded container" with
@@ -56,11 +56,8 @@ impl From<EncodedContainer> for Vec<u8> {
     }
 }
 
-/// Decoded signal + the raw metadata JSON the container carried.
-/// Distinct from `SignalBundle` because container-decode never has
-/// the source-format sidecar (EDF raw_header etc.) — reconstructing
-/// that lives in format-specific stages (e.g. an `EdfReconstruct`
-/// stage downstream of `DecompressStage`).
+/// Decoded signal plus raw metadata JSON for the quarantined legacy
+/// `Stage`/`Pass` pipeline boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedSignal {
     pub signal: Vec<Vec<i64>>,
@@ -78,36 +75,25 @@ impl DecodedSignal {
 
 // ─── Compress ────────────────────────────────────────────────────────
 
-/// Config-bearing compress stage. Config lives in the struct;
-/// `process` takes one `SignalBundle`, returns one `EncodedContainer`.
+/// Config-bearing compress stage over one validated semantic source result.
 ///
-/// Bible R6: per-call argument carries data only; config (window
-/// size, noise bits, LPC mode, metadata) travels with the stage.
+/// Sample rate and source metadata come from ABIR. Packet size and kernel mode
+/// remain physical execution controls.
 #[derive(Debug, Clone)]
 pub struct CompressStage {
-    pub sample_rate: f64,
     pub window_size: usize,
     pub noise_bits: u8,
     pub mode: LpcMode,
-    pub metadata_json: String,
 }
 
 impl CompressStage {
-    /// Convenience constructor with sensible defaults — adaptive LPC,
-    /// lossless (noise_bits=0), 2500-sample windows.
-    pub fn new(sample_rate: f64) -> Self {
+    /// Adaptive LPC, exact coding, 2500-sample packets.
+    pub fn new() -> Self {
         Self {
-            sample_rate,
             window_size: 2500,
             noise_bits: 0,
             mode: LpcMode::default(),
-            metadata_json: "{}".into(),
         }
-    }
-
-    pub fn with_metadata(mut self, metadata_json: impl Into<String>) -> Self {
-        self.metadata_json = metadata_json.into();
-        self
     }
 
     pub fn with_window_size(mut self, window_size: usize) -> Self {
@@ -126,38 +112,25 @@ impl CompressStage {
     }
 }
 
+impl Default for CompressStage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Stage for CompressStage {
-    type Input = SignalBundle;
+    type Input = SemanticRead;
     type Output = EncodedContainer;
 
-    fn process(&mut self, bundle: SignalBundle) -> LmlResult<EncodedContainer> {
-        // Validate at the trust boundary — Bible R23.
-        bundle.validate()?;
+    fn process(&mut self, read: SemanticRead) -> LmlResult<EncodedContainer> {
         if self.noise_bits != 0 {
             return Err(LmlError::InvalidHeader(
                 "the BCS2 LML profile is exact; use a registered lossy profile for noise_bits > 0"
                     .into(),
             ));
         }
-        let total_samples = bundle.signal.first().map(Vec::len).ok_or_else(|| {
-            LmlError::InvalidHeader("SignalBundle must contain at least one channel".into())
-        })?;
-        let mut metadata = bundle.metadata.clone();
-        metadata.recording_info = self.metadata_json.clone();
-        let semantic = from_uniform_signal_view(
-            &bundle.signal,
-            self.sample_rate,
-            bundle.channels.clone(),
-            bundle.phys_min.clone(),
-            bundle.phys_max.clone(),
-            total_samples as f64 / self.sample_rate,
-            metadata,
-            semantic_abir::ValidationLimits::default(),
-        )?;
-        let views = bundle.signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let encoded = container::encode_views_with_options(
-            semantic.opened.dataset(),
-            &views,
+        let encoded = container::encode_semantic_read_with_options(
+            &read,
             container::LmlEncodeOptions::new(self.window_size).with_lpc_mode(self.mode),
         )?;
         Ok(EncodedContainer(encoded.into_bytes()))
@@ -192,9 +165,9 @@ impl Stage for DecompressStage {
 mod tests {
     use super::*;
     use crate::pipeline::StageExt;
-    use crate::source::SourceMetadata;
+    use crate::source::{from_owned_uniform_signal, SourceMetadata};
 
-    fn synth_bundle(n_ch: usize, n_samples: usize) -> SignalBundle {
+    fn synth_read(n_ch: usize, n_samples: usize) -> LmlResult<SemanticRead> {
         let mut state: u64 = 0x00C0_FFEE_BABE_DEAD;
         let mut signal: Vec<Vec<i64>> = (0..n_ch).map(|_| Vec::with_capacity(n_samples)).collect();
         for ch in &mut signal {
@@ -205,14 +178,14 @@ mod tests {
                 ch.push(((state >> 33) as i32) as i64 % 8000);
             }
         }
-        SignalBundle {
+        from_owned_uniform_signal(
             signal,
-            sample_rate: 250.0,
-            channels: (0..n_ch).map(|i| format!("ch{i}")).collect(),
-            phys_min: vec![-200.0; n_ch],
-            phys_max: vec![200.0; n_ch],
-            duration_s: n_samples as f64 / 250.0,
-            metadata: SourceMetadata {
+            250.0,
+            (0..n_ch).map(|i| format!("ch{i}")).collect(),
+            vec![-200.0; n_ch],
+            vec![200.0; n_ch],
+            n_samples as f64 / 250.0,
+            SourceMetadata {
                 source_file: "synth.edf".into(),
                 format: "EDF".into(),
                 patient_id: "anon".into(),
@@ -220,25 +193,26 @@ mod tests {
                 startdate: "2026-05-17".into(),
                 phys_dim: "uV".into(),
             },
-            sidecar: vec![],
-        }
+            vec![],
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 
     #[test]
     fn compress_yields_current_abir_bcs2_container() {
         // ADR 0139/0143: the current archive is an authenticated ABIR/BCS2
         // codec bundle. The deterministic LML1 packet is sealed inside it.
-        let bundle = synth_bundle(2, 256);
-        let mut stage = CompressStage::new(250.0);
-        let encoded = stage.process(bundle).unwrap();
+        let read = synth_read(2, 256).unwrap();
+        let mut stage = CompressStage::new();
+        let encoded = stage.process(read).unwrap();
         assert_eq!(&encoded.as_bytes()[0..4], b"ABIR");
     }
 
     #[test]
     fn decompress_yields_decoded_signal_byte_exact() {
-        let bundle = synth_bundle(3, 512);
-        let original = bundle.signal.clone();
-        let encoded = CompressStage::new(250.0).process(bundle).unwrap();
+        let read = synth_read(3, 512).unwrap();
+        let original = read.native_i64().unwrap().to_vec();
+        let encoded = CompressStage::new().process(read).unwrap();
         let mut decompress = DecompressStage;
         let decoded = decompress.process(encoded).unwrap();
         assert_eq!(decoded.signal, original);
@@ -247,45 +221,39 @@ mod tests {
     #[test]
     fn compress_then_decompress_chain_round_trips() {
         // The whole point: compose stages, type-checked by the compiler.
-        let bundle = synth_bundle(4, 384);
-        let original = bundle.signal.clone();
-        let mut chain = CompressStage::new(250.0)
-            .with_metadata("{\"src\":\"unit-test\"}")
-            .then(DecompressStage);
-        let decoded = chain.process(bundle).unwrap();
+        let read = synth_read(4, 384).unwrap();
+        let original = read.native_i64().unwrap().to_vec();
+        let mut chain = CompressStage::new().then(DecompressStage);
+        let decoded = chain.process(read).unwrap();
         assert_eq!(decoded.signal, original);
-        assert_eq!(decoded.metadata_json, "{\"src\":\"unit-test\"}");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&decoded.metadata_json).expect("ABIR metadata projection");
+        assert_eq!(metadata["format"], "EDF");
+        assert_eq!(metadata["source_file"], "synth.edf");
+        assert_eq!(metadata["channels"].as_array().map(Vec::len), Some(4));
     }
 
     #[test]
     fn compress_refuses_unregistered_lossy_profile() {
-        let bundle = synth_bundle(1, 128);
-        let mut stage = CompressStage::new(250.0).with_noise_bits(4);
-        let error = stage
-            .process(bundle)
-            .expect_err("unregistered lossy profile");
+        let read = synth_read(1, 128).unwrap();
+        let mut stage = CompressStage::new().with_noise_bits(4);
+        let error = stage.process(read).expect_err("unregistered lossy profile");
         assert!(error.to_string().contains("registered lossy profile"));
     }
 
     #[test]
     fn compress_rejects_empty_signal_without_panicking() {
-        let bundle = synth_bundle(0, 0);
-        let error = CompressStage::new(250.0)
-            .process(bundle)
-            .expect_err("empty signal must fail closed");
+        let error = synth_read(0, 0).expect_err("empty signal must fail closed");
         assert!(error.to_string().contains("at least one channel"));
     }
 
     #[test]
     fn config_with_builder_pattern() {
-        let stage = CompressStage::new(500.0)
+        let stage = CompressStage::new()
             .with_window_size(1024)
-            .with_noise_bits(2)
-            .with_metadata("{\"k\":1}");
-        assert_eq!(stage.sample_rate, 500.0);
+            .with_noise_bits(2);
         assert_eq!(stage.window_size, 1024);
         assert_eq!(stage.noise_bits, 2);
-        assert_eq!(stage.metadata_json, "{\"k\":1}");
     }
 
     #[test]

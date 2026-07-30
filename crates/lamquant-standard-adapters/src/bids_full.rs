@@ -29,7 +29,7 @@ use abir_adapter::{
     MappingReport, PayloadObject, PayloadResolver, ProfileId, ProfileStatus, SemanticCoverage,
     ValidationArtifact,
 };
-use lamquant_core::source::{EdfReader, SignalBundle};
+use lamquant_core::source::{EdfReader, SemanticRead, SignalSourceReader};
 use semantic_abir::{
     interchange_content_id, payload_content_id as abir_payload_id, AbirDataset, Atom, AtomTag,
     ByteOrder, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock, ClockTag, ConceptId,
@@ -496,7 +496,7 @@ fn column<'a>(header: &[String], row: &'a [String], name: &str) -> Option<&'a st
         .map(String::as_str)
 }
 
-fn read_edf_bundle(bytes: &[u8]) -> Result<SignalBundle, AdapterError> {
+fn read_edf_semantic(bytes: &[u8]) -> Result<SemanticRead, AdapterError> {
     let temporary = tempfile::tempdir().map_err(invalid)?;
     let extension = if bytes.first() == Some(&0xff) {
         "bdf"
@@ -505,7 +505,70 @@ fn read_edf_bundle(bytes: &[u8]) -> Result<SignalBundle, AdapterError> {
     };
     let path = temporary.path().join(format!("recording.{extension}"));
     fs::write(&path, bytes).map_err(invalid)?;
-    EdfReader::new(&path).read_bundle().map_err(invalid)
+    EdfReader::new(&path).lower_to_abir().map_err(invalid)
+}
+
+fn semantic_uniform_rate(read: &SemanticRead) -> Result<f64, AdapterError> {
+    let atom_id = read
+        .mapping
+        .channels
+        .first()
+        .ok_or_else(|| AdapterError::InvalidSource("EDF maps no signal channels".to_owned()))?
+        .atom_id;
+    let block = read
+        .opened
+        .dataset()
+        .atoms()
+        .iter()
+        .find(|atom| atom.id() == atom_id)
+        .and_then(|atom| match atom {
+            Atom::SignalBlock(block) => Some(block),
+            _ => None,
+        })
+        .ok_or_else(|| AdapterError::InvalidSource("EDF signal atom is missing".to_owned()))?;
+    let segment = match block.time_axis() {
+        TimeAxis::Regular(segment) => *segment,
+        _ => {
+            return Err(AdapterError::UnsupportedMeaning(
+                "BIDS EDF import requires one regular sampling rate".to_owned(),
+            ));
+        }
+    };
+    let (numerator, denominator) = segment.rate().parts();
+    Ok(numerator as f64 / denominator as f64)
+}
+
+fn semantic_channel_labels(read: &SemanticRead) -> Result<Vec<String>, AdapterError> {
+    let stream = read
+        .opened
+        .dataset()
+        .streams()
+        .first()
+        .ok_or_else(|| AdapterError::InvalidSource("EDF maps no semantic stream".to_owned()))?;
+    let basis_id = stream.channel_basis_id().ok_or_else(|| {
+        AdapterError::InvalidSource("EDF semantic stream has no channel basis".to_owned())
+    })?;
+    let basis = read
+        .opened
+        .dataset()
+        .channel_bases()
+        .iter()
+        .find(|basis| basis.id() == basis_id)
+        .ok_or_else(|| AdapterError::InvalidSource("EDF channel basis is missing".to_owned()))?;
+    Ok(basis
+        .channels()
+        .iter()
+        .map(|channel| {
+            channel
+                .source_keys()
+                .iter()
+                .find(|key| key.namespace() == "source.channel-label")
+                .map_or_else(
+                    || channel.concept().as_str().to_owned(),
+                    |key| key.value().to_owned(),
+                )
+        })
+        .collect())
 }
 
 fn read_gzip_bounded(bytes: &[u8], limit: u64) -> Result<Vec<u8>, AdapterError> {
@@ -716,9 +779,15 @@ fn parse_bids(
                     "recording {path} sits in no BIDS datatype directory"
                 ))
             })?;
-            let bundle = read_edf_bundle(&entry.bytes)?;
-            let decoded_bytes = bundle
-                .signal
+            let mut semantic = read_edf_semantic(&entry.bytes)?;
+            let rate = semantic_uniform_rate(&semantic)?;
+            let channels = semantic_channel_labels(&semantic)?;
+            let signal = semantic.take_native_i64().ok_or_else(|| {
+                AdapterError::InvalidSource(
+                    "EDF semantic lowering retained no native integer samples".to_owned(),
+                )
+            })?;
+            let decoded_bytes = signal
                 .iter()
                 .try_fold(0_u64, |total, channel| {
                     total.checked_add(
@@ -743,10 +812,10 @@ fn parse_bids(
                 datatype,
                 subject: subject_of(path),
                 session: session_of(path),
-                rate: format!("{}", bundle.sample_rate),
+                rate: format!("{rate}"),
                 start: "0".to_owned(),
-                channels: bundle.channels.clone(),
-                signal: RecordedSignal::Integer(bundle.signal),
+                channels,
+                signal: RecordedSignal::Integer(signal),
             });
             continue;
         }

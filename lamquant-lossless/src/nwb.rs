@@ -16,10 +16,10 @@
 //! item), so the ingest caller stores those byte-exact instead of through LML.
 
 use crate::error::{LmlError, LmlResult};
-use crate::source::{SidecarBlob, SignalBundle, SourceMetadata};
 use hdf5_metno::types::{IntSize, TypeDescriptor};
 use hdf5_metno::{Dataset, File, Group};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// One integer time-series dataset extracted from an HDF5/NWB file, in the
@@ -170,26 +170,43 @@ pub fn read_int_signals(path: &Path) -> LmlResult<Vec<H5IntSignal>> {
     Ok(out)
 }
 
-// ── Zero-skeleton NWB ⇄ SignalBundle (ADR 0051 Track 3, Phase B) ──────────────
+// ── Zero-skeleton NWB ⇄ ABIR (ADR 0051 Track 3, Phase B) ─────────────────────
 //
-// Ingest an NWB/HDF5 into the codec's `SignalBundle` IR without a fragile
-// structural transcoder. The trick: the bundle's `signal` carries the integer
-// datasets (→ LML); a sidecar carries the original file with those datasets
-// **zeroed** (a "skeleton"). Zeros compress to ~nothing, so the skeleton adds
-// little, yet it is a real HDF5 file — every group, attribute, float/compound
-// dataset, and object reference survives untouched. Reconstruction writes the
-// LML-decoded values back into the skeleton's (zeroed) datasets. The result is
-// data-identical to the original, with no structural modelling and no
-// double-storage of the signal.
+// Ingest an NWB/HDF5 file into canonical ABIR without a fragile structural
+// transcoder. Integer datasets become typed Tensor atoms. A content-bound
+// source capsule carries the original file with those datasets **zeroed** (a
+// "skeleton"), preserving groups, attributes, float/compound datasets, and
+// object references. Reconstruction writes tensor values back into the
+// skeleton.
 
-/// Sidecar key: the original HDF5 with its integer datasets zeroed.
+/// Source-capsule key: original HDF5 with integer datasets zeroed.
 const SKEL_KEY: &str = "nwb_skeleton";
-/// Sidecar key: JSON `[NwbSlot]` describing how to split `signal` back into the
-/// skeleton's integer datasets.
+/// Source-capsule key: JSON `[NwbSlot]` mapping tensors into the skeleton.
 const SLOTS_KEY: &str = "nwb_slots";
 
-/// One integer dataset's placement: where it lives in the skeleton and which
-/// span of `SignalBundle.signal` channels reconstructs it.
+/// One integer dataset's placement in the skeleton and ABIR tensor catalog.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct NwbAtomId(semantic_abir::ObjectId<semantic_abir::AtomTag>);
+
+impl Serialize for NwbAtomId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.to_bytes().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for NwbAtomId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = <[u8; 16]>::deserialize(deserializer)?;
+        Ok(Self(semantic_abir::ObjectId::from_bytes(bytes)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NwbSlot {
     h5_path: String,
@@ -197,10 +214,7 @@ struct NwbSlot {
     signed: bool,
     orig_shape: Vec<usize>,
     time_major: bool,
-    /// First channel index in `SignalBundle.signal` for this dataset.
-    first_ch: usize,
-    /// Number of channels this dataset contributes.
-    n_ch: usize,
+    atom_id: NwbAtomId,
 }
 
 /// Write `flat` (i64, row-major over the dataset's dims) into `ds`, narrowed to
@@ -254,36 +268,92 @@ fn flatten_slot(chs: &[Vec<i64>], shape: &[usize], time_major: bool) -> Vec<i64>
     flat
 }
 
-/// Read an HDF5/NWB file into a [`SignalBundle`]: integer datasets become
-/// `signal` (for LML), and a zeroed copy of the whole file plus a slot map go
-/// into the sidecar (see module note). The original is never mutated.
+struct PreparedTensor {
+    slot: NwbSlot,
+    bytes: Vec<u8>,
+    content_id: semantic_abir::ContentId,
+}
+
+fn semantic_id<T>(seed: &[u8; 32], domain: &[u8], index: u64) -> semantic_abir::ObjectId<T> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lamquant.nwb.abir.v1\0");
+    hasher.update(seed);
+    hasher.update(domain);
+    hasher.update(index.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    semantic_abir::ObjectId::from_bytes(bytes)
+}
+
+fn i64_payload_bytes(signal: &[Vec<i64>], shape: &[usize], time_major: bool) -> Vec<u8> {
+    let flat = flatten_slot(signal, shape, time_major);
+    let mut bytes = Vec::with_capacity(flat.len().saturating_mul(8));
+    for value in flat {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn invalid(message: impl Into<String>) -> LmlError {
+    LmlError::InvalidHeader(message.into())
+}
+
+/// Read HDF5/NWB integer datasets as canonical ABIR Tensor atoms.
 ///
-/// Note: the bundle may be *ragged* (integer datasets of differing length), so
-/// callers must NOT assume `SignalBundle::validate`'s equal-length invariant.
-pub fn read_bundle(path: &Path) -> LmlResult<SignalBundle> {
+/// Arbitrary HDF5 integer arrays are not falsely labeled as one uniform-rate
+/// signal. Exact source structure remains recoverable through content-bound
+/// skeleton and slot-map capsules.
+pub fn read_dataset(
+    path: &Path,
+) -> LmlResult<semantic_abir::OpenedDataset<semantic_abir::InMemoryPayloadAccess>> {
     let sigs = read_int_signals(path)?;
     if sigs.is_empty() {
-        return Err(LmlError::InvalidHeader(
-            "no little-endian integer datasets found to compress".into(),
+        return Err(invalid(
+            "no little-endian integer datasets found to compress",
         ));
     }
 
-    let mut signal: Vec<Vec<i64>> = Vec::new();
-    let mut slots: Vec<NwbSlot> = Vec::new();
-    for s in sigs {
-        let first_ch = signal.len();
-        let n_ch = s.signal.len();
-        slots.push(NwbSlot {
-            h5_path: s.h5_path,
-            int_bytes: s.int_bytes,
-            signed: s.signed,
-            orig_shape: s.orig_shape,
-            time_major: s.time_major,
-            first_ch,
-            n_ch,
+    let mut seed_hasher = Sha256::new();
+    let mut prepared = Vec::with_capacity(sigs.len());
+    for (index, signal) in sigs.into_iter().enumerate() {
+        let bytes = i64_payload_bytes(&signal.signal, &signal.orig_shape, signal.time_major);
+        let content_id = semantic_abir::payload_content_id(semantic_abir::ElementType::I64, &bytes);
+        seed_hasher.update(signal.h5_path.as_bytes());
+        seed_hasher.update([signal.int_bytes, u8::from(signal.signed)]);
+        seed_hasher.update(content_id.to_bytes());
+        for extent in &signal.orig_shape {
+            seed_hasher.update((*extent as u64).to_le_bytes());
+        }
+        prepared.push(PreparedTensor {
+            slot: NwbSlot {
+                h5_path: signal.h5_path,
+                int_bytes: signal.int_bytes,
+                signed: signal.signed,
+                orig_shape: signal.orig_shape,
+                time_major: signal.time_major,
+                atom_id: NwbAtomId(semantic_abir::ObjectId::from_bytes([0; 16])),
+            },
+            bytes,
+            content_id,
         });
-        signal.extend(s.signal);
+        seed_hasher.update((index as u64).to_le_bytes());
     }
+    let seed: [u8; 32] = seed_hasher.finalize().into();
+    let dataset_id = semantic_id(&seed, b"dataset", 0);
+    let recording_id = semantic_id(&seed, b"recording", 0);
+    let stream_id = semantic_id(&seed, b"stream", 0);
+    for (index, tensor) in prepared.iter_mut().enumerate() {
+        tensor.slot.atom_id = NwbAtomId(semantic_id::<semantic_abir::AtomTag>(
+            &seed,
+            b"tensor",
+            index as u64,
+        ));
+    }
+    let slots = prepared
+        .iter()
+        .map(|tensor| tensor.slot.clone())
+        .collect::<Vec<_>>();
 
     // Build the zeroed skeleton: copy the file, overwrite each integer dataset
     // with zeros, read the bytes back. The temp file is removed on drop.
@@ -303,68 +373,163 @@ pub fn read_bundle(path: &Path) -> LmlResult<SignalBundle> {
     }
     let skel_bytes = std::fs::read(skel.path()).map_err(LmlError::Io)?;
 
-    let n = signal.len();
     let slots_json = serde_json::to_vec(&slots)
         .map_err(|e| LmlError::InvalidHeader(format!("slot encode: {e}")))?;
-    Ok(SignalBundle {
-        signal,
-        sample_rate: 0.0,
-        channels: (0..n).map(|i| format!("ch{i}")).collect(),
-        phys_min: vec![0.0; n],
-        phys_max: vec![0.0; n],
-        duration_s: 0.0,
-        metadata: SourceMetadata {
-            source_file: path.display().to_string(),
-            format: "NWB".into(),
-            patient_id: String::new(),
-            recording_info: String::new(),
-            startdate: String::new(),
-            phys_dim: String::new(),
-        },
-        sidecar: vec![
-            SidecarBlob {
-                key: SKEL_KEY.into(),
-                bytes: skel_bytes,
-                aux: None,
-            },
-            SidecarBlob {
-                key: SLOTS_KEY.into(),
-                bytes: slots_json,
-                aux: None,
-            },
-        ],
-    })
+
+    let atom_ids = slots.iter().map(|slot| slot.atom_id.0).collect::<Vec<_>>();
+    let mut draft = semantic_abir::DatasetDraft::new(dataset_id);
+    let mut recording = semantic_abir::Recording::new(recording_id, vec![stream_id]);
+    recording.add_source_key(
+        semantic_abir::SourceKey::new("source.format", "NWB")
+            .map_err(|_| invalid("invalid static NWB source key"))?,
+    );
+    if let Some(name) = path.file_name() {
+        recording.add_source_key(
+            semantic_abir::SourceKey::new("source.file", name.to_string_lossy())
+                .map_err(|_| invalid("invalid NWB source filename"))?,
+        );
+    }
+    draft.add_recording(recording);
+    draft.add_stream(semantic_abir::Stream::new(
+        stream_id,
+        recording_id,
+        semantic_abir::ConceptId::new("nwb:modality/integer-dataset")
+            .map_err(|error| invalid(error.to_string()))?,
+        atom_ids,
+        None,
+        None,
+        None,
+    ));
+
+    let mut access = semantic_abir::InMemoryPayloadAccess::new();
+    for tensor in prepared {
+        let shape = tensor
+            .slot
+            .orig_shape
+            .iter()
+            .map(|extent| u64::try_from(*extent).map_err(|_| invalid("NWB extent exceeds u64")))
+            .collect::<LmlResult<Vec<_>>>()?;
+        let axes = shape
+            .iter()
+            .enumerate()
+            .map(|(axis, extent)| {
+                Ok(semantic_abir::SemanticAxis::new(
+                    semantic_abir::ConceptId::new(format!("nwb:axis/dimension-{axis}"))
+                        .map_err(|error| invalid(error.to_string()))?,
+                    *extent,
+                ))
+            })
+            .collect::<LmlResult<Vec<_>>>()?;
+        let logical_bytes =
+            u64::try_from(tensor.bytes.len()).map_err(|_| invalid("NWB payload too large"))?;
+        let descriptor = semantic_abir::PayloadDescriptor::new(
+            tensor.content_id,
+            logical_bytes,
+            semantic_abir::ElementType::I64,
+            semantic_abir::ByteOrder::Little,
+            shape,
+            semantic_abir::Layout::DenseRowMajor,
+            None,
+            Some("application/x-nwb-integer-tensor".into()),
+        );
+        access.insert(tensor.content_id, tensor.bytes);
+        draft.add_atom(semantic_abir::Atom::Tensor(semantic_abir::Tensor::new(
+            tensor.slot.atom_id.0,
+            semantic_abir::Presence::Present,
+            Some(descriptor),
+            axes,
+        )));
+    }
+
+    for (index, (key, bytes, media_type)) in [
+        (SKEL_KEY, skel_bytes, "application/x-hdf5"),
+        (SLOTS_KEY, slots_json, "application/json"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let content_id =
+            semantic_abir::payload_content_id(semantic_abir::ElementType::Bytes, &bytes);
+        access.insert(content_id, bytes);
+        draft.add_source_capsule(semantic_abir::SourceCapsule::new(
+            semantic_abir::SourceKey::new(format!("source.sidecar.{index}"), key)
+                .map_err(|_| invalid("invalid static NWB capsule key"))?,
+            content_id,
+            Some(media_type),
+        ));
+    }
+
+    let dataset = draft
+        .validate(semantic_abir::ValidationLimits::default())
+        .map_err(|report| invalid(format!("NWB ABIR validation failed: {report:?}")))?;
+    Ok(semantic_abir::OpenedDataset::new(dataset, access))
 }
 
-/// Reconstruct an HDF5/NWB file at `out` from a [`SignalBundle`] produced by
-/// [`read_bundle`]: write the skeleton, then refill each integer dataset with
-/// its `signal` channels. Data-identical to the original (HDF5 byte layout may
-/// differ, as HDF5 permits).
-pub fn write_bundle(bundle: &SignalBundle, out: &Path) -> LmlResult<()> {
-    let skel = bundle
-        .sidecar_first(SKEL_KEY)
-        .ok_or_else(|| LmlError::InvalidHeader("bundle missing nwb_skeleton sidecar".into()))?;
-    let slots_blob = bundle
-        .sidecar_first(SLOTS_KEY)
-        .ok_or_else(|| LmlError::InvalidHeader("bundle missing nwb_slots sidecar".into()))?;
-    let slots: Vec<NwbSlot> = serde_json::from_slice(&slots_blob.bytes)
+fn capsule_bytes<'a>(
+    opened: &'a semantic_abir::OpenedDataset<semantic_abir::InMemoryPayloadAccess>,
+    key: &str,
+) -> LmlResult<&'a [u8]> {
+    let capsule = opened
+        .dataset()
+        .source_capsules()
+        .iter()
+        .find(|capsule| capsule.source().value() == key)
+        .ok_or_else(|| invalid(format!("NWB dataset missing {key} source capsule")))?;
+    opened
+        .access()
+        .bytes(capsule.content_id())
+        .ok_or_else(|| invalid(format!("NWB dataset missing {key} payload bytes")))
+}
+
+/// Reconstruct an HDF5/NWB file from ABIR tensors and retained source capsules.
+pub fn write_dataset(
+    opened: &semantic_abir::OpenedDataset<semantic_abir::InMemoryPayloadAccess>,
+    out: &Path,
+) -> LmlResult<()> {
+    let skel = capsule_bytes(opened, SKEL_KEY)?;
+    let slots_blob = capsule_bytes(opened, SLOTS_KEY)?;
+    let slots: Vec<NwbSlot> = serde_json::from_slice(slots_blob)
         .map_err(|e| LmlError::InvalidHeader(format!("slot decode: {e}")))?;
 
-    std::fs::write(out, &skel.bytes).map_err(LmlError::Io)?;
+    std::fs::write(out, skel).map_err(LmlError::Io)?;
     let f = h5(File::open_rw(out), "open_rw output")?;
     for slot in &slots {
-        let end = slot.first_ch + slot.n_ch;
-        if end > bundle.signal.len() {
-            return Err(LmlError::InvalidHeader(format!(
-                "slot {} channel span {}..{} exceeds signal ({})",
-                slot.h5_path,
-                slot.first_ch,
-                end,
-                bundle.signal.len()
+        let atom_id = slot.atom_id.0;
+        let view = opened
+            .tensor_view(atom_id)
+            .map_err(|error| invalid(format!("NWB tensor {}: {error}", slot.h5_path)))?;
+        if view.descriptor().element() != semantic_abir::ElementType::I64 {
+            return Err(invalid(format!(
+                "NWB tensor {} is not widened i64",
+                slot.h5_path
             )));
         }
-        let chs = &bundle.signal[slot.first_ch..end];
-        let flat = flatten_slot(chs, &slot.orig_shape, slot.time_major);
+        let chunks = view.bytes().chunks_exact(8);
+        if !chunks.remainder().is_empty() {
+            return Err(invalid(format!(
+                "NWB tensor {} byte length is not divisible by 8",
+                slot.h5_path
+            )));
+        }
+        let flat = chunks
+            .map(|chunk| {
+                let mut bytes = [0_u8; 8];
+                bytes.copy_from_slice(chunk);
+                i64::from_le_bytes(bytes)
+            })
+            .collect::<Vec<_>>();
+        let expected = slot
+            .orig_shape
+            .iter()
+            .try_fold(1_usize, |total, extent| total.checked_mul(*extent));
+        if expected != Some(flat.len()) {
+            return Err(invalid(format!(
+                "NWB tensor {} has {} values, expected {:?}",
+                slot.h5_path,
+                flat.len(),
+                expected
+            )));
+        }
         let ds = h5(f.dataset(&slot.h5_path), "output dataset")?;
         write_flat_i64(&ds, slot.int_bytes, slot.signed, &flat)?;
     }

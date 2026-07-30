@@ -13,7 +13,7 @@ use semantic_abir::{AbirDataset, Atom, PayloadAccess, TimeAxis};
 use semantic_abir_bcs::ResourceBounds;
 
 use crate::error::{LmlError, LmlResult};
-use crate::source::{from_signal_bundle, from_uniform_signal_view, SignalBundle, SourceMetadata};
+use crate::source::{from_uniform_signal_view, SemanticRead, SourceMetadata};
 
 /// Summary of one emitted BCS2 LML bundle.
 #[derive(Clone, Debug, PartialEq)]
@@ -99,6 +99,25 @@ pub fn encode<A: PayloadAccess>(dataset: &AbirDataset, access: &A) -> LmlResult<
     encode_with_options(dataset, access, LmlEncodeOptions::default()).map(EncodedLml::into_bytes)
 }
 
+/// Encode one validated source result, selecting its fused native cache when
+/// available and otherwise resolving canonical ABIR payload leases.
+pub fn encode_semantic_read(read: &SemanticRead) -> LmlResult<Vec<u8>> {
+    encode_semantic_read_with_options(read, LmlEncodeOptions::default()).map(EncodedLml::into_bytes)
+}
+
+/// Encode one validated source result with explicit packet controls.
+pub fn encode_semantic_read_with_options(
+    read: &SemanticRead,
+    options: LmlEncodeOptions,
+) -> LmlResult<EncodedLml> {
+    if let Some(signal) = read.native_i64() {
+        let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        encode_views_with_options(read.opened.dataset(), &views, options)
+    } else {
+        encode_with_options(read.opened.dataset(), read.opened.access(), options)
+    }
+}
+
 /// Encode canonical ABIR semantics with explicit packet and predictor controls.
 pub fn encode_with_options<A: PayloadAccess>(
     dataset: &AbirDataset,
@@ -169,26 +188,6 @@ pub fn encode_views_with_options(
 /// Authenticate and decode a BCS2 LML profile.
 pub fn open(data: &[u8]) -> LmlResult<lamquant_abir_codec::OpenedLmlBundle<'_>> {
     lamquant_abir_codec::open_lml_bundle(data, ResourceBounds::default()).map_err(bundle_error)
-}
-
-/// Encode a validated source-neutral signal bundle as canonical ABIR + BCS2.
-pub fn encode_signal_bundle(bundle: SignalBundle) -> LmlResult<Vec<u8>> {
-    encode_signal_bundle_with_window_size(bundle, lamquant_abir_codec::MAX_PACKET_SAMPLES)
-}
-
-/// Encode a source-neutral signal bundle using bounded ordered LML1 packets.
-pub fn encode_signal_bundle_with_window_size(
-    bundle: SignalBundle,
-    window_size: usize,
-) -> LmlResult<Vec<u8>> {
-    let semantic = from_signal_bundle(bundle, semantic_abir::ValidationLimits::default())?;
-    lamquant_abir_codec::encode_lml_bundle_with_window_size(
-        semantic.opened.dataset(),
-        semantic.opened.access(),
-        window_size,
-        ResourceBounds::default(),
-    )
-    .map_err(bundle_error)
 }
 
 fn encode_uniform_signal(
@@ -508,16 +507,81 @@ fn semantic_signal_shape(dataset: &AbirDataset) -> LmlResult<(usize, usize)> {
 }
 
 fn metadata(dataset: &AbirDataset) -> String {
-    dataset
-        .recordings()
-        .first()
-        .and_then(|recording| {
-            recording
-                .source_keys()
+    let Some(recording) = dataset.recordings().first() else {
+        return "{}".into();
+    };
+    if let Some(value) = source_value(recording.source_keys(), "source.recording-info") {
+        if !value.is_empty() {
+            return value.into();
+        }
+    }
+
+    let mut object = serde_json::Map::new();
+    for (namespace, field) in [
+        ("source.file", "source_file"),
+        ("source.format", "format"),
+        ("source.patient-id", "patient_id"),
+        ("source.startdate", "startdate"),
+    ] {
+        if let Some(value) = source_value(recording.source_keys(), namespace) {
+            object.insert(field.into(), serde_json::Value::String(value.into()));
+        }
+    }
+
+    if let Some(stream) = dataset.streams().first() {
+        object.insert(
+            "n_channels".into(),
+            serde_json::Value::from(stream.atoms().len() as u64),
+        );
+        if let Ok(rate) = sample_rate(dataset) {
+            if let Some(rate) = serde_json::Number::from_f64(rate) {
+                object.insert("sample_rate".into(), serde_json::Value::Number(rate));
+            }
+        }
+        if let Some(basis_id) = stream.channel_basis_id() {
+            if let Some(basis) = dataset
+                .channel_bases()
                 .iter()
-                .find(|key| key.namespace() == "source.recording-info")
-        })
-        .map_or_else(|| "{}".into(), |key| key.value().into())
+                .find(|basis| basis.id() == basis_id)
+            {
+                let mut labels = Vec::with_capacity(basis.channels().len());
+                let mut physical_min = Vec::with_capacity(basis.channels().len());
+                let mut physical_max = Vec::with_capacity(basis.channels().len());
+                let mut unit = None;
+                for channel in basis.channels() {
+                    labels.push(serde_json::Value::String(
+                        source_value(channel.source_keys(), "source.channel-label")
+                            .unwrap_or("")
+                            .into(),
+                    ));
+                    physical_min.push(source_number(channel.source_keys(), "source.physical-min"));
+                    physical_max.push(source_number(channel.source_keys(), "source.physical-max"));
+                    unit = unit
+                        .or_else(|| source_value(channel.source_keys(), "source.physical-unit"));
+                }
+                object.insert("channels".into(), serde_json::Value::Array(labels));
+                object.insert("phys_min".into(), serde_json::Value::Array(physical_min));
+                object.insert("phys_max".into(), serde_json::Value::Array(physical_max));
+                if let Some(unit) = unit {
+                    object.insert("phys_dim".into(), serde_json::Value::String(unit.into()));
+                }
+            }
+        }
+    }
+    serde_json::to_string(&object).unwrap_or_else(|_| "{}".into())
+}
+
+fn source_value<'a>(keys: &'a [semantic_abir::SourceKey], namespace: &str) -> Option<&'a str> {
+    keys.iter()
+        .find(|key| key.namespace() == namespace)
+        .map(semantic_abir::SourceKey::value)
+}
+
+fn source_number(keys: &[semantic_abir::SourceKey], namespace: &str) -> serde_json::Value {
+    source_value(keys, namespace)
+        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(serde_json::Number::from_f64)
+        .map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 
 fn validate_uniform_signal(signal: &[Vec<i64>], sample_rate: f64) -> LmlResult<()> {
@@ -649,6 +713,42 @@ mod tests {
         assert_eq!(opened.packet_sample_counts(), &[3, 3, 1]);
         assert_eq!(opened.signal(), signal);
         assert_eq!(opened.dataset().id(), expected_dataset_id);
+    }
+
+    #[test]
+    fn metadata_projection_is_derived_from_abir_when_legacy_blob_is_absent() {
+        let signal = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let semantic = from_uniform_signal_view(
+            &signal,
+            500.0,
+            vec!["Fp1".into(), "Cz".into()],
+            vec![-100.0, -200.0],
+            vec![100.0, 200.0],
+            3.0 / 500.0,
+            SourceMetadata {
+                source_file: "fixture.edf".into(),
+                format: "EDF".into(),
+                patient_id: String::new(),
+                recording_info: String::new(),
+                startdate: "2026-07-30".into(),
+                phys_dim: "uV".into(),
+            },
+            semantic_abir::ValidationLimits::default(),
+        )
+        .unwrap();
+        let encoded = encode_semantic_read_with_options(
+            &semantic,
+            LmlEncodeOptions::new(3).with_lpc_mode(crate::lpc::LpcMode::Fixed),
+        )
+        .unwrap();
+        let header = parse_header(encoded.as_bytes()).unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&header.metadata).unwrap();
+        assert_eq!(metadata["source_file"], "fixture.edf");
+        assert_eq!(metadata["format"], "EDF");
+        assert_eq!(metadata["sample_rate"], 500.0);
+        assert_eq!(metadata["channels"], serde_json::json!(["Fp1", "Cz"]));
+        assert_eq!(metadata["phys_min"], serde_json::json!([-100.0, -200.0]));
+        assert_eq!(metadata["phys_dim"], "uV");
     }
 
     #[test]

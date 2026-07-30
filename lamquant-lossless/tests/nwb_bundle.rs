@@ -1,7 +1,7 @@
-//! Zero-skeleton NWB ⇄ SignalBundle round-trip (ADR 0051 Track 3, Phase B).
+//! Zero-skeleton NWB ⇄ ABIR round-trip (ADR 0051 Track 3, Phase B).
 //!
 //! Proves the headline claim: integer datasets round-trip byte-exact through the
-//! bundle, AND everything LML doesn't touch — float datasets, attributes, and
+//! ABIR dataset, AND everything LML doesn't touch — float datasets, attributes, and
 //! **object references** (the hard case a structural transcoder breaks) —
 //! survives, because the skeleton is a real HDF5 file with only the integer
 //! payloads zeroed. h5py authors + verifies (real ecosystem tooling). Skips when
@@ -82,11 +82,15 @@ fn zero_skeleton_roundtrip_preserves_structure_and_data() {
         None => return, // toolchain absent — skip
     }
 
-    let bundle = lamquant_core::nwb::read_bundle(&src).expect("read_bundle");
-    // sidecar carries skeleton + slots; signal carries the two integer datasets.
-    assert!(bundle.sidecar.iter().any(|s| s.key == "nwb_skeleton"));
-    assert!(!bundle.signal.is_empty());
-    lamquant_core::nwb::write_bundle(&bundle, &out).expect("write_bundle");
+    let opened = lamquant_core::nwb::read_dataset(&src).expect("read_dataset");
+    assert_eq!(opened.dataset().atoms().len(), 2);
+    assert_eq!(opened.dataset().source_capsules().len(), 2);
+    assert!(opened
+        .dataset()
+        .atoms()
+        .iter()
+        .all(|atom| matches!(atom, semantic_abir::Atom::Tensor(_))));
+    lamquant_core::nwb::write_dataset(&opened, &out).expect("write_dataset");
 
     match py(CHECK, &[&src, &out]) {
         Some(true) => {}

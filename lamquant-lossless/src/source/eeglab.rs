@@ -52,9 +52,9 @@
 use crate::error::{LmlError, LmlResult};
 use std::path::{Path, PathBuf};
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::metadata::{SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::from_signal_bundle;
+use super::semantic::from_owned_uniform_signal;
 
 const MAX_META_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum bytes we'll buffer for the original `.set` MAT v5 file when
@@ -194,7 +194,7 @@ impl EeglabReader {
         self
     }
 
-    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    fn lower_to_abir_inner(&mut self) -> LmlResult<super::semantic::SemanticRead> {
         let meta_path = self
             .meta_override
             .clone()
@@ -328,19 +328,15 @@ impl EeglabReader {
                 fdt_path.display()
             )));
         }
-        // `raw` already contains the full `.fdt` bytes from the load
-        // above. Clone instead of re-reading from disk.
-        let fdt_raw = raw.clone();
-
-        let bundle = SignalBundle {
+        from_owned_uniform_signal(
             signal,
-            sample_rate: meta.sample_rate,
-            channels: meta.channels,
+            meta.sample_rate,
+            meta.channels,
             phys_min,
             phys_max,
             duration_s,
-            metadata: SourceMetadata {
-                source_file: crate::source::bundle::source_basename(&self.set_path),
+            SourceMetadata {
+                source_file: crate::source::metadata::source_basename(&self.set_path),
                 format: if self.lossy_int16 {
                     "EEGLAB_LOSSY_I16".to_string()
                 } else {
@@ -351,7 +347,7 @@ impl EeglabReader {
                 startdate: String::new(),
                 phys_dim: meta.phys_dim,
             },
-            sidecar: vec![
+            vec![
                 // (1) The codec-consumed metadata JSON. Keep for
                 //     downstream tooling that wants the parsed fields
                 //     without re-walking the MAT struct.
@@ -375,22 +371,18 @@ impl EeglabReader {
                 //     this as `<stem>.fdt` LMA entry.
                 SidecarBlob {
                     key: "fdt_raw".to_string(),
-                    bytes: fdt_raw,
+                    bytes: raw,
                     aux: None,
                 },
             ],
-        };
-        bundle.validate()?;
-        Ok(bundle)
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 }
 
 impl SignalSourceReader for EeglabReader {
     fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
-        )
+        self.lower_to_abir_inner()
     }
 }
 
@@ -430,15 +422,17 @@ mod tests {
         std::fs::write(&fdt, synth_fdt(n_ch, n_samp)).unwrap();
         std::fs::write(&meta, synth_meta(n_ch, n_samp)).unwrap();
         let mut r = EeglabReader::new(&set);
-        let b = r.read_bundle().unwrap();
-        assert_eq!(b.signal.len(), n_ch);
-        assert_eq!(b.signal[0].len(), n_samp);
+        let read = r.lower_to_abir().unwrap();
+        let signal = read.native_i64().unwrap();
+        assert_eq!(signal.len(), n_ch);
+        assert_eq!(signal[0].len(), n_samp);
+        assert_eq!(read.mapping.source_format, "EEGLAB_LOSSLESS_F32");
         // Bit-cast invariant: reading bits back via f32::from_bits
         // recovers the exact f32 we wrote.
         for ch in 0..n_ch {
             for s in 0..n_samp {
                 let expected = (s as f32) * 0.1 + (ch as f32);
-                let stored_i = b.signal[ch][s];
+                let stored_i = signal[ch][s];
                 let recovered = f32::from_bits(stored_i as u32);
                 assert_eq!(
                     recovered.to_bits(),
@@ -447,7 +441,6 @@ mod tests {
                 );
             }
         }
-        assert_eq!(b.metadata.format, "EEGLAB_LOSSLESS_F32");
     }
 
     #[test]
@@ -460,9 +453,10 @@ mod tests {
         std::fs::write(tmp.path().join("a.fdt"), synth_fdt(n_ch, n_samp)).unwrap();
         std::fs::write(tmp.path().join("a.lml-meta.json"), synth_meta(n_ch, n_samp)).unwrap();
         let mut r = EeglabReader::new(&set).with_lossy_int16(true);
-        let b = r.read_bundle().unwrap();
+        let read = r.lower_to_abir().unwrap();
+        let signal = read.native_i64().unwrap();
         // Values stored should be within i16 range (clamp invariant).
-        for ch in &b.signal {
+        for ch in signal {
             for &v in ch {
                 assert!(
                     v >= i16::MIN as i64 && v <= i16::MAX as i64,
@@ -470,7 +464,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(b.metadata.format, "EEGLAB_LOSSY_I16");
+        assert_eq!(read.mapping.source_format, "EEGLAB_LOSSY_I16");
     }
 
     #[test]
@@ -486,15 +480,14 @@ mod tests {
         )
         .unwrap();
         let mut r = EeglabReader::new(&set);
-        let b = r.read_bundle().unwrap();
-        assert_eq!(b.channels, vec!["Fp1".to_string(), "Cz".to_string()]);
-        assert!((b.sample_rate - 250.0).abs() < 1e-9);
+        let read = r.lower_to_abir().unwrap();
+        assert_eq!(read.mapping.channel_count, 2);
+        assert_eq!(read.mapping.source_format, "EEGLAB_LOSSLESS_F32");
     }
 
     // ─── ADR 0069 S3b gate: born-typed lowering (modality inference) ───
     //
-    // Semantic lowering is now an explicit reader seam. Legacy bundle tests
-    // remain here until Package 26 removes the transitional carrier.
+    // Semantic lowering is now the only reader seam.
 
     #[test]
     fn missing_fdt_errors_explicitly() {
@@ -503,7 +496,7 @@ mod tests {
         std::fs::write(&set, b"").unwrap();
         std::fs::write(tmp.path().join("c.lml-meta.json"), synth_meta(1, 1)).unwrap();
         let mut r = EeglabReader::new(&set);
-        match r.read_bundle() {
+        match r.lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("no .fdt found")),
             other => panic!("expected InvalidHeader('no .fdt'), got {other:?}"),
         }
@@ -520,7 +513,7 @@ mod tests {
         std::fs::write(tmp.path().join("d.fdt"), &fdt).unwrap();
         std::fs::write(tmp.path().join("d.lml-meta.json"), synth_meta(1, 4)).unwrap();
         let mut r = EeglabReader::new(&set);
-        match r.read_bundle() {
+        match r.lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("non-finite")),
             other => panic!("expected InvalidHeader('non-finite'), got {other:?}"),
         }

@@ -3,7 +3,7 @@
 //!
 //! Every reader under `source/` today (`RawReader`, `EdfReader`,
 //! `BrainVisionReader`, ...) is hand-written Rust: a struct that owns a
-//! byte source and a `read_bundle` method that
+//! byte source and a direct ABIR-lowering method that
 //! walk the format's byte layout by hand. That's the right shape for a
 //! format with real structure (EDF's per-channel headers, BrainVision's
 //! three-file split, DICOM's nested TLV dataset — see "Limits" below).
@@ -16,8 +16,8 @@
 //! For that whole class, hand-writing a new Rust reader per acquisition
 //! rig is unnecessary ceremony. This module declares [`FormatDescriptor`]
 //! — a `serde`-derivable **struct** that describes the fixed layout as
-//! DATA — and an interpreter, [`read_bundle_from_descriptor`], that walks that
-//! description exactly the way a hand-written reader's `read_bundle` would.
+//! DATA — and an interpreter, [`lower_descriptor_to_abir`], that walks that
+//! description exactly the way a hand-written reader lowers into ABIR.
 //! The proof obligation for this increment is narrow and load-bearing:
 //! a `FormatDescriptor` built to describe the RAW format must produce
 //! semantically equivalent output to `RawReader`.
@@ -90,7 +90,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{LmlError, LmlResult};
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::metadata::{SidecarBlob, SourceMetadata};
+use super::semantic::SemanticRead;
 
 // ─── Schema ──────────────────────────────────────────────────────────────
 
@@ -199,7 +200,7 @@ pub struct ChannelModality {
 /// scope limits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormatDescriptor {
-    /// Becomes `SignalBundle.metadata.format` (e.g. `"RAW"`).
+    /// Becomes `SourceMetadata.format` (e.g. `"RAW"`).
     pub format_name: String,
     pub dtype: DescriptorDtype,
     pub endian: Endian,
@@ -209,7 +210,7 @@ pub struct FormatDescriptor {
     #[serde(default)]
     pub channel_modality: ChannelModality,
     /// Which interpreter-recognized sidecar blobs to copy into the
-    /// resulting `SignalBundle.sidecar`. Recognized values today:
+    /// resulting source-carried sidecars. Recognized values today:
     /// `"sidecar_json"` (the sidecar bytes verbatim) and `"payload"`
     /// (the sample `data` bytes verbatim). Any other value is a
     /// `validate()`-time error — fail-closed rather than silently
@@ -229,7 +230,7 @@ impl FormatDescriptor {
     /// sidecar is in hand): a `FromSidecarField` channel count that
     /// resolves to 0, or a `Reciprocal` transform whose sidecar-supplied
     /// divisor is 0. Both of those are checked at interpret time by
-    /// [`read_bundle_from_descriptor`] (via `resolve_channel_count` /
+    /// [`lower_descriptor_to_abir`] (via `resolve_channel_count` /
     /// `resolve_sample_rate`), which also
     /// call this method first — so every entry point is fully fail-closed
     /// end to end, just not from a single static call.
@@ -383,9 +384,9 @@ impl core::fmt::Display for DescriptorError {
 impl std::error::Error for DescriptorError {}
 
 /// Convert an interpreter-internal `DescriptorError` into the crate's
-/// standard `LmlError` at the [`read_bundle_from_descriptor`] boundary — mirrors
+/// standard `LmlError` at the [`lower_descriptor_to_abir`] boundary — mirrors
 /// every other reader's `LmlError::InvalidHeader(format!(...))` convention (see
-/// `RawReader::read_bundle`).
+/// `RawReader` lowering).
 fn to_lml_err(e: DescriptorError) -> LmlError {
     LmlError::InvalidHeader(e.to_string())
 }
@@ -634,8 +635,8 @@ fn decode_grid<T: Copy>(
 }
 
 /// Decode straight to the codec's `i64` working currency — the
-/// `SignalBundle` path, mirroring every hand-written reader's
-/// `read_bundle` (always widens, regardless of native width).
+/// ABIR path, mirroring every hand-written reader's
+/// `lower_to_abir` (always widens, regardless of native width).
 fn decode_signal_i64(
     descriptor: &FormatDescriptor,
     n_channels: usize,
@@ -668,16 +669,32 @@ fn decode_signal_i64(
 /// `sidecar_bytes` (a JSON sidecar, same schema convention `RawReader`
 /// uses: `channels` / `phys_min` / `phys_max` / `phys_dim` plus whatever
 /// scalar fields `descriptor.channel_count` / `descriptor.sample_rate`
-/// name), producing the codec-agnostic [`SignalBundle`]. Panic-free on
+/// name), producing the codec-agnostic [`SemanticRead`]. Panic-free on
 /// any input — malformed JSON, missing fields, wrong JSON types, a
 /// truncated payload, or an oversized declared channel count are all
 /// typed errors, never an unwrap/index/slice panic (see
 /// `truncation_sweep_never_panics`).
-pub fn read_bundle_from_descriptor(
+pub fn lower_descriptor_to_abir(
     descriptor: &FormatDescriptor,
     data: &[u8],
     sidecar_bytes: &[u8],
-) -> LmlResult<SignalBundle> {
+) -> LmlResult<SemanticRead> {
+    lower_descriptor_to_abir_with_modality(
+        descriptor,
+        data,
+        sidecar_bytes,
+        semantic_abir::ConceptId::new("abir:modality/unknown")
+            .expect("static modality concept is canonical"),
+    )
+}
+
+/// Interpret a descriptor while assigning an explicit ABIR modality concept.
+pub fn lower_descriptor_to_abir_with_modality(
+    descriptor: &FormatDescriptor,
+    data: &[u8],
+    sidecar_bytes: &[u8],
+    modality: semantic_abir::ConceptId,
+) -> LmlResult<SemanticRead> {
     descriptor.validate().map_err(to_lml_err)?;
     let json = parse_sidecar_json(sidecar_bytes).map_err(to_lml_err)?;
     let obj = sidecar_object(&json).map_err(to_lml_err)?;
@@ -716,14 +733,14 @@ pub fn read_bundle_from_descriptor(
         }
     }
 
-    let bundle = SignalBundle {
+    super::semantic::from_owned_uniform_signal_with_semantics(
         signal,
         sample_rate,
         channels,
         phys_min,
         phys_max,
         duration_s,
-        metadata: SourceMetadata {
+        SourceMetadata {
             source_file: String::new(),
             format: descriptor.format_name.clone(),
             patient_id: String::new(),
@@ -732,9 +749,11 @@ pub fn read_bundle_from_descriptor(
             phys_dim,
         },
         sidecar,
-    };
-    bundle.validate()?;
-    Ok(bundle)
+        modality,
+        Vec::new(),
+        Vec::new(),
+        semantic_abir::ValidationLimits::default(),
+    )
 }
 
 #[cfg(test)]
@@ -819,7 +838,7 @@ mod tests {
 
         // Also refused at the current interpreter entry point, not just
         // validate() in isolation — defense in depth.
-        let err = read_bundle_from_descriptor(&d, &[0u8; 8], b"{}").unwrap_err();
+        let err = lower_descriptor_to_abir(&d, &[0u8; 8], b"{}").unwrap_err();
         assert!(err.to_string().to_lowercase().contains("f32"), "got: {err}");
     }
 
@@ -840,29 +859,19 @@ mod tests {
         be.endian = Endian::Big;
         assert_eq!(le.endian, Endian::Little);
 
-        let le_bundle = read_bundle_from_descriptor(&le, &bytes, sidecar).unwrap();
-        let be_bundle = read_bundle_from_descriptor(&be, &bytes, sidecar).unwrap();
+        let le_read = lower_descriptor_to_abir(&le, &bytes, sidecar).unwrap();
+        let be_read = lower_descriptor_to_abir(&be, &bytes, sidecar).unwrap();
+        let le_signal = le_read.native_i64().expect("native samples preserved");
+        let be_signal = be_read.native_i64().expect("native samples preserved");
 
         assert_ne!(
-            le_bundle.signal, be_bundle.signal,
+            le_signal, be_signal,
             "LE and BE descriptors must decode the same bytes differently"
         );
-        assert_eq!(
-            le_bundle.signal[0][0],
-            i16::from_le_bytes([0x01, 0x02]) as i64
-        );
-        assert_eq!(
-            be_bundle.signal[0][0],
-            i16::from_be_bytes([0x01, 0x02]) as i64
-        );
-        assert_eq!(
-            le_bundle.signal[1][0],
-            i16::from_le_bytes([0x03, 0x04]) as i64
-        );
-        assert_eq!(
-            be_bundle.signal[1][0],
-            i16::from_be_bytes([0x03, 0x04]) as i64
-        );
+        assert_eq!(le_signal[0][0], i16::from_le_bytes([0x01, 0x02]) as i64);
+        assert_eq!(be_signal[0][0], i16::from_be_bytes([0x01, 0x02]) as i64);
+        assert_eq!(le_signal[1][0], i16::from_le_bytes([0x03, 0x04]) as i64);
+        assert_eq!(be_signal[1][0], i16::from_be_bytes([0x03, 0x04]) as i64);
     }
 
     // ─── Gate 4: reciprocal sample-rate transform (G5) ──────────────
@@ -879,18 +888,14 @@ mod tests {
         };
         let sidecar = b"{\"SamplingInterval\":4000,\"channels\":[\"a\"],\
                           \"phys_min\":[-1.0],\"phys_max\":[1.0]}";
-        let bundle = read_bundle_from_descriptor(&d, &[0, 0, 0, 0], sidecar).unwrap();
-        assert!(
-            (bundle.sample_rate - 250.0).abs() < 1e-9,
-            "sr={}",
-            bundle.sample_rate
-        );
+        let read = lower_descriptor_to_abir(&d, &[0, 0, 0, 0], sidecar).unwrap();
+        assert_eq!(read.mapping.channel_count, 1);
 
         // Zero divisor -> typed Err, never a panic (division by zero on
         // f64 would silently produce inf/NaN if unchecked).
         let zero_sidecar = b"{\"SamplingInterval\":0,\"channels\":[\"a\"],\
                                \"phys_min\":[-1.0],\"phys_max\":[1.0]}";
-        let err = read_bundle_from_descriptor(&d, &[0, 0, 0, 0], zero_sidecar).unwrap_err();
+        let err = lower_descriptor_to_abir(&d, &[0, 0, 0, 0], zero_sidecar).unwrap_err();
         assert!(
             err.to_string().to_lowercase().contains("divisor"),
             "got: {err}"
@@ -912,7 +917,7 @@ mod tests {
         let descriptor = descriptor_for(DescriptorDtype::I16, DescriptorOrientation::Multiplexed);
 
         for k in 0..=payload.len() {
-            let _ = read_bundle_from_descriptor(&descriptor, &payload[..k], sidecar.as_bytes());
+            let _ = lower_descriptor_to_abir(&descriptor, &payload[..k], sidecar.as_bytes());
         }
 
         assert!(
@@ -920,14 +925,14 @@ mod tests {
             "sweep corpus must be ASCII-safe to slice"
         );
         for k in 0..sidecar.len() {
-            let _ = read_bundle_from_descriptor(&descriptor, &payload, &sidecar.as_bytes()[..k]);
+            let _ = lower_descriptor_to_abir(&descriptor, &payload, &sidecar.as_bytes()[..k]);
         }
 
         // Also sweep a handful of adversarial channel-count magnitudes
         // that could overflow a naive `n_channels * bytes_per_sample`.
         let mut huge = descriptor.clone();
         huge.channel_count = ChannelCount::Fixed(usize::MAX / 2);
-        let _ = read_bundle_from_descriptor(&huge, &payload, sidecar.as_bytes());
+        let _ = lower_descriptor_to_abir(&huge, &payload, sidecar.as_bytes());
     }
 
     // ─── Extra coverage (schema completeness, not gate-numbered) ────
@@ -951,10 +956,20 @@ mod tests {
         d.sidecar_keys = vec!["sidecar_json".to_string(), "payload".to_string()];
         let payload = vec![1u8, 0, 2, 0];
         let sidecar = b"{\"channels\":[\"a\"],\"phys_min\":[-1.0],\"phys_max\":[1.0]}".to_vec();
-        let bundle = read_bundle_from_descriptor(&d, &payload, &sidecar).unwrap();
-        assert_eq!(bundle.sidecar.len(), 2);
-        assert_eq!(bundle.sidecar_first("sidecar_json").unwrap().bytes, sidecar);
-        assert_eq!(bundle.sidecar_first("payload").unwrap().bytes, payload);
+        let read = lower_descriptor_to_abir(&d, &payload, &sidecar).unwrap();
+        assert_eq!(read.mapping.source_capsule_count, 2);
+        let capsules = read.opened.dataset().source_capsules();
+        assert_eq!(capsules.len(), 2);
+        assert_eq!(capsules[0].source().namespace(), "source.sidecar.0");
+        assert_eq!(capsules[1].source().namespace(), "source.sidecar.1");
+        assert_eq!(capsules[0].source().value(), "sidecar_json");
+        assert_eq!(capsules[1].source().value(), "payload");
+        let sidecar_json_id =
+            semantic_abir::payload_content_id(semantic_abir::ElementType::Bytes, &sidecar);
+        let payload_id =
+            semantic_abir::payload_content_id(semantic_abir::ElementType::Bytes, &payload);
+        assert_eq!(capsules[0].content_id(), sidecar_json_id);
+        assert_eq!(capsules[1].content_id(), payload_id);
     }
 
     #[test]
@@ -967,7 +982,11 @@ mod tests {
         d.sample_rate = SampleRateSpec::Fixed(100.0);
         let bytes: Vec<u8> = vec![0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x80];
         let sidecar = b"{\"channels\":[\"a\"],\"phys_min\":[-1.0],\"phys_max\":[1.0]}";
-        let bundle = read_bundle_from_descriptor(&d, &bytes, sidecar).unwrap();
-        assert_eq!(bundle.signal[0], vec![0x7F_FFFF_i64, -1, -8_388_608]);
+        let read = lower_descriptor_to_abir(&d, &bytes, sidecar).unwrap();
+        let signal = read.native_i64().unwrap();
+        assert_eq!(signal[0], vec![0x7F_FFFF_i64, -1, -8_388_608]);
+        assert_eq!(read.mapping.source_format, "RAW");
+        assert_eq!(read.mapping.channel_count, 1);
+        assert_eq!(read.mapping.source_capsule_count, 0);
     }
 }

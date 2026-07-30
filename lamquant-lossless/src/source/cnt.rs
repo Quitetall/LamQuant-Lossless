@@ -30,9 +30,9 @@
 use crate::error::{LmlError, LmlResult};
 use std::path::PathBuf;
 
-use super::bundle::{SidecarBlob, SignalBundle, SourceMetadata};
+use super::metadata::{SidecarBlob, SourceMetadata};
 use super::reader::SignalSourceReader;
-use super::semantic::from_signal_bundle;
+use super::semantic::from_owned_uniform_signal;
 
 const SETUP_HEADER_LEN: usize = 900;
 const ELECTLOC_LEN: usize = 75;
@@ -50,7 +50,7 @@ impl CntReader {
         Self { path: path.into() }
     }
 
-    pub fn read_bundle(&mut self) -> LmlResult<SignalBundle> {
+    fn lower_to_owned_signal(&mut self) -> LmlResult<super::semantic::SemanticRead> {
         let raw = std::fs::read(&self.path).map_err(LmlError::Io)?;
         if raw.len() < SETUP_HEADER_LEN {
             return Err(LmlError::Truncated {
@@ -150,38 +150,34 @@ impl CntReader {
         // Preserve the full source bytes as a sidecar so a future
         // `lml decode --to-cnt` can reconstruct losslessly even though
         // we ignored the event table on the read path.
-        let bundle = SignalBundle {
+        from_owned_uniform_signal(
             signal,
             sample_rate,
             channels,
             phys_min,
             phys_max,
             duration_s,
-            metadata: SourceMetadata {
-                source_file: crate::source::bundle::source_basename(&self.path),
+            SourceMetadata {
+                source_file: crate::source::metadata::source_basename(&self.path),
                 format: "CNT".to_string(),
                 patient_id: String::new(),
                 recording_info: String::new(),
                 startdate: String::new(),
                 phys_dim: "raw_int16".to_string(),
             },
-            sidecar: vec![SidecarBlob {
+            vec![SidecarBlob {
                 key: "cnt_raw".to_string(),
                 bytes: raw,
                 aux: None,
             }],
-        };
-        bundle.validate()?;
-        Ok(bundle)
+            semantic_abir::ValidationLimits::default(),
+        )
     }
 }
 
 impl SignalSourceReader for CntReader {
     fn lower_to_abir(&mut self) -> LmlResult<super::semantic::SemanticRead> {
-        from_signal_bundle(
-            self.read_bundle()?,
-            semantic_abir::ValidationLimits::default(),
-        )
+        self.lower_to_owned_signal()
     }
 }
 
@@ -211,23 +207,25 @@ mod tests {
     }
 
     #[test]
-    fn read_bundle_round_trip() {
+    fn lower_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("synth.cnt");
         let blob = synth_cnt(4, 100, 250);
         std::fs::write(&p, &blob).unwrap();
         let mut reader = CntReader::new(&p);
-        let b = reader.read_bundle().unwrap();
-        assert_eq!(b.signal.len(), 4);
-        assert_eq!(b.signal[0].len(), 100);
+        let read = reader.lower_to_abir().unwrap();
+        let signal = read.native_i64().unwrap();
+        assert_eq!(read.mapping.channel_count, 4);
+        assert_eq!(read.mapping.source_format, "CNT");
+        assert_eq!(read.mapping.source_capsule_count, 1);
+        assert_eq!(signal.len(), 4);
+        assert_eq!(signal[0].len(), 100);
         for s in 0..100 {
             for ch in 0..4 {
-                assert_eq!(b.signal[ch][s], (s as i64) * (ch as i64 + 1));
+                assert_eq!(signal[ch][s], (s as i64) * (ch as i64 + 1));
             }
         }
-        assert_eq!(b.metadata.format, "CNT");
-        assert_eq!(b.sample_rate, 250.0);
-        assert_eq!(b.channels[0], "E00");
+        assert_eq!(signal[0][0], 0);
     }
 
     #[test]
@@ -243,41 +241,42 @@ mod tests {
         assert_eq!(read.opened.dataset().atoms().len(), 4);
         assert_eq!(read.mapping.channel_count, 4);
         assert!(read.fidelity.sample_values_exact);
+        assert_eq!(read.opened.dataset().source_capsules().len(), 1);
     }
 
     #[test]
-    fn read_bundle_rejects_too_small_header() {
+    fn lower_rejects_too_small_header() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("tiny.cnt");
         std::fs::write(&p, b"too short").unwrap();
-        match CntReader::new(&p).read_bundle() {
+        match CntReader::new(&p).lower_to_abir() {
             Err(LmlError::Truncated { .. }) => {}
             other => panic!("expected Truncated, got {other:?}"),
         }
     }
 
     #[test]
-    fn read_bundle_rejects_zero_channels() {
+    fn lower_rejects_zero_channels() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("zero.cnt");
         let mut buf = vec![0u8; SETUP_HEADER_LEN];
         buf[376..378].copy_from_slice(&250u16.to_le_bytes()); // valid rate
         std::fs::write(&p, &buf).unwrap();
-        match CntReader::new(&p).read_bundle() {
+        match CntReader::new(&p).lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("nchannels = 0")),
             other => panic!("expected InvalidHeader, got {other:?}"),
         }
     }
 
     #[test]
-    fn read_bundle_rejects_zero_sample_rate() {
+    fn lower_rejects_zero_sample_rate() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("zerorate.cnt");
         let mut buf = vec![0u8; SETUP_HEADER_LEN];
         buf[370..372].copy_from_slice(&2u16.to_le_bytes());
         // rate stays 0
         std::fs::write(&p, &buf).unwrap();
-        match CntReader::new(&p).read_bundle() {
+        match CntReader::new(&p).lower_to_abir() {
             Err(LmlError::InvalidHeader(msg)) => assert!(msg.contains("sample_rate = 0")),
             other => panic!("expected InvalidHeader, got {other:?}"),
         }
