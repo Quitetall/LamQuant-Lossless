@@ -10,10 +10,11 @@ this repo). Two modes:
     weights. This is what the Rust `py_backend` unit test exercises.
 
   * "model" — the real Gen-7.6 `SubbandCodec` (codec-neural). Requires the
-    `lamquant_neural` + `lamquant_codec` packages importable and a checkpoint
-    resolvable via $LAMQUANT_WEIGHTS_DIR. Developer runs may skip this path when
-    dependencies are absent; `LAMQUANT_LMQ_REQUIRE_MODEL_TEST=1` makes missing
-    configuration, dependencies, weights, or inference a gate failure.
+    `lamquant_neural` package and a checkpoint resolvable via
+    $LAMQUANT_WEIGHTS_DIR. Tokenization and BCS2 wire remain Rust-owned.
+    Developer runs may skip this path when dependencies are absent;
+    `LAMQUANT_LMQ_REQUIRE_MODEL_TEST=1` makes missing configuration,
+    dependencies, weights, or inference a gate failure.
 
 Protocol (all arrays are plain JSON numbers):
   encode  req : {op:"encode", mode, sample_rate, signal_domain, signal:[[i64]...]}
