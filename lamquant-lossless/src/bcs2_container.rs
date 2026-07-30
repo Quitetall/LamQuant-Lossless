@@ -369,7 +369,11 @@ pub fn parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
     header(&opened)
 }
 
-fn header(opened: &lamquant_abir_codec::OpenedLmlBundle<'_>) -> LmlResult<ContainerHeader> {
+/// Project authenticated ABIR semantics into the compatibility header.
+///
+/// This is intentionally a scalar metadata view. Sample access remains behind
+/// the already-validated opened bundle.
+pub fn header(opened: &lamquant_abir_codec::OpenedLmlBundle<'_>) -> LmlResult<ContainerHeader> {
     let n_channels = opened.signal().len();
     let total_samples = opened.signal().first().map_or(0, Vec::len);
     let sample_rate_hz = sample_rate(opened.dataset())?;

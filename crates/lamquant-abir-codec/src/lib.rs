@@ -77,6 +77,28 @@ pub const MAX_PACKET_CHANNELS: usize = 1024;
 const MAX_DECODED_BUNDLE_BYTES: usize = 1024 * 1024 * 1024;
 /// Maximum encoded BCS2 bundle produced by graph-facing explicit encoders.
 pub const MAX_ENCODED_BUNDLE_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Validate a dense channel-major LML matrix before any caller copies or
+/// reserves storage for it.
+///
+/// This is the shared host/Python preflight for the same limits enforced while
+/// decoding authenticated bundles.
+pub fn validate_lml_signal_shape(channels: usize, samples: usize) -> Result<(), LmlBundleError> {
+    if channels == 0 || samples == 0 {
+        return Err(LmlBundleError::SignalShapeMismatch);
+    }
+    if channels > MAX_PACKET_CHANNELS {
+        return Err(LmlBundleError::DecodedResourceLimit);
+    }
+    let decoded_bytes = channels
+        .checked_mul(samples)
+        .and_then(|elements| elements.checked_mul(core::mem::size_of::<i64>()))
+        .ok_or(LmlBundleError::DecodedResourceLimit)?;
+    if decoded_bytes > MAX_DECODED_BUNDLE_BYTES {
+        return Err(LmlBundleError::DecodedResourceLimit);
+    }
+    Ok(())
+}
 const BCS2_HEADER_BYTES: usize = 128;
 const BCS2_INDEX_HEADER_BYTES: usize = 48;
 const BCS2_INDEX_ENTRY_BYTES: usize = 128;
@@ -326,6 +348,7 @@ fn encode_lml_bundle_from_verified_signal(
         return Err(LmlBundleError::PacketExtent);
     }
     let total_samples = signal.first().map_or(0, |channel| channel.len());
+    validate_lml_signal_shape(signal.len(), total_samples)?;
     let packet_count = total_samples.div_ceil(packet_samples);
     let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
     let packet_budget = encoded_packet_budget(semantics.len(), packet_count, bounds)?;
@@ -623,14 +646,7 @@ fn decode_packet_sequence<'a>(
         .copied()
         .and_then(|samples| usize::try_from(samples).ok())
         .ok_or(LmlBundleError::SignalShapeMismatch)?;
-    let decoded_bytes = descriptors
-        .len()
-        .checked_mul(expected_samples)
-        .and_then(|elements| elements.checked_mul(core::mem::size_of::<i64>()))
-        .ok_or(LmlBundleError::DecodedResourceLimit)?;
-    if decoded_bytes > MAX_DECODED_BUNDLE_BYTES {
-        return Err(LmlBundleError::DecodedResourceLimit);
-    }
+    validate_lml_signal_shape(descriptors.len(), expected_samples)?;
     let mut signal = (0..descriptors.len())
         .map(|_| {
             let mut channel = Vec::new();
@@ -1311,6 +1327,23 @@ mod tests {
         ObjectId, OpenedDataset, Rational, Recording, RecordingTag, SignalBlock, Stream, StreamTag,
         TimeAxis, TimeSegment, ValidationLimits,
     };
+
+    #[test]
+    fn dense_signal_shape_preflight_matches_decode_limits() {
+        assert!(validate_lml_signal_shape(1, 1).is_ok());
+        assert!(matches!(
+            validate_lml_signal_shape(0, 1),
+            Err(LmlBundleError::SignalShapeMismatch)
+        ));
+        assert!(matches!(
+            validate_lml_signal_shape(MAX_PACKET_CHANNELS + 1, 1),
+            Err(LmlBundleError::DecodedResourceLimit)
+        ));
+        assert!(matches!(
+            validate_lml_signal_shape(1, usize::MAX),
+            Err(LmlBundleError::DecodedResourceLimit)
+        ));
+    }
 
     fn fixture() -> OpenedDataset<InMemoryPayloadAccess> {
         fixture_from_signal(&[

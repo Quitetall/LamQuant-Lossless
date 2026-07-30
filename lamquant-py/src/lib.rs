@@ -1,3 +1,5 @@
+mod abir_view;
+
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict};
@@ -911,6 +913,8 @@ impl PyNeg {
 
 #[pymodule]
 fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<abir_view::PyAbirDatasetView>()?;
+    m.add_function(wrap_pyfunction!(abir_view::open_abir, m)?)?;
     m.add_function(wrap_pyfunction!(golomb_encode_dense, m)?)?;
     m.add_function(wrap_pyfunction!(golomb_decode_dense, m)?)?;
     m.add_function(wrap_pyfunction!(rans_encode, m)?)?;
