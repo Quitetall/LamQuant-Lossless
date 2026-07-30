@@ -3569,6 +3569,7 @@ dependencies = [
  "abir-bcs",
  "blake3",
  "blut-graph-core",
+ "criterion",
  "flate2",
  "lamquant-abir-codec",
  "lamquant-lml-mcu",
