@@ -129,8 +129,45 @@ pub fn encode_from_signal_with_options(
     finish_encoded(dataset, packet_samples, bytes)
 }
 
+/// Every wire frozen by ADR 0071 and reaffirmed by ADR 0118. These are
+/// decode-forever, but NOT here: ADR 0139/0143 put retired wires behind the
+/// independent, supervised legacy Adapter process, and this crate's own
+/// manifest records that the compatibility selector "must never restore a
+/// main-graph legacy dependency". Recognising a magic costs eight bytes and no
+/// dependency; decoding it would cost the dependency, so this only names them.
+const FROZEN_LEGACY_MAGICS: &[(&[u8], &str)] = &[
+    (b"LMLCRYPT", "LMLCRYPT"),
+    (b"LMLFOOT1", "LMLFOOT1"),
+    (b"LML1", "LML1"),
+    (b"LMO1", "LMO1"),
+    (b"LMA1", "LMA1"),
+    (b"LMA2", "LMA2"),
+    (b"LMQC", "LMQC"),
+    (b"LFT2", "LFT2"),
+];
+
+/// Name the retired wire a byte slice starts with, if it is one.
+fn frozen_legacy_magic(data: &[u8]) -> Option<&'static str> {
+    FROZEN_LEGACY_MAGICS
+        .iter()
+        .find(|(magic, _)| data.starts_with(magic))
+        .map(|(_, name)| *name)
+}
+
 /// Authenticate and decode a BCS2 LML profile.
 pub fn open(data: &[u8]) -> LmlResult<lamquant_abir_codec::OpenedLmlBundle<'_>> {
+    // Answer the retired wires by name before handing the bytes to the BCS2
+    // opener. It rejects them on a leading-magic comparison, so without this a
+    // Gen 1-7 file reports `Bcs2(BadMagic)` -- which reads as "corrupt" when
+    // the file is fine and simply belongs to a reader that lives elsewhere.
+    // Refusing is correct; refusing uninformatively is not.
+    if let Some(name) = frozen_legacy_magic(data) {
+        return Err(invalid(format!(
+            "{name} is a retired wire and is not read by this binary. It remains \
+             decode-forever through the independent legacy Adapter process \
+             (capability `legacy.lml1.v1`); see ADR 0071 and ADR 0143."
+        )));
+    }
     lamquant_abir_codec::open_lml_bundle(data, ResourceBounds::default()).map_err(bundle_error)
 }
 
@@ -536,7 +573,17 @@ fn stats(
 }
 
 fn bundle_error(error: lamquant_abir_codec::LmlBundleError) -> LmlError {
-    LmlError::InvalidHeader(format!("BCS2 LML bundle rejected: {error}"))
+    // `Lml(inner)` already IS an `LmlError`, and it is the only variant that
+    // carries a typed data-integrity verdict -- CrcMismatch, Truncated,
+    // InvalidMagic. Wrapping it in InvalidHeader threw that verdict away and
+    // reported bit-rot and truncation as "bad header", which is both wrong and
+    // the least useful thing to tell someone holding a damaged archive.
+    // Callers matching on LmlError::CrcMismatch could never see one through
+    // this seam; the conformance suite pins exactly those variants.
+    match error {
+        lamquant_abir_codec::LmlBundleError::Lml(inner) => inner,
+        other => LmlError::InvalidHeader(format!("BCS2 LML bundle rejected: {other}")),
+    }
 }
 
 fn invalid(message: impl Into<String>) -> LmlError {
