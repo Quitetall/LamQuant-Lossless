@@ -3,6 +3,10 @@ name = "lamquant-abir-codec"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
+# Matches LICENSE.md and every sibling first-party crate. Its absence made
+# cargo-deny report the crate as `unlicensed`; `publish = false` suppresses
+# cargo's own warning, so nothing flagged it until the license gate ran.
+license = "AGPL-3.0-or-later"
 publish = false
 build = "build.rs"
 
