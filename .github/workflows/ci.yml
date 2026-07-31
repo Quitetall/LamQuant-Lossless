@@ -150,8 +150,8 @@ jobs:
       - name: cargo build -p lamquant-lml-optimum (decode, no_std)
         run: cargo build -p lamquant-lml-optimum --no-default-features --features decode --target riscv32imac-unknown-none-elf
 
-  pytest-fast:
-    name: Pytest fast tier
+  python-binding:
+    name: Canonical Python binding
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -172,12 +172,17 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Python codec and test dependencies
+      - name: Build canonical lamquant-core wheel
         run: |
           pip install --upgrade pip
-          pip install -e ".[test,fast,mne]"
-      - name: Run fast tier diagnostics
-        run: python3 tests/run_diagnostics.py fast
+          pip install maturin pytest numpy
+          maturin build --release --manifest-path lamquant-py/Cargo.toml --out wheels
+      - name: Verify wheel inventory and import
+        run: |
+          pip install wheels/*.whl
+          python -c "import lamquant_core; assert callable(lamquant_core.lml_compress)"
+      - name: Run canonical binding tests
+        run: python -m pytest -q lamquant-py/tests
 
   format-check:
     name: cargo fmt + clippy

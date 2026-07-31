@@ -4,11 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "lamquant-core"
-version = "0.2.0"
-description = "LML lossless EEG codec — Rust acceleration for lamquant-codec"
+version = "0.9.3"
+description = "Canonical LamQuant ABIR/BCS2 and deterministic LML Python binding"
 requires-python = ">=3.10"
 license = {text = "AGPL-3.0-or-later"}
-keywords = ["eeg", "lossless", "compression", "codec"]
+dependencies = ["numpy>=1.24"]
+keywords = ["biosignal", "abir", "bcs2", "lossless", "compression", "codec"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -17,4 +18,4 @@ classifiers = [
 ]
 
 [tool.maturin]
-features = ["python", "pyo3/extension-module"]
+module-name = "lamquant_core"

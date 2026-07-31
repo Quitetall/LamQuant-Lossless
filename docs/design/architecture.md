@@ -205,7 +205,9 @@ Two reconstruction routes:
 - Requires latent upsampling: T/4 (79) -> T (313) via linear interpolation, then inverse lifting
 - Higher compute cost, optional
 
-Both routes are implemented in `lamquant_codec/codec.py` and accessible via the `lamquant-decode` CLI.
+Both neural reconstruction routes are owned by `codec-neural/` and exposed
+through current runtime/Node APIs. The former pure-Python implementation is
+retired under the process-isolated `lamquant-legacy` boundary.
 
 ---
 

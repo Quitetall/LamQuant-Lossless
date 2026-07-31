@@ -566,9 +566,11 @@ A conformant encoder+decoder MUST roundtrip this signal bit-exactly.
 | Language | Location | LOC | Status |
 |----------|----------|-----|--------|
 | Rust | `lamquant-lossless` crate (lib target `lamquant_core`) | ~2200 | Canonical |
-| Python | `lamquant_codec/` | ~1500 | Production |
+| Python | `lamquant-py/` (`import lamquant_core`) | PyO3 binding | Canonical binding |
 
-Both produce byte-identical output for the same input.
+Python calls the canonical Rust implementation, so both surfaces emit the same
+bytes. The independent pure-Python implementation is retired, byte-preserved
+under `lamquant-legacy`, and not a current encoder.
 
 ## Appendix C. Format Limits
 

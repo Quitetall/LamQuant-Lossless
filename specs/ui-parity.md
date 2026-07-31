@@ -1,12 +1,16 @@
 # UI Parity Spec
 
-Single source of truth for the LamQuant front-end inventory. Three implementations must match this document exactly:
+Single source of truth for the LamQuant front-end inventory. Current product
+implementations must match this document exactly:
 
-1. **Python TUI** — `lamquant.py` + `lamquant_codec/cli/*`
-2. **Rust+Ratatui TUI** — `lamquant-core/src/tui/*` + `lamquant-core/src/bin/lml.rs`
-3. **Tauri+Svelte 5 GUI** — `gui/`
+1. **Rust+Ratatui TUI** — meta-repository `crates/lamquant-tui/` plus the
+   lossless `lml` launcher
+2. **Tauri+Svelte 5 GUI** — meta-repository `gui/`
 
-When any of the three drifts from this spec, the spec wins. Drift is a CI failure via `crates/lamquant-ops/tests/schema_parity.rs`.
+The former Python TUI is preserved only in `lamquant-legacy`; it is not a
+current parity target. When a current front end drifts from this spec, the spec
+wins. Drift is a CI failure via
+`crates/lamquant-ops/tests/schema_parity.rs`.
 
 ## Workflow inventory (10 top-level)
 
@@ -269,7 +273,8 @@ Schemas in `specs/` are language-neutral. Each UI/runner must keep plan-projecti
 bindings in sync with the protocol:
 
 - **Rust:** `crates/lamquant-ops` exports binding types for `PlanProjection`.
-- **Python:** `lamquant_codec/cli` keeps Python bindings consistent with `plan-projections`.
+- **Python:** current meta-repository launchers consume the versioned
+  `plan-projections` protocol; no binding lives in the retired codec package.
 - **TS:** `gui/` keeps TypeScript bindings consistent with `plan-projections`.
 
 Producers may emit `planned`, `progress`, `artifact`, and `diagnostic`

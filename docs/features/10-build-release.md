@@ -27,7 +27,7 @@ machines when fed `SOURCE_DATE_EPOCH`.
 | Release notarize (macOS) | `release.yml` | shipped | v1.0 (7.7) | Opt-in via repo secrets |
 | Release Authenticode (Windows) | `release.yml` | shipped | v1.0 (7.7) | Opt-in via repo secrets |
 | cargo-tarpaulin Rust coverage | `.tarpaulin.toml` | shipped | v1.2 (T.1) | llvm engine, fail-under 70% |
-| Python coverage on `lamquant_codec` | `pyproject.toml` | shipped | v1.2 (T.2) | Coverage scope extended |
+| Historical pure-Python codec coverage | `lamquant-legacy` snapshot | retired | v1.2 (T.2) | Preserved for audit; not a current CI lane |
 | 1M-file stress harness | `scripts/stress_1m_files.sh` | shipped | v1.0 (8.5) | synth N EDFs → encode → archive → verify |
 | >100 GB file fixture recipe | `docs/STRESS_TESTING.md` | shipped | v1.0 (8.6) | Pipeline scaling test |
 
@@ -160,15 +160,15 @@ cargo install cargo-tarpaulin
 cargo tarpaulin --config .tarpaulin.toml
 ```
 
-## Python coverage extended (v1.2 T.2)
+## Historical Python coverage extension (v1.2 T.2, retired)
 
-`pyproject.toml`'s coverage scope expanded from `[ai_models,
-firmware]` to also include `lamquant_codec`. Same `pytest-cov` run
-now covers the Python codec layer plus the AI / firmware layers.
+Generation v1.2 expanded `pyproject.toml` coverage from `[ai_models,
+firmware]` to the former pure-Python codec. Package 32 retired that
+distribution and byte-preserved its project/test closure in
+`lamquant-legacy`. Current CI builds and tests the `lamquant-core` wheel from
+`lamquant-py/`; this command remains historical evidence:
 
-```sh
-pytest --cov=lamquant_codec --cov=ai_models --cov=firmware --cov-report=term
-```
+Historical target set: retired pure-Python codec, `ai_models`, and `firmware`.
 
 ## Release pipeline notarize + Authenticode (Phase 7.7)
 
@@ -273,7 +273,7 @@ packagers can pick a smaller subset.
   - Phase 8.8 — cargo-audit + cargo-deny lanes
   - Phase 8.9 — publishable conformance suite
   - v1.2 T.1 — cargo-tarpaulin + CI coverage job
-  - v1.2 T.2 — Python coverage extended to `lamquant_codec`
+  - v1.2 T.2 — historical pure-Python codec coverage extension
 - **Cross-cutting docs**:
   - [`../BUILDING.md`](../BUILDING.md) — full build walkthrough
   - [`../FEATURES.md`](../FEATURES.md) §9 (CI hardening + supply-chain)
