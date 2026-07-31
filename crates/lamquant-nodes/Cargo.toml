@@ -47,7 +47,7 @@ standard-nwb = [
 ]
 
 [dependencies]
-abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", optional = true }
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "92cae253f0a43b0c457cb1c0b773d77420f288a7", optional = true }
 blake3 = { version = "=1.5.5", default-features = false }
 blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "4d80951056bb7c464ee4ff4412131dc607f57199", default-features = false }
 ed25519-dalek = { version = "2.1", optional = true }
@@ -56,8 +56,8 @@ lamquant-abir-codec = { version = "0.1.0", path = "../lamquant-abir-codec", defa
 lamquant-lmq = { version = "0.0.2", path = "../../lamquant-lmq", default-features = false, optional = true }
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
 lamquant-standard-adapters = { version = "0.1.0", path = "../lamquant-standard-adapters", default-features = false, optional = true }
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", default-features = false, features = ["alloc"] }
-semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "92cae253f0a43b0c457cb1c0b773d77420f288a7", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "92cae253f0a43b0c457cb1c0b773d77420f288a7", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["alloc"], optional = true }
 serde_json = { version = "1", features = ["arbitrary_precision"], optional = true }
 
