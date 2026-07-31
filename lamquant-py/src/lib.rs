@@ -154,6 +154,41 @@ fn container_read(path: &str) -> PyResult<(Vec<Vec<i64>>, String)> {
         .map_err(|error| pyo3::exceptions::PyIOError::new_err(error.to_string()))
 }
 
+/// Read an EDF/EDF+/BDF file as DIGITAL samples → (signal, metadata_json).
+///
+/// Digital, not physical: the integers as stored on disk, with no scaling
+/// applied. Verification tools compare these against what the codec
+/// reconstructs, and any float conversion in that path would compare a
+/// rounding artefact instead of the recording.
+///
+/// Deliberately shaped like `container_read` — `(Vec<Vec<i64>>, String)` —
+/// because the two are used as a pair: read the EDF, read the .lml the codec
+/// produced from it, assert equality. Matching shapes keep that comparison
+/// free of adapter code on the Python side.
+///
+/// `lml::edf::read_edf` covers the whole family (EDF, EDF+C, EDF+D, BDF), so
+/// callers do not dispatch on format.
+#[pyfunction]
+fn edf_read_digital(path: &str) -> PyResult<(Vec<Vec<i64>>, String)> {
+    let edf = lml::edf::read_edf(std::path::Path::new(path))
+        .map_err(|error| pyo3::exceptions::PyIOError::new_err(error.to_string()))?;
+    let metadata = serde_json::json!({
+        "channels": edf.channels,
+        "sample_rate": edf.sample_rate,
+        "n_channels": edf.n_channels,
+        "total_samples": edf.total_samples,
+        "duration_s": edf.duration_s,
+        "source_file": edf.source_file,
+        "patient_id": edf.patient_id,
+        "format": edf.format,
+        "startdate": edf.startdate,
+        "recording_info": edf.recording_info,
+        "n_data_records": edf.n_data_records,
+        "record_duration": edf.record_duration,
+    });
+    Ok((edf.signal, metadata.to_string()))
+}
+
 /// Read LML container from in-memory bytes → (signal, metadata_json).
 ///
 /// Used by the LMA-direct training dataloader: the .lml bytes are
@@ -923,6 +958,7 @@ fn lamquant_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lml_decompress, m)?)?;
     m.add_function(wrap_pyfunction!(container_write, m)?)?;
     m.add_function(wrap_pyfunction!(container_read, m)?)?;
+    m.add_function(wrap_pyfunction!(edf_read_digital, m)?)?;
     m.add_function(wrap_pyfunction!(container_read_bytes, m)?)?;
     m.add_class::<PyNeg>()?;
     m.add_class::<PyPackWriter>()?;
