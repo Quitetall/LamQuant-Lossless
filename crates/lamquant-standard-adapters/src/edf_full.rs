@@ -7,11 +7,12 @@ use abir_adapter::{
 };
 use lamquant_core::edf::{read_edf, EdfFile};
 use semantic_abir::{
-    interchange_content_id, payload_content_id as abir_payload_id, Atom, AtomTag, BlobIntegrity,
-    BlobRef, ByteOrder, Calibration, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock, ClockTag,
-    ConceptId, DatasetDraft, DatasetTag, ElementType, Event, EventTag, Layout, ObjectId,
-    PayloadDescriptor, Presence, Rational, Recording, RecordingTag, ReferenceKind, SignalBlock,
-    SourceCapsule, SourceKey, Stream, StreamTag, TimeAxis, TimeSegment, ValidationLimits,
+    interchange_content_id, payload_content_id as abir_payload_id, verify_payload_content, Atom,
+    AtomTag, BlobIntegrity, BlobRef, ByteOrder, Calibration, ChannelBasis, ChannelBasisTag,
+    ChannelSpec, Clock, ClockTag, ConceptId, DatasetDraft, DatasetTag, ElementType, Event,
+    EventTag, Layout, ObjectId, PayloadDescriptor, Presence, Rational, Recording, RecordingTag,
+    ReferenceKind, SignalBlock, SourceCapsule, SourceKey, Stream, StreamTag, TimeAxis, TimeSegment,
+    ValidationLimits,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -48,6 +49,23 @@ struct Annotation {
     onset: Rational,
     duration: Option<Rational>,
     text: String,
+}
+
+struct SemanticEdfSignal<'a> {
+    atom_id: ObjectId<AtomTag>,
+    block: &'a SignalBlock,
+    descriptor: &'a PayloadDescriptor,
+    label: &'a str,
+    unit: &'a str,
+}
+
+struct SemanticEdf<'a> {
+    signals: Vec<SemanticEdfSignal<'a>>,
+    record_duration: Rational,
+    patient_id: &'a str,
+    recording_info: &'a str,
+    start_date: &'a str,
+    start_time: &'a str,
 }
 
 impl EdfAdapter {
@@ -355,6 +373,178 @@ impl EdfAdapter {
             .filter(|capsule| capsule.source().namespace() == namespace)
             .collect())
     }
+
+    fn semantic_edf<'a>(
+        &self,
+        dataset: &'a semantic_abir::AbirDataset,
+    ) -> Result<SemanticEdf<'a>, AdapterError> {
+        if dataset.recordings().len() != 1
+            || dataset.streams().len() != 1
+            || dataset.channel_bases().len() != 1
+            || !dataset.events().is_empty()
+            || !dataset.coordinate_frames().is_empty()
+            || !dataset.policies().is_empty()
+            || !dataset.proofs().is_empty()
+            || !dataset.derivations().is_empty()
+            || !dataset.fidelity().is_empty()
+            || !dataset.observed_execution().is_empty()
+            || !dataset.subjects().is_empty()
+            || !dataset.patients().is_empty()
+            || !dataset.sessions().is_empty()
+            || !dataset.acquisitions().is_empty()
+            || !dataset.devices().is_empty()
+            || !dataset.sensors().is_empty()
+            || !dataset.channels().is_empty()
+            || !dataset.clock_relations().is_empty()
+            || !dataset.frame_transforms().is_empty()
+            || !dataset.concept_dictionaries().is_empty()
+            || !dataset.derived_artifacts().is_empty()
+            || !dataset.source_relationships().is_empty()
+        {
+            return Err(unsupported(
+                "EDF semantic writeback currently requires one recording and one signal stream without auxiliary ABIR catalogs",
+            ));
+        }
+        let recording = &dataset.recordings()[0];
+        let stream = &dataset.streams()[0];
+        let basis = &dataset.channel_bases()[0];
+        if recording.streams() != [stream.id()]
+            || stream.recording_id() != recording.id()
+            || stream.modality().as_str() != "abir:modality/eeg"
+            || stream.channel_basis_id() != Some(basis.id())
+            || stream.policy_id().is_some()
+            || stream.atoms().len() != basis.channels().len()
+            || stream.atoms().len() != dataset.atoms().len()
+            || stream.atoms().is_empty()
+        {
+            return Err(unsupported(
+                "EDF semantic writeback requires one EEG stream with one signal atom per channel",
+            ));
+        }
+        if dataset.clocks().len() != 1 {
+            return Err(unsupported(
+                "EDF semantic writeback requires one recording-local clock",
+            ));
+        }
+        let clock = &dataset.clocks()[0];
+        if stream.clock_id() != Some(clock.id())
+            || clock.kind().as_str() != "edf:clock/recording-local-unknown-zone"
+            || clock.parent_id().is_some()
+            || clock.offset() != Rational::new(0, 1).unwrap()
+            || clock.rate() != Rational::new(1, 1).unwrap()
+            || clock.uncertainty() != Rational::new(1, 1).unwrap()
+        {
+            return Err(unsupported("EDF cannot exactly write this clock model"));
+        }
+
+        let patient_id = required_source_value(recording.source_keys(), "edf.patient-id")?;
+        let recording_info = required_source_value(recording.source_keys(), "edf.recording-info")?;
+        let local_time =
+            required_source_value(recording.source_keys(), "edf.recording-local-time")?;
+        let mut local_parts = local_time.split_ascii_whitespace();
+        let start_date = local_parts
+            .next()
+            .ok_or_else(|| unsupported("EDF recording date is missing"))?;
+        let start_time = local_parts
+            .next()
+            .ok_or_else(|| unsupported("EDF recording time is missing"))?;
+        if local_parts.next().is_some() {
+            return Err(unsupported("EDF recording local time is malformed"));
+        }
+        check_ascii_field(patient_id, 80, "patient identifier")?;
+        check_ascii_field(recording_info, 80, "recording information")?;
+        check_ascii_field(start_date, 8, "recording date")?;
+        check_ascii_field(start_time, 8, "recording time")?;
+
+        let mut signals = Vec::with_capacity(stream.atoms().len());
+        let mut record_duration = None;
+        for (atom_id, channel) in stream.atoms().iter().zip(basis.channels()) {
+            let atom = dataset
+                .atoms()
+                .iter()
+                .find(|atom| atom.id() == *atom_id)
+                .ok_or_else(|| unsupported("EDF stream references a missing signal atom"))?;
+            let Atom::SignalBlock(block) = atom else {
+                return Err(unsupported("EDF channels require SignalBlock atoms"));
+            };
+            let descriptor = atom
+                .payload()
+                .ok_or_else(|| unsupported("EDF channels require present payloads"))?;
+            let TimeAxis::Regular(segment) = block.time_axis() else {
+                return Err(unsupported(
+                    "EDF semantic writeback currently requires regular time axes",
+                ));
+            };
+            if segment.start() != Rational::new(0, 1).unwrap()
+                || descriptor.element() != ElementType::I64
+                || descriptor.byte_order() != ByteOrder::Little
+                || descriptor.layout() != &Layout::DenseRowMajor
+                || descriptor.shape() != [1, segment.samples()]
+                || descriptor.encoding().map(ConceptId::as_str) != Some("abir:encoding/raw")
+            {
+                return Err(unsupported(
+                    "EDF channels require zero-origin dense little-endian raw I64 signal blocks",
+                ));
+            }
+            let duration = divide_by(
+                Rational::new(i128::from(segment.samples()), 1)
+                    .map_err(|error| AdapterError::InvalidSource(error.to_string()))?,
+                segment.rate().parts().0,
+            )?;
+            let (_, rate_denominator) = segment.rate().parts();
+            let duration = multiply_by(duration, rate_denominator)?;
+            if record_duration
+                .replace(duration)
+                .is_some_and(|other| other != duration)
+            {
+                return Err(unsupported(
+                    "all EDF channels must span one identical record duration",
+                ));
+            }
+            let calibration = block
+                .calibration()
+                .ok_or_else(|| unsupported("EDF channels require exact calibration"))?;
+            if !calibration.scale().is_positive() {
+                return Err(unsupported(
+                    "EDF semantic writeback requires positive calibration scale",
+                ));
+            }
+            for digital in [i16::MIN, i16::MAX] {
+                edf_decimal(add(
+                    multiply_by(calibration.scale(), i128::from(digital))?,
+                    calibration.offset(),
+                )?)?;
+            }
+            check_ascii_field(&segment.samples().to_string(), 8, "samples-per-record")?;
+            let label = required_source_value(channel.source_keys(), "edf.channel-label")?;
+            let unit = required_source_value(channel.source_keys(), "edf.physical-unit")?;
+            if unit_concept(unit)? != *calibration.unit() {
+                return Err(unsupported(
+                    "EDF physical-unit source key disagrees with ABIR calibration",
+                ));
+            }
+            check_ascii_field(label, 16, "channel label")?;
+            check_ascii_field(unit, 8, "physical unit")?;
+            signals.push(SemanticEdfSignal {
+                atom_id: *atom_id,
+                block,
+                descriptor,
+                label,
+                unit,
+            });
+        }
+        let record_duration = record_duration.expect("nonempty signal stream");
+        edf_decimal(record_duration)?;
+        check_ascii_field(&signals.len().to_string(), 4, "signal count")?;
+        Ok(SemanticEdf {
+            signals,
+            record_duration,
+            patient_id,
+            recording_info,
+            start_date,
+            start_time,
+        })
+    }
 }
 
 impl Adapter for EdfAdapter {
@@ -407,10 +597,25 @@ impl Adapter for EdfAdapter {
         dataset: &semantic_abir::AbirDataset,
     ) -> Result<ExportPlan, AdapterError> {
         let capsules = self.capsules(dataset)?;
-        let mut plan = ExportPlan {
-            source_dataset: dataset.id().to_string(),
-            target_profile: self.profile.id.clone(),
-            mappings: capsules
+        let semantic = if capsules.len() == 1 {
+            None
+        } else {
+            self.semantic_edf(dataset).ok()
+        };
+        let mappings = if let Some(semantic) = semantic.as_ref() {
+            semantic
+                .signals
+                .iter()
+                .enumerate()
+                .map(|(index, signal)| {
+                    exact(
+                        format!("atom:{}", signal.atom_id),
+                        format!("recording.edf:signal[{index}]"),
+                    )
+                })
+                .collect()
+        } else {
+            capsules
                 .iter()
                 .map(|capsule| {
                     exact(
@@ -418,9 +623,14 @@ impl Adapter for EdfAdapter {
                         capsule.source().value().to_owned(),
                     )
                 })
-                .collect(),
+                .collect()
+        };
+        let mut plan = ExportPlan {
+            source_dataset: dataset.id().to_string(),
+            target_profile: self.profile.id.clone(),
+            mappings,
             requires_user_acceptance: false,
-            unsupported: capsules.len() != 1,
+            unsupported: capsules.len() != 1 && semantic.is_none(),
             plan_id: String::new(),
         };
         plan.plan_id = plan_id(&plan);
@@ -439,28 +649,55 @@ impl Adapter for EdfAdapter {
         }
         if !plan.accepts_without_loss() {
             return Err(AdapterError::UnsupportedMeaning(
-                "dataset lacks one identity-bound EDF source capsule".to_owned(),
+                "dataset lacks one identity-bound EDF source capsule and cannot be represented by semantic EDF writeback".to_owned(),
             ));
         }
-        let capsule = self.capsules(dataset)?[0];
-        let bytes = payloads.resolve(capsule.content_id())?;
-        if payload_content_id(&bytes) != capsule.content_id() {
-            return Err(AdapterError::MissingPayload(capsule.content_id()));
+        let capsules = self.capsules(dataset)?;
+        if capsules.len() == 1 {
+            let capsule = capsules[0];
+            let bytes = payloads.resolve(capsule.content_id())?;
+            if payload_content_id(&bytes) != capsule.content_id() {
+                return Err(AdapterError::MissingPayload(capsule.content_id()));
+            }
+            return Ok((
+                ForeignObject {
+                    profile: self.profile.id.clone(),
+                    entries: vec![ForeignEntry {
+                        path: capsule.source().value().to_owned(),
+                        media_type: capsule.media_type().map(str::to_owned),
+                        bytes,
+                    }],
+                },
+                FidelityReceipt {
+                    plan_id: plan.plan_id.clone(),
+                    exact_source_restoration: true,
+                    semantic_equivalence: true,
+                    output_content_ids: vec![capsule.content_id().to_string()],
+                },
+            ));
         }
+        let semantic = self.semantic_edf(dataset)?;
+        let bytes = write_semantic_edf(&semantic, payloads)?;
+        if u64::try_from(bytes.len()).map_err(|_| AdapterError::SourceTooLarge)?
+            > self.max_source_bytes
+        {
+            return Err(AdapterError::SourceTooLarge);
+        }
+        let content_id = payload_content_id(&bytes);
         Ok((
             ForeignObject {
                 profile: self.profile.id.clone(),
                 entries: vec![ForeignEntry {
-                    path: capsule.source().value().to_owned(),
-                    media_type: capsule.media_type().map(str::to_owned),
+                    path: "recording.edf".to_owned(),
+                    media_type: Some("application/edf".to_owned()),
                     bytes,
                 }],
             },
             FidelityReceipt {
                 plan_id: plan.plan_id.clone(),
-                exact_source_restoration: true,
+                exact_source_restoration: false,
                 semantic_equivalence: true,
-                output_content_ids: vec![capsule.content_id().to_string()],
+                output_content_ids: vec![content_id.to_string()],
             },
         ))
     }
@@ -481,6 +718,205 @@ impl Adapter for EdfAdapter {
                 .collect(),
         }
     }
+}
+
+fn write_semantic_edf(
+    semantic: &SemanticEdf<'_>,
+    payloads: &dyn PayloadResolver,
+) -> Result<Vec<u8>, AdapterError> {
+    let signal_count = semantic.signals.len();
+    let header_bytes = 256_usize
+        .checked_add(
+            signal_count
+                .checked_mul(256)
+                .ok_or(AdapterError::SourceTooLarge)?,
+        )
+        .ok_or(AdapterError::SourceTooLarge)?;
+    let payload_bytes = semantic.signals.iter().try_fold(0_usize, |total, signal| {
+        let samples = usize::try_from(signal.descriptor.shape()[1])
+            .map_err(|_| AdapterError::SourceTooLarge)?;
+        total
+            .checked_add(samples.checked_mul(2).ok_or(AdapterError::SourceTooLarge)?)
+            .ok_or(AdapterError::SourceTooLarge)
+    })?;
+    let mut bytes = Vec::with_capacity(
+        header_bytes
+            .checked_add(payload_bytes)
+            .ok_or(AdapterError::SourceTooLarge)?,
+    );
+    push_edf_field(&mut bytes, "0", 8)?;
+    push_edf_field(&mut bytes, semantic.patient_id, 80)?;
+    push_edf_field(&mut bytes, semantic.recording_info, 80)?;
+    push_edf_field(&mut bytes, semantic.start_date, 8)?;
+    push_edf_field(&mut bytes, semantic.start_time, 8)?;
+    push_edf_field(&mut bytes, &header_bytes.to_string(), 8)?;
+    push_edf_field(&mut bytes, "", 44)?;
+    push_edf_field(&mut bytes, "1", 8)?;
+    push_edf_field(&mut bytes, &edf_decimal(semantic.record_duration)?, 8)?;
+    push_edf_field(&mut bytes, &signal_count.to_string(), 4)?;
+    debug_assert_eq!(bytes.len(), 256);
+
+    for signal in &semantic.signals {
+        push_edf_field(&mut bytes, signal.label, 16)?;
+    }
+    for _ in &semantic.signals {
+        push_edf_field(&mut bytes, "", 80)?;
+    }
+    for signal in &semantic.signals {
+        push_edf_field(&mut bytes, signal.unit, 8)?;
+    }
+    for digital in [i16::MIN, i16::MAX] {
+        for signal in &semantic.signals {
+            let calibration = signal
+                .block
+                .calibration()
+                .expect("semantic projection requires calibration");
+            if !calibration.scale().is_positive() {
+                return Err(unsupported(
+                    "EDF semantic writeback requires positive calibration scale",
+                ));
+            }
+            let physical = add(
+                multiply_by(calibration.scale(), i128::from(digital))?,
+                calibration.offset(),
+            )?;
+            push_edf_field(&mut bytes, &edf_decimal(physical)?, 8)?;
+        }
+    }
+    for value in [i16::MIN, i16::MAX] {
+        for _ in &semantic.signals {
+            push_edf_field(&mut bytes, &value.to_string(), 8)?;
+        }
+    }
+    for _ in &semantic.signals {
+        push_edf_field(&mut bytes, "", 80)?;
+    }
+    for signal in &semantic.signals {
+        push_edf_field(&mut bytes, &signal.descriptor.shape()[1].to_string(), 8)?;
+    }
+    for _ in &semantic.signals {
+        push_edf_field(&mut bytes, "", 32)?;
+    }
+    debug_assert_eq!(bytes.len(), header_bytes);
+
+    for signal in &semantic.signals {
+        let logical = payloads.resolve(signal.descriptor.content_id())?;
+        verify_payload_content(signal.descriptor, &logical)
+            .map_err(|_| AdapterError::MissingPayload(signal.descriptor.content_id()))?;
+        for sample in logical.chunks_exact(8) {
+            let value = i64::from_le_bytes(sample.try_into().expect("eight-byte chunk"));
+            let value = i16::try_from(value).map_err(|_| {
+                unsupported("EDF signal payload contains a sample outside signed 16-bit range")
+            })?;
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn required_source_value<'a>(
+    keys: &'a [SourceKey],
+    namespace: &str,
+) -> Result<&'a str, AdapterError> {
+    let mut matches = keys
+        .iter()
+        .filter(|key| key.namespace() == namespace)
+        .map(SourceKey::value);
+    let value = matches
+        .next()
+        .ok_or_else(|| unsupported(&format!("required source key {namespace} is missing")))?;
+    if matches.next().is_some() {
+        return Err(unsupported(&format!(
+            "required source key {namespace} is ambiguous"
+        )));
+    }
+    Ok(value)
+}
+
+fn check_ascii_field(value: &str, width: usize, name: &str) -> Result<(), AdapterError> {
+    if !value.is_ascii() || value.len() > width || value.chars().any(char::is_control) {
+        return Err(unsupported(&format!(
+            "EDF {name} is not representable in its {width}-byte ASCII field"
+        )));
+    }
+    Ok(())
+}
+
+fn push_edf_field(bytes: &mut Vec<u8>, value: &str, width: usize) -> Result<(), AdapterError> {
+    check_ascii_field(value, width, "header value")?;
+    bytes.extend_from_slice(value.as_bytes());
+    bytes.resize(bytes.len() + width - value.len(), b' ');
+    Ok(())
+}
+
+fn edf_decimal(value: Rational) -> Result<String, AdapterError> {
+    let (numerator, mut denominator) = value.parts();
+    let mut twos = 0_u32;
+    let mut fives = 0_u32;
+    while denominator % 2 == 0 {
+        denominator /= 2;
+        twos += 1;
+    }
+    while denominator % 5 == 0 {
+        denominator /= 5;
+        fives += 1;
+    }
+    if denominator != 1 {
+        return Err(unsupported(
+            "EDF exact number has no finite decimal representation",
+        ));
+    }
+    let digits = twos.max(fives);
+    let scaled = numerator
+        .checked_mul(two(digits - twos)?)
+        .and_then(|value| value.checked_mul(five(digits - fives).ok()?))
+        .ok_or(AdapterError::SourceTooLarge)?;
+    let negative = scaled < 0;
+    let magnitude = scaled.unsigned_abs().to_string();
+    let mut rendered = if digits == 0 {
+        magnitude
+    } else {
+        let digits = usize::try_from(digits).map_err(|_| AdapterError::SourceTooLarge)?;
+        if magnitude.len() <= digits {
+            format!("0.{}{}", "0".repeat(digits - magnitude.len()), magnitude)
+        } else {
+            let split = magnitude.len() - digits;
+            format!("{}.{}", &magnitude[..split], &magnitude[split..])
+        }
+    };
+    if rendered.contains('.') {
+        while rendered.ends_with('0') {
+            rendered.pop();
+        }
+        if rendered.ends_with('.') {
+            rendered.pop();
+        }
+    }
+    if negative {
+        rendered.insert(0, '-');
+    }
+    if rendered.len() > 8 {
+        return Err(unsupported(
+            "EDF exact decimal does not fit its eight-byte field",
+        ));
+    }
+    Ok(rendered)
+}
+
+fn five(power: u32) -> Result<i128, AdapterError> {
+    (0..power).try_fold(1_i128, |value, _| {
+        value.checked_mul(5).ok_or(AdapterError::SourceTooLarge)
+    })
+}
+
+fn two(power: u32) -> Result<i128, AdapterError> {
+    (0..power).try_fold(1_i128, |value, _| {
+        value.checked_mul(2).ok_or(AdapterError::SourceTooLarge)
+    })
+}
+
+fn unsupported(reason: &str) -> AdapterError {
+    AdapterError::UnsupportedMeaning(reason.to_owned())
 }
 
 fn signal_headers(edf: &EdfFile) -> Result<Vec<SignalHeader>, AdapterError> {

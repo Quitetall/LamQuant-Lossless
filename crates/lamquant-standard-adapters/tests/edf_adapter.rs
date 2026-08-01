@@ -3,7 +3,11 @@ use lamquant_core::source::{
     from_owned_uniform_signal, SemanticLoweringOptions, SemanticSourceCapsule, SourceMetadata,
 };
 use lamquant_standard_adapters::{payload_content_id, EdfAdapter};
-use semantic_abir::{ContentId, ValidationLimits};
+use semantic_abir::{
+    payload_content_id as abir_payload_id, Atom, AtomTag, ByteOrder, ConceptId, ContentId,
+    ElementType, Event, EventTag, Layout, ObjectId, PayloadDescriptor, Presence, Rational,
+    SignalBlock, ValidationLimits,
+};
 use std::collections::BTreeMap;
 
 fn write_ascii(target: &mut [u8], value: &str) {
@@ -141,6 +145,15 @@ fn payloads(imported: &abir_adapter::ImportOutcome) -> Payloads {
     )
 }
 
+fn signal_payload(imported: &abir_adapter::ImportOutcome, content_id: ContentId) -> &[u8] {
+    &imported
+        .payloads
+        .iter()
+        .find(|payload| payload.content_id == content_id)
+        .expect("signal payload belongs to the imported payload closure")
+        .bytes
+}
+
 #[test]
 fn edf_import_maps_samples_and_restores_exact_source() {
     let bytes = lamquant_common::ingest::synth_single_channel_edf(&[1, -2, 3, -4], 250.0);
@@ -182,6 +195,167 @@ fn edf_import_maps_samples_and_restores_exact_source() {
     assert_eq!(restored, source);
     assert!(receipt.exact_source_restoration);
     assert!(receipt.semantic_equivalence);
+}
+
+#[test]
+fn capsule_free_abir_exports_semantic_edf_and_reimports_without_signal_loss() {
+    let source = ForeignObject {
+        profile: ProfileId("edfplus.1".to_owned()),
+        entries: vec![ForeignEntry {
+            path: "recording.edf".to_owned(),
+            media_type: Some("application/edf".to_owned()),
+            bytes: lamquant_common::ingest::synth_single_channel_edf(
+                &[i16::MIN, -2, 0, 3, i16::MAX],
+                250.0,
+            ),
+        }],
+    };
+    let adapter = EdfAdapter::new(1024 * 1024);
+    let imported = adapter
+        .import(&source, ValidationLimits::default())
+        .expect("semantic EDF import");
+    let mut draft = imported.dataset.clone().into_draft();
+    draft.clear_source_capsules();
+    let capsule_free = draft
+        .validate(ValidationLimits::default())
+        .expect("capsules are not required semantic payloads");
+
+    let plan = adapter
+        .plan_export(&capsule_free)
+        .expect("representable ABIR receives an export plan");
+    assert!(plan.accepts_without_loss());
+    assert!(!plan.mappings.is_empty());
+    let (written, receipt) = adapter
+        .export(&capsule_free, &plan, &payloads(&imported))
+        .expect("semantic EDF writeback succeeds without a source capsule");
+    assert!(!receipt.exact_source_restoration);
+    assert!(receipt.semantic_equivalence);
+
+    let reimported = adapter
+        .import(&written, ValidationLimits::default())
+        .expect("written EDF is accepted by the first-class EDF adapter");
+    let (source_block, target_block) =
+        match (&imported.dataset.atoms()[0], &reimported.dataset.atoms()[0]) {
+            (Atom::SignalBlock(source), Atom::SignalBlock(target)) => (source, target),
+            other => panic!("expected signal blocks, got {other:?}"),
+        };
+    assert_eq!(target_block.time_axis(), source_block.time_axis());
+    assert_eq!(target_block.calibration(), source_block.calibration());
+    let source_descriptor = imported.dataset.atoms()[0].payload().unwrap();
+    let target_descriptor = reimported.dataset.atoms()[0].payload().unwrap();
+    assert_eq!(target_descriptor.element(), source_descriptor.element());
+    assert_eq!(target_descriptor.shape(), source_descriptor.shape());
+    assert_eq!(
+        signal_payload(&reimported, target_descriptor.content_id()),
+        signal_payload(&imported, source_descriptor.content_id())
+    );
+    assert_eq!(
+        reimported.dataset.channel_bases()[0].channels()[0]
+            .source_keys()
+            .iter()
+            .find(|key| key.namespace() == "edf.channel-label")
+            .map(|key| key.value()),
+        imported.dataset.channel_bases()[0].channels()[0]
+            .source_keys()
+            .iter()
+            .find(|key| key.namespace() == "edf.channel-label")
+            .map(|key| key.value())
+    );
+}
+
+#[test]
+fn semantic_edf_export_rejects_unrepresented_events_before_output() {
+    let source = ForeignObject {
+        profile: ProfileId("edfplus.1".to_owned()),
+        entries: vec![ForeignEntry {
+            path: "recording.edf".to_owned(),
+            media_type: Some("application/edf".to_owned()),
+            bytes: lamquant_common::ingest::synth_single_channel_edf(&[1, 2, 3, 4, 5], 250.0),
+        }],
+    };
+    let adapter = EdfAdapter::new(1024 * 1024);
+    let imported = adapter
+        .import(&source, ValidationLimits::default())
+        .expect("semantic EDF import");
+    let mut draft = imported.dataset.clone().into_draft();
+    draft.clear_source_capsules();
+    draft.add_event(Event::new(
+        ObjectId::<EventTag>::from_bytes([0x55; 16]),
+        ConceptId::new("test:event/not-represented").unwrap(),
+        imported.dataset.clocks()[0].id(),
+        Rational::new(0, 1).unwrap(),
+        Rational::new(1, 1).unwrap(),
+        Rational::new(0, 1).unwrap(),
+    ));
+    let unsupported = draft
+        .validate(ValidationLimits::default())
+        .expect("event-bearing dataset is valid ABIR");
+
+    let plan = adapter.plan_export(&unsupported).unwrap();
+    assert!(plan.unsupported);
+    assert!(matches!(
+        adapter.export(&unsupported, &plan, &payloads(&imported)),
+        Err(abir_adapter::AdapterError::UnsupportedMeaning(_))
+    ));
+}
+
+#[test]
+fn semantic_edf_export_rejects_samples_outside_i16_without_partial_output() {
+    let source = ForeignObject {
+        profile: ProfileId("edfplus.1".to_owned()),
+        entries: vec![ForeignEntry {
+            path: "recording.edf".to_owned(),
+            media_type: Some("application/edf".to_owned()),
+            bytes: lamquant_common::ingest::synth_single_channel_edf(&[0; 5], 250.0),
+        }],
+    };
+    let adapter = EdfAdapter::new(1024 * 1024);
+    let imported = adapter
+        .import(&source, ValidationLimits::default())
+        .expect("semantic EDF import");
+    let source_block = match &imported.dataset.atoms()[0] {
+        Atom::SignalBlock(block) => block,
+        other => panic!("expected signal block, got {other:?}"),
+    };
+    let mut bytes = Vec::new();
+    for value in [i64::from(i16::MAX) + 1, 0, 1, 2, 3] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let content_id = abir_payload_id(ElementType::I64, &bytes);
+    let descriptor = PayloadDescriptor::new(
+        content_id,
+        bytes.len() as u64,
+        ElementType::I64,
+        ByteOrder::Little,
+        vec![1, 5],
+        Layout::DenseRowMajor,
+        Some(ConceptId::new("abir:encoding/raw").unwrap()),
+        None,
+    );
+    let mut draft = imported.dataset.clone().into_draft();
+    draft.clear_source_capsules();
+    draft.atoms_mut()[0] = Atom::SignalBlock(SignalBlock::new(
+        ObjectId::<AtomTag>::from_bytes(source_block_id(&imported.dataset.atoms()[0])),
+        Presence::Present,
+        Some(descriptor),
+        source_block.time_axis().clone(),
+        source_block.calibration().cloned(),
+    ));
+    let out_of_range = draft
+        .validate(ValidationLimits::default())
+        .expect("out-of-range i64 samples are valid ABIR");
+    let plan = adapter.plan_export(&out_of_range).unwrap();
+    assert!(plan.accepts_without_loss());
+    let resolver = Payloads(BTreeMap::from([(content_id, bytes)]));
+    assert!(matches!(
+        adapter.export(&out_of_range, &plan, &resolver),
+        Err(abir_adapter::AdapterError::UnsupportedMeaning(message))
+            if message.contains("outside signed 16-bit range")
+    ));
+}
+
+fn source_block_id(atom: &Atom) -> [u8; 16] {
+    atom.id().to_bytes()
 }
 
 #[test]
