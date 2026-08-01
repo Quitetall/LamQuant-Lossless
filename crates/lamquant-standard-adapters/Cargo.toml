@@ -11,7 +11,7 @@ default = ["nwb"]
 nwb = ["dep:hdf5-metno", "lamquant-lml/nwb"]
 
 [dependencies]
-abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc" }
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "3f5c47cb76d0707f4443c001a4e1c37d19ccb2da" }
 blake3 = "=1.5.5"
 # The first-class DICOM profile needs raw element access, not just the
 # waveform reader the codec exposes.
@@ -21,7 +21,7 @@ flate2 = "1"
 dicom-object = "0.8"
 hdf5-metno = { version = "0.12", optional = true }
 lamquant-lml = { path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom"] }
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc" }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "3f5c47cb76d0707f4443c001a4e1c37d19ccb2da" }
 serde_json = "1"
 tempfile = "3"
 
