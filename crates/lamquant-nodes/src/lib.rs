@@ -22,11 +22,12 @@ pub use lml_reference::{
 #[cfg(feature = "lmq")]
 pub use lmq_node::{
     lmq_descriptor, lmq_node_config, load_lmq_pccp_authorization_snapshot_json, register_lmq_node,
-    verify_current_lmq_pccp_authorization_snapshot, verify_pccp_gate_evidence, LmqBackendSession,
-    LmqNodeProfile, LmqNodeProfileError, LmqPccpAuthorizationEntry, LmqPccpAuthorizationEpochStore,
-    LmqPccpAuthorizationLedger, LmqPccpAuthorizationLedgerError,
-    SignedLmqPccpAuthorizationSnapshot, VerifiedPccpEvidence, LMQ_CURRENT_PCCP_POLICY,
-    LMQ_GENERATED_PROOF, LMQ_MODEL_INPUT_PROOF, LMQ_NODE_TYPE,
+    verify_current_lmq_pccp_authorization_snapshot, verify_lmq_production_authorization,
+    verify_pccp_gate_evidence, LmqBackendSession, LmqNodeProfile, LmqNodeProfileError,
+    LmqPccpAuthorizationEntry, LmqPccpAuthorizationEpochStore, LmqPccpAuthorizationLedger,
+    LmqPccpAuthorizationLedgerError, LmqProductionAuthorizationError,
+    SignedLmqPccpAuthorizationSnapshot, VerifiedLmqProductionAuthorization, VerifiedPccpEvidence,
+    LMQ_CURRENT_PCCP_POLICY, LMQ_GENERATED_PROOF, LMQ_MODEL_INPUT_PROOF, LMQ_NODE_TYPE,
     LMQ_PCCP_AUTHORIZATION_MAX_LIFETIME_SECONDS, LMQ_PCCP_AUTHORIZATION_SNAPSHOT_SCHEMA,
 };
 #[cfg(all(test, feature = "lmq"))]

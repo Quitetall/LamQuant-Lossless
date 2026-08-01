@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 
 use crate::{
     lmq_descriptor, lmq_node_config, load_lmq_pccp_authorization_snapshot_json, register_lmq_node,
-    verify_current_lmq_pccp_authorization_snapshot, verify_pccp_gate_evidence, AbirDatasetValue,
-    LamQuantKernelExecutor, LamQuantNodeValue, LmqAttestedBackend, LmqBackendDeploymentManifest,
-    LmqBackendSession, LmqNodeProfile, LmqPccpAuthorizationEntry, LmqPccpAuthorizationEpochStore,
-    LmqPccpAuthorizationLedger, LmqPccpAuthorizationLedgerError, NoopTransactionalSink,
-    SignedLmqPccpAuthorizationSnapshot, LMQ_CURRENT_PCCP_POLICY, LMQ_MODEL_INPUT_PROOF,
-    LMQ_NODE_TYPE, LMQ_PCCP_AUTHORIZATION_SNAPSHOT_SCHEMA,
+    verify_current_lmq_pccp_authorization_snapshot, verify_lmq_production_authorization,
+    verify_pccp_gate_evidence, AbirDatasetValue, LamQuantKernelExecutor, LamQuantNodeValue,
+    LmqAttestedBackend, LmqBackendDeploymentManifest, LmqBackendSession, LmqNodeProfile,
+    LmqPccpAuthorizationEntry, LmqPccpAuthorizationEpochStore, LmqPccpAuthorizationLedger,
+    LmqPccpAuthorizationLedgerError, NoopTransactionalSink, SignedLmqPccpAuthorizationSnapshot,
+    LMQ_CURRENT_PCCP_POLICY, LMQ_MODEL_INPUT_PROOF, LMQ_NODE_TYPE,
+    LMQ_PCCP_AUTHORIZATION_SNAPSHOT_SCHEMA,
 };
 use blut_graph_core::{
     Compiler, ExecutionRealm, Graph, KernelRegistry, NodeId, NodeInstance, PlanExecutor, PortRef,
@@ -409,6 +410,7 @@ fn gate_evidence(
             .collect::<String>(),
         "registry_sha256": "a".repeat(64),
         "passed": passed,
+        "promoted": passed,
         "measurements": {
             "pearson_r": decimal(measured),
         },
@@ -616,6 +618,65 @@ fn authorization_snapshot_json_requires_exact_trusted_signature() {
         ),
         Err(LmqPccpAuthorizationLedgerError::UntrustedSignature)
     );
+}
+
+#[test]
+fn production_authorization_binds_checkpoint_gate_result_and_current_snapshot() {
+    let checkpoint_sha256 = [0x56; 32];
+    let change_id = "PCCP-CHG-PACKAGE16-TEST";
+    let evidence = gate_evidence(
+        checkpoint_sha256,
+        change_id,
+        Rational::new(93, 100).unwrap(),
+        Rational::new(99, 100).unwrap(),
+        true,
+        false,
+    );
+    let verified_evidence = verify_pccp_gate_evidence(&evidence, [0xaa; 32]).unwrap();
+    let entry = LmqPccpAuthorizationEntry::new(
+        ContentId::from_bytes([0x54; 32]),
+        ContentId::from_bytes([0x55; 32]),
+        checkpoint_sha256,
+        change_id,
+        verified_evidence.evidence_id(),
+    )
+    .unwrap();
+    let signing_key = SigningKey::from_bytes(&[0xa4; 32]);
+    let snapshot = signed_authorization_snapshot(&signing_key, 9, vec![entry]);
+    let document = authorization_snapshot_json(&snapshot, snapshot.signature());
+
+    let verified = verify_lmq_production_authorization(
+        &evidence,
+        [0xaa; 32],
+        checkpoint_sha256,
+        &document,
+        signing_key.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(verified.authorization_epoch(), 9);
+    assert_eq!(verified.checkpoint_sha256(), checkpoint_sha256);
+    assert_eq!(verified.pccp_change_id(), change_id);
+    assert_eq!(verified.pccp_evidence_id(), verified_evidence.evidence_id());
+
+    let mut unpromoted: serde_json::Value = serde_json::from_slice(&evidence).unwrap();
+    unpromoted["promoted"] = serde_json::Value::Bool(false);
+    assert!(verify_lmq_production_authorization(
+        &serde_json::to_vec(&unpromoted).unwrap(),
+        [0xaa; 32],
+        checkpoint_sha256,
+        &document,
+        signing_key.verifying_key().to_bytes(),
+    )
+    .is_err());
+
+    assert!(verify_lmq_production_authorization(
+        &evidence,
+        [0xaa; 32],
+        [0x57; 32],
+        &document,
+        signing_key.verifying_key().to_bytes(),
+    )
+    .is_err());
 }
 
 #[test]

@@ -8,6 +8,11 @@ description = "Production ABIR Node catalog and fused LamQuant kernel adapters."
 publish = false
 build = "build.rs"
 
+[[bin]]
+name = "lmq-package16-verify"
+path = "src/bin/lmq_package16_verify.rs"
+required-features = ["lmq"]
+
 [features]
 default = ["std"]
 std = [

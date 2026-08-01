@@ -370,6 +370,102 @@ pub fn verify_current_lmq_pccp_authorization_snapshot(
     ensure_authorization_snapshot_current(snapshot)
 }
 
+/// Production-ready checkpoint, PCCP result, and signed authorization binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedLmqProductionAuthorization {
+    authorization_epoch: u64,
+    model_artifact_content_id: ContentId,
+    checkpoint_content_id: ContentId,
+    checkpoint_sha256: [u8; 32],
+    pccp_change_id: String,
+    pccp_evidence_id: ContentId,
+    pearson_floor: Rational,
+}
+
+impl VerifiedLmqProductionAuthorization {
+    pub const fn authorization_epoch(&self) -> u64 {
+        self.authorization_epoch
+    }
+
+    pub const fn model_artifact_content_id(&self) -> ContentId {
+        self.model_artifact_content_id
+    }
+
+    pub const fn checkpoint_content_id(&self) -> ContentId {
+        self.checkpoint_content_id
+    }
+
+    pub const fn checkpoint_sha256(&self) -> [u8; 32] {
+        self.checkpoint_sha256
+    }
+
+    pub fn pccp_change_id(&self) -> &str {
+        &self.pccp_change_id
+    }
+
+    pub const fn pccp_evidence_id(&self) -> ContentId {
+        self.pccp_evidence_id
+    }
+
+    pub const fn pearson_floor(&self) -> Rational {
+        self.pearson_floor
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum LmqProductionAuthorizationError {
+    InvalidPccpEvidence,
+    CheckpointMismatch,
+    InvalidAuthorizationSnapshot,
+    AuthorizationMissing,
+}
+
+impl fmt::Display for LmqProductionAuthorizationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for LmqProductionAuthorizationError {}
+
+/// Independently bind one promoted PCCP result to a current signed snapshot.
+pub fn verify_lmq_production_authorization(
+    pccp_evidence: &[u8],
+    trusted_registry_sha256: [u8; 32],
+    expected_checkpoint_sha256: [u8; 32],
+    authorization_snapshot: &[u8],
+    trusted_verifying_key: [u8; 32],
+) -> Result<VerifiedLmqProductionAuthorization, LmqProductionAuthorizationError> {
+    let evidence = verify_pccp_gate_evidence(pccp_evidence, trusted_registry_sha256)
+        .map_err(|_| LmqProductionAuthorizationError::InvalidPccpEvidence)?;
+    if evidence.checkpoint_sha256() != expected_checkpoint_sha256 {
+        return Err(LmqProductionAuthorizationError::CheckpointMismatch);
+    }
+    let snapshot = load_lmq_pccp_authorization_snapshot_json(authorization_snapshot)
+        .map_err(|_| LmqProductionAuthorizationError::InvalidAuthorizationSnapshot)?;
+    verify_current_lmq_pccp_authorization_snapshot(trusted_verifying_key, &snapshot)
+        .map_err(|_| LmqProductionAuthorizationError::InvalidAuthorizationSnapshot)?;
+    let entry = snapshot
+        .entries()
+        .iter()
+        .find(|entry| {
+            entry.checkpoint_sha256() == expected_checkpoint_sha256
+                && entry.pccp_change_id() == evidence.change_id()
+                && entry.pccp_evidence_id() == evidence.evidence_id()
+        })
+        .ok_or(LmqProductionAuthorizationError::AuthorizationMissing)?;
+    Ok(VerifiedLmqProductionAuthorization {
+        authorization_epoch: snapshot.epoch(),
+        model_artifact_content_id: entry.model_artifact_content_id(),
+        checkpoint_content_id: entry.checkpoint_content_id(),
+        checkpoint_sha256: entry.checkpoint_sha256(),
+        pccp_change_id: entry.pccp_change_id().into(),
+        pccp_evidence_id: entry.pccp_evidence_id(),
+        pearson_floor: evidence.pearson_floor(),
+    })
+}
+
 fn has_exact_json_members(root: &JsonMap<String, JsonValue>, required: &[&str]) -> bool {
     root.len() == required.len() && required.iter().all(|name| root.contains_key(*name))
 }

@@ -35,6 +35,24 @@ pub struct VerifiedPccpEvidence {
     pub(super) pearson_floor: Rational,
 }
 
+impl VerifiedPccpEvidence {
+    pub const fn evidence_id(&self) -> ContentId {
+        self.evidence_id
+    }
+
+    pub const fn checkpoint_sha256(&self) -> [u8; 32] {
+        self.checkpoint_sha256
+    }
+
+    pub fn change_id(&self) -> &str {
+        &self.change_id
+    }
+
+    pub const fn pearson_floor(&self) -> Rational {
+        self.pearson_floor
+    }
+}
+
 pub fn verify_pccp_gate_evidence(
     evidence: &[u8],
     trusted_registry_sha256: [u8; 32],
@@ -52,6 +70,7 @@ pub fn verify_pccp_gate_evidence(
         .ok_or(LmqNodeProfileError::InvalidPccpEvidence)?;
     if root.get("model").and_then(Value::as_str) != Some("encoder")
         || root.get("passed").and_then(Value::as_bool) != Some(true)
+        || root.get("promoted").and_then(Value::as_bool) != Some(true)
     {
         return Err(LmqNodeProfileError::InvalidPccpEvidence);
     }
