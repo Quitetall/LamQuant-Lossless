@@ -9,15 +9,19 @@ use blut_graph_core::{
     NodeInstance, Partiality, PlanExecutor, PortRef, StateScope, Target,
 };
 use lamquant_nodes::{
-    register_standard_nodes, standard_import_descriptor, standard_node_config,
-    standard_restore_descriptor, standard_sink_descriptor, LamQuantKernelExecutor,
-    LamQuantNodeValue, NoopTransactionalSink, BIDS_IMPORT_NODE_TYPE, BIDS_RESTORE_NODE_TYPE,
-    BIDS_SINK_NODE_TYPE, DICOM_IMPORT_NODE_TYPE, DICOM_RESTORE_NODE_TYPE, DICOM_SINK_NODE_TYPE,
+    register_standard_nodes, standard_export_descriptor, standard_import_descriptor,
+    standard_node_config, standard_restore_descriptor, standard_sink_descriptor,
+    LamQuantKernelExecutor, LamQuantNodeValue, NoopTransactionalSink,
+    ACCEPTED_STANDARD_EXPORT_PROOF, BIDS_EXPORT_NODE_TYPE, BIDS_IMPORT_NODE_TYPE,
+    BIDS_RESTORE_NODE_TYPE, BIDS_SINK_NODE_TYPE, DICOM_EXPORT_NODE_TYPE, DICOM_IMPORT_NODE_TYPE,
+    DICOM_RESTORE_NODE_TYPE, DICOM_SINK_NODE_TYPE, EDFPLUS_EXPORT_NODE_TYPE,
     EDFPLUS_IMPORT_NODE_TYPE, EDFPLUS_RESTORE_NODE_TYPE, EDFPLUS_SINK_NODE_TYPE,
     XDF_IMPORT_NODE_TYPE, XDF_RESTORE_NODE_TYPE, XDF_SINK_NODE_TYPE,
 };
 #[cfg(feature = "standard-nwb")]
-use lamquant_nodes::{NWB_IMPORT_NODE_TYPE, NWB_RESTORE_NODE_TYPE, NWB_SINK_NODE_TYPE};
+use lamquant_nodes::{
+    NWB_EXPORT_NODE_TYPE, NWB_IMPORT_NODE_TYPE, NWB_RESTORE_NODE_TYPE, NWB_SINK_NODE_TYPE,
+};
 #[cfg(feature = "standard-nwb")]
 use lamquant_standard_adapters::NwbAdapter;
 use lamquant_standard_adapters::XdfAdapter;
@@ -37,6 +41,7 @@ const BOUNDARY_UUID: [u8; 16] = [
 struct Case {
     profile: &'static str,
     import_type: &'static str,
+    export_type: Option<&'static str>,
     restore_type: &'static str,
     sink_type: &'static str,
     source: ForeignObject,
@@ -55,6 +60,7 @@ fn cases() -> Vec<Case> {
         Case {
             profile: "edfplus.1",
             import_type: EDFPLUS_IMPORT_NODE_TYPE,
+            export_type: Some(EDFPLUS_EXPORT_NODE_TYPE),
             restore_type: EDFPLUS_RESTORE_NODE_TYPE,
             sink_type: EDFPLUS_SINK_NODE_TYPE,
             source: ForeignObject {
@@ -71,6 +77,7 @@ fn cases() -> Vec<Case> {
         Case {
             profile: "bids.1.11.1",
             import_type: BIDS_IMPORT_NODE_TYPE,
+            export_type: Some(BIDS_EXPORT_NODE_TYPE),
             restore_type: BIDS_RESTORE_NODE_TYPE,
             sink_type: BIDS_SINK_NODE_TYPE,
             source: bids_source(),
@@ -78,6 +85,7 @@ fn cases() -> Vec<Case> {
         Case {
             profile: "dicom.ps3.2026c",
             import_type: DICOM_IMPORT_NODE_TYPE,
+            export_type: Some(DICOM_EXPORT_NODE_TYPE),
             restore_type: DICOM_RESTORE_NODE_TYPE,
             sink_type: DICOM_SINK_NODE_TYPE,
             source: ForeignObject {
@@ -95,6 +103,7 @@ fn cases() -> Vec<Case> {
         Case {
             profile: "nwb.2.10.0",
             import_type: NWB_IMPORT_NODE_TYPE,
+            export_type: Some(NWB_EXPORT_NODE_TYPE),
             restore_type: NWB_RESTORE_NODE_TYPE,
             sink_type: NWB_SINK_NODE_TYPE,
             source: ForeignObject {
@@ -111,6 +120,7 @@ fn cases() -> Vec<Case> {
         Case {
             profile: "xdf.1.0",
             import_type: XDF_IMPORT_NODE_TYPE,
+            export_type: None,
             restore_type: XDF_RESTORE_NODE_TYPE,
             sink_type: XDF_SINK_NODE_TYPE,
             source: ForeignObject {
@@ -334,7 +344,7 @@ fn sink_graph(sink_type: &str, profile: &str, destination_resource: &str) -> Gra
             },
         ],
         required_capabilities: descriptor.capabilities,
-        required_proofs: vec![lamquant_nodes::EXACT_SOURCE_RESTORATION_PROOF.into()],
+        required_proofs: vec![ACCEPTED_STANDARD_EXPORT_PROOF.into()],
         policy: vec![],
         minimum_fidelity: u16::MAX,
         session: None,
@@ -634,9 +644,16 @@ fn registers_all_enabled_profile_specific_host_nodes() {
     for case in cases() {
         let import = standard_import_descriptor(case.profile).unwrap();
         let restore = standard_restore_descriptor(case.profile).unwrap();
+        let export = standard_export_descriptor(case.profile);
         let sink = standard_sink_descriptor(case.profile).unwrap();
         assert_eq!(import.type_name, case.import_type);
         assert_eq!(restore.type_name, case.restore_type);
+        assert_eq!(
+            export
+                .as_ref()
+                .map(|descriptor| descriptor.type_name.as_str()),
+            case.export_type
+        );
         assert_eq!(sink.type_name, case.sink_type);
         assert_eq!(import.targets, vec![blut_graph_core::Target::Host]);
         assert_eq!(restore.targets, vec![blut_graph_core::Target::Host]);
@@ -657,10 +674,7 @@ fn registers_all_enabled_profile_specific_host_nodes() {
         );
         assert_eq!(sink.inputs[2].name, "fidelity_receipt");
         assert_eq!(sink.inputs[2].semantic_type, "abir.fidelity_receipt");
-        assert_eq!(
-            sink.proof.requires,
-            [lamquant_nodes::EXACT_SOURCE_RESTORATION_PROOF]
-        );
+        assert_eq!(sink.proof.requires, [ACCEPTED_STANDARD_EXPORT_PROOF]);
         assert_eq!(sink.determinism, Determinism::BitExact);
         assert_eq!(sink.retry_limit, 0);
         assert_eq!(sink.effect, Effect::Transactional);

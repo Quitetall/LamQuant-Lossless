@@ -29,6 +29,11 @@ pub const DICOM_IMPORT_NODE_TYPE: &str = "org.quitetall.lamquant.standard.dicom.
 pub const NWB_IMPORT_NODE_TYPE: &str = "org.quitetall.lamquant.standard.nwb.import";
 pub const XDF_IMPORT_NODE_TYPE: &str = "org.quitetall.lamquant.standard.xdf.import";
 
+pub const EDFPLUS_EXPORT_NODE_TYPE: &str = "org.quitetall.lamquant.standard.edfplus.export";
+pub const BIDS_EXPORT_NODE_TYPE: &str = "org.quitetall.lamquant.standard.bids.export";
+pub const DICOM_EXPORT_NODE_TYPE: &str = "org.quitetall.lamquant.standard.dicom.export";
+pub const NWB_EXPORT_NODE_TYPE: &str = "org.quitetall.lamquant.standard.nwb.export";
+
 pub const EDFPLUS_RESTORE_NODE_TYPE: &str = "org.quitetall.lamquant.standard.edfplus.restore";
 pub const BIDS_RESTORE_NODE_TYPE: &str = "org.quitetall.lamquant.standard.bids.restore";
 pub const DICOM_RESTORE_NODE_TYPE: &str = "org.quitetall.lamquant.standard.dicom.restore";
@@ -46,6 +51,10 @@ const CAP_SOURCE_CAPSULE: &str = "abir.source-capsule.identity-bound-v1";
 const SOURCE_CAPSULE_PROOF: &str = "org.quitetall.abir.proof.identity-bound-source-capsule-v1";
 pub const EXACT_SOURCE_RESTORATION_PROOF: &str =
     "org.quitetall.abir.proof.exact-source-restoration-v1";
+pub const SEMANTIC_STANDARD_EXPORT_PROOF: &str =
+    "org.quitetall.abir.proof.semantic-standard-export-v1";
+pub const ACCEPTED_STANDARD_EXPORT_PROOF: &str =
+    "org.quitetall.abir.proof.accepted-standard-export-v1";
 const CAP_DURABLE_FILE_SINK: &str = "org.quitetall.lamquant.sink.durable-file-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.standard";
 // Current adapters materialize decoded host values before ABIR payloads.
@@ -69,6 +78,7 @@ const MAX_FOREIGN_ENTRIES: usize = STANDARD_MAX_FOREIGN_ENTRIES;
 const STANDARD_SPECS: &[StandardSpec] = &[
     StandardSpec {
         import_type: EDFPLUS_IMPORT_NODE_TYPE,
+        export_type: Some(EDFPLUS_EXPORT_NODE_TYPE),
         restore_type: EDFPLUS_RESTORE_NODE_TYPE,
         sink_type: EDFPLUS_SINK_NODE_TYPE,
         profile: "edfplus.1",
@@ -77,6 +87,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     },
     StandardSpec {
         import_type: BIDS_IMPORT_NODE_TYPE,
+        export_type: Some(BIDS_EXPORT_NODE_TYPE),
         restore_type: BIDS_RESTORE_NODE_TYPE,
         sink_type: BIDS_SINK_NODE_TYPE,
         profile: "bids.1.11.1",
@@ -85,6 +96,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     },
     StandardSpec {
         import_type: DICOM_IMPORT_NODE_TYPE,
+        export_type: Some(DICOM_EXPORT_NODE_TYPE),
         restore_type: DICOM_RESTORE_NODE_TYPE,
         sink_type: DICOM_SINK_NODE_TYPE,
         profile: "dicom.ps3.2026c",
@@ -94,6 +106,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     #[cfg(feature = "standard-nwb")]
     StandardSpec {
         import_type: NWB_IMPORT_NODE_TYPE,
+        export_type: Some(NWB_EXPORT_NODE_TYPE),
         restore_type: NWB_RESTORE_NODE_TYPE,
         sink_type: NWB_SINK_NODE_TYPE,
         profile: "nwb.2.10.0",
@@ -102,6 +115,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
     },
     StandardSpec {
         import_type: XDF_IMPORT_NODE_TYPE,
+        export_type: None,
         restore_type: XDF_RESTORE_NODE_TYPE,
         sink_type: XDF_SINK_NODE_TYPE,
         profile: "xdf.1.0",
@@ -113,6 +127,7 @@ const STANDARD_SPECS: &[StandardSpec] = &[
 #[derive(Clone, Copy)]
 struct StandardSpec {
     import_type: &'static str,
+    export_type: Option<&'static str>,
     restore_type: &'static str,
     sink_type: &'static str,
     profile: &'static str,
@@ -135,6 +150,8 @@ impl StandardSpec {
         STANDARD_SPECS.iter().copied().find_map(|spec| {
             if type_name == spec.import_type {
                 Some((spec, Operation::Import))
+            } else if spec.export_type == Some(type_name) {
+                Some((spec, Operation::Export))
             } else if type_name == spec.restore_type {
                 Some((spec, Operation::Restore))
             } else if type_name == spec.sink_type {
@@ -163,6 +180,7 @@ impl StandardSpec {
 #[derive(Clone, Copy)]
 enum Operation {
     Import,
+    Export,
     Restore,
     Sink,
 }
@@ -252,6 +270,7 @@ pub fn execute_standard<'a>(
     let adapter = spec.adapter(max_source_bytes);
     match operation {
         Operation::Import => execute_import(node, adapter.as_ref(), max_source_bytes, inputs),
+        Operation::Export => execute_export(node, adapter.as_ref(), max_source_bytes, inputs),
         Operation::Restore => execute_restore(node, adapter.as_ref(), max_source_bytes, inputs),
         Operation::Sink => {
             let _ = parse_standard_sink_contract(node)?;
@@ -262,6 +281,25 @@ pub fn execute_standard<'a>(
             ))
         }
     }
+}
+
+pub fn export_standard_dataset(
+    node: &CompiledNode,
+    type_name: &str,
+    source: &AbirDatasetValue,
+) -> Result<(abir_adapter::ForeignObject, ExportPlan, FidelityReceipt), ExecutionError> {
+    let (spec, operation) = StandardSpec::for_type(type_name)
+        .ok_or_else(|| kernel_failure(node, "unsupported-node", "unknown standard node"))?;
+    if !matches!(operation, Operation::Export) {
+        return Err(kernel_failure(
+            node,
+            "invalid-plan",
+            "compiled node is not a standard export",
+        ));
+    }
+    let max_source_bytes = parse_max_source_bytes(node)?;
+    let adapter = spec.adapter(max_source_bytes);
+    export_dataset(node, adapter.as_ref(), max_source_bytes, source)
 }
 
 pub fn restore_standard_dataset(
@@ -377,6 +415,30 @@ fn execute_restore<'a>(
     ])
 }
 
+fn execute_export<'a>(
+    node: &CompiledNode,
+    adapter: &dyn Adapter,
+    max_source_bytes: u64,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    let source = match inputs {
+        [Some(LamQuantNodeValue::AbirDataset(source))] => source,
+        _ => {
+            return Err(kernel_failure(
+                node,
+                "invalid-input",
+                "standard export requires one AbirDataset input",
+            ))
+        }
+    };
+    let (foreign, plan, receipt) = export_dataset(node, adapter, max_source_bytes, source)?;
+    Ok(vec![
+        LamQuantNodeValue::ForeignObject(foreign),
+        LamQuantNodeValue::ExportPlan(plan),
+        LamQuantNodeValue::FidelityReceipt(receipt),
+    ])
+}
+
 fn restore_dataset(
     node: &CompiledNode,
     adapter: &dyn Adapter,
@@ -416,6 +478,51 @@ fn restore_dataset(
             node,
             "resource-or-fidelity",
             "restored source exceeds limits or lacks exact-source attestation",
+        ));
+    }
+    Ok((foreign, plan, receipt))
+}
+
+fn export_dataset(
+    node: &CompiledNode,
+    adapter: &dyn Adapter,
+    max_source_bytes: u64,
+    source: &AbirDatasetValue,
+) -> Result<(abir_adapter::ForeignObject, ExportPlan, FidelityReceipt), ExecutionError> {
+    let plan = adapter
+        .plan_export(source.dataset())
+        .map_err(|error| adapter_failure(node, error))?;
+    if !plan.accepts_without_loss() {
+        return Err(kernel_failure(
+            node,
+            "semantic-loss",
+            "dataset cannot be represented by this standard profile without semantic loss",
+        ));
+    }
+    if !export_plan_fits(&plan) {
+        return Err(kernel_failure(
+            node,
+            "resource-limit",
+            "semantic export plan exceeds the declared output limit",
+        ));
+    }
+    let (foreign, receipt) = adapter
+        .export(source.dataset(), &plan, source.payloads())
+        .map_err(|error| adapter_failure(node, error))?;
+    if !receipt.semantic_equivalence
+        || receipt.plan_id != plan.plan_id
+        || foreign.entries.len() > MAX_FOREIGN_ENTRIES
+        || foreign_object_payload_bytes(&foreign).is_none_or(|bytes| bytes > max_source_bytes)
+        || foreign_object_metadata_bytes(&foreign)
+            .is_none_or(|bytes| bytes > STANDARD_MAX_FOREIGN_METADATA_BYTES)
+        || foreign_object_resident_bytes(&foreign)
+            .is_none_or(|bytes| bytes > STANDARD_MAX_FOREIGN_TREE_BYTES)
+        || !fidelity_receipt_fits(&receipt)
+    {
+        return Err(kernel_failure(
+            node,
+            "resource-or-fidelity",
+            "standard export exceeds limits or lacks semantic-equivalence attestation",
         ));
     }
     Ok((foreign, plan, receipt))
@@ -628,7 +735,15 @@ fn export_plan_fits(plan: &abir_adapter::ExportPlan) -> bool {
 
 pub fn register_standard_nodes(registry: &mut KernelRegistry) -> Result<(), CompileError> {
     for spec in STANDARD_SPECS {
-        for operation in [Operation::Import, Operation::Restore, Operation::Sink] {
+        for operation in [
+            Operation::Import,
+            Operation::Restore,
+            Operation::Export,
+            Operation::Sink,
+        ] {
+            if matches!(operation, Operation::Export) && spec.export_type.is_none() {
+                continue;
+            }
             let descriptor = descriptor(*spec, operation);
             let type_name = descriptor.type_name.clone();
             registry.register_descriptor(descriptor)?;
@@ -639,6 +754,7 @@ pub fn register_standard_nodes(registry: &mut KernelRegistry) -> Result<(), Comp
                             Operation::Import => 1,
                             Operation::Restore => 2,
                             Operation::Sink => 3,
+                            Operation::Export => 4,
                         },
                 ),
                 &type_name,
@@ -647,6 +763,14 @@ pub fn register_standard_nodes(registry: &mut KernelRegistry) -> Result<(), Comp
         }
     }
     Ok(())
+}
+
+pub fn standard_export_descriptor(profile: &str) -> Option<NodeDescriptor> {
+    STANDARD_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.profile == profile && spec.export_type.is_some())
+        .map(|spec| descriptor(spec, Operation::Export))
 }
 
 pub fn standard_import_descriptor(profile: &str) -> Option<NodeDescriptor> {
@@ -699,6 +823,21 @@ pub fn standard_restore_kernel_binding(profile: &str) -> Option<(KernelId, Imple
         })
 }
 
+pub fn standard_export_kernel_binding(profile: &str) -> Option<(KernelId, ImplementationId)> {
+    STANDARD_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.profile == profile)
+        .and_then(|spec| {
+            spec.export_type.map(|export_type| {
+                (
+                    KernelId(spec.kernel_base + 4),
+                    implementation_id(export_type, Target::Host),
+                )
+            })
+        })
+}
+
 fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
     let source_proof = source_capsule_proof(spec.profile);
     let (type_name, inputs, outputs, proof, config, capabilities, effect) = match operation {
@@ -728,11 +867,21 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
             vec![
                 foreign_port("source", spec.profile),
                 export_plan_port("export_plan", spec.profile),
-                fidelity_receipt_port("fidelity_receipt", true),
+                fidelity_receipt_port(
+                    "fidelity_receipt",
+                    vec![
+                        EXACT_SOURCE_RESTORATION_PROOF.into(),
+                        ACCEPTED_STANDARD_EXPORT_PROOF.into(),
+                    ],
+                    vec![],
+                ),
             ],
             ProofContract {
                 requires: vec![source_proof],
-                provides: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
+                provides: vec![
+                    EXACT_SOURCE_RESTORATION_PROOF.into(),
+                    ACCEPTED_STANDARD_EXPORT_PROOF.into(),
+                ],
                 invalidates: vec![],
             },
             config_schema(),
@@ -743,16 +892,51 @@ fn descriptor(spec: StandardSpec, operation: Operation) -> NodeDescriptor {
             ],
             Effect::Pure,
         ),
+        Operation::Export => (
+            spec.export_type
+                .expect("export operation requires a node type"),
+            vec![plain_dataset_port("dataset")],
+            vec![
+                foreign_port("source", spec.profile),
+                export_plan_port("export_plan", spec.profile),
+                fidelity_receipt_port(
+                    "fidelity_receipt",
+                    vec![
+                        SEMANTIC_STANDARD_EXPORT_PROOF.into(),
+                        ACCEPTED_STANDARD_EXPORT_PROOF.into(),
+                    ],
+                    vec![],
+                ),
+            ],
+            ProofContract {
+                requires: vec![],
+                provides: vec![
+                    SEMANTIC_STANDARD_EXPORT_PROOF.into(),
+                    ACCEPTED_STANDARD_EXPORT_PROOF.into(),
+                ],
+                invalidates: vec![],
+            },
+            config_schema(),
+            vec![
+                Capability(CAP_ABIR.into()),
+                Capability(format!("abir.adapter.{}", spec.profile)),
+            ],
+            Effect::Pure,
+        ),
         Operation::Sink => (
             spec.sink_type,
             vec![
                 foreign_port("source", spec.profile),
                 export_plan_port("export_plan", spec.profile),
-                fidelity_receipt_port("fidelity_receipt", false),
+                fidelity_receipt_port(
+                    "fidelity_receipt",
+                    vec![],
+                    vec![ACCEPTED_STANDARD_EXPORT_PROOF.into()],
+                ),
             ],
             vec![],
             ProofContract {
-                requires: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
+                requires: vec![ACCEPTED_STANDARD_EXPORT_PROOF.into()],
                 provides: vec![],
                 invalidates: vec![],
             },
@@ -897,6 +1081,12 @@ fn dataset_port(
     }
 }
 
+fn plain_dataset_port(name: &str) -> PortDescriptor {
+    let mut port = dataset_port(name, "", true);
+    port.proof = empty_proof();
+    port
+}
+
 fn report_port(name: &str) -> PortDescriptor {
     PortDescriptor {
         name: name.into(),
@@ -916,20 +1106,16 @@ fn report_port(name: &str) -> PortDescriptor {
     }
 }
 
-fn fidelity_receipt_port(name: &str, provides_proof: bool) -> PortDescriptor {
+fn fidelity_receipt_port(
+    name: &str,
+    provides: Vec<String>,
+    requires: Vec<String>,
+) -> PortDescriptor {
     let mut port = report_port(name);
-    port.proof = if provides_proof {
-        ProofContract {
-            requires: vec![],
-            provides: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
-            invalidates: vec![],
-        }
-    } else {
-        ProofContract {
-            requires: vec![EXACT_SOURCE_RESTORATION_PROOF.into()],
-            provides: vec![],
-            invalidates: vec![],
-        }
+    port.proof = ProofContract {
+        requires,
+        provides,
+        invalidates: vec![],
     };
     port
 }
@@ -956,6 +1142,11 @@ fn standard_kernel(id: KernelId, type_name: &str, operation: Operation) -> Kerne
             vec![Layout::Opaque],
             vec![Layout::Packed, Layout::Opaque, Layout::Opaque],
             "adapter:plan-export+exact-source-export:v1",
+        ),
+        Operation::Export => (
+            vec![Layout::Opaque],
+            vec![Layout::Packed, Layout::Opaque, Layout::Opaque],
+            "adapter:plan-export+semantic-standard-export:v1",
         ),
         Operation::Sink => (
             vec![Layout::Packed, Layout::Opaque, Layout::Opaque],
@@ -1034,8 +1225,9 @@ fn read_lease(zero_copy_permitted: bool) -> LeaseContract {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_error_code, export_plan_fits, standard_sink_descriptor, standard_sink_node_config,
-        StandardNodeConfigError, EXACT_SOURCE_RESTORATION_PROOF, MAX_REPORT_BYTES,
+        adapter_error_code, export_plan_fits, standard_export_descriptor, standard_sink_descriptor,
+        standard_sink_node_config, StandardNodeConfigError, ACCEPTED_STANDARD_EXPORT_PROOF,
+        MAX_REPORT_BYTES, SEMANTIC_STANDARD_EXPORT_PROOF,
     };
     use abir_adapter::{AdapterError, ExportPlan, MappingDisposition, MappingEntry, ProfileId};
     use semantic_abir::ContentId;
@@ -1105,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn sink_requires_exact_export_receipt_and_proof() {
+    fn sink_requires_accepted_export_receipt_and_proof() {
         let descriptor = standard_sink_descriptor("bids.1.11.1").unwrap();
         assert_eq!(descriptor.inputs.len(), 3);
         assert_eq!(descriptor.inputs[0].name, "source");
@@ -1113,9 +1305,29 @@ mod tests {
         assert_eq!(descriptor.inputs[2].name, "fidelity_receipt");
         assert_eq!(
             descriptor.inputs[2].proof.requires,
-            [EXACT_SOURCE_RESTORATION_PROOF]
+            [ACCEPTED_STANDARD_EXPORT_PROOF]
         );
-        assert_eq!(descriptor.proof.requires, [EXACT_SOURCE_RESTORATION_PROOF]);
+        assert_eq!(descriptor.proof.requires, [ACCEPTED_STANDARD_EXPORT_PROOF]);
+    }
+
+    #[test]
+    fn semantic_export_requires_no_source_capsule_and_provides_accepted_evidence() {
+        let descriptor = standard_export_descriptor("bids.1.11.1").unwrap();
+        assert!(descriptor.inputs[0].proof.requires.is_empty());
+        assert_eq!(
+            descriptor.proof.provides,
+            [
+                SEMANTIC_STANDARD_EXPORT_PROOF,
+                ACCEPTED_STANDARD_EXPORT_PROOF,
+            ]
+        );
+        assert_eq!(
+            descriptor.outputs[2].proof.provides,
+            [
+                SEMANTIC_STANDARD_EXPORT_PROOF,
+                ACCEPTED_STANDARD_EXPORT_PROOF,
+            ]
+        );
     }
 
     #[test]
