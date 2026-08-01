@@ -36,6 +36,7 @@ use lamquant_lmq::{
 };
 use semantic_abir::{ContentId, Rational};
 use semantic_abir_bcs::{CodecFidelity, CodecImplementation, PccpStatus};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{LamQuantNodeValue, FEATURE_SET, SOURCE_ID};
 
@@ -77,6 +78,9 @@ const AUTHORIZATION_LOCK_FILE: &str = ".lock";
 const AUTHORIZATION_STAGING_PREFIX: &str = ".staging-";
 static AUTHORIZATION_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub const LMQ_PCCP_AUTHORIZATION_MAX_LIFETIME_SECONDS: u64 = 24 * 60 * 60;
+pub const LMQ_PCCP_AUTHORIZATION_SNAPSHOT_SCHEMA: &str =
+    "org.quitetall.lamquant.pccp-authorization-snapshot-v1";
+const MAX_PCCP_AUTHORIZATION_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -162,6 +166,26 @@ impl LmqPccpAuthorizationEntry {
         .expect("validated LMQ profile always yields a valid authorization entry")
     }
 
+    pub const fn model_artifact_content_id(&self) -> ContentId {
+        self.model_artifact_content_id
+    }
+
+    pub const fn checkpoint_content_id(&self) -> ContentId {
+        self.checkpoint_content_id
+    }
+
+    pub const fn checkpoint_sha256(&self) -> [u8; 32] {
+        self.checkpoint_sha256
+    }
+
+    pub fn pccp_change_id(&self) -> &str {
+        &self.pccp_change_id
+    }
+
+    pub const fn pccp_evidence_id(&self) -> ContentId {
+        self.pccp_evidence_id
+    }
+
     fn matches(&self, request: &LmqPccpAuthorizationRequest<'_>) -> bool {
         self.model_artifact_content_id == request.model_artifact_content_id
             && self.checkpoint_content_id == request.checkpoint_content_id
@@ -220,6 +244,153 @@ impl SignedLmqPccpAuthorizationSnapshot {
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
+
+    pub const fn not_before_unix_seconds(&self) -> u64 {
+        self.not_before_unix_seconds
+    }
+
+    pub const fn not_after_unix_seconds(&self) -> u64 {
+        self.not_after_unix_seconds
+    }
+
+    pub fn entries(&self) -> &[LmqPccpAuthorizationEntry] {
+        &self.entries
+    }
+
+    pub const fn signature(&self) -> &[u8; 64] {
+        &self.signature
+    }
+}
+
+/// Parse one strict external authorization snapshot without selecting trust.
+///
+/// Signature trust remains caller-provided. JSON rejects duplicate or unknown
+/// members and accepts only exact lowercase hexadecimal identities.
+pub fn load_lmq_pccp_authorization_snapshot_json(
+    document: &[u8],
+) -> Result<SignedLmqPccpAuthorizationSnapshot, LmqPccpAuthorizationLedgerError> {
+    if document.is_empty()
+        || document.len() > MAX_PCCP_AUTHORIZATION_SNAPSHOT_BYTES
+        || !evidence::has_unique_object_members(document)
+    {
+        return Err(LmqPccpAuthorizationLedgerError::InvalidSnapshot);
+    }
+    let value: JsonValue = serde_json::from_slice(document)
+        .map_err(|_| LmqPccpAuthorizationLedgerError::InvalidSnapshot)?;
+    let root = value
+        .as_object()
+        .filter(|root| {
+            has_exact_json_members(
+                root,
+                &[
+                    "schema",
+                    "epoch",
+                    "not_before_unix_seconds",
+                    "not_after_unix_seconds",
+                    "entries",
+                    "signature",
+                ],
+            )
+        })
+        .ok_or(LmqPccpAuthorizationLedgerError::InvalidSnapshot)?;
+    if root.get("schema").and_then(JsonValue::as_str)
+        != Some(LMQ_PCCP_AUTHORIZATION_SNAPSHOT_SCHEMA)
+    {
+        return Err(LmqPccpAuthorizationLedgerError::InvalidSnapshot);
+    }
+    let epoch = required_json_u64(root, "epoch")?;
+    let not_before_unix_seconds = required_json_u64(root, "not_before_unix_seconds")?;
+    let not_after_unix_seconds = required_json_u64(root, "not_after_unix_seconds")?;
+    let raw_entries = root
+        .get("entries")
+        .and_then(JsonValue::as_array)
+        .filter(|entries| entries.len() <= MAX_PCCP_AUTHORIZATION_ENTRIES)
+        .ok_or(LmqPccpAuthorizationLedgerError::InvalidSnapshot)?;
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for raw_entry in raw_entries {
+        let entry = raw_entry
+            .as_object()
+            .filter(|entry| {
+                has_exact_json_members(
+                    entry,
+                    &[
+                        "model_artifact_content_id",
+                        "checkpoint_content_id",
+                        "checkpoint_sha256",
+                        "pccp_change_id",
+                        "pccp_evidence_id",
+                    ],
+                )
+            })
+            .ok_or(LmqPccpAuthorizationLedgerError::InvalidSnapshot)?;
+        let model_artifact_content_id =
+            ContentId::from_bytes(required_json_hex_32(entry, "model_artifact_content_id")?);
+        let checkpoint_content_id =
+            ContentId::from_bytes(required_json_hex_32(entry, "checkpoint_content_id")?);
+        let checkpoint_sha256 = required_json_hex_32(entry, "checkpoint_sha256")?;
+        let pccp_change_id = entry
+            .get("pccp_change_id")
+            .and_then(JsonValue::as_str)
+            .ok_or(LmqPccpAuthorizationLedgerError::InvalidSnapshot)?;
+        let pccp_evidence_id =
+            ContentId::from_bytes(required_json_hex_32(entry, "pccp_evidence_id")?);
+        entries.push(
+            LmqPccpAuthorizationEntry::new(
+                model_artifact_content_id,
+                checkpoint_content_id,
+                checkpoint_sha256,
+                pccp_change_id,
+                pccp_evidence_id,
+            )
+            .map_err(|_| LmqPccpAuthorizationLedgerError::InvalidSnapshot)?,
+        );
+    }
+    let signature = root
+        .get("signature")
+        .and_then(JsonValue::as_str)
+        .and_then(|value| decode_hex_64(value.as_bytes()))
+        .ok_or(LmqPccpAuthorizationLedgerError::InvalidSnapshot)?;
+    SignedLmqPccpAuthorizationSnapshot::new(
+        epoch,
+        not_before_unix_seconds,
+        not_after_unix_seconds,
+        entries,
+        signature,
+    )
+}
+
+/// Verify signature and validity window against caller-provisioned trust.
+pub fn verify_current_lmq_pccp_authorization_snapshot(
+    trusted_verifying_key: [u8; 32],
+    snapshot: &SignedLmqPccpAuthorizationSnapshot,
+) -> Result<(), LmqPccpAuthorizationLedgerError> {
+    let verifying_key = VerifyingKey::from_bytes(&trusted_verifying_key)
+        .map_err(|_| LmqPccpAuthorizationLedgerError::InvalidVerifyingKey)?;
+    verify_authorization_snapshot(&verifying_key, snapshot)?;
+    ensure_authorization_snapshot_current(snapshot)
+}
+
+fn has_exact_json_members(root: &JsonMap<String, JsonValue>, required: &[&str]) -> bool {
+    root.len() == required.len() && required.iter().all(|name| root.contains_key(*name))
+}
+
+fn required_json_u64(
+    root: &JsonMap<String, JsonValue>,
+    name: &str,
+) -> Result<u64, LmqPccpAuthorizationLedgerError> {
+    root.get(name)
+        .and_then(JsonValue::as_u64)
+        .ok_or(LmqPccpAuthorizationLedgerError::InvalidSnapshot)
+}
+
+fn required_json_hex_32(
+    root: &JsonMap<String, JsonValue>,
+    name: &str,
+) -> Result<[u8; 32], LmqPccpAuthorizationLedgerError> {
+    root.get(name)
+        .and_then(JsonValue::as_str)
+        .and_then(|value| decode_hex_32(value.as_bytes()))
+        .ok_or(LmqPccpAuthorizationLedgerError::InvalidSnapshot)
 }
 
 #[derive(Debug)]
@@ -959,6 +1130,19 @@ fn decode_hex_32(bytes: &[u8]) -> Option<[u8; 32]> {
         return None;
     }
     let mut output = [0_u8; 32];
+    for (index, output_byte) in output.iter_mut().enumerate() {
+        let high = decode_hex_nibble(bytes[index * 2])?;
+        let low = decode_hex_nibble(bytes[index * 2 + 1])?;
+        *output_byte = (high << 4) | low;
+    }
+    Some(output)
+}
+
+fn decode_hex_64(bytes: &[u8]) -> Option<[u8; 64]> {
+    if bytes.len() != 128 {
+        return None;
+    }
+    let mut output = [0_u8; 64];
     for (index, output_byte) in output.iter_mut().enumerate() {
         let high = decode_hex_nibble(bytes[index * 2])?;
         let low = decode_hex_nibble(bytes[index * 2 + 1])?;

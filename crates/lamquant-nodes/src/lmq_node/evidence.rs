@@ -42,7 +42,9 @@ pub fn verify_pccp_gate_evidence(
     if evidence.is_empty() || evidence.len() > MAX_PCCP_EVIDENCE_BYTES {
         return Err(LmqNodeProfileError::InvalidPccpEvidence);
     }
-    reject_duplicate_object_members(evidence)?;
+    if !has_unique_object_members(evidence) {
+        return Err(LmqNodeProfileError::InvalidPccpEvidence);
+    }
     let document: Value =
         serde_json::from_slice(evidence).map_err(|_| LmqNodeProfileError::InvalidPccpEvidence)?;
     let root = document
@@ -152,14 +154,12 @@ pub fn verify_pccp_gate_evidence(
     })
 }
 
-fn reject_duplicate_object_members(evidence: &[u8]) -> Result<(), LmqNodeProfileError> {
-    let mut deserializer = serde_json::Deserializer::from_slice(evidence);
+pub(super) fn has_unique_object_members(document: &[u8]) -> bool {
+    let mut deserializer = serde_json::Deserializer::from_slice(document);
     DuplicateRejectingSeed
         .deserialize(&mut deserializer)
-        .map_err(|_| LmqNodeProfileError::InvalidPccpEvidence)?;
-    deserializer
-        .end()
-        .map_err(|_| LmqNodeProfileError::InvalidPccpEvidence)
+        .is_ok()
+        && deserializer.end().is_ok()
 }
 
 #[derive(Clone, Copy)]

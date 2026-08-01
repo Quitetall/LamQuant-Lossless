@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    lmq_descriptor, lmq_node_config, register_lmq_node, verify_pccp_gate_evidence,
-    AbirDatasetValue, LamQuantKernelExecutor, LamQuantNodeValue, LmqAttestedBackend,
-    LmqBackendDeploymentManifest, LmqBackendSession, LmqNodeProfile, LmqPccpAuthorizationEntry,
-    LmqPccpAuthorizationEpochStore, LmqPccpAuthorizationLedger, NoopTransactionalSink,
+    lmq_descriptor, lmq_node_config, load_lmq_pccp_authorization_snapshot_json, register_lmq_node,
+    verify_current_lmq_pccp_authorization_snapshot, verify_pccp_gate_evidence, AbirDatasetValue,
+    LamQuantKernelExecutor, LamQuantNodeValue, LmqAttestedBackend, LmqBackendDeploymentManifest,
+    LmqBackendSession, LmqNodeProfile, LmqPccpAuthorizationEntry, LmqPccpAuthorizationEpochStore,
+    LmqPccpAuthorizationLedger, LmqPccpAuthorizationLedgerError, NoopTransactionalSink,
     SignedLmqPccpAuthorizationSnapshot, LMQ_CURRENT_PCCP_POLICY, LMQ_MODEL_INPUT_PROOF,
-    LMQ_NODE_TYPE,
+    LMQ_NODE_TYPE, LMQ_PCCP_AUTHORIZATION_SNAPSHOT_SCHEMA,
 };
 use blut_graph_core::{
     Compiler, ExecutionRealm, Graph, KernelRegistry, NodeId, NodeInstance, PlanExecutor, PortRef,
@@ -549,6 +550,111 @@ fn signed_authorization_snapshot(
         signing_key.sign(&message).to_bytes(),
     )
     .unwrap()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    output
+}
+
+fn authorization_snapshot_json(
+    snapshot: &SignedLmqPccpAuthorizationSnapshot,
+    signature: &[u8; 64],
+) -> Vec<u8> {
+    let entry = &snapshot.entries()[0];
+    format!(
+        concat!(
+            "{{\"schema\":\"{}\",\"epoch\":{},",
+            "\"not_before_unix_seconds\":{},\"not_after_unix_seconds\":{},",
+            "\"entries\":[{{\"model_artifact_content_id\":\"{}\",",
+            "\"checkpoint_content_id\":\"{}\",\"checkpoint_sha256\":\"{}\",",
+            "\"pccp_change_id\":\"{}\",\"pccp_evidence_id\":\"{}\"}}],",
+            "\"signature\":\"{}\"}}"
+        ),
+        LMQ_PCCP_AUTHORIZATION_SNAPSHOT_SCHEMA,
+        snapshot.epoch(),
+        snapshot.not_before_unix_seconds(),
+        snapshot.not_after_unix_seconds(),
+        hex(entry.model_artifact_content_id().as_bytes()),
+        hex(entry.checkpoint_content_id().as_bytes()),
+        hex(&entry.checkpoint_sha256()),
+        entry.pccp_change_id(),
+        hex(entry.pccp_evidence_id().as_bytes()),
+        hex(signature),
+    )
+    .into_bytes()
+}
+
+#[test]
+fn authorization_snapshot_json_requires_exact_trusted_signature() {
+    let signing_key = SigningKey::from_bytes(&[0xa1; 32]);
+    let (dataset, _) = fixture_dataset();
+    let contract = test_contract(dataset.dataset());
+    let profile = build_profile(Rational::new(93, 100).unwrap(), &contract);
+    let expected = signed_authorization_snapshot(
+        &signing_key,
+        7,
+        vec![LmqPccpAuthorizationEntry::from_profile(&profile)],
+    );
+    let document = authorization_snapshot_json(&expected, expected.signature());
+
+    let parsed = load_lmq_pccp_authorization_snapshot_json(&document).unwrap();
+    assert_eq!(parsed, expected);
+    verify_current_lmq_pccp_authorization_snapshot(signing_key.verifying_key().to_bytes(), &parsed)
+        .unwrap();
+
+    let attacker = SigningKey::from_bytes(&[0xa2; 32]);
+    assert_eq!(
+        verify_current_lmq_pccp_authorization_snapshot(
+            attacker.verifying_key().to_bytes(),
+            &parsed,
+        ),
+        Err(LmqPccpAuthorizationLedgerError::UntrustedSignature)
+    );
+}
+
+#[test]
+fn authorization_snapshot_json_rejects_ambiguous_or_malformed_documents() {
+    let signing_key = SigningKey::from_bytes(&[0xa3; 32]);
+    let (dataset, _) = fixture_dataset();
+    let contract = test_contract(dataset.dataset());
+    let profile = build_profile(Rational::new(93, 100).unwrap(), &contract);
+    let snapshot = signed_authorization_snapshot(
+        &signing_key,
+        8,
+        vec![LmqPccpAuthorizationEntry::from_profile(&profile)],
+    );
+    let valid =
+        String::from_utf8(authorization_snapshot_json(&snapshot, snapshot.signature())).unwrap();
+
+    let duplicate = valid.replacen("\"epoch\":8,", "\"epoch\":8,\"epoch\":8,", 1);
+    assert_eq!(
+        load_lmq_pccp_authorization_snapshot_json(duplicate.as_bytes()),
+        Err(LmqPccpAuthorizationLedgerError::InvalidSnapshot)
+    );
+
+    let unknown = valid.replacen("\"epoch\":8,", "\"extra\":1,\"epoch\":8,", 1);
+    assert_eq!(
+        load_lmq_pccp_authorization_snapshot_json(unknown.as_bytes()),
+        Err(LmqPccpAuthorizationLedgerError::InvalidSnapshot)
+    );
+
+    let uppercase = valid.replacen(&"55".repeat(32), &"AA".repeat(32), 1);
+    assert_eq!(
+        load_lmq_pccp_authorization_snapshot_json(uppercase.as_bytes()),
+        Err(LmqPccpAuthorizationLedgerError::InvalidSnapshot)
+    );
+
+    let truncated = valid.replace(&hex(snapshot.signature()), "00");
+    assert_eq!(
+        load_lmq_pccp_authorization_snapshot_json(truncated.as_bytes()),
+        Err(LmqPccpAuthorizationLedgerError::InvalidSnapshot)
+    );
 }
 
 fn build_plan(
