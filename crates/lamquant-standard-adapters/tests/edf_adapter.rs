@@ -10,6 +10,8 @@ use semantic_abir::{
 };
 use std::collections::BTreeMap;
 
+mod support;
+
 fn write_ascii(target: &mut [u8], value: &str) {
     assert!(value.len() <= target.len());
     target.fill(b' ');
@@ -230,6 +232,7 @@ fn capsule_free_abir_exports_semantic_edf_and_reimports_without_signal_loss() {
         .expect("semantic EDF writeback succeeds without a source capsule");
     assert!(!receipt.exact_source_restoration);
     assert!(receipt.semantic_equivalence);
+    support::dump_package33_output("edf", &written);
 
     let reimported = adapter
         .import(&written, ValidationLimits::default())

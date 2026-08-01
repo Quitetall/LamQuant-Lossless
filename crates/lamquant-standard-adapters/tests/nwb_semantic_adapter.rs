@@ -16,6 +16,8 @@ use semantic_abir::{Atom, ContentId, ValidationLimits};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+mod support;
+
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
 
 impl PayloadResolver for Payloads {
@@ -73,6 +75,7 @@ fn capsule_free_abir_exports_nwb_and_reimports_integer_series_semantics() {
     assert!(!receipt.exact_source_restoration);
     assert!(receipt.semantic_equivalence);
     assert!(adapter.validate(&written).internal_valid);
+    support::dump_package33_output("nwb", &written);
 
     let reimported = adapter
         .import(&written, ValidationLimits::default())

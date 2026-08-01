@@ -14,6 +14,8 @@ use semantic_abir::{logical_content_id, Atom, ContentId, ElementType, Validation
 use std::collections::BTreeMap;
 use std::io::Write;
 
+mod support;
+
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
 
 impl PayloadResolver for Payloads {
@@ -297,6 +299,7 @@ fn capsule_free_abir_exports_a_valid_bids_tree_and_reimports_signal_semantics() 
     assert!(!receipt.exact_source_restoration);
     assert!(receipt.semantic_equivalence);
     assert!(adapter.validate(&written).internal_valid);
+    support::dump_package33_output("bids", &written);
 
     let reimported = adapter
         .import(&written, ValidationLimits::default())

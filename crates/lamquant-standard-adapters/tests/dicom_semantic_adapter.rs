@@ -13,6 +13,8 @@ use lamquant_standard_adapters::DicomSemanticAdapter;
 use semantic_abir::{Atom, ContentId, DatasetDraft, Recording, ValidationLimits};
 use std::collections::BTreeMap;
 
+mod support;
+
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
 
 impl PayloadResolver for Payloads {
@@ -91,7 +93,7 @@ fn capsule_free_abir_exports_dicom_and_reimports_waveform_semantics() {
         draft.add_event(event.clone());
     }
     for relationship in imported.dataset.source_relationships() {
-        draft.add_source_relationship(relationship.clone());
+        draft.add_source_relationship(*relationship);
     }
     let capsule_free = draft
         .validate(ValidationLimits::default())
@@ -112,6 +114,7 @@ fn capsule_free_abir_exports_dicom_and_reimports_waveform_semantics() {
     assert!(!receipt.exact_source_restoration);
     assert!(receipt.semantic_equivalence);
     assert!(adapter.validate(&written).internal_valid);
+    support::dump_package33_output("dicom", &written);
 
     let reimported = adapter
         .import(&written, ValidationLimits::default())
