@@ -58,7 +58,8 @@ fn helper_script(name: &str, body: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!("lmq_timeout_{name}_{}.py", std::process::id()));
     let mut file = fs::File::create(&path).expect("create helper script");
-    file.write_all(body.as_bytes()).expect("write helper script");
+    file.write_all(body.as_bytes())
+        .expect("write helper script");
     path
 }
 

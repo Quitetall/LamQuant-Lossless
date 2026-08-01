@@ -185,20 +185,17 @@ impl PyBackend {
         // against a live child and an early return abandons both — the thread
         // detached and the child never reaped. Failing here instead costs
         // nothing, because nothing has been started yet.
-        let (mut stdin, stdout, stderr) = match (
-            child.stdin.take(),
-            child.stdout.take(),
-            child.stderr.take(),
-        ) {
-            (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(BackendError(
-                    "helper was spawned without all three pipes".to_string(),
-                ));
-            }
-        };
+        let (mut stdin, stdout, stderr) =
+            match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+                (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(BackendError(
+                        "helper was spawned without all three pipes".to_string(),
+                    ));
+                }
+            };
         let writer = thread::spawn(move || {
             let outcome = stdin.write_all(&payload);
             // Closing the pipe is how the helper learns the request has ended.
