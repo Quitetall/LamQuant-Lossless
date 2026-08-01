@@ -31,14 +31,15 @@ use abir_adapter::{
 };
 use lamquant_core::source::{EdfReader, SemanticRead, SignalSourceReader};
 use semantic_abir::{
-    interchange_content_id, payload_content_id as abir_payload_id, AbirDataset, Atom, AtomTag,
-    ByteOrder, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock, ClockTag, ConceptId,
-    CoordinateFrame, CoordinateFrameTag, DatasetDraft, DatasetTag, ElementType, Event, EventTag,
-    Layout, ObjectId, PayloadDescriptor, Presence, Rational, Recording, RecordingTag,
-    ReferenceKind, SignalBlock, SourceCapsule, SourceKey, Stream, StreamTag, TimeAxis, TimeSegment,
-    ValidationLimits,
+    interchange_content_id, payload_content_id as abir_payload_id, verify_payload_content,
+    AbirDataset, Atom, AtomTag, ByteOrder, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock,
+    ClockTag, ConceptId, CoordinateFrame, CoordinateFrameTag, DatasetDraft, DatasetTag,
+    ElementType, Event, EventTag, Layout, ObjectId, PayloadDescriptor, Presence, Rational,
+    Recording, RecordingTag, ReferenceKind, SignalBlock, SourceCapsule, SourceKey, Stream,
+    StreamTag, TimeAxis, TimeSegment, ValidationLimits,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 
 use crate::{binding_namespace, payload_content_id, plan_id, valid_relative_path};
@@ -789,6 +790,19 @@ struct ParsedDataset {
     derivatives: u64,
 }
 
+struct SemanticBids<'a> {
+    recording_path: &'a str,
+    datatype: Datatype,
+    subject: &'a str,
+    task: &'a str,
+    dataset_name: &'a str,
+    bids_version: &'a str,
+    channel_names: Vec<&'a str>,
+    descriptor: &'a PayloadDescriptor,
+    segment: TimeSegment,
+    events: Vec<&'a Event>,
+}
+
 impl BidsSemanticAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self {
@@ -1155,6 +1169,617 @@ impl BidsSemanticAdapter {
             .filter(|capsule| capsule.source().namespace() == namespace)
             .collect())
     }
+
+    fn semantic_bids<'a>(
+        &self,
+        dataset: &'a AbirDataset,
+    ) -> Result<SemanticBids<'a>, AdapterError> {
+        if dataset.recordings().len() != 1
+            || dataset.streams().len() != 1
+            || dataset.atoms().len() != 1
+            || dataset.clocks().len() != 1
+            || !dataset.coordinate_frames().is_empty()
+            || !dataset.channel_bases().is_empty()
+            || !dataset.policies().is_empty()
+            || !dataset.proofs().is_empty()
+            || !dataset.derivations().is_empty()
+            || !dataset.fidelity().is_empty()
+            || !dataset.observed_execution().is_empty()
+            || !dataset.subjects().is_empty()
+            || !dataset.patients().is_empty()
+            || !dataset.sessions().is_empty()
+            || !dataset.acquisitions().is_empty()
+            || !dataset.devices().is_empty()
+            || !dataset.sensors().is_empty()
+            || !dataset.channels().is_empty()
+            || !dataset.clock_relations().is_empty()
+            || !dataset.frame_transforms().is_empty()
+            || !dataset.concept_dictionaries().is_empty()
+            || !dataset.derived_artifacts().is_empty()
+            || !dataset.source_relationships().is_empty()
+        {
+            return Err(unsupported(
+                "BIDS semantic writeback currently requires one recording and one signal stream without auxiliary ABIR catalogs",
+            ));
+        }
+        let recording = &dataset.recordings()[0];
+        let stream = &dataset.streams()[0];
+        let clock = &dataset.clocks()[0];
+        if recording.streams() != [stream.id()]
+            || stream.recording_id() != recording.id()
+            || stream.atoms() != [dataset.atoms()[0].id()]
+            || stream.clock_id() != Some(clock.id())
+            || stream.channel_basis_id().is_some()
+            || stream.policy_id().is_some()
+            || clock.kind().as_str() != "bids:clock/recording-onset"
+            || clock.parent_id().is_some()
+            || clock.offset() != Rational::new(0, 1).unwrap()
+            || clock.rate() != Rational::new(1, 1).unwrap()
+            || clock.uncertainty() != Rational::new(0, 1).unwrap()
+        {
+            return Err(unsupported(
+                "BIDS semantic writeback requires its recording-onset clock and one signal atom",
+            ));
+        }
+        let datatype = match stream.modality().as_str() {
+            "abir:modality/eeg" => Datatype::Eeg,
+            "abir:modality/ieeg" => {
+                return Err(unsupported(
+                    "BIDS iEEG writeback requires an electrodes table and coordinate system",
+                ))
+            }
+            _ => {
+                return Err(unsupported(
+                    "BIDS semantic writeback currently supports EEG and iEEG recordings",
+                ))
+            }
+        };
+        let Atom::SignalBlock(block) = &dataset.atoms()[0] else {
+            return Err(unsupported("BIDS recording atom must be a SignalBlock"));
+        };
+        if block.calibration().is_some() {
+            return Err(unsupported(
+                "BIDS EDF writeback cannot infer channel-specific physical units from one block calibration",
+            ));
+        }
+        let descriptor = dataset.atoms()[0]
+            .payload()
+            .ok_or_else(|| unsupported("BIDS recording requires a present payload"))?;
+        let TimeAxis::Regular(segment) = block.time_axis() else {
+            return Err(unsupported(
+                "BIDS semantic writeback currently requires a regular time axis",
+            ));
+        };
+        if segment.start() != Rational::new(0, 1).unwrap()
+            || descriptor.element() != ElementType::I64
+            || descriptor.byte_order() != ByteOrder::Little
+            || descriptor.layout() != &Layout::DenseRowMajor
+            || descriptor.shape().len() != 2
+            || descriptor.shape()[0] == 0
+            || descriptor.shape()[1] != segment.samples()
+            || descriptor.encoding().map(ConceptId::as_str) != Some("abir:encoding/raw")
+        {
+            return Err(unsupported(
+                "BIDS EDF writeback requires zero-origin dense little-endian raw I64 [channel,sample] data",
+            ));
+        }
+
+        let bids_version = required_source_value(recording.source_keys(), "bids.version")?;
+        let dataset_name = required_source_value(recording.source_keys(), "bids.dataset-name")?;
+        let subject = required_source_value(recording.source_keys(), "bids.subject")?;
+        let (recording_path, metadata) = recording_source_metadata(recording.source_keys())?;
+        let fields = parse_metadata_fields(metadata)?;
+        let expected_fields =
+            BTreeSet::from(["datatype", "subject", "session", "channels", "rate"]);
+        if fields.keys().copied().collect::<BTreeSet<_>>() != expected_fields
+            || fields.get("datatype").copied() != Some(datatype.key())
+            || fields.get("subject").copied() != Some(subject)
+        {
+            return Err(unsupported(
+                "BIDS recording source metadata disagrees with stream semantics",
+            ));
+        }
+        let channel_names = fields
+            .get("channels")
+            .copied()
+            .unwrap_or_default()
+            .split('|')
+            .collect::<Vec<_>>();
+        if channel_names.len() as u64 != descriptor.shape()[0]
+            || channel_names.iter().any(|name| !valid_tsv_cell(name))
+        {
+            return Err(unsupported(
+                "BIDS channel metadata does not match signal payload shape",
+            ));
+        }
+        let declared_rate = fields
+            .get("rate")
+            .ok_or_else(|| unsupported("BIDS recording rate metadata is missing"))?;
+        if decimal_rational(declared_rate)? != segment.rate() {
+            return Err(unsupported(
+                "BIDS recording rate metadata disagrees with its time axis",
+            ));
+        }
+        let expected_suffix = format!("_{}.edf", datatype.key());
+        if !valid_relative_path(recording_path)
+            || !recording_path.starts_with(&format!("sub-{subject}/"))
+            || !recording_path.ends_with(&expected_suffix)
+        {
+            return Err(unsupported(
+                "BIDS recording path is not a representable EEG/iEEG path",
+            ));
+        }
+        let filename = recording_path.rsplit('/').next().unwrap_or(recording_path);
+        let session = fields["session"];
+        let expected_session_directory = format!("sub-{subject}/ses-{session}/");
+        let expected_session_entity = format!("_ses-{session}_");
+        if (session.is_empty() && recording_path.contains("/ses-"))
+            || (!session.is_empty()
+                && (!valid_bids_label(session)
+                    || !recording_path.starts_with(&expected_session_directory)
+                    || !filename.contains(&expected_session_entity)))
+        {
+            return Err(unsupported(
+                "BIDS session metadata disagrees with the recording path",
+            ));
+        }
+        let task = filename
+            .split('_')
+            .find_map(|entity| entity.strip_prefix("task-"))
+            .filter(|task| valid_bids_label(task))
+            .ok_or_else(|| unsupported("BIDS recording path has no valid task entity"))?;
+        if !valid_tsv_cell(dataset_name)
+            || !valid_bids_label(subject)
+            || !bids_version.starts_with("1.")
+        {
+            return Err(unsupported(
+                "BIDS dataset identity metadata is not representable",
+            ));
+        }
+        for key in recording.source_keys() {
+            if !matches!(
+                key.namespace(),
+                "bids.version" | "bids.dataset-name" | "bids.subject"
+            ) && !key.namespace().starts_with("bids.recording.")
+            {
+                return Err(unsupported(&format!(
+                    "BIDS source metadata {} has no semantic writer",
+                    key.namespace()
+                )));
+            }
+        }
+        let mut events = dataset.events().iter().collect::<Vec<_>>();
+        events.sort_by_key(|event| (event.start(), event.end(), event.id()));
+        for event in &events {
+            if event.clock_id() != clock.id()
+                || event.uncertainty() != Rational::new(0, 1).unwrap()
+                || !event.kind().as_str().starts_with("bids:event/")
+                || !valid_tsv_cell(event.kind().as_str().trim_start_matches("bids:event/"))
+            {
+                return Err(unsupported(
+                    "BIDS event cannot be represented without semantic loss",
+                ));
+            }
+            exact_decimal(event.start())?;
+            exact_decimal(subtract_rational(event.end(), event.start())?)?;
+        }
+        exact_decimal(segment.rate())?;
+        let duration = divide_rational_by(segment.samples(), segment.rate())?;
+        if exact_decimal(duration)?.len() > 8
+            || descriptor.shape()[1].to_string().len() > 8
+            || channel_names.len().to_string().len() > 4
+            || !edf_field_representable(&format!("sub-{subject}"), 80)
+            || !edf_field_representable(dataset_name, 80)
+            || channel_names
+                .iter()
+                .any(|name| !edf_field_representable(name, 16))
+        {
+            return Err(unsupported(
+                "BIDS EDF header fields exceed their fixed widths",
+            ));
+        }
+        Ok(SemanticBids {
+            recording_path,
+            datatype,
+            subject,
+            task,
+            dataset_name,
+            bids_version,
+            channel_names,
+            descriptor,
+            segment: *segment,
+            events,
+        })
+    }
+}
+
+fn write_semantic_bids(
+    semantic: &SemanticBids<'_>,
+    payloads: &dyn PayloadResolver,
+) -> Result<Vec<ForeignEntry>, AdapterError> {
+    let logical = payloads.resolve(semantic.descriptor.content_id())?;
+    verify_payload_content(semantic.descriptor, &logical)
+        .map_err(|_| AdapterError::MissingPayload(semantic.descriptor.content_id()))?;
+    let edf = write_bids_edf(semantic, &logical)?;
+    let frequency = json_number(semantic.segment.rate())?;
+    let duration = json_number(divide_rational_by(
+        semantic.segment.samples(),
+        semantic.segment.rate(),
+    )?)?;
+    let sidecar = match semantic.datatype {
+        Datatype::Eeg => serde_json::json!({
+            "TaskName": semantic.task,
+            "SamplingFrequency": frequency,
+            "PowerLineFrequency": "n/a",
+            "SoftwareFilters": "n/a",
+            "EEGReference": "n/a",
+            "EEGGround": "n/a",
+            "EEGPlacementScheme": "n/a",
+            "RecordingType": "continuous",
+            "RecordingDuration": duration,
+            "EEGChannelCount": semantic.channel_names.len(),
+            "EOGChannelCount": 0,
+            "ECGChannelCount": 0,
+            "EMGChannelCount": 0,
+            "MiscChannelCount": 0,
+            "TriggerChannelCount": 0,
+            "Manufacturer": "LamQuant"
+        }),
+        Datatype::Ieeg => serde_json::json!({
+            "TaskName": semantic.task,
+            "SamplingFrequency": frequency,
+            "PowerLineFrequency": "n/a",
+            "SoftwareFilters": "n/a",
+            "iEEGReference": "n/a",
+            "iEEGGround": "n/a",
+            "RecordingType": "continuous",
+            "RecordingDuration": duration,
+            "iEEGChannelCount": semantic.channel_names.len(),
+            "EOGChannelCount": 0,
+            "ECGChannelCount": 0,
+            "EMGChannelCount": 0,
+            "MiscChannelCount": 0,
+            "TriggerChannelCount": 0,
+            "Manufacturer": "LamQuant"
+        }),
+        Datatype::Physio => unreachable!("semantic projection rejects physiology"),
+    };
+    let mut sidecar_bytes = serde_json::to_vec_pretty(&sidecar).map_err(invalid)?;
+    sidecar_bytes.push(b'\n');
+    let description = serde_json::json!({
+        "Name": semantic.dataset_name,
+        "BIDSVersion": semantic.bids_version,
+        "DatasetType": "raw",
+        "Authors": ["LamQuant semantic writeback"]
+    });
+    let mut description_bytes = serde_json::to_vec_pretty(&description).map_err(invalid)?;
+    description_bytes.push(b'\n');
+    let mut channels = String::from("name\ttype\tunits\tsampling_frequency\tstatus\n");
+    for name in &semantic.channel_names {
+        writeln!(
+            channels,
+            "{}\t{}\tuV\t{}\tgood",
+            name,
+            if semantic.datatype == Datatype::Eeg {
+                "EEG"
+            } else {
+                "SEEG"
+            },
+            exact_decimal(semantic.segment.rate())?
+        )
+        .expect("writing to String cannot fail");
+    }
+    let mut entries = vec![
+        ForeignEntry {
+            path: "dataset_description.json".to_owned(),
+            media_type: Some("application/json".to_owned()),
+            bytes: description_bytes,
+        },
+        ForeignEntry {
+            path: "participants.tsv".to_owned(),
+            media_type: Some("text/tab-separated-values".to_owned()),
+            bytes: format!("participant_id\nsub-{}\n", semantic.subject).into_bytes(),
+        },
+        ForeignEntry {
+            path: "README".to_owned(),
+            media_type: Some("text/plain".to_owned()),
+            bytes: b"BIDS dataset written from validated ABIR semantics by LamQuant.\n".to_vec(),
+        },
+        ForeignEntry {
+            path: semantic.recording_path.to_owned(),
+            media_type: Some("application/edf".to_owned()),
+            bytes: edf,
+        },
+        ForeignEntry {
+            path: bids_sidecar_path(
+                semantic.recording_path,
+                &format!("{}.json", semantic.datatype.key()),
+            )?,
+            media_type: Some("application/json".to_owned()),
+            bytes: sidecar_bytes,
+        },
+        ForeignEntry {
+            path: bids_sidecar_path(semantic.recording_path, "channels.tsv")?,
+            media_type: Some("text/tab-separated-values".to_owned()),
+            bytes: channels.into_bytes(),
+        },
+    ];
+    if !semantic.events.is_empty() {
+        let mut events = String::from("onset\tduration\ttrial_type\n");
+        for event in &semantic.events {
+            writeln!(
+                events,
+                "{}\t{}\t{}",
+                exact_decimal(event.start())?,
+                exact_decimal(subtract_rational(event.end(), event.start())?)?,
+                event.kind().as_str().trim_start_matches("bids:event/")
+            )
+            .expect("writing to String cannot fail");
+        }
+        entries.push(ForeignEntry {
+            path: bids_sidecar_path(semantic.recording_path, "events.tsv")?,
+            media_type: Some("text/tab-separated-values".to_owned()),
+            bytes: events.into_bytes(),
+        });
+    }
+    Ok(entries)
+}
+
+fn write_bids_edf(semantic: &SemanticBids<'_>, logical: &[u8]) -> Result<Vec<u8>, AdapterError> {
+    let channel_count = semantic.channel_names.len();
+    let samples =
+        usize::try_from(semantic.segment.samples()).map_err(|_| AdapterError::SourceTooLarge)?;
+    let header_bytes = 256_usize
+        .checked_add(
+            channel_count
+                .checked_mul(256)
+                .ok_or(AdapterError::SourceTooLarge)?,
+        )
+        .ok_or(AdapterError::SourceTooLarge)?;
+    let mut bytes = Vec::with_capacity(
+        header_bytes
+            .checked_add(
+                channel_count
+                    .checked_mul(samples)
+                    .and_then(|count| count.checked_mul(2))
+                    .ok_or(AdapterError::SourceTooLarge)?,
+            )
+            .ok_or(AdapterError::SourceTooLarge)?,
+    );
+    push_edf_field(&mut bytes, "0", 8)?;
+    push_edf_field(&mut bytes, &format!("sub-{}", semantic.subject), 80)?;
+    push_edf_field(&mut bytes, semantic.dataset_name, 80)?;
+    push_edf_field(&mut bytes, "01.01.85", 8)?;
+    push_edf_field(&mut bytes, "00.00.00", 8)?;
+    push_edf_field(&mut bytes, &header_bytes.to_string(), 8)?;
+    push_edf_field(&mut bytes, "", 44)?;
+    push_edf_field(&mut bytes, "1", 8)?;
+    push_edf_field(
+        &mut bytes,
+        &exact_decimal(divide_rational_by(
+            semantic.segment.samples(),
+            semantic.segment.rate(),
+        )?)?,
+        8,
+    )?;
+    push_edf_field(&mut bytes, &channel_count.to_string(), 4)?;
+    for name in &semantic.channel_names {
+        push_edf_field(&mut bytes, name, 16)?;
+    }
+    for _ in &semantic.channel_names {
+        push_edf_field(&mut bytes, "", 80)?;
+    }
+    for _ in &semantic.channel_names {
+        push_edf_field(&mut bytes, "uV", 8)?;
+    }
+    for value in ["-32768", "32767", "-32768", "32767"] {
+        for _ in &semantic.channel_names {
+            push_edf_field(&mut bytes, value, 8)?;
+        }
+    }
+    for _ in &semantic.channel_names {
+        push_edf_field(&mut bytes, "", 80)?;
+    }
+    for _ in &semantic.channel_names {
+        push_edf_field(&mut bytes, &samples.to_string(), 8)?;
+    }
+    for _ in &semantic.channel_names {
+        push_edf_field(&mut bytes, "", 32)?;
+    }
+    debug_assert_eq!(bytes.len(), header_bytes);
+    for sample in logical.chunks_exact(8) {
+        let value = i64::from_le_bytes(sample.try_into().expect("eight-byte chunk"));
+        let value = i16::try_from(value).map_err(|_| {
+            unsupported("BIDS EDF payload contains a sample outside signed 16-bit range")
+        })?;
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+fn push_edf_field(bytes: &mut Vec<u8>, value: &str, width: usize) -> Result<(), AdapterError> {
+    if !edf_field_representable(value, width) {
+        return Err(unsupported(&format!(
+            "BIDS EDF value is not representable in its {width}-byte field"
+        )));
+    }
+    bytes.extend_from_slice(value.as_bytes());
+    bytes.resize(bytes.len() + width - value.len(), b' ');
+    Ok(())
+}
+
+fn edf_field_representable(value: &str, width: usize) -> bool {
+    value.is_ascii() && value.len() <= width && !value.chars().any(char::is_control)
+}
+
+fn bids_sidecar_path(recording_path: &str, suffix: &str) -> Result<String, AdapterError> {
+    let datatype = if recording_path.ends_with("_eeg.edf") {
+        "eeg"
+    } else if recording_path.ends_with("_ieeg.edf") {
+        "ieeg"
+    } else {
+        return Err(unsupported("BIDS recording path has no EEG/iEEG suffix"));
+    };
+    let stem = recording_path
+        .strip_suffix(&format!("_{datatype}.edf"))
+        .expect("suffix checked");
+    Ok(format!("{stem}_{suffix}"))
+}
+
+fn required_source_value<'a>(
+    keys: &'a [SourceKey],
+    namespace: &str,
+) -> Result<&'a str, AdapterError> {
+    let mut matches = keys
+        .iter()
+        .filter(|key| key.namespace() == namespace)
+        .map(SourceKey::value);
+    let value = matches
+        .next()
+        .ok_or_else(|| unsupported(&format!("required source key {namespace} is missing")))?;
+    if matches.next().is_some() {
+        return Err(unsupported(&format!(
+            "required source key {namespace} is ambiguous"
+        )));
+    }
+    Ok(value)
+}
+
+fn recording_source_metadata(keys: &[SourceKey]) -> Result<(&str, &str), AdapterError> {
+    let mut matches = keys.iter().filter_map(|key| {
+        key.namespace()
+            .strip_prefix("bids.recording.")
+            .map(|path| (path, key.value()))
+    });
+    let value = matches
+        .next()
+        .ok_or_else(|| unsupported("BIDS recording source metadata is missing"))?;
+    if matches.next().is_some() {
+        return Err(unsupported(
+            "BIDS semantic writeback currently supports one recording",
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_metadata_fields(value: &str) -> Result<BTreeMap<&str, &str>, AdapterError> {
+    let mut fields = BTreeMap::new();
+    for field in value.split(';') {
+        let (name, value) = field
+            .split_once('=')
+            .ok_or_else(|| unsupported("BIDS recording source metadata is malformed"))?;
+        if name.is_empty() || fields.insert(name, value).is_some() {
+            return Err(unsupported("BIDS recording source metadata is ambiguous"));
+        }
+    }
+    Ok(fields)
+}
+
+fn valid_tsv_cell(value: &str) -> bool {
+    !value.is_empty()
+        && !value
+            .chars()
+            .any(|character| matches!(character, '\t' | '\r' | '\n'))
+}
+
+fn valid_bids_label(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn json_number(value: Rational) -> Result<serde_json::Value, AdapterError> {
+    serde_json::from_str(&exact_decimal(value)?).map_err(invalid)
+}
+
+fn subtract_rational(left: Rational, right: Rational) -> Result<Rational, AdapterError> {
+    let (left_numerator, left_denominator) = left.parts();
+    let (right_numerator, right_denominator) = right.parts();
+    Rational::new(
+        left_numerator
+            .checked_mul(right_denominator)
+            .and_then(|left| {
+                right_numerator
+                    .checked_mul(left_denominator)
+                    .and_then(|right| left.checked_sub(right))
+            })
+            .ok_or(AdapterError::SourceTooLarge)?,
+        left_denominator
+            .checked_mul(right_denominator)
+            .ok_or(AdapterError::SourceTooLarge)?,
+    )
+    .map_err(invalid)
+}
+
+fn divide_rational_by(samples: u64, rate: Rational) -> Result<Rational, AdapterError> {
+    let (rate_numerator, rate_denominator) = rate.parts();
+    Rational::new(
+        i128::from(samples)
+            .checked_mul(rate_denominator)
+            .ok_or(AdapterError::SourceTooLarge)?,
+        rate_numerator,
+    )
+    .map_err(invalid)
+}
+
+fn exact_decimal(value: Rational) -> Result<String, AdapterError> {
+    let (numerator, mut denominator) = value.parts();
+    let mut twos = 0_u32;
+    let mut fives = 0_u32;
+    while denominator % 2 == 0 {
+        denominator /= 2;
+        twos += 1;
+    }
+    while denominator % 5 == 0 {
+        denominator /= 5;
+        fives += 1;
+    }
+    if denominator != 1 {
+        return Err(unsupported(
+            "BIDS exact number has no finite decimal representation",
+        ));
+    }
+    let digits = twos.max(fives);
+    let scaled = numerator
+        .checked_mul(checked_power(2, digits - twos)?)
+        .and_then(|value| value.checked_mul(checked_power(5, digits - fives).ok()?))
+        .ok_or(AdapterError::SourceTooLarge)?;
+    let negative = scaled < 0;
+    let magnitude = scaled.unsigned_abs().to_string();
+    let mut rendered = if digits == 0 {
+        magnitude
+    } else {
+        let digits = usize::try_from(digits).map_err(|_| AdapterError::SourceTooLarge)?;
+        if magnitude.len() <= digits {
+            format!("0.{}{}", "0".repeat(digits - magnitude.len()), magnitude)
+        } else {
+            let split = magnitude.len() - digits;
+            format!("{}.{}", &magnitude[..split], &magnitude[split..])
+        }
+    };
+    if rendered.contains('.') {
+        while rendered.ends_with('0') {
+            rendered.pop();
+        }
+        if rendered.ends_with('.') {
+            rendered.pop();
+        }
+    }
+    if negative {
+        rendered.insert(0, '-');
+    }
+    Ok(rendered)
+}
+
+fn checked_power(base: i128, power: u32) -> Result<i128, AdapterError> {
+    (0..power).try_fold(1_i128, |value, _| {
+        value.checked_mul(base).ok_or(AdapterError::SourceTooLarge)
+    })
+}
+
+fn unsupported(reason: &str) -> AdapterError {
+    AdapterError::UnsupportedMeaning(reason.to_owned())
 }
 
 impl Adapter for BidsSemanticAdapter {
@@ -1213,22 +1838,40 @@ impl Adapter for BidsSemanticAdapter {
 
     fn plan_export(&self, dataset: &AbirDataset) -> Result<ExportPlan, AdapterError> {
         let capsules = self.capsules(dataset)?;
-        let unsupported = capsules.is_empty();
-        let mappings = capsules
-            .iter()
-            .map(|capsule| {
-                exact(
-                    capsule.source().value().to_owned(),
-                    capsule.source().value().to_owned(),
-                )
-            })
-            .collect();
+        let semantic = if capsules.is_empty() {
+            self.semantic_bids(dataset).ok()
+        } else {
+            None
+        };
+        let mappings = if let Some(semantic) = semantic.as_ref() {
+            let mut mappings = vec![exact(
+                format!("atom:{}", dataset.atoms()[0].id()),
+                semantic.recording_path.to_owned(),
+            )];
+            if !semantic.events.is_empty() {
+                mappings.push(exact(
+                    "events:bids:event".to_owned(),
+                    bids_sidecar_path(semantic.recording_path, "events.tsv")?,
+                ));
+            }
+            mappings
+        } else {
+            capsules
+                .iter()
+                .map(|capsule| {
+                    exact(
+                        capsule.source().value().to_owned(),
+                        capsule.source().value().to_owned(),
+                    )
+                })
+                .collect()
+        };
         let mut plan = ExportPlan {
             source_dataset: dataset.id().to_string(),
             target_profile: self.profile.id.clone(),
             mappings,
             requires_user_acceptance: false,
-            unsupported,
+            unsupported: capsules.is_empty() && semantic.is_none(),
             plan_id: String::new(),
         };
         plan.plan_id = plan_id(&plan);
@@ -1247,24 +1890,55 @@ impl Adapter for BidsSemanticAdapter {
         }
         if !plan.accepts_without_loss() {
             return Err(AdapterError::UnsupportedMeaning(
-                "dataset lacks BIDS source capsules".to_owned(),
+                "dataset lacks BIDS source capsules and cannot be represented by semantic BIDS writeback".to_owned(),
             ));
         }
-        let mut entries = Vec::new();
-        let mut output_ids = Vec::new();
-        for capsule in self.capsules(dataset)? {
-            let bytes = payloads.resolve(capsule.content_id())?;
-            if payload_content_id(&bytes) != capsule.content_id() {
-                return Err(AdapterError::MissingPayload(capsule.content_id()));
+        let capsules = self.capsules(dataset)?;
+        if !capsules.is_empty() {
+            let mut entries = Vec::new();
+            let mut output_ids = Vec::new();
+            for capsule in capsules {
+                let bytes = payloads.resolve(capsule.content_id())?;
+                if payload_content_id(&bytes) != capsule.content_id() {
+                    return Err(AdapterError::MissingPayload(capsule.content_id()));
+                }
+                output_ids.push(capsule.content_id().to_string());
+                entries.push(ForeignEntry {
+                    path: capsule.source().value().to_owned(),
+                    media_type: capsule.media_type().map(str::to_owned),
+                    bytes,
+                });
             }
-            output_ids.push(capsule.content_id().to_string());
-            entries.push(ForeignEntry {
-                path: capsule.source().value().to_owned(),
-                media_type: capsule.media_type().map(str::to_owned),
-                bytes,
-            });
+            entries.sort_by(|left, right| left.path.cmp(&right.path));
+            return Ok((
+                ForeignObject {
+                    profile: self.profile.id.clone(),
+                    entries,
+                },
+                FidelityReceipt {
+                    plan_id: plan.plan_id.clone(),
+                    exact_source_restoration: true,
+                    semantic_equivalence: true,
+                    output_content_ids: output_ids,
+                },
+            ));
+        }
+        let semantic = self.semantic_bids(dataset)?;
+        let mut entries = write_semantic_bids(&semantic, payloads)?;
+        let logical_bytes = entries
+            .iter()
+            .try_fold(0_u64, |total, entry| {
+                total.checked_add(u64::try_from(entry.bytes.len()).ok()?)
+            })
+            .ok_or(AdapterError::SourceTooLarge)?;
+        if logical_bytes > self.max_source_bytes {
+            return Err(AdapterError::SourceTooLarge);
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let output_ids = entries
+            .iter()
+            .map(|entry| payload_content_id(&entry.bytes).to_string())
+            .collect();
         Ok((
             ForeignObject {
                 profile: self.profile.id.clone(),
@@ -1272,7 +1946,7 @@ impl Adapter for BidsSemanticAdapter {
             },
             FidelityReceipt {
                 plan_id: plan.plan_id.clone(),
-                exact_source_restoration: true,
+                exact_source_restoration: false,
                 semantic_equivalence: true,
                 output_content_ids: output_ids,
             },

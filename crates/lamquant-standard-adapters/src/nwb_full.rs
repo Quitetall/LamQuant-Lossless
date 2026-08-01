@@ -29,16 +29,17 @@ use abir_adapter::{
     MappingReport, PayloadObject, PayloadResolver, ProfileId, ProfileStatus, SemanticCoverage,
     ValidationArtifact,
 };
-use hdf5_metno::types::{FloatSize, IntSize, TypeDescriptor};
+use hdf5_metno::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
 use semantic_abir::{
-    interchange_content_id, payload_content_id as abir_payload_id, AbirDataset, Atom, AtomTag,
-    ByteOrder, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock, ClockTag, ConceptId,
-    DatasetDraft, DatasetTag, ElementType, Event, EventTag, Layout, ObjectId, PayloadDescriptor,
-    Presence, Rational, Recording, RecordingTag, ReferenceKind, SignalBlock, SourceCapsule,
-    SourceKey, Stream, StreamTag, TimeAxis, TimeSegment, ValidationLimits,
+    interchange_content_id, payload_content_id as abir_payload_id, verify_payload_content,
+    AbirDataset, Atom, AtomTag, ByteOrder, ChannelBasis, ChannelBasisTag, ChannelSpec, Clock,
+    ClockTag, ConceptId, DatasetDraft, DatasetTag, ElementType, Event, EventTag, Layout, ObjectId,
+    PayloadDescriptor, Presence, Rational, Recording, RecordingTag, ReferenceKind, SignalBlock,
+    SourceCapsule, SourceKey, Stream, StreamTag, TimeAxis, TimeSegment, ValidationLimits,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::{binding_namespace, payload_content_id, plan_id, valid_relative_path};
@@ -944,6 +945,18 @@ struct ParsedDataset {
     timing_changed: bool,
 }
 
+struct SemanticNwb<'a> {
+    series_path: &'a str,
+    neurodata_type: &'a str,
+    unit: &'a str,
+    identifier: &'a str,
+    session_description: &'a str,
+    nwb_version: &'a str,
+    atom_id: ObjectId<AtomTag>,
+    descriptor: &'a PayloadDescriptor,
+    segment: TimeSegment,
+}
+
 impl NwbAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self::with_decoded_limit(max_source_bytes, max_source_bytes)
@@ -1338,6 +1351,167 @@ impl NwbAdapter {
             .filter(|capsule| capsule.source().namespace() == namespace)
             .collect())
     }
+
+    fn semantic_nwb<'a>(&self, dataset: &'a AbirDataset) -> Result<SemanticNwb<'a>, AdapterError> {
+        if dataset.recordings().len() != 1
+            || dataset.streams().len() != 1
+            || dataset.atoms().len() != 1
+            || dataset.clocks().len() != 1
+            || !dataset.events().is_empty()
+            || !dataset.coordinate_frames().is_empty()
+            || !dataset.channel_bases().is_empty()
+            || !dataset.policies().is_empty()
+            || !dataset.proofs().is_empty()
+            || !dataset.derivations().is_empty()
+            || !dataset.fidelity().is_empty()
+            || !dataset.observed_execution().is_empty()
+            || !dataset.subjects().is_empty()
+            || !dataset.patients().is_empty()
+            || !dataset.sessions().is_empty()
+            || !dataset.acquisitions().is_empty()
+            || !dataset.devices().is_empty()
+            || !dataset.sensors().is_empty()
+            || !dataset.channels().is_empty()
+            || !dataset.clock_relations().is_empty()
+            || !dataset.frame_transforms().is_empty()
+            || !dataset.concept_dictionaries().is_empty()
+            || !dataset.derived_artifacts().is_empty()
+            || !dataset.source_relationships().is_empty()
+        {
+            return Err(unsupported(
+                "NWB semantic writeback currently requires one regular TimeSeries without auxiliary ABIR catalogs",
+            ));
+        }
+        let recording = &dataset.recordings()[0];
+        let stream = &dataset.streams()[0];
+        let clock = &dataset.clocks()[0];
+        let atom = &dataset.atoms()[0];
+        if recording.streams() != [stream.id()]
+            || stream.recording_id() != recording.id()
+            || stream.atoms() != [atom.id()]
+            || stream.modality().as_str() != "abir:modality/unknown"
+            || stream.clock_id() != Some(clock.id())
+            || stream.channel_basis_id().is_some()
+            || stream.policy_id().is_some()
+            || clock.kind().as_str() != "nwb:clock/session-start"
+            || clock.parent_id().is_some()
+            || clock.offset() != Rational::new(0, 1).unwrap()
+            || clock.rate() != Rational::new(1, 1).unwrap()
+            || clock.uncertainty() != Rational::new(0, 1).unwrap()
+        {
+            return Err(unsupported(
+                "NWB semantic writeback requires one acquisition stream on its session clock",
+            ));
+        }
+        let Atom::SignalBlock(block) = atom else {
+            return Err(unsupported("NWB TimeSeries atom must be a SignalBlock"));
+        };
+        if block.calibration().is_some() {
+            return Err(unsupported(
+                "NWB TimeSeries writeback does not yet map ABIR calibration",
+            ));
+        }
+        let descriptor = atom
+            .payload()
+            .ok_or_else(|| unsupported("NWB TimeSeries requires a present payload"))?;
+        let TimeAxis::Regular(segment) = block.time_axis() else {
+            return Err(unsupported(
+                "NWB semantic writeback currently requires a regular time axis",
+            ));
+        };
+        if !matches!(descriptor.element(), ElementType::I64 | ElementType::F64)
+            || descriptor.byte_order() != ByteOrder::Little
+            || descriptor.layout() != &Layout::DenseRowMajor
+            || descriptor.shape().len() != 2
+            || descriptor.shape()[0] == 0
+            || descriptor.shape()[1] != segment.samples()
+            || descriptor.encoding().map(ConceptId::as_str) != Some("abir:encoding/raw")
+        {
+            return Err(unsupported(
+                "NWB TimeSeries requires dense little-endian raw I64 or F64 [channel,sample] data",
+            ));
+        }
+        rational_as_microsecond_f64(segment.start())?;
+        rational_as_microsecond_f64(segment.rate())?;
+        let nwb_version = required_source_value(recording.source_keys(), "nwb.version")?;
+        let identifier = required_source_value(recording.source_keys(), "nwb.identifier")?;
+        let session_description =
+            required_source_value(recording.source_keys(), "nwb.session-description")?;
+        if !nwb_version.starts_with("2.") || identifier.is_empty() || session_description.is_empty()
+        {
+            return Err(unsupported(
+                "NWB root identity metadata is not representable",
+            ));
+        }
+        let (series_path, metadata) = nwb_series_metadata(recording.source_keys())?;
+        let fields = parse_metadata_fields(metadata)?;
+        let expected_fields = BTreeSet::from(["container", "type", "unit", "rows", "columns"]);
+        let series_name = series_path.trim_start_matches("/acquisition/");
+        if fields.keys().copied().collect::<BTreeSet<_>>() != expected_fields
+            || fields.get("container").copied() != Some("acquisition")
+            || fields
+                .get("rows")
+                .and_then(|value| value.parse::<u64>().ok())
+                != Some(descriptor.shape()[1])
+            || fields
+                .get("columns")
+                .and_then(|value| value.parse::<u64>().ok())
+                != Some(descriptor.shape()[0])
+            || !series_path.starts_with("/acquisition/")
+            || series_name.is_empty()
+            || series_name == "."
+            || series_name.contains('/')
+            || series_name.contains('\0')
+        {
+            return Err(unsupported(
+                "NWB series source metadata disagrees with signal semantics",
+            ));
+        }
+        let neurodata_type = fields
+            .get("type")
+            .copied()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| unsupported("NWB TimeSeries type metadata is missing"))?;
+        if neurodata_type != "TimeSeries" {
+            return Err(unsupported(
+                "NWB semantic writeback currently supports the core TimeSeries type only",
+            ));
+        }
+        let unit = fields
+            .get("unit")
+            .copied()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| unsupported("NWB TimeSeries unit metadata is missing"))?;
+        if [identifier, session_description, nwb_version, unit]
+            .iter()
+            .any(|value| value.contains('\0'))
+        {
+            return Err(unsupported("NWB text metadata contains an embedded NUL"));
+        }
+        for key in recording.source_keys() {
+            if !matches!(
+                key.namespace(),
+                "nwb.version" | "nwb.identifier" | "nwb.session-description"
+            ) && !key.namespace().starts_with("nwb.series.")
+            {
+                return Err(unsupported(&format!(
+                    "NWB source metadata {} has no semantic writer",
+                    key.namespace()
+                )));
+            }
+        }
+        Ok(SemanticNwb {
+            series_path,
+            neurodata_type,
+            unit,
+            identifier,
+            session_description,
+            nwb_version,
+            atom_id: atom.id(),
+            descriptor,
+            segment: *segment,
+        })
+    }
 }
 
 impl Adapter for NwbAdapter {
@@ -1390,22 +1564,33 @@ impl Adapter for NwbAdapter {
 
     fn plan_export(&self, dataset: &AbirDataset) -> Result<ExportPlan, AdapterError> {
         let capsules = self.capsules(dataset)?;
-        let unsupported = capsules.len() != 1;
-        let mappings = capsules
-            .iter()
-            .map(|capsule| {
-                exact(
-                    capsule.source().value().to_owned(),
-                    capsule.source().value().to_owned(),
-                )
-            })
-            .collect();
+        let semantic = if capsules.len() == 1 {
+            None
+        } else {
+            self.semantic_nwb(dataset).ok()
+        };
+        let mappings = if let Some(semantic) = semantic.as_ref() {
+            vec![exact(
+                format!("atom:{}", semantic.atom_id),
+                format!("{}/data", semantic.series_path),
+            )]
+        } else {
+            capsules
+                .iter()
+                .map(|capsule| {
+                    exact(
+                        capsule.source().value().to_owned(),
+                        capsule.source().value().to_owned(),
+                    )
+                })
+                .collect()
+        };
         let mut plan = ExportPlan {
             source_dataset: dataset.id().to_string(),
             target_profile: self.profile.id.clone(),
             mappings,
             requires_user_acceptance: false,
-            unsupported,
+            unsupported: capsules.len() != 1 && semantic.is_none(),
             plan_id: String::new(),
         };
         plan.plan_id = plan_id(&plan);
@@ -1424,28 +1609,55 @@ impl Adapter for NwbAdapter {
         }
         if !plan.accepts_without_loss() {
             return Err(AdapterError::UnsupportedMeaning(
-                "dataset lacks one exact NWB source capsule".to_owned(),
+                "dataset lacks one exact NWB source capsule and cannot be represented by semantic NWB writeback".to_owned(),
             ));
         }
-        let capsule = self.capsules(dataset)?[0];
-        let bytes = payloads.resolve(capsule.content_id())?;
-        if payload_content_id(&bytes) != capsule.content_id() {
-            return Err(AdapterError::MissingPayload(capsule.content_id()));
+        let capsules = self.capsules(dataset)?;
+        if capsules.len() == 1 {
+            let capsule = capsules[0];
+            let bytes = payloads.resolve(capsule.content_id())?;
+            if payload_content_id(&bytes) != capsule.content_id() {
+                return Err(AdapterError::MissingPayload(capsule.content_id()));
+            }
+            return Ok((
+                ForeignObject {
+                    profile: self.profile.id.clone(),
+                    entries: vec![ForeignEntry {
+                        path: capsule.source().value().to_owned(),
+                        media_type: capsule.media_type().map(str::to_owned),
+                        bytes,
+                    }],
+                },
+                FidelityReceipt {
+                    plan_id: plan.plan_id.clone(),
+                    exact_source_restoration: true,
+                    semantic_equivalence: true,
+                    output_content_ids: vec![capsule.content_id().to_string()],
+                },
+            ));
         }
+        let semantic = self.semantic_nwb(dataset)?;
+        let bytes = write_semantic_nwb(&semantic, payloads)?;
+        if u64::try_from(bytes.len()).map_err(|_| AdapterError::SourceTooLarge)?
+            > self.max_source_bytes
+        {
+            return Err(AdapterError::SourceTooLarge);
+        }
+        let content_id = payload_content_id(&bytes);
         Ok((
             ForeignObject {
                 profile: self.profile.id.clone(),
                 entries: vec![ForeignEntry {
-                    path: capsule.source().value().to_owned(),
-                    media_type: capsule.media_type().map(str::to_owned),
+                    path: "session.nwb".to_owned(),
+                    media_type: Some("application/x-nwb".to_owned()),
                     bytes,
                 }],
             },
             FidelityReceipt {
                 plan_id: plan.plan_id.clone(),
-                exact_source_restoration: true,
+                exact_source_restoration: false,
                 semantic_equivalence: true,
-                output_content_ids: vec![capsule.content_id().to_string()],
+                output_content_ids: vec![content_id.to_string()],
             },
         ))
     }
@@ -1469,4 +1681,271 @@ impl Adapter for NwbAdapter {
             diagnostics,
         }
     }
+}
+
+fn write_semantic_nwb(
+    semantic: &SemanticNwb<'_>,
+    payloads: &dyn PayloadResolver,
+) -> Result<Vec<u8>, AdapterError> {
+    let logical = payloads.resolve(semantic.descriptor.content_id())?;
+    verify_payload_content(semantic.descriptor, &logical)
+        .map_err(|_| AdapterError::MissingPayload(semantic.descriptor.content_id()))?;
+    let rows = usize::try_from(semantic.descriptor.shape()[1])
+        .map_err(|_| AdapterError::SourceTooLarge)?;
+    let columns = usize::try_from(semantic.descriptor.shape()[0])
+        .map_err(|_| AdapterError::SourceTooLarge)?;
+    let temporary = tempfile::tempdir().map_err(invalid)?;
+    let path = temporary.path().join("semantic.nwb");
+    {
+        let file = hdf5_metno::File::create(&path).map_err(invalid)?;
+        let root = file.as_group().map_err(invalid)?;
+        write_group_text_attr(&root, "namespace", "core")?;
+        write_group_text_attr(&root, "neurodata_type", "NWBFile")?;
+        write_group_text_attr(&root, "nwb_version", semantic.nwb_version)?;
+        write_group_text_attr(
+            &root,
+            "object_id",
+            &uuid_from_bytes(semantic.atom_id.as_bytes()),
+        )?;
+        write_scalar_text_dataset(&root, "identifier", semantic.identifier)?;
+        write_scalar_text_dataset(&root, "session_description", semantic.session_description)?;
+        write_scalar_text_dataset(&root, "session_start_time", "1970-01-01T00:00:00+00:00")?;
+        write_scalar_text_dataset(
+            &root,
+            "timestamps_reference_time",
+            "1970-01-01T00:00:00+00:00",
+        )?;
+        let created = [unicode("1970-01-01T00:00:00+00:00")?];
+        root.new_dataset::<VarLenUnicode>()
+            .shape(1)
+            .create("file_create_date")
+            .and_then(|dataset| dataset.write(&created))
+            .map_err(invalid)?;
+        for group in ["analysis", "general", "processing"] {
+            root.create_group(group).map_err(invalid)?;
+        }
+        let stimulus = root.create_group("stimulus").map_err(invalid)?;
+        stimulus.create_group("presentation").map_err(invalid)?;
+        stimulus.create_group("templates").map_err(invalid)?;
+        let acquisition = root.create_group("acquisition").map_err(invalid)?;
+        let series_name = semantic.series_path.trim_start_matches("/acquisition/");
+        let series = acquisition.create_group(series_name).map_err(invalid)?;
+        write_group_text_attr(&series, "namespace", "core")?;
+        write_group_text_attr(&series, "neurodata_type", semantic.neurodata_type)?;
+        write_group_text_attr(
+            &series,
+            "object_id",
+            &uuid_from_bytes(semantic.descriptor.content_id().as_bytes()),
+        )?;
+        write_group_text_attr(&series, "comments", "no comments")?;
+        write_group_text_attr(
+            &series,
+            "description",
+            "TimeSeries written from validated ABIR semantics",
+        )?;
+        match semantic.descriptor.element() {
+            ElementType::I64 => {
+                let source = logical
+                    .chunks_exact(8)
+                    .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("eight-byte chunk")))
+                    .collect::<Vec<_>>();
+                let values = transpose_channel_major(&source, rows, columns)?;
+                let data = series
+                    .new_dataset::<i64>()
+                    .shape((rows, columns))
+                    .create("data")
+                    .map_err(invalid)?;
+                data.write_raw(&values).map_err(invalid)?;
+                write_dataset_text_attr(&data, "unit", semantic.unit)?;
+                write_numeric_series_attrs(&data)?;
+            }
+            ElementType::F64 => {
+                let source = logical
+                    .chunks_exact(8)
+                    .map(|chunk| f64::from_le_bytes(chunk.try_into().expect("eight-byte chunk")))
+                    .collect::<Vec<_>>();
+                let values = transpose_channel_major(&source, rows, columns)?;
+                let data = series
+                    .new_dataset::<f64>()
+                    .shape((rows, columns))
+                    .create("data")
+                    .map_err(invalid)?;
+                data.write_raw(&values).map_err(invalid)?;
+                write_dataset_text_attr(&data, "unit", semantic.unit)?;
+                write_numeric_series_attrs(&data)?;
+            }
+            _ => unreachable!("semantic projection limits element types"),
+        }
+        let starting_time = series
+            .new_dataset::<f64>()
+            .create("starting_time")
+            .map_err(invalid)?;
+        starting_time
+            .write_scalar(&rational_as_microsecond_f64(semantic.segment.start())?)
+            .map_err(invalid)?;
+        let rate = rational_as_microsecond_f64(semantic.segment.rate())?;
+        starting_time
+            .new_attr::<f64>()
+            .create("rate")
+            .and_then(|attribute| attribute.write_scalar(&rate))
+            .map_err(invalid)?;
+        write_dataset_text_attr(&starting_time, "unit", "seconds")?;
+        file.flush().map_err(invalid)?;
+    }
+    fs::read(path).map_err(invalid)
+}
+
+fn transpose_channel_major<T: Copy>(
+    source: &[T],
+    rows: usize,
+    columns: usize,
+) -> Result<Vec<T>, AdapterError> {
+    if source.len() != rows.saturating_mul(columns) {
+        return Err(AdapterError::SourceTooLarge);
+    }
+    let mut values = Vec::with_capacity(source.len());
+    for row in 0..rows {
+        for column in 0..columns {
+            values.push(source[column * rows + row]);
+        }
+    }
+    Ok(values)
+}
+
+fn unicode(value: &str) -> Result<VarLenUnicode, AdapterError> {
+    VarLenUnicode::from_str(value).map_err(invalid)
+}
+
+fn write_group_text_attr(
+    group: &hdf5_metno::Group,
+    name: &str,
+    value: &str,
+) -> Result<(), AdapterError> {
+    let value = unicode(value)?;
+    group
+        .new_attr::<VarLenUnicode>()
+        .create(name)
+        .and_then(|attribute| attribute.write_scalar(&value))
+        .map_err(invalid)
+}
+
+fn write_dataset_text_attr(
+    dataset: &hdf5_metno::Dataset,
+    name: &str,
+    value: &str,
+) -> Result<(), AdapterError> {
+    let value = unicode(value)?;
+    dataset
+        .new_attr::<VarLenUnicode>()
+        .create(name)
+        .and_then(|attribute| attribute.write_scalar(&value))
+        .map_err(invalid)
+}
+
+fn write_scalar_text_dataset(
+    group: &hdf5_metno::Group,
+    name: &str,
+    value: &str,
+) -> Result<(), AdapterError> {
+    let value = unicode(value)?;
+    group
+        .new_dataset::<VarLenUnicode>()
+        .create(name)
+        .and_then(|dataset| dataset.write_scalar(&value))
+        .map_err(invalid)
+}
+
+fn write_numeric_series_attrs(dataset: &hdf5_metno::Dataset) -> Result<(), AdapterError> {
+    for (name, value) in [
+        ("conversion", 1.0_f64),
+        ("offset", 0.0),
+        ("resolution", -1.0),
+    ] {
+        dataset
+            .new_attr::<f64>()
+            .create(name)
+            .and_then(|attribute| attribute.write_scalar(&value))
+            .map_err(invalid)?;
+    }
+    Ok(())
+}
+
+fn uuid_from_bytes(bytes: &[u8]) -> String {
+    let hex = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+fn required_source_value<'a>(
+    keys: &'a [SourceKey],
+    namespace: &str,
+) -> Result<&'a str, AdapterError> {
+    let mut matches = keys
+        .iter()
+        .filter(|key| key.namespace() == namespace)
+        .map(SourceKey::value);
+    let value = matches
+        .next()
+        .ok_or_else(|| unsupported(&format!("required source key {namespace} is missing")))?;
+    if matches.next().is_some() {
+        return Err(unsupported(&format!(
+            "required source key {namespace} is ambiguous"
+        )));
+    }
+    Ok(value)
+}
+
+fn nwb_series_metadata(keys: &[SourceKey]) -> Result<(&str, &str), AdapterError> {
+    let mut matches = keys.iter().filter_map(|key| {
+        key.namespace()
+            .strip_prefix("nwb.series.")
+            .map(|path| (path, key.value()))
+    });
+    let value = matches
+        .next()
+        .ok_or_else(|| unsupported("NWB series source metadata is missing"))?;
+    if matches.next().is_some() {
+        return Err(unsupported(
+            "NWB semantic writeback currently supports one TimeSeries",
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_metadata_fields(value: &str) -> Result<BTreeMap<&str, &str>, AdapterError> {
+    let mut fields = BTreeMap::new();
+    for field in value.split(';') {
+        let (name, value) = field
+            .split_once('=')
+            .ok_or_else(|| unsupported("NWB series source metadata is malformed"))?;
+        if name.is_empty() || fields.insert(name, value).is_some() {
+            return Err(unsupported("NWB series source metadata is ambiguous"));
+        }
+    }
+    Ok(fields)
+}
+
+fn rational_as_microsecond_f64(value: Rational) -> Result<f64, AdapterError> {
+    let (numerator, denominator) = value.parts();
+    let value = numerator as f64 / denominator as f64;
+    let (round_trip, changed) = seconds(value)?;
+    if changed || round_trip != Rational::new(numerator, denominator).map_err(invalid)? {
+        return Err(unsupported(
+            "NWB f64 timing cannot represent this ABIR rational exactly on the profile microsecond grid",
+        ));
+    }
+    Ok(value)
+}
+
+fn unsupported(reason: &str) -> AdapterError {
+    AdapterError::UnsupportedMeaning(reason.to_owned())
 }

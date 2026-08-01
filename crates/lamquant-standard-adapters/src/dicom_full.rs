@@ -29,16 +29,16 @@ use abir_adapter::{
     MappingReport, PayloadObject, PayloadResolver, ProfileId, ProfileStatus, SemanticCoverage,
     ValidationArtifact,
 };
-use dicom_core::header::HasLength;
-use dicom_object::{FileDicomObject, InMemDicomObject};
+use dicom_core::{header::HasLength, value::DataSetSequence, DataElement, PrimitiveValue, Tag, VR};
+use dicom_object::{FileDicomObject, FileMetaTableBuilder, InMemDicomObject};
 use semantic_abir::{
-    interchange_content_id, payload_content_id as abir_payload_id, AbirDataset, Acquisition,
-    AcquisitionTag, Atom, AtomTag, ByteOrder, Calibration, ChannelBasis, ChannelBasisTag,
-    ChannelSpec, Clock, ClockTag, ConceptId, DatasetDraft, DatasetTag, Device, DeviceTag,
-    ElementType, Event, EventTag, Layout, ObjectId, Patient, PatientTag, PayloadDescriptor,
-    Presence, Rational, Recording, RecordingTag, ReferenceKind, Session, SessionTag, SignalBlock,
-    SourceCapsule, SourceKey, SourceRelationship, Stream, StreamTag, TimeAxis, TimeSegment,
-    ValidationLimits,
+    interchange_content_id, payload_content_id as abir_payload_id, verify_payload_content,
+    AbirDataset, Acquisition, AcquisitionTag, Atom, AtomTag, ByteOrder, Calibration, ChannelBasis,
+    ChannelBasisTag, ChannelSpec, Clock, ClockTag, ConceptId, DatasetDraft, DatasetTag, Device,
+    DeviceTag, ElementType, Event, EventTag, Layout, ObjectId, Patient, PatientTag,
+    PayloadDescriptor, Presence, Rational, Recording, RecordingTag, ReferenceKind, Session,
+    SessionTag, SignalBlock, SourceCapsule, SourceKey, SourceRelationship, Stream, StreamTag,
+    TimeAxis, TimeSegment, ValidationLimits,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -436,6 +436,32 @@ struct ParsedDataset {
     private_tags: u64,
 }
 
+struct SemanticDicomSignal<'a> {
+    atom_id: ObjectId<AtomTag>,
+    descriptor: &'a PayloadDescriptor,
+    calibration: Option<&'a Calibration>,
+    label: &'a str,
+}
+
+struct SemanticDicomGroup<'a> {
+    rate: Rational,
+    samples: u64,
+    signals: Vec<SemanticDicomSignal<'a>>,
+}
+
+struct SemanticDicom<'a> {
+    patient_id: &'a str,
+    patient_name: &'a str,
+    study_uid: &'a str,
+    series_uid: &'a str,
+    modality: &'a str,
+    manufacturer: &'a str,
+    model: &'a str,
+    serial: Option<&'a str>,
+    groups: Vec<SemanticDicomGroup<'a>>,
+    events: Vec<(&'a Event, &'a str)>,
+}
+
 impl DicomSemanticAdapter {
     pub fn new(max_source_bytes: u64) -> Self {
         Self {
@@ -828,6 +854,279 @@ impl DicomSemanticAdapter {
             .filter(|capsule| capsule.source().namespace() == namespace)
             .collect())
     }
+
+    fn semantic_dicom<'a>(
+        &self,
+        dataset: &'a AbirDataset,
+    ) -> Result<SemanticDicom<'a>, AdapterError> {
+        if dataset.recordings().len() != 1
+            || dataset.streams().len() != 1
+            || dataset.clocks().len() != 1
+            || dataset.channel_bases().len() != 1
+            || dataset.patients().len() != 1
+            || dataset.sessions().len() != 1
+            || dataset.acquisitions().len() != 1
+            || dataset.devices().len() != 1
+            || !dataset.coordinate_frames().is_empty()
+            || !dataset.policies().is_empty()
+            || !dataset.proofs().is_empty()
+            || !dataset.derivations().is_empty()
+            || !dataset.fidelity().is_empty()
+            || !dataset.observed_execution().is_empty()
+            || !dataset.subjects().is_empty()
+            || !dataset.sensors().is_empty()
+            || !dataset.channels().is_empty()
+            || !dataset.clock_relations().is_empty()
+            || !dataset.frame_transforms().is_empty()
+            || !dataset.concept_dictionaries().is_empty()
+            || !dataset.derived_artifacts().is_empty()
+        {
+            return Err(unsupported(
+                "DICOM semantic writeback requires one waveform information model without auxiliary ABIR catalogs",
+            ));
+        }
+        let recording = &dataset.recordings()[0];
+        let stream = &dataset.streams()[0];
+        let clock = &dataset.clocks()[0];
+        let basis = &dataset.channel_bases()[0];
+        let patient = &dataset.patients()[0];
+        let session = &dataset.sessions()[0];
+        let acquisition = &dataset.acquisitions()[0];
+        let device = &dataset.devices()[0];
+        if recording.streams() != [stream.id()]
+            || stream.recording_id() != recording.id()
+            || stream.clock_id() != Some(clock.id())
+            || stream.channel_basis_id() != Some(basis.id())
+            || stream.policy_id().is_some()
+            || stream.atoms().len() != basis.channels().len()
+            || stream.atoms().len() != dataset.atoms().len()
+            || stream.atoms().is_empty()
+            || clock.kind().as_str() != "dicom:clock/acquisition"
+            || clock.parent_id().is_some()
+            || clock.offset() != Rational::new(0, 1).unwrap()
+            || clock.rate() != Rational::new(1, 1).unwrap()
+            || clock.uncertainty() != Rational::new(0, 1).unwrap()
+            || patient.kind().as_str() != "dicom:entity/patient"
+            || session.kind().as_str() != "dicom:entity/study"
+            || acquisition.kind().as_str() != "dicom:entity/series"
+            || device.kind().as_str() != "dicom:entity/equipment"
+        {
+            return Err(unsupported(
+                "DICOM waveform stream or information-model identity is inconsistent",
+            ));
+        }
+        let expected_relationships = BTreeSet::from([
+            SourceRelationship::SessionPatient {
+                session_id: session.id(),
+                patient_id: patient.id(),
+            },
+            SourceRelationship::AcquisitionSession {
+                acquisition_id: acquisition.id(),
+                session_id: session.id(),
+            },
+            SourceRelationship::AcquisitionDevice {
+                acquisition_id: acquisition.id(),
+                device_id: device.id(),
+            },
+            SourceRelationship::AcquisitionRecording {
+                acquisition_id: acquisition.id(),
+                recording_id: recording.id(),
+            },
+        ]);
+        if dataset
+            .source_relationships()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != expected_relationships
+        {
+            return Err(unsupported(
+                "DICOM source relationships cannot be represented without loss",
+            ));
+        }
+        let patient_id = required_source_value(patient.source_keys(), "dicom.patient-id")?;
+        let patient_name = required_source_value(patient.source_keys(), "dicom.patient-name")?;
+        let study_uid = required_source_value(session.source_keys(), "dicom.study-instance-uid")?;
+        let series_uid =
+            required_source_value(acquisition.source_keys(), "dicom.series-instance-uid")?;
+        let modality = required_source_value(acquisition.source_keys(), "dicom.modality")?;
+        let manufacturer = required_source_value(device.source_keys(), "dicom.manufacturer")?;
+        let model = required_source_value(device.source_keys(), "dicom.manufacturer-model")?;
+        let serial = optional_source_value(device.source_keys(), "dicom.device-serial-number")?;
+        if !matches!(
+            (modality, stream.modality().as_str()),
+            ("ECG", "abir:modality/ecg") | ("EEG", "abir:modality/eeg")
+        ) {
+            return Err(unsupported(
+                "DICOM modality disagrees with the ABIR waveform modality",
+            ));
+        }
+        validate_dicom_uid(study_uid)?;
+        validate_dicom_uid(series_uid)?;
+        for (value, width) in [
+            (patient_id, 64),
+            (patient_name, 64),
+            (manufacturer, 64),
+            (model, 64),
+        ] {
+            validate_dicom_text(value, width)?;
+        }
+        if let Some(serial) = serial {
+            validate_dicom_text(serial, 64)?;
+        }
+        reject_unknown_keys(
+            patient.source_keys(),
+            &["dicom.patient-id", "dicom.patient-name"],
+        )?;
+        reject_unknown_keys(session.source_keys(), &["dicom.study-instance-uid"])?;
+        reject_unknown_keys(
+            acquisition.source_keys(),
+            &["dicom.series-instance-uid", "dicom.modality"],
+        )?;
+        reject_unknown_keys(
+            device.source_keys(),
+            &[
+                "dicom.manufacturer",
+                "dicom.manufacturer-model",
+                "dicom.device-serial-number",
+            ],
+        )?;
+
+        let mut grouped: BTreeMap<usize, Vec<(usize, SemanticDicomSignal<'a>, Rational, u64)>> =
+            BTreeMap::new();
+        for (atom_id, channel) in stream.atoms().iter().zip(basis.channels()) {
+            let (group_index, channel_index) = dicom_channel_indices(channel.concept())?;
+            let atom = dataset
+                .atoms()
+                .iter()
+                .find(|atom| atom.id() == *atom_id)
+                .ok_or_else(|| unsupported("DICOM stream references a missing signal atom"))?;
+            let Atom::SignalBlock(block) = atom else {
+                return Err(unsupported(
+                    "DICOM waveform channels require SignalBlock atoms",
+                ));
+            };
+            let descriptor = atom
+                .payload()
+                .ok_or_else(|| unsupported("DICOM waveform channel payload is missing"))?;
+            let TimeAxis::Regular(segment) = block.time_axis() else {
+                return Err(unsupported(
+                    "DICOM waveform channels require regular timing",
+                ));
+            };
+            if segment.start() != Rational::new(0, 1).unwrap()
+                || descriptor.element() != ElementType::I64
+                || descriptor.byte_order() != ByteOrder::Little
+                || descriptor.layout() != &Layout::DenseRowMajor
+                || descriptor.shape() != [1, segment.samples()]
+                || descriptor.encoding().map(ConceptId::as_str) != Some("abir:encoding/raw")
+            {
+                return Err(unsupported(
+                    "DICOM channels require zero-origin dense little-endian raw I64 signal blocks",
+                ));
+            }
+            dicom_decimal(segment.rate())?;
+            if let Some(calibration) = block.calibration() {
+                dicom_calibration_decimal(calibration.scale())?;
+                dicom_calibration_decimal(calibration.offset())?;
+                dicom_unit(calibration.unit())?;
+            }
+            let label = required_source_value(channel.source_keys(), "dicom.channel-source")?;
+            reject_unknown_keys(channel.source_keys(), &["dicom.channel-source"])?;
+            if validate_dicom_text(label, 64).is_err() {
+                return Err(unsupported("DICOM channel label is not representable"));
+            }
+            grouped.entry(group_index).or_default().push((
+                channel_index,
+                SemanticDicomSignal {
+                    atom_id: *atom_id,
+                    descriptor,
+                    calibration: block.calibration(),
+                    label,
+                },
+                segment.rate(),
+                segment.samples(),
+            ));
+        }
+        let mut groups = Vec::with_capacity(grouped.len());
+        for (expected_group, (group_index, mut channels)) in grouped.into_iter().enumerate() {
+            if group_index != expected_group {
+                return Err(unsupported(
+                    "DICOM waveform group indices are not contiguous",
+                ));
+            }
+            channels.sort_by_key(|(channel, _, _, _)| *channel);
+            let rate = channels[0].2;
+            let samples = channels[0].3;
+            if channels.iter().enumerate().any(|(expected, value)| {
+                value.0 != expected || value.2 != rate || value.3 != samples
+            }) {
+                return Err(unsupported(
+                    "DICOM channel indices, rates, or extents disagree within a multiplex group",
+                ));
+            }
+            groups.push(SemanticDicomGroup {
+                rate,
+                samples,
+                signals: channels
+                    .into_iter()
+                    .map(|(_, signal, _, _)| signal)
+                    .collect(),
+            });
+        }
+
+        let mut annotations = BTreeMap::new();
+        for key in recording.source_keys() {
+            let Some(index) = key.namespace().strip_prefix("dicom.annotation.") else {
+                return Err(unsupported(&format!(
+                    "DICOM recording metadata {} requires an exact source capsule",
+                    key.namespace()
+                )));
+            };
+            let index = index
+                .parse::<usize>()
+                .map_err(|_| unsupported("DICOM annotation index is malformed"))?;
+            if annotations.insert(index, key.value()).is_some() {
+                return Err(unsupported("DICOM annotation index is ambiguous"));
+            }
+        }
+        if annotations.len() != dataset.events().len()
+            || annotations.keys().copied().ne(0..annotations.len())
+        {
+            return Err(unsupported(
+                "DICOM annotation text and event counts do not agree",
+            ));
+        }
+        let mut events = Vec::with_capacity(dataset.events().len());
+        for (index, event) in dataset.events().iter().enumerate() {
+            if event.kind().as_str() != "dicom:event/waveform-annotation"
+                || event.clock_id() != clock.id()
+                || event.uncertainty() != Rational::new(0, 1).unwrap()
+            {
+                return Err(unsupported("DICOM annotation event is not representable"));
+            }
+            event_sample_position(event.start(), groups[0].rate)?;
+            event_sample_position(event.end(), groups[0].rate)?;
+            if !annotations[&index].is_ascii() || annotations[&index].contains('\0') {
+                return Err(unsupported(
+                    "DICOM annotation text requires an unsupported character set",
+                ));
+            }
+            events.push((event, annotations[&index]));
+        }
+        Ok(SemanticDicom {
+            patient_id,
+            patient_name,
+            study_uid,
+            series_uid,
+            modality,
+            manufacturer,
+            model,
+            serial,
+            groups,
+            events,
+        })
+    }
 }
 
 /// DICOM sample positions are 1-based; position 1 is time zero.
@@ -919,22 +1218,46 @@ impl Adapter for DicomSemanticAdapter {
 
     fn plan_export(&self, dataset: &AbirDataset) -> Result<ExportPlan, AdapterError> {
         let capsules = self.capsules(dataset)?;
-        let unsupported = capsules.len() != 1;
-        let mappings = capsules
-            .iter()
-            .map(|capsule| {
-                exact(
-                    capsule.source().value().to_owned(),
-                    capsule.source().value().to_owned(),
-                )
-            })
-            .collect();
+        let semantic = if capsules.len() == 1 {
+            None
+        } else {
+            self.semantic_dicom(dataset).ok()
+        };
+        let mappings = if let Some(semantic) = semantic.as_ref() {
+            semantic
+                .groups
+                .iter()
+                .enumerate()
+                .flat_map(|(group, multiplex)| {
+                    multiplex
+                        .signals
+                        .iter()
+                        .enumerate()
+                        .map(move |(channel, signal)| {
+                            exact(
+                                format!("atom:{}", signal.atom_id),
+                                format!("(5400,0100)[{group}] channel {channel}"),
+                            )
+                        })
+                })
+                .collect()
+        } else {
+            capsules
+                .iter()
+                .map(|capsule| {
+                    exact(
+                        capsule.source().value().to_owned(),
+                        capsule.source().value().to_owned(),
+                    )
+                })
+                .collect()
+        };
         let mut plan = ExportPlan {
             source_dataset: dataset.id().to_string(),
             target_profile: self.profile.id.clone(),
             mappings,
             requires_user_acceptance: false,
-            unsupported,
+            unsupported: capsules.len() != 1 && semantic.is_none(),
             plan_id: String::new(),
         };
         plan.plan_id = plan_id(&plan);
@@ -953,31 +1276,57 @@ impl Adapter for DicomSemanticAdapter {
         }
         if !plan.accepts_without_loss() {
             return Err(AdapterError::UnsupportedMeaning(
-                "dataset lacks one exact DICOM source capsule".to_owned(),
+                "dataset lacks one exact DICOM source capsule and cannot be represented by semantic DICOM waveform writeback".to_owned(),
             ));
         }
-        let capsule = self.capsules(dataset)?[0];
-        let bytes = payloads.resolve(capsule.content_id())?;
-        if payload_content_id(&bytes) != capsule.content_id() {
-            return Err(AdapterError::MissingPayload(capsule.content_id()));
+        let capsules = self.capsules(dataset)?;
+        if capsules.len() == 1 {
+            let capsule = capsules[0];
+            let bytes = payloads.resolve(capsule.content_id())?;
+            if payload_content_id(&bytes) != capsule.content_id() {
+                return Err(AdapterError::MissingPayload(capsule.content_id()));
+            }
+            parse_dicom(&bytes)?;
+            return Ok((
+                ForeignObject {
+                    profile: self.profile.id.clone(),
+                    entries: vec![ForeignEntry {
+                        path: capsule.source().value().to_owned(),
+                        media_type: capsule.media_type().map(str::to_owned),
+                        bytes,
+                    }],
+                },
+                FidelityReceipt {
+                    plan_id: plan.plan_id.clone(),
+                    exact_source_restoration: true,
+                    semantic_equivalence: true,
+                    output_content_ids: vec![capsule.content_id().to_string()],
+                },
+            ));
         }
-        // Re-parse before handing the bytes back: matching the capsule
-        // ContentId proves they are unchanged, not that they are still DICOM.
+        let semantic = self.semantic_dicom(dataset)?;
+        let bytes = write_semantic_dicom(dataset, &semantic, payloads)?;
+        if u64::try_from(bytes.len()).map_err(|_| AdapterError::SourceTooLarge)?
+            > self.max_source_bytes
+        {
+            return Err(AdapterError::SourceTooLarge);
+        }
         parse_dicom(&bytes)?;
+        let content_id = payload_content_id(&bytes);
         Ok((
             ForeignObject {
                 profile: self.profile.id.clone(),
                 entries: vec![ForeignEntry {
-                    path: capsule.source().value().to_owned(),
-                    media_type: capsule.media_type().map(str::to_owned),
+                    path: "waveform.dcm".to_owned(),
+                    media_type: Some("application/dicom".to_owned()),
                     bytes,
                 }],
             },
             FidelityReceipt {
                 plan_id: plan.plan_id.clone(),
-                exact_source_restoration: true,
+                exact_source_restoration: false,
                 semantic_equivalence: true,
-                output_content_ids: vec![capsule.content_id().to_string()],
+                output_content_ids: vec![content_id.to_string()],
             },
         ))
     }
@@ -1005,4 +1354,360 @@ impl Adapter for DicomSemanticAdapter {
             diagnostics,
         }
     }
+}
+
+fn write_semantic_dicom(
+    dataset: &AbirDataset,
+    semantic: &SemanticDicom<'_>,
+    payloads: &dyn PayloadResolver,
+) -> Result<Vec<u8>, AdapterError> {
+    const SOP_CLASS: &str = "1.2.840.10008.5.1.4.1.1.9.1.1";
+    const TRANSFER_SYNTAX: &str = "1.2.840.10008.1.2.1";
+    let sop_instance = format!("2.25.{}", u128::from_be_bytes(dataset.id().to_bytes()));
+    let mut waveform_items = Vec::with_capacity(semantic.groups.len());
+    for group in &semantic.groups {
+        let channel_count =
+            u16::try_from(group.signals.len()).map_err(|_| AdapterError::SourceTooLarge)?;
+        let samples = u32::try_from(group.samples).map_err(|_| AdapterError::SourceTooLarge)?;
+        let mut channel_items = Vec::with_capacity(group.signals.len());
+        let mut channel_values = Vec::with_capacity(group.signals.len());
+        for signal in &group.signals {
+            let logical = payloads.resolve(signal.descriptor.content_id())?;
+            verify_payload_content(signal.descriptor, &logical)
+                .map_err(|_| AdapterError::MissingPayload(signal.descriptor.content_id()))?;
+            let values = logical
+                .chunks_exact(8)
+                .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("eight-byte chunk")))
+                .map(|value| {
+                    i16::try_from(value).map_err(|_| {
+                        unsupported(
+                            "DICOM waveform payload contains a sample outside signed 16-bit range",
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.len() as u64 != group.samples {
+                return Err(AdapterError::SourceTooLarge);
+            }
+            channel_values.push(values);
+
+            let source_code = coded_item(signal.label, "99LQ")?;
+            let mut elements = vec![DataElement::new(
+                Tag(0x003A, 0x0208),
+                VR::SQ,
+                DataSetSequence::from(vec![source_code]),
+            )];
+            if let Some(calibration) = signal.calibration {
+                elements.push(DataElement::new(
+                    Tag(0x003A, 0x0210),
+                    VR::DS,
+                    dicom_calibration_decimal(calibration.scale())?,
+                ));
+                elements.push(DataElement::new(Tag(0x003A, 0x0212), VR::DS, "1"));
+                elements.push(DataElement::new(
+                    Tag(0x003A, 0x0213),
+                    VR::DS,
+                    dicom_calibration_decimal(calibration.offset())?,
+                ));
+                elements.push(DataElement::new(
+                    Tag(0x003A, 0x0211),
+                    VR::SQ,
+                    DataSetSequence::from(vec![coded_item(
+                        dicom_unit(calibration.unit())?,
+                        "UCUM",
+                    )?]),
+                ));
+            }
+            channel_items.push(InMemDicomObject::from_element_iter(elements));
+        }
+        let mut words = Vec::with_capacity(
+            usize::try_from(group.samples)
+                .ok()
+                .and_then(|samples| samples.checked_mul(group.signals.len()))
+                .ok_or(AdapterError::SourceTooLarge)?,
+        );
+        for sample in 0..usize::try_from(group.samples).map_err(|_| AdapterError::SourceTooLarge)? {
+            for channel in &channel_values {
+                words.push(channel[sample] as u16);
+            }
+        }
+        waveform_items.push(InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x003A, 0x0005),
+                VR::US,
+                PrimitiveValue::from(channel_count),
+            ),
+            DataElement::new(Tag(0x003A, 0x0010), VR::UL, PrimitiveValue::from(samples)),
+            DataElement::new(Tag(0x003A, 0x001A), VR::DS, dicom_decimal(group.rate)?),
+            DataElement::new(
+                Tag(0x003A, 0x0200),
+                VR::SQ,
+                DataSetSequence::from(channel_items),
+            ),
+            DataElement::new(Tag(0x5400, 0x1004), VR::US, PrimitiveValue::from(16_u16)),
+            DataElement::new(Tag(0x5400, 0x1006), VR::CS, "SS"),
+            DataElement::new(
+                Tag(0x5400, 0x1010),
+                VR::OW,
+                PrimitiveValue::U16(words.into()),
+            ),
+        ]));
+    }
+    let mut root = InMemDicomObject::new_empty();
+    for element in [
+        DataElement::new(Tag(0x0008, 0x0016), VR::UI, SOP_CLASS),
+        DataElement::new(Tag(0x0008, 0x0018), VR::UI, sop_instance.as_str()),
+        DataElement::new(Tag(0x0008, 0x0060), VR::CS, semantic.modality),
+        DataElement::new(Tag(0x0008, 0x0070), VR::LO, semantic.manufacturer),
+        DataElement::new(Tag(0x0008, 0x1090), VR::LO, semantic.model),
+        DataElement::new(Tag(0x0010, 0x0010), VR::PN, semantic.patient_name),
+        DataElement::new(Tag(0x0010, 0x0020), VR::LO, semantic.patient_id),
+        DataElement::new(Tag(0x0020, 0x000D), VR::UI, semantic.study_uid),
+        DataElement::new(Tag(0x0020, 0x000E), VR::UI, semantic.series_uid),
+    ] {
+        root.put(element);
+    }
+    if let Some(serial) = semantic.serial {
+        root.put(DataElement::new(Tag(0x0018, 0x1000), VR::LO, serial));
+    }
+    root.put(DataElement::new(
+        Tag(0x5400, 0x0100),
+        VR::SQ,
+        DataSetSequence::from(waveform_items),
+    ));
+    if !semantic.events.is_empty() {
+        let mut annotations = Vec::with_capacity(semantic.events.len());
+        for (event, text) in &semantic.events {
+            let positions = vec![
+                event_sample_position(event.start(), semantic.groups[0].rate)?,
+                event_sample_position(event.end(), semantic.groups[0].rate)?,
+            ];
+            annotations.push(InMemDicomObject::from_element_iter([
+                DataElement::new(
+                    Tag(0x0040, 0xA132),
+                    VR::UL,
+                    PrimitiveValue::U32(positions.into()),
+                ),
+                DataElement::new(Tag(0x0040, 0xA160), VR::UT, *text),
+            ]));
+        }
+        root.put(DataElement::new(
+            Tag(0x0040, 0xB020),
+            VR::SQ,
+            DataSetSequence::from(annotations),
+        ));
+    }
+    let file = root
+        .with_meta(FileMetaTableBuilder::new().transfer_syntax(TRANSFER_SYNTAX))
+        .map_err(invalid)?;
+    let temporary = tempfile::NamedTempFile::new().map_err(invalid)?;
+    file.write_to_file(temporary.path()).map_err(invalid)?;
+    std::fs::read(temporary.path()).map_err(invalid)
+}
+
+fn coded_item(meaning: &str, scheme: &str) -> Result<InMemDicomObject, AdapterError> {
+    if meaning.is_empty() || meaning.chars().any(char::is_control) {
+        return Err(unsupported("DICOM coded meaning is not representable"));
+    }
+    let digest = blake3::hash(meaning.as_bytes());
+    let code = format!("LQ{}", &digest.to_hex()[..12]);
+    Ok(InMemDicomObject::from_element_iter([
+        DataElement::new(Tag(0x0008, 0x0100), VR::SH, code),
+        DataElement::new(Tag(0x0008, 0x0102), VR::SH, scheme),
+        DataElement::new(Tag(0x0008, 0x0104), VR::LO, meaning),
+    ]))
+}
+
+fn required_source_value<'a>(
+    keys: &'a [SourceKey],
+    namespace: &str,
+) -> Result<&'a str, AdapterError> {
+    optional_source_value(keys, namespace)?
+        .ok_or_else(|| unsupported(&format!("required DICOM source key {namespace} is missing")))
+}
+
+fn optional_source_value<'a>(
+    keys: &'a [SourceKey],
+    namespace: &str,
+) -> Result<Option<&'a str>, AdapterError> {
+    let mut matches = keys
+        .iter()
+        .filter(|key| key.namespace() == namespace)
+        .map(SourceKey::value);
+    let value = matches.next();
+    if matches.next().is_some() {
+        return Err(unsupported(&format!(
+            "DICOM source key {namespace} is ambiguous"
+        )));
+    }
+    Ok(value)
+}
+
+fn reject_unknown_keys(keys: &[SourceKey], allowed: &[&str]) -> Result<(), AdapterError> {
+    if let Some(key) = keys.iter().find(|key| !allowed.contains(&key.namespace())) {
+        return Err(unsupported(&format!(
+            "DICOM source metadata {} has no semantic writer",
+            key.namespace()
+        )));
+    }
+    Ok(())
+}
+
+fn dicom_channel_indices(concept: &ConceptId) -> Result<(usize, usize), AdapterError> {
+    let value = concept
+        .as_str()
+        .strip_prefix("dicom:channel/")
+        .ok_or_else(|| unsupported("DICOM channel concept is not canonical"))?;
+    let (group, channel) = value
+        .split_once('-')
+        .ok_or_else(|| unsupported("DICOM channel concept is malformed"))?;
+    Ok((
+        group
+            .parse()
+            .map_err(|_| unsupported("DICOM waveform group index is malformed"))?,
+        channel
+            .parse()
+            .map_err(|_| unsupported("DICOM waveform channel index is malformed"))?,
+    ))
+}
+
+fn event_sample_position(time: Rational, rate: Rational) -> Result<u32, AdapterError> {
+    let (time_numerator, time_denominator) = time.parts();
+    let (rate_numerator, rate_denominator) = rate.parts();
+    let numerator = time_numerator
+        .checked_mul(rate_numerator)
+        .ok_or(AdapterError::SourceTooLarge)?;
+    let denominator = time_denominator
+        .checked_mul(rate_denominator)
+        .ok_or(AdapterError::SourceTooLarge)?;
+    if numerator < 0 || numerator % denominator != 0 {
+        return Err(unsupported(
+            "DICOM annotation time is not an exact sample position",
+        ));
+    }
+    u32::try_from(
+        numerator
+            .checked_div(denominator)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(AdapterError::SourceTooLarge)?,
+    )
+    .map_err(|_| AdapterError::SourceTooLarge)
+}
+
+fn dicom_unit(unit: &ConceptId) -> Result<&'static str, AdapterError> {
+    match unit.as_str() {
+        "abir:unit/microvolt" => Ok("microvolt"),
+        "abir:unit/millivolt" => Ok("millivolt"),
+        "abir:unit/volt" => Ok("volt"),
+        "dicom:unit/unstated" => Err(unsupported(
+            "DICOM calibrated data requires a stated measurement unit",
+        )),
+        _ => Err(unsupported("DICOM calibration unit has no exact writer")),
+    }
+}
+
+fn validate_dicom_uid(value: &str) -> Result<(), AdapterError> {
+    if value.is_empty()
+        || value.len() > 64
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value.split('.').any(|component| {
+            component.is_empty()
+                || !component.bytes().all(|byte| byte.is_ascii_digit())
+                || (component.len() > 1 && component.starts_with('0'))
+        })
+    {
+        return Err(unsupported("DICOM UID is not representable"));
+    }
+    Ok(())
+}
+
+fn validate_dicom_text(value: &str, max_bytes: usize) -> Result<(), AdapterError> {
+    if value.is_empty()
+        || value.len() > max_bytes
+        || !value.is_ascii()
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
+        return Err(unsupported("DICOM text value is not representable"));
+    }
+    Ok(())
+}
+
+fn dicom_calibration_decimal(value: Rational) -> Result<String, AdapterError> {
+    let rendered = dicom_decimal(value)?;
+    let parsed = rendered
+        .parse::<f64>()
+        .map_err(|_| unsupported("DICOM calibration decimal is malformed"))?;
+    let reparsed = decimal_rational(&format!("{parsed:.9}"))?;
+    if reparsed != value {
+        return Err(unsupported(
+            "DICOM calibration would change under the adapter precision contract",
+        ));
+    }
+    Ok(rendered)
+}
+
+fn dicom_decimal(value: Rational) -> Result<String, AdapterError> {
+    let (numerator, mut denominator) = value.parts();
+    let mut twos = 0_u32;
+    let mut fives = 0_u32;
+    while denominator % 2 == 0 {
+        denominator /= 2;
+        twos += 1;
+    }
+    while denominator % 5 == 0 {
+        denominator /= 5;
+        fives += 1;
+    }
+    if denominator != 1 {
+        return Err(unsupported(
+            "DICOM exact number has no finite decimal representation",
+        ));
+    }
+    let digits = twos.max(fives);
+    let scaled = numerator
+        .checked_mul(checked_power(2, digits - twos)?)
+        .and_then(|value| value.checked_mul(checked_power(5, digits - fives).ok()?))
+        .ok_or(AdapterError::SourceTooLarge)?;
+    let negative = scaled < 0;
+    let magnitude = scaled.unsigned_abs().to_string();
+    let mut rendered = if digits == 0 {
+        magnitude
+    } else {
+        let digits = usize::try_from(digits).map_err(|_| AdapterError::SourceTooLarge)?;
+        if magnitude.len() <= digits {
+            format!("0.{}{}", "0".repeat(digits - magnitude.len()), magnitude)
+        } else {
+            let split = magnitude.len() - digits;
+            format!("{}.{}", &magnitude[..split], &magnitude[split..])
+        }
+    };
+    if rendered.contains('.') {
+        while rendered.ends_with('0') {
+            rendered.pop();
+        }
+        if rendered.ends_with('.') {
+            rendered.pop();
+        }
+    }
+    if negative {
+        rendered.insert(0, '-');
+    }
+    if rendered.len() > 16 {
+        return Err(unsupported(
+            "DICOM decimal exceeds its sixteen-character value limit",
+        ));
+    }
+    Ok(rendered)
+}
+
+fn checked_power(base: i128, power: u32) -> Result<i128, AdapterError> {
+    (0..power).try_fold(1_i128, |value, _| {
+        value.checked_mul(base).ok_or(AdapterError::SourceTooLarge)
+    })
+}
+
+fn unsupported(reason: &str) -> AdapterError {
+    AdapterError::UnsupportedMeaning(reason.to_owned())
 }

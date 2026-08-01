@@ -10,7 +10,7 @@ use abir_adapter::{
     Adapter, AdapterError, ForeignEntry, ForeignObject, PayloadResolver, ProfileId,
 };
 use lamquant_standard_adapters::DicomSemanticAdapter;
-use semantic_abir::{ContentId, ValidationLimits};
+use semantic_abir::{Atom, ContentId, DatasetDraft, Recording, ValidationLimits};
 use std::collections::BTreeMap;
 
 struct Payloads(BTreeMap<ContentId, Vec<u8>>);
@@ -36,6 +36,114 @@ fn foreign(bytes: Vec<u8>) -> ForeignObject {
             media_type: Some("application/dicom".to_owned()),
             bytes,
         }],
+    }
+}
+
+fn plain_waveform_foreign() -> ForeignObject {
+    foreign(
+        include_bytes!("../../../lamquant-lossless/tests/fixtures/dicom/12lead_ecg.dcm").to_vec(),
+    )
+}
+
+#[test]
+fn capsule_free_abir_exports_dicom_and_reimports_waveform_semantics() {
+    let adapter = DicomSemanticAdapter::new(1 << 26);
+    let imported = adapter
+        .import(&plain_waveform_foreign(), ValidationLimits::default())
+        .expect("plain DICOM waveform imports");
+    let mut draft = DatasetDraft::new(imported.dataset.id());
+    let source_recording = &imported.dataset.recordings()[0];
+    let mut writable_recording =
+        Recording::new(source_recording.id(), source_recording.streams().to_vec());
+    for key in source_recording.source_keys().iter().filter(|key| {
+        !key.namespace().starts_with("dicom.private.")
+            && !key.namespace().starts_with("dicom.referenced-media.")
+            && !key.namespace().starts_with("dicom.report.")
+    }) {
+        writable_recording.add_source_key(key.clone());
+    }
+    draft.add_recording(writable_recording);
+    for stream in imported.dataset.streams() {
+        draft.add_stream(stream.clone());
+    }
+    for atom in imported.dataset.atoms() {
+        draft.add_atom(atom.clone());
+    }
+    for clock in imported.dataset.clocks() {
+        draft.add_clock(clock.clone());
+    }
+    for basis in imported.dataset.channel_bases() {
+        draft.add_channel_basis(basis.clone());
+    }
+    for patient in imported.dataset.patients() {
+        draft.add_patient(patient.clone());
+    }
+    for session in imported.dataset.sessions() {
+        draft.add_session(session.clone());
+    }
+    for acquisition in imported.dataset.acquisitions() {
+        draft.add_acquisition(acquisition.clone());
+    }
+    for device in imported.dataset.devices() {
+        draft.add_device(device.clone());
+    }
+    for event in imported.dataset.events() {
+        draft.add_event(event.clone());
+    }
+    for relationship in imported.dataset.source_relationships() {
+        draft.add_source_relationship(relationship.clone());
+    }
+    let capsule_free = draft
+        .validate(ValidationLimits::default())
+        .expect("source capsule is not semantic payload");
+    let resolver = Payloads(
+        imported
+            .payloads
+            .iter()
+            .map(|payload| (payload.content_id, payload.bytes.clone()))
+            .collect(),
+    );
+
+    let plan = adapter.plan_export(&capsule_free).unwrap();
+    assert!(plan.accepts_without_loss());
+    let (written, receipt) = adapter
+        .export(&capsule_free, &plan, &resolver)
+        .expect("capsule-free DICOM semantic writeback succeeds");
+    assert!(!receipt.exact_source_restoration);
+    assert!(receipt.semantic_equivalence);
+    assert!(adapter.validate(&written).internal_valid);
+
+    let reimported = adapter
+        .import(&written, ValidationLimits::default())
+        .expect("written DICOM reimports");
+    assert_eq!(
+        reimported.dataset.atoms().len(),
+        imported.dataset.atoms().len()
+    );
+    for (source_atom, target_atom) in imported
+        .dataset
+        .atoms()
+        .iter()
+        .zip(reimported.dataset.atoms())
+    {
+        let (source_block, target_block) = match (source_atom, target_atom) {
+            (Atom::SignalBlock(source), Atom::SignalBlock(target)) => (source, target),
+            other => panic!("expected signal blocks, got {other:?}"),
+        };
+        assert_eq!(target_block.time_axis(), source_block.time_axis());
+        assert_eq!(target_block.calibration(), source_block.calibration());
+        let source_descriptor = source_atom.payload().unwrap();
+        let target_descriptor = target_atom.payload().unwrap();
+        assert_eq!(target_descriptor.shape(), source_descriptor.shape());
+        assert_eq!(
+            resolver.resolve(source_descriptor.content_id()).unwrap(),
+            reimported
+                .payloads
+                .iter()
+                .find(|payload| payload.content_id == target_descriptor.content_id())
+                .unwrap()
+                .bytes
+        );
     }
 }
 

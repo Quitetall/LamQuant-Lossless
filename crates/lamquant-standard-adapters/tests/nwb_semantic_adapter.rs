@@ -12,7 +12,7 @@ use abir_adapter::{
     Adapter, AdapterError, ForeignEntry, ForeignObject, PayloadResolver, ProfileId,
 };
 use lamquant_standard_adapters::NwbAdapter;
-use semantic_abir::{ContentId, ValidationLimits};
+use semantic_abir::{Atom, ContentId, ValidationLimits};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -40,6 +40,62 @@ fn foreign(bytes: Vec<u8>) -> ForeignObject {
             bytes,
         }],
     }
+}
+
+fn single_series_foreign() -> ForeignObject {
+    foreign(include_bytes!("fixtures/single_integer_timeseries.nwb").to_vec())
+}
+
+#[test]
+fn capsule_free_abir_exports_nwb_and_reimports_integer_series_semantics() {
+    let adapter = NwbAdapter::new(1 << 26);
+    let imported = adapter
+        .import(&single_series_foreign(), ValidationLimits::default())
+        .expect("single integer NWB series imports");
+    let mut draft = imported.dataset.clone().into_draft();
+    draft.clear_source_capsules();
+    let capsule_free = draft
+        .validate(ValidationLimits::default())
+        .expect("source capsule is not semantic payload");
+    let resolver = Payloads(
+        imported
+            .payloads
+            .iter()
+            .map(|payload| (payload.content_id, payload.bytes.clone()))
+            .collect(),
+    );
+
+    let plan = adapter.plan_export(&capsule_free).unwrap();
+    assert!(plan.accepts_without_loss());
+    let (written, receipt) = adapter
+        .export(&capsule_free, &plan, &resolver)
+        .expect("capsule-free NWB semantic writeback succeeds");
+    assert!(!receipt.exact_source_restoration);
+    assert!(receipt.semantic_equivalence);
+    assert!(adapter.validate(&written).internal_valid);
+
+    let reimported = adapter
+        .import(&written, ValidationLimits::default())
+        .expect("written NWB reimports");
+    let (source_block, target_block) =
+        match (&imported.dataset.atoms()[0], &reimported.dataset.atoms()[0]) {
+            (Atom::SignalBlock(source), Atom::SignalBlock(target)) => (source, target),
+            other => panic!("expected signal blocks, got {other:?}"),
+        };
+    assert_eq!(target_block.time_axis(), source_block.time_axis());
+    let source_descriptor = imported.dataset.atoms()[0].payload().unwrap();
+    let target_descriptor = reimported.dataset.atoms()[0].payload().unwrap();
+    assert_eq!(target_descriptor.shape(), source_descriptor.shape());
+    assert_eq!(target_descriptor.element(), source_descriptor.element());
+    assert_eq!(
+        resolver.resolve(source_descriptor.content_id()).unwrap(),
+        reimported
+            .payloads
+            .iter()
+            .find(|payload| payload.content_id == target_descriptor.content_id())
+            .unwrap()
+            .bytes
+    );
 }
 
 #[test]

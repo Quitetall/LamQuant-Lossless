@@ -10,7 +10,7 @@ use abir_adapter::{
     Adapter, AdapterError, ForeignEntry, ForeignObject, PayloadResolver, ProfileId,
 };
 use lamquant_standard_adapters::BidsSemanticAdapter;
-use semantic_abir::{logical_content_id, ContentId, ElementType, ValidationLimits};
+use semantic_abir::{logical_content_id, Atom, ContentId, ElementType, ValidationLimits};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -71,6 +71,34 @@ fn dataset() -> Vec<ForeignEntry> {
     ];
     replace_physio(&mut entries, "0.5\t1.5\n0.7\t1.4\n0.6\t1.6\n");
     entries
+}
+
+macro_rules! single_member {
+    ($path:literal, $media:expr) => {
+        ForeignEntry {
+            path: $path.to_owned(),
+            media_type: Some($media.to_owned()),
+            bytes: include_bytes!(concat!("fixtures/bids-single-edf-eeg/", $path)).to_vec(),
+        }
+    };
+}
+
+fn single_edf_dataset() -> Vec<ForeignEntry> {
+    vec![
+        single_member!("dataset_description.json", "application/json"),
+        single_member!("participants.tsv", "text/tab-separated-values"),
+        single_member!("README", "text/plain"),
+        single_member!("sub-01/eeg/sub-01_task-rest_eeg.edf", "application/edf"),
+        single_member!("sub-01/eeg/sub-01_task-rest_eeg.json", "application/json"),
+        single_member!(
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+            "text/tab-separated-values"
+        ),
+        single_member!(
+            "sub-01/eeg/sub-01_task-rest_events.tsv",
+            "text/tab-separated-values"
+        ),
+    ]
 }
 
 fn replace_physio(entries: &mut [ForeignEntry], text: &str) {
@@ -238,6 +266,64 @@ fn bids_reverse_export_restores_every_member_byte_for_byte() {
         assert_eq!(restored_entry.path, original.path);
         assert_eq!(restored_entry.bytes, original.bytes);
     }
+}
+
+#[test]
+fn capsule_free_abir_exports_a_valid_bids_tree_and_reimports_signal_semantics() {
+    let adapter = BidsSemanticAdapter::new(1 << 24);
+    let imported = adapter
+        .import(&foreign(single_edf_dataset()), ValidationLimits::default())
+        .expect("single-recording BIDS dataset imports");
+    let mut draft = imported.dataset.clone().into_draft();
+    draft.clear_source_capsules();
+    let capsule_free = draft
+        .validate(ValidationLimits::default())
+        .expect("source capsules are not semantic payloads");
+    let resolver = Payloads(
+        imported
+            .payloads
+            .iter()
+            .map(|payload| (payload.content_id, payload.bytes.clone()))
+            .collect(),
+    );
+
+    let plan = adapter
+        .plan_export(&capsule_free)
+        .expect("representable BIDS ABIR receives an export plan");
+    assert!(plan.accepts_without_loss());
+    let (written, receipt) = adapter
+        .export(&capsule_free, &plan, &resolver)
+        .expect("capsule-free BIDS semantic writeback succeeds");
+    assert!(!receipt.exact_source_restoration);
+    assert!(receipt.semantic_equivalence);
+    assert!(adapter.validate(&written).internal_valid);
+
+    let reimported = adapter
+        .import(&written, ValidationLimits::default())
+        .expect("written BIDS tree reimports");
+    let (source_block, target_block) =
+        match (&imported.dataset.atoms()[0], &reimported.dataset.atoms()[0]) {
+            (Atom::SignalBlock(source), Atom::SignalBlock(target)) => (source, target),
+            other => panic!("expected signal blocks, got {other:?}"),
+        };
+    assert_eq!(target_block.time_axis(), source_block.time_axis());
+    let source_descriptor = imported.dataset.atoms()[0].payload().unwrap();
+    let target_descriptor = reimported.dataset.atoms()[0].payload().unwrap();
+    assert_eq!(target_descriptor.shape(), source_descriptor.shape());
+    assert_eq!(target_descriptor.element(), source_descriptor.element());
+    assert_eq!(
+        reimported.dataset.events().len(),
+        imported.dataset.events().len()
+    );
+    assert_eq!(
+        resolver.resolve(source_descriptor.content_id()).unwrap(),
+        reimported
+            .payloads
+            .iter()
+            .find(|payload| payload.content_id == target_descriptor.content_id())
+            .unwrap()
+            .bytes
+    );
 }
 
 #[test]
