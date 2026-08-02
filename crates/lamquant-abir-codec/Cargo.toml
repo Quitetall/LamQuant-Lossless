@@ -3,11 +3,10 @@ name = "lamquant-abir-codec"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
-# Matches LICENSE.md and every sibling first-party crate. Its absence made
-# cargo-deny report the crate as `unlicensed`; `publish = false` suppresses
-# cargo's own warning, so nothing flagged it until the license gate ran.
+# Matches LICENSE.md and every sibling first-party crate. Package 39 publishes
+# this semantic codec seam because the public `lamquant-lml` crate depends on
+# it; leaving it repository-only makes that public dependency graph unusable.
 license = "AGPL-3.0-or-later"
-publish = false
 build = "build.rs"
 
 [features]
@@ -27,8 +26,8 @@ std = [
 ]
 
 [dependencies]
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "4eec3689abd67b2e9bc1117ea246a1fbb919e4b0", default-features = false, features = ["alloc"] }
-semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "4eec3689abd67b2e9bc1117ea246a1fbb919e4b0", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "4eec3689abd67b2e9bc1117ea246a1fbb919e4b0", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "4eec3689abd67b2e9bc1117ea246a1fbb919e4b0", default-features = false, features = ["alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
 lamquant-lml-desktop = { version = "0.9.3", path = "../../lamquant-lml-desktop", optional = true }

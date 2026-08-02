@@ -4,10 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
 license = "AGPL-3.0-or-later"
-# Internal crate. Wildcard path dependencies cannot be published to crates.io,
-# so the missing flag made cargo-deny treat it as publishable and reject those
-# deps instead of applying allow-wildcard-paths.
-publish = false
+# Public semantic dependency of the Package 39 LamQuant crate family.
 description = "Exact no_std projection of LamQuant electrode montages into ABIR."
 
 [lib]
@@ -18,5 +15,5 @@ default = ["std"]
 std = ["semantic-abir/std"]
 
 [dependencies]
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "4eec3689abd67b2e9bc1117ea246a1fbb919e4b0", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "4eec3689abd67b2e9bc1117ea246a1fbb919e4b0", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false }

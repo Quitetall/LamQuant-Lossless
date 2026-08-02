@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # The MCU-tier lossless codec (lml::compress / lml::decompress) — the same
 # byte-exact integer pipeline the rest of the codec ships. Host build (std).
-lamquant-lml-mcu = { path = "../lamquant-lml-mcu" }
+lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu" }
 # NOTE: deliberately NO hdf5-metno-sys here. The shipped cdylib must carry no
 # DT_NEEDED on any specific libhdf5 (see src/hdf5_abi.rs) so it loads under
 # whatever libhdf5 the host process (system / conda / pip-h5py) provides.
