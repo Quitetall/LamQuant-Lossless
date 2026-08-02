@@ -9,9 +9,10 @@ this repo). Two modes:
     L, and back). Proves the subprocess bridge + JSON protocol WITHOUT any model or
     weights. This is what the Rust `py_backend` unit test exercises.
 
-  * "model" — the real Gen-7.6 `SubbandCodec` (codec-neural). Requires the
-    `lamquant_neural` package and a checkpoint resolvable via
-    $LAMQUANT_WEIGHTS_DIR. Tokenization and BCS2 wire remain Rust-owned.
+  * "model" — the production encoder + fixed scalar FSQ + Vocos decoder bound
+    by `codec_artifact_set.json`. Requires the `lamquant_neural` package and an
+    artifact set resolvable via $LAMQUANT_WEIGHTS_DIR. BCS2 wire remains
+    Rust-owned.
     Developer runs may skip this path when dependencies are absent;
     `LAMQUANT_LMQ_REQUIRE_MODEL_TEST=1` makes missing configuration,
     dependencies, weights, or inference a gate failure.
@@ -25,7 +26,6 @@ Protocol (all arrays are plain JSON numbers):
           resp: {signal:[[i64]...]}
 """
 import json
-import hashlib
 import math
 import sys
 
@@ -33,7 +33,12 @@ SELFTEST_ALPHABET = 5
 DIGITAL_DOMAIN = "digital-integer"
 MODEL_DOMAIN = "physical-microvolt-q16"
 MICROVOLT_Q16 = 65_536.0
-MODEL_MAX_METADATA_ARRAY_ELEMENTS = 21 * (2_500 + 8)
+MODEL_CHANNELS = 21
+MODEL_SAMPLES = 2_500
+MODEL_LATENT_CHANNELS = 32
+MODEL_LATENT_FRAMES = 79
+MODEL_FSQ_LEVEL = 32
+MODEL_ALPHABET = 33
 
 
 def _reject_nonfinite_json_constant(value):
@@ -56,73 +61,6 @@ def _require_finite_json(value, path="value"):
 def _require_signal_domain(actual, expected, backend):
     if actual != expected:
         raise ValueError(f"{backend} requires {expected}, got {actual!r}")
-
-
-def _new_array_budget():
-    return {"remaining_elements": MODEL_MAX_METADATA_ARRAY_ELEMENTS}
-
-
-def _to_jsonable(obj, array_budget=None):
-    """Recursively convert numpy arrays/scalars into JSON-safe values, so the
-    backend metadata can be carried as JSON (NEVER pickle — backend_meta round-trips
-    through the untrusted .lmq wire, and pickle.loads is arbitrary code execution)."""
-    import numpy as np
-
-    if array_budget is None:
-        array_budget = _new_array_budget()
-    if isinstance(obj, np.ndarray):
-        if obj.dtype != np.dtype("float64"):
-            raise ValueError(f"unsupported model metadata dtype {obj.dtype!s}")
-        if obj.size > array_budget["remaining_elements"]:
-            raise ValueError("model metadata arrays exceed element budget")
-        array_budget["remaining_elements"] -= int(obj.size)
-        return {"__ndarray__": obj.tolist(), "dtype": str(obj.dtype)}
-    if isinstance(obj, np.integer):
-        return int(obj)
-    if isinstance(obj, np.floating):
-        return float(obj)
-    if isinstance(obj, dict):
-        return {k: _to_jsonable(v, array_budget) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_jsonable(x, array_budget) for x in obj]
-    return obj
-
-
-def _array_leaf_count(value):
-    stack = [value]
-    count = 0
-    while stack:
-        item = stack.pop()
-        if isinstance(item, list):
-            stack.extend(item)
-        elif isinstance(item, (int, float)) and not isinstance(item, bool):
-            count += 1
-        else:
-            raise ValueError("model metadata ndarray contains a non-numeric value")
-    return count
-
-
-def _from_jsonable(obj, array_budget=None):
-    """Inverse of _to_jsonable."""
-    import numpy as np
-
-    if array_budget is None:
-        array_budget = _new_array_budget()
-    if isinstance(obj, dict):
-        if "__ndarray__" in obj:
-            if set(obj) != {"__ndarray__", "dtype"}:
-                raise ValueError("malformed model metadata ndarray envelope")
-            if obj["dtype"] != "float64":
-                raise ValueError(f"unsupported model metadata dtype {obj['dtype']!r}")
-            count = _array_leaf_count(obj["__ndarray__"])
-            if count > array_budget["remaining_elements"]:
-                raise ValueError("model metadata arrays exceed element budget")
-            array_budget["remaining_elements"] -= count
-            return np.asarray(obj["__ndarray__"], dtype=np.float64)
-        return {k: _from_jsonable(v, array_budget) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_from_jsonable(x, array_budget) for x in obj]
-    return obj
 
 
 def selftest_encode(signal, _sample_rate, signal_domain):
@@ -154,32 +92,30 @@ def selftest_decode(req):
 
 
 def _load_bound_model(req):
-    """Resolve once, bind the exact checkpoint bytes, then load that path."""
-    from lamquant_neural.codec import SubbandCodec, _resolve_checkpoint
+    """Resolve and load one exact encoder-decoder artifact set."""
+    from lamquant_neural.artifact_set import ARTIFACT_SET_FILENAME
+    from lamquant_neural.codec import ProductionSubbandCodec, _resolve_checkpoint
 
-    checkpoint_path = _resolve_checkpoint(None, "student_subband.ckpt")
-    with open(checkpoint_path, "rb") as checkpoint:
-        actual_sha256 = hashlib.sha256(checkpoint.read()).hexdigest()
-    expected_sha256 = req.get("expected_checkpoint_sha256")
-    if expected_sha256 != actual_sha256:
-        raise ValueError(
-            "checkpoint provenance mismatch: "
-            f"expected {expected_sha256!r}, loaded {actual_sha256}"
-        )
-    return SubbandCodec.from_checkpoint(checkpoint_path), actual_sha256
+    expected_sha256 = req.get("expected_artifact_set_sha256")
+    if not isinstance(expected_sha256, str):
+        raise ValueError("expected artifact-set SHA-256 is required")
+    artifact_set_path = _resolve_checkpoint(None, ARTIFACT_SET_FILENAME)
+    codec = ProductionSubbandCodec.from_artifact_set(
+        artifact_set_path,
+        expected_sha256=expected_sha256,
+    )
+    return codec, codec.artifact_set.manifest_sha256
 
 
 def model_encode(req):
-    """Drive the real SubbandCodec. Returns integer FSQ tokens + the
-    per-channel preprocessing metadata (serialized into backend_meta) the decoder
-    needs. Raises if the codec-neural environment, weights, or inference are
-    unavailable. Rust decides whether that failure is an optional developer skip
-    or a required gate failure."""
+    """Encode one exact production window into canonical unsigned FSQ symbols."""
     import numpy as np
     import torch
     _require_signal_domain(req.get("signal_domain"), MODEL_DOMAIN, "model")
     signal = req["signal"]
-    codec, checkpoint_sha256 = _load_bound_model(req)
+    if req.get("sample_rate") != 250.0:
+        raise ValueError("production model requires 250 Hz input")
+    codec, artifact_set_sha256 = _load_bound_model(req)
     # Rust shell already applied exact ABIR calibration. Integer transport keeps
     # JSON deterministic and avoids binary64 text becoming a second unit seam.
     physical_microvolts_f64 = np.asarray(signal, dtype=np.float64) / MICROVOLT_Q16
@@ -189,65 +125,65 @@ def model_encode(req):
     if not np.isfinite(physical_microvolts).all():
         raise ValueError("model input overflows float32 physical samples")
     x = torch.tensor(physical_microvolts).unsqueeze(0)  # [1, C, T]
-    latent, metadata = codec.encode(x)  # latent [1, 32, 79] float, metadata list
-    l = 32  # CLINICAL FSQ level (FSQ_LEVELS_BY_MODE[2])
-    lat = latent.detach().cpu().numpy()[0]  # [32, 79]
-    if not np.isfinite(lat).all():
-        raise ValueError("model latent contains non-finite values")
-    vmin, vmax = float(lat.min()), float(lat.max())
-    if not np.isfinite([vmin, vmax]).all():
-        raise ValueError("model latent extrema are non-finite")
-    norm = (lat - vmin) / (vmax - vmin + 1e-8)
-    if not np.isfinite(norm).all():
-        raise ValueError("model latent normalization contains non-finite values")
-    quantized = norm * l
-    if not np.isfinite(quantized).all():
-        raise ValueError("model quantization contains non-finite values")
-    toks = np.clip(quantized.astype(np.int32), 0, l - 1).reshape(-1)
-    # Carry vmin/vmax + the metadata as JSON bytes (never pickle) so decode inverts
-    # exactly — safe against a crafted .lmq (backend_meta is untrusted on decode).
-    meta_bytes = json.dumps(
-        _to_jsonable(
-            {
-                "vmin": vmin,
-                "vmax": vmax,
-                "shape": [int(s) for s in lat.shape],
-                "metadata": metadata,
-            }
-        ),
-        allow_nan=False,
-    ).encode("utf-8")
+    encoded = codec.encode(x)
+    symbols = encoded.symbols.detach().cpu()
+    if (
+        tuple(symbols.shape) != (1, MODEL_LATENT_CHANNELS, MODEL_LATENT_FRAMES)
+        or symbols.dtype not in (torch.int32, torch.int64)
+        or encoded.level != MODEL_FSQ_LEVEL
+        or encoded.alphabet != MODEL_ALPHABET
+        or (symbols < 0).any().item()
+        or (symbols >= MODEL_ALPHABET).any().item()
+    ):
+        raise ValueError("production codec returned an invalid FSQ envelope")
     return {
-        "tokens": toks.tolist(),
-        "schedule": [l] * lat.shape[1],
-        "alphabet": l,
+        "tokens": symbols.reshape(-1).tolist(),
+        "schedule": [MODEL_FSQ_LEVEL] * MODEL_LATENT_FRAMES,
+        "alphabet": MODEL_ALPHABET,
         "n_channels": len(signal),
         "n_samples": len(signal[0]) if signal else 0,
-        "backend_meta": list(meta_bytes),
-        "checkpoint_sha256": checkpoint_sha256,
+        "backend_meta": [],
+        "artifact_set_sha256": artifact_set_sha256,
     }
 
 
 def model_decode(req):
     import numpy as np
     import torch
+    from lamquant_neural.codec import QuantizedLatent
+
     _require_signal_domain(req.get("signal_domain"), MODEL_DOMAIN, "model")
-    codec, checkpoint_sha256 = _load_bound_model(req)
-    metadata_json = json.loads(
-        bytes(req["backend_meta"]).decode("utf-8"),
-        parse_constant=_reject_nonfinite_json_constant,
+    tokens = req.get("tokens")
+    if (
+        req.get("alphabet") != MODEL_ALPHABET
+        or req.get("n_channels") != MODEL_CHANNELS
+        or req.get("n_samples") != MODEL_SAMPLES
+        or req.get("backend_meta") != []
+        or req.get("schedule") != [MODEL_FSQ_LEVEL] * MODEL_LATENT_FRAMES
+        or not isinstance(tokens, list)
+        or len(tokens) != MODEL_LATENT_CHANNELS * MODEL_LATENT_FRAMES
+        or any(type(token) is not int for token in tokens)
+        or any(token < 0 or token >= MODEL_ALPHABET for token in tokens)
+    ):
+        raise ValueError("production decode envelope differs from artifact set")
+    codec, artifact_set_sha256 = _load_bound_model(req)
+    symbols = torch.tensor(tokens, dtype=torch.int32).reshape(
+        1, MODEL_LATENT_CHANNELS, MODEL_LATENT_FRAMES
     )
-    _require_finite_json(metadata_json, "backend_meta")
-    meta = _from_jsonable(metadata_json)
-    l = int(req["alphabet"])
-    shape = meta["shape"]
-    toks = np.asarray(req["tokens"], dtype=np.float32).reshape(shape)
-    norm = (toks + 0.5) / l
-    lat = norm * (meta["vmax"] - meta["vmin"]) + meta["vmin"]
-    if not np.isfinite(lat).all():
-        raise ValueError("model latent reconstruction contains non-finite values")
-    latent = torch.tensor(lat).unsqueeze(0)
-    recon = codec.decode(latent, meta["metadata"])  # [1, C, T]
+    recon = codec.decode(
+        QuantizedLatent(
+            symbols=symbols,
+            level=MODEL_FSQ_LEVEL,
+            alphabet=MODEL_ALPHABET,
+        )
+    )
+    if (
+        not isinstance(recon, torch.Tensor)
+        or tuple(recon.shape) != (1, MODEL_CHANNELS, MODEL_SAMPLES)
+        or not recon.is_floating_point()
+        or not torch.isfinite(recon).all().item()
+    ):
+        raise ValueError("production decoder returned an invalid reconstruction")
     sig = recon.detach().cpu().numpy()[0]
     scaled = np.rint(sig.astype(np.float64) * MICROVOLT_Q16)
     if not np.isfinite(scaled).all():
@@ -260,7 +196,7 @@ def model_decode(req):
     signal_q16 = scaled.astype(np.int64)
     return {
         "signal": signal_q16.tolist(),
-        "checkpoint_sha256": checkpoint_sha256,
+        "artifact_set_sha256": artifact_set_sha256,
     }
 
 

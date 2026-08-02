@@ -114,7 +114,7 @@ pub struct PyBackend {
     /// Path to the inference helper script (`lmq_infer.py`).
     helper: PathBuf,
     /// `"selftest"` (deterministic, no weights — proves the bridge) or `"model"`
-    /// (the real `SubbandCodec`; optional in developer tests, mandatory in the
+    /// (the bound production encoder/FSQ/Vocos codec; optional in developer tests, mandatory in the
     /// package evidence gate).
     mode: String,
     model: PyBackendModel,
@@ -147,7 +147,7 @@ struct HelperRequest<'a, T> {
     operation: T,
     mode: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    expected_checkpoint_sha256: Option<String>,
+    expected_artifact_set_sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -180,7 +180,7 @@ impl PyBackendModel {
 }
 
 impl PyBackend {
-    /// Drive the real `SubbandCodec` (`mode = "model"`).
+    /// Drive one content-bound production encoder/FSQ/Vocos artifact set.
     pub fn model(
         python: impl Into<String>,
         helper: impl Into<PathBuf>,
@@ -246,7 +246,7 @@ impl PyBackend {
         let request = HelperRequest {
             operation,
             mode: &self.mode,
-            expected_checkpoint_sha256: (self.mode == "model")
+            expected_artifact_set_sha256: (self.mode == "model")
                 .then(|| encode_hex(&self.model.provenance().checkpoint_sha256)),
         };
         let maximum_request_bytes =
@@ -450,13 +450,13 @@ impl PyBackend {
         Ok(())
     }
 
-    fn validate_checkpoint(&self, actual: Option<&str>) -> Result<(), BackendError> {
+    fn validate_artifact_set(&self, actual: Option<&str>) -> Result<(), BackendError> {
         if self.mode == "model"
             && actual != Some(encode_hex(&self.model.provenance().checkpoint_sha256).as_str())
         {
             return Err(BackendError::new(
                 BackendErrorKind::Model,
-                "helper executed a checkpoint different from model provenance".to_string(),
+                "helper executed an artifact set different from model provenance".to_string(),
             ));
         }
         Ok(())
@@ -1048,9 +1048,9 @@ fn model_capabilities() -> NeuralBackendCapabilities {
         maximum_sample_rate: Rational::new(250, 1).expect("valid model sample rate"),
         maximum_tokens: 32 * 79,
         maximum_schedule_bytes: 79,
-        maximum_backend_metadata_bytes: 16 * 1024 * 1024,
-        minimum_alphabet: 32,
-        maximum_alphabet: 32,
+        maximum_backend_metadata_bytes: 0,
+        minimum_alphabet: 33,
+        maximum_alphabet: 33,
     }
 }
 
@@ -1111,7 +1111,7 @@ impl NeuralBackend for PyBackend {
         )?;
         self.check_active(output.started)?;
         let envelope: EncodeResponse<'_> = parse_envelope(&output)?;
-        self.validate_checkpoint(envelope.checkpoint_sha256)?;
+        self.validate_artifact_set(envelope.artifact_set_sha256)?;
         let input_elements = signal.channels.len().checked_mul(samples).ok_or_else(|| {
             BackendError::new(
                 BackendErrorKind::ResourceLimit,
@@ -1192,7 +1192,7 @@ impl NeuralBackend for PyBackend {
         )?;
         self.check_active(output.started)?;
         let envelope: DecodeResponse<'_> = parse_envelope(&output)?;
-        self.validate_checkpoint(envelope.checkpoint_sha256)?;
+        self.validate_artifact_set(envelope.artifact_set_sha256)?;
         let signal = parse_bounded_matrix(
             envelope.signal,
             usize::from(t.n_channels),
@@ -1224,7 +1224,7 @@ struct EncodeResponse<'a> {
     #[serde(borrow)]
     backend_meta: &'a RawValue,
     #[serde(default)]
-    checkpoint_sha256: Option<&'a str>,
+    artifact_set_sha256: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -1232,7 +1232,7 @@ struct DecodeResponse<'a> {
     #[serde(borrow)]
     signal: &'a RawValue,
     #[serde(default)]
-    checkpoint_sha256: Option<&'a str>,
+    artifact_set_sha256: Option<&'a str>,
 }
 
 fn parse_envelope<'a, T>(output: &'a HelperOutput) -> Result<T, BackendError>

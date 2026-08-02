@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use semantic_abir::{ContentId, ElementType, Rational};
 use serde::de::{DeserializeSeed, Error as DeError, SeqAccess, Visitor};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::{
@@ -23,8 +23,8 @@ pub struct ProductionPyBackendConfig {
     pub python: PathBuf,
     /// Absolute path inside `rootfs`.
     pub helper: PathBuf,
-    /// Absolute path inside `rootfs`.
-    pub checkpoint: PathBuf,
+    /// Absolute path to `codec_artifact_set.json` inside `rootfs`.
+    pub artifact_set: PathBuf,
     pub cgroup: PathBuf,
     pub model: TrainedModelArtifact,
     pub io_limits: BackendIoLimits,
@@ -40,6 +40,8 @@ pub struct ProductionDeploymentAttestation {
     execution_id: ContentId,
     checkpoint_content_id: ContentId,
     checkpoint_sha256: [u8; 32],
+    encoder_sha256: [u8; 32],
+    decoder_sha256: [u8; 32],
     process_limits: BackendProcessLimits,
     io_limits: BackendIoLimits,
 }
@@ -59,6 +61,16 @@ impl ProductionDeploymentAttestation {
 
     pub const fn checkpoint_sha256(&self) -> [u8; 32] {
         self.checkpoint_sha256
+    }
+
+    /// SHA-256 of the encoder member bound by the checkpoint manifest.
+    pub const fn encoder_sha256(&self) -> [u8; 32] {
+        self.encoder_sha256
+    }
+
+    /// SHA-256 of the Vocos decoder member bound by the checkpoint manifest.
+    pub const fn decoder_sha256(&self) -> [u8; 32] {
+        self.decoder_sha256
     }
 
     pub const fn process_limits(&self) -> BackendProcessLimits {
@@ -129,12 +141,84 @@ struct RuntimeManifestFile {
     executable: bool,
 }
 
+// Declaration order in this and the nested artifact structs is load-bearing:
+// it matches codec-neural's sorted-key compact UTF-8 writer. Reordering fields
+// requires an artifact schema bump.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CodecArtifactSetManifest {
+    decoder: ArtifactSetMember<DecoderArchitecture>,
+    encoder: ArtifactSetMember<EncoderArchitecture>,
+    input: ArtifactSetInput,
+    quantizer: ArtifactSetQuantizer,
+    schema: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactSetMember<A> {
+    architecture: A,
+    bytes: u64,
+    path: String,
+    role: String,
+    sha256: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EncoderArchitecture {
+    blocks: u16,
+    channel_agnostic: bool,
+    family: String,
+    in_channels: u16,
+    kernels: Vec<u16>,
+    latent_dim: u16,
+    width: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DecoderArchitecture {
+    channel_agnostic: bool,
+    family: String,
+    latent_dim: u16,
+    n_channels: u16,
+    target_len: u32,
+    tier: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactSetInput {
+    channels: u16,
+    pipeline: String,
+    sample_rate_hz: u32,
+    samples: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactSetQuantizer {
+    kind: String,
+    level: u16,
+}
+
+struct VerifiedArtifactSet {
+    encoder_relative: PathBuf,
+    decoder_relative: PathBuf,
+    encoder_sha256: [u8; 32],
+    decoder_sha256: [u8; 32],
+}
+
 const MAX_RUNTIME_FILES: usize = 200_000;
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ARTIFACT_SET_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_ARTIFACT_ENCODER_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ARTIFACT_DECODER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const FULL_RUNTIME_REVALIDATION_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
 const PRODUCTION_EXECUTION_POLICY: &[u8] =
-    b"org.quitetall.lamquant.lmq.production-py-execution-policy-v2";
+    b"org.quitetall.lamquant.lmq.production-py-execution-policy-v3";
 
 impl ProductionPyBackend {
     pub fn load(config: ProductionPyBackendConfig) -> Result<Self, ProductionBackendLoadError> {
@@ -191,18 +275,22 @@ impl ProductionPyBackend {
 
             let python = virtual_runtime_path(&rootfs, &config.python, "python")?;
             let helper = virtual_runtime_path(&rootfs, &config.helper, "helper")?;
-            let checkpoint = virtual_runtime_path(&rootfs, &config.checkpoint, "checkpoint")?;
-            if config.checkpoint.file_name().and_then(|name| name.to_str())
-                != Some("student_subband.ckpt")
+            let artifact_set = virtual_runtime_path(&rootfs, &config.artifact_set, "artifact set")?;
+            if config
+                .artifact_set
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some("codec_artifact_set.json")
             {
                 return Err(ProductionBackendLoadError(
-                    "production checkpoint must use helper-resolved name student_subband.ckpt"
+                    "production artifact set must use helper-resolved name codec_artifact_set.json"
                         .into(),
                 ));
             }
             let python_relative = virtual_relative_path(&config.python, "python")?;
             let helper_relative = virtual_relative_path(&config.helper, "helper")?;
-            let checkpoint_relative = virtual_relative_path(&config.checkpoint, "checkpoint")?;
+            let artifact_set_relative =
+                virtual_relative_path(&config.artifact_set, "artifact set")?;
             let by_path = files
                 .iter()
                 .map(|file| (file.relative_path.as_path(), file))
@@ -216,36 +304,47 @@ impl ProductionPyBackend {
                 ));
             }
             if !by_path.contains_key(helper_relative.as_path())
-                || !by_path.contains_key(checkpoint_relative.as_path())
+                || !by_path.contains_key(artifact_set_relative.as_path())
             {
                 return Err(ProductionBackendLoadError(
-                    "helper or checkpoint absent from runtime closure".into(),
+                    "helper or artifact set absent from runtime closure".into(),
                 ));
             }
 
             let checkpoint_content_id_expected = config.model.provenance().checkpoint_content_id;
             let checkpoint_sha256_expected = config.model.provenance().checkpoint_sha256;
-            let checkpoint_entry = by_path
-                .get(checkpoint_relative.as_path())
-                .expect("checked checkpoint closure membership");
-            if checkpoint_entry.sha256 != checkpoint_sha256_expected {
+            let artifact_set_entry = by_path
+                .get(artifact_set_relative.as_path())
+                .expect("checked artifact-set closure membership");
+            if artifact_set_entry.sha256 != checkpoint_sha256_expected {
                 return Err(ProductionBackendLoadError(
-                    "checkpoint SHA-256 differs from trained model provenance".into(),
+                    "artifact-set SHA-256 differs from trained model provenance".into(),
                 ));
             }
-            let checkpoint_content_id = payload_content_id_streaming(&checkpoint)?;
+            let checkpoint_content_id = payload_content_id_streaming(&artifact_set)?;
             if checkpoint_content_id != checkpoint_content_id_expected {
                 return Err(ProductionBackendLoadError(
-                    "checkpoint ContentId differs from trained model provenance".into(),
+                    "artifact-set ContentId differs from trained model provenance".into(),
                 ));
             }
+            let artifact_set_bytes = read_bounded_file(
+                &artifact_set,
+                MAX_ARTIFACT_SET_MANIFEST_BYTES,
+                "artifact-set manifest",
+            )?;
+            let artifact_binding =
+                verify_artifact_set_manifest(&artifact_set_bytes, &artifact_set_relative, &files)?;
             let execution_id = production_execution_id(
                 closure_id,
                 &python_relative,
                 &helper_relative,
-                &checkpoint_relative,
+                &artifact_set_relative,
+                &artifact_binding.encoder_relative,
+                &artifact_binding.decoder_relative,
                 checkpoint_content_id,
                 checkpoint_sha256_expected,
+                artifact_binding.encoder_sha256,
+                artifact_binding.decoder_sha256,
                 config.process_limits,
                 config.io_limits,
                 config.timeout,
@@ -262,9 +361,9 @@ impl ProductionPyBackend {
                     rootfs.clone(),
                     cgroup,
                     config
-                        .checkpoint
+                        .artifact_set
                         .parent()
-                        .expect("absolute checkpoint has a parent")
+                        .expect("absolute artifact set has a parent")
                         .to_path_buf(),
                     config.process_limits,
                 );
@@ -277,6 +376,8 @@ impl ProductionPyBackend {
                     execution_id,
                     checkpoint_content_id,
                     checkpoint_sha256: checkpoint_sha256_expected,
+                    encoder_sha256: artifact_binding.encoder_sha256,
+                    decoder_sha256: artifact_binding.decoder_sha256,
                     process_limits: config.process_limits,
                     io_limits: config.io_limits,
                 },
@@ -480,6 +581,139 @@ fn normalized_relative_path(value: &str) -> Result<PathBuf, ProductionBackendLoa
         ));
     }
     Ok(path.to_path_buf())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_artifact_set_manifest(
+    bytes: &[u8],
+    artifact_set_relative: &Path,
+    files: &[VerifiedRuntimeFile],
+) -> Result<VerifiedArtifactSet, ProductionBackendLoadError> {
+    reject_duplicate_json_members(bytes)?;
+    let manifest: CodecArtifactSetManifest = serde_json::from_slice(bytes)
+        .map_err(|error| ProductionBackendLoadError(format!("parse artifact set: {error}")))?;
+    let mut canonical = serde_json::to_vec(&manifest)
+        .map_err(|error| ProductionBackendLoadError(format!("serialize artifact set: {error}")))?;
+    canonical.push(b'\n');
+    if canonical != bytes {
+        return Err(ProductionBackendLoadError(
+            "artifact-set manifest is not canonical JSON".into(),
+        ));
+    }
+    if manifest.schema != "lamquant.neural-codec-artifact-set/v1"
+        || manifest.input.channels != 21
+        || manifest.input.pipeline != "subband-l3-v1"
+        || manifest.input.sample_rate_hz != 250
+        || manifest.input.samples != 2_500
+        || manifest.quantizer.kind != "scalar-fsq-round-v1"
+        || manifest.quantizer.level != 32
+    {
+        return Err(ProductionBackendLoadError(
+            "artifact-set semantic contract is outside production profile".into(),
+        ));
+    }
+    let encoder = &manifest.encoder.architecture;
+    if encoder.family != "TernaryMobileNetV5_Subband"
+        || encoder.in_channels != 21
+        || encoder.latent_dim != 32
+        || !matches!(encoder.width, 96 | 128 | 160)
+        || encoder.blocks != 3
+        || encoder.kernels.as_slice() != [3, 5, 7]
+        || encoder.channel_agnostic
+    {
+        return Err(ProductionBackendLoadError(
+            "artifact-set encoder architecture is outside production profile".into(),
+        ));
+    }
+    let decoder = &manifest.decoder.architecture;
+    if decoder.family != "VocosDecoder"
+        || !(3..=8).contains(&decoder.tier)
+        || decoder.latent_dim != 32
+        || decoder.n_channels != 21
+        || decoder.target_len != 2_500
+        || decoder.channel_agnostic
+    {
+        return Err(ProductionBackendLoadError(
+            "artifact-set decoder architecture is outside production profile".into(),
+        ));
+    }
+    let (encoder_relative, encoder_sha256) = verify_artifact_member(
+        &manifest.encoder,
+        "encoder",
+        artifact_set_relative,
+        files,
+        MAX_ARTIFACT_ENCODER_BYTES,
+    )?;
+    let (decoder_relative, decoder_sha256) = verify_artifact_member(
+        &manifest.decoder,
+        "decoder",
+        artifact_set_relative,
+        files,
+        MAX_ARTIFACT_DECODER_BYTES,
+    )?;
+    if encoder_relative == decoder_relative {
+        return Err(ProductionBackendLoadError(
+            "artifact-set members must use distinct paths".into(),
+        ));
+    }
+    Ok(VerifiedArtifactSet {
+        encoder_relative,
+        decoder_relative,
+        encoder_sha256,
+        decoder_sha256,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn verify_artifact_member<A>(
+    member: &ArtifactSetMember<A>,
+    role: &str,
+    artifact_set_relative: &Path,
+    files: &[VerifiedRuntimeFile],
+    maximum_bytes: u64,
+) -> Result<(PathBuf, [u8; 32]), ProductionBackendLoadError> {
+    if member.role != role
+        || member.path.is_empty()
+        || member.path.contains(['/', '\\'])
+        || member.bytes == 0
+        || member.bytes > maximum_bytes
+        || member.sha256.len() != 64
+        || !member
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ProductionBackendLoadError(format!(
+            "artifact-set {role} member is invalid"
+        )));
+    }
+    let member_path = Path::new(&member.path);
+    if !matches!(member_path.components().next(), Some(Component::Normal(_)))
+        || member_path.components().count() != 1
+    {
+        return Err(ProductionBackendLoadError(format!(
+            "artifact-set {role} path must be one sibling filename"
+        )));
+    }
+    let relative = artifact_set_relative
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(member_path);
+    let entry = files
+        .iter()
+        .find(|file| file.relative_path == relative)
+        .ok_or_else(|| {
+            ProductionBackendLoadError(format!(
+                "artifact-set {role} member is absent from runtime closure"
+            ))
+        })?;
+    let declared_sha256 = parse_sha256(&member.sha256).expect("validated lowercase SHA-256");
+    if entry.sha256 != declared_sha256 || entry.bytes != member.bytes {
+        return Err(ProductionBackendLoadError(format!(
+            "artifact-set {role} member differs from runtime closure"
+        )));
+    }
+    Ok((relative, declared_sha256))
 }
 
 #[cfg(target_os = "linux")]
@@ -711,9 +945,13 @@ fn production_execution_id(
     closure_id: ContentId,
     python_relative: &Path,
     helper_relative: &Path,
-    checkpoint_relative: &Path,
+    artifact_set_relative: &Path,
+    encoder_relative: &Path,
+    decoder_relative: &Path,
     checkpoint_content_id: ContentId,
     checkpoint_sha256: [u8; 32],
+    encoder_sha256: [u8; 32],
+    decoder_sha256: [u8; 32],
     process_limits: BackendProcessLimits,
     io_limits: BackendIoLimits,
     timeout: std::time::Duration,
@@ -721,14 +959,18 @@ fn production_execution_id(
     use std::os::unix::ffi::OsStrExt;
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"org.quitetall.lamquant.lmq.production-py-execution-v1\0");
+    hasher.update(b"org.quitetall.lamquant.lmq.production-py-execution-v2\0");
     hash_closure_field(&mut hasher, PRODUCTION_EXECUTION_POLICY);
     hash_closure_field(&mut hasher, closure_id.as_bytes());
     hash_closure_field(&mut hasher, python_relative.as_os_str().as_bytes());
     hash_closure_field(&mut hasher, helper_relative.as_os_str().as_bytes());
-    hash_closure_field(&mut hasher, checkpoint_relative.as_os_str().as_bytes());
+    hash_closure_field(&mut hasher, artifact_set_relative.as_os_str().as_bytes());
+    hash_closure_field(&mut hasher, encoder_relative.as_os_str().as_bytes());
+    hash_closure_field(&mut hasher, decoder_relative.as_os_str().as_bytes());
     hash_closure_field(&mut hasher, checkpoint_content_id.as_bytes());
     hash_closure_field(&mut hasher, &checkpoint_sha256);
+    hash_closure_field(&mut hasher, &encoder_sha256);
+    hash_closure_field(&mut hasher, &decoder_sha256);
     hash_closure_field(
         &mut hasher,
         &process_limits.memory_bytes.get().to_le_bytes(),
@@ -1030,6 +1272,60 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn artifact_set_manifest_binds_canonical_encoder_and_decoder_members() {
+        let encoder_sha256 = [0x11; 32];
+        let decoder_sha256 = [0x22; 32];
+        let files = vec![
+            VerifiedRuntimeFile {
+                relative_path: PathBuf::from("weights/decoder.ckpt"),
+                sha256: decoder_sha256,
+                bytes: 456,
+                executable: false,
+            },
+            VerifiedRuntimeFile {
+                relative_path: PathBuf::from("weights/encoder.ckpt"),
+                sha256: encoder_sha256,
+                bytes: 123,
+                executable: false,
+            },
+        ];
+        let bytes = format!(
+            concat!(
+                r#"{{"decoder":{{"architecture":{{"channel_agnostic":false,"family":"VocosDecoder","latent_dim":32,"n_channels":21,"target_len":2500,"tier":3}},"bytes":456,"path":"decoder.ckpt","role":"decoder","sha256":"{}"}},"encoder":{{"architecture":{{"blocks":3,"channel_agnostic":false,"family":"TernaryMobileNetV5_Subband","in_channels":21,"kernels":[3,5,7],"latent_dim":32,"width":96}},"bytes":123,"path":"encoder.ckpt","role":"encoder","sha256":"{}"}},"input":{{"channels":21,"pipeline":"subband-l3-v1","sample_rate_hz":250,"samples":2500}},"quantizer":{{"kind":"scalar-fsq-round-v1","level":32}},"schema":"lamquant.neural-codec-artifact-set/v1"}}"#,
+                "\n"
+            ),
+            "22".repeat(32),
+            "11".repeat(32),
+        );
+        let binding = verify_artifact_set_manifest(
+            bytes.as_bytes(),
+            Path::new("weights/codec_artifact_set.json"),
+            &files,
+        )
+        .unwrap();
+        assert_eq!(binding.encoder_relative, Path::new("weights/encoder.ckpt"));
+        assert_eq!(binding.decoder_relative, Path::new("weights/decoder.ckpt"));
+        assert_eq!(binding.encoder_sha256, encoder_sha256);
+        assert_eq!(binding.decoder_sha256, decoder_sha256);
+
+        let mut drifted = files;
+        drifted[0].sha256[0] ^= 1;
+        assert!(verify_artifact_set_manifest(
+            bytes.as_bytes(),
+            Path::new("weights/codec_artifact_set.json"),
+            &drifted,
+        )
+        .is_err());
+        assert!(verify_artifact_set_manifest(
+            bytes.trim_end().as_bytes(),
+            Path::new("weights/codec_artifact_set.json"),
+            &drifted,
+        )
+        .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn bounded_manifest_reader_uses_one_descriptor_and_hard_byte_limit() {
         use std::os::unix::fs::symlink;
 
@@ -1070,9 +1366,13 @@ mod tests {
             closure,
             Path::new("opt/python"),
             Path::new("opt/helper.py"),
-            Path::new("weights/student_subband.ckpt"),
+            Path::new("weights/codec_artifact_set.json"),
+            Path::new("weights/encoder.ckpt"),
+            Path::new("weights/decoder.ckpt"),
             checkpoint,
             [0x33; 32],
+            [0x44; 32],
+            [0x55; 32],
             process,
             io,
             Duration::from_secs(30),
@@ -1082,10 +1382,32 @@ mod tests {
             production_execution_id(
                 closure,
                 Path::new("opt/python"),
-                Path::new("opt/alternate-helper.py"),
-                Path::new("weights/student_subband.ckpt"),
+                Path::new("opt/helper.py"),
+                Path::new("weights/codec_artifact_set.json"),
+                Path::new("weights/encoder.ckpt"),
+                Path::new("weights/decoder.ckpt"),
                 checkpoint,
                 [0x33; 32],
+                [0x44; 32],
+                [0x56; 32],
+                process,
+                io,
+                Duration::from_secs(30),
+            )
+        );
+        assert_ne!(
+            identity,
+            production_execution_id(
+                closure,
+                Path::new("opt/python"),
+                Path::new("opt/alternate-helper.py"),
+                Path::new("weights/codec_artifact_set.json"),
+                Path::new("weights/encoder.ckpt"),
+                Path::new("weights/decoder.ckpt"),
+                checkpoint,
+                [0x33; 32],
+                [0x44; 32],
+                [0x55; 32],
                 process,
                 io,
                 Duration::from_secs(30),
@@ -1097,9 +1419,13 @@ mod tests {
                 closure,
                 Path::new("opt/python"),
                 Path::new("opt/helper.py"),
-                Path::new("weights/student_subband.ckpt"),
+                Path::new("weights/codec_artifact_set.json"),
+                Path::new("weights/encoder.ckpt"),
+                Path::new("weights/decoder.ckpt"),
                 checkpoint,
                 [0x33; 32],
+                [0x44; 32],
+                [0x55; 32],
                 process,
                 BackendIoLimits {
                     maximum_request_bytes: 512,
@@ -1115,9 +1441,13 @@ mod tests {
                 closure,
                 Path::new("opt/python"),
                 Path::new("opt/helper.py"),
-                Path::new("weights/student_subband.ckpt"),
+                Path::new("weights/codec_artifact_set.json"),
+                Path::new("weights/encoder.ckpt"),
+                Path::new("weights/decoder.ckpt"),
                 checkpoint,
                 [0x33; 32],
+                [0x44; 32],
+                [0x55; 32],
                 process,
                 io,
                 Duration::from_secs(31),
@@ -1206,7 +1536,7 @@ mod tests {
             runtime_manifest: root.join("manifest.json"),
             python: PathBuf::from("/usr/bin/python3"),
             helper: PathBuf::from("/opt/lamquant/lmq_infer.py"),
-            checkpoint: PathBuf::from("/opt/lamquant/model.ckpt"),
+            artifact_set: PathBuf::from("/opt/lamquant/codec_artifact_set.json"),
             cgroup: PathBuf::from("/sys/fs/cgroup/missing-lmq-test"),
             model: trained_model(),
             io_limits: super::BackendIoLimits::default(),

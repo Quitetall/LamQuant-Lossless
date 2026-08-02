@@ -26,6 +26,7 @@ use semantic_abir::{
     StreamTag, TimeAxis, TimeSegment, ValidationLimits,
 };
 use semantic_abir_bcs::{ModelProvenance, PccpStatus, ResourceBounds, BCS2_MAGIC};
+use sha2::{Digest as _, Sha256};
 
 fn helper() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/lmq_infer.py")
@@ -41,7 +42,7 @@ fn python_available(python: &str) -> bool {
 
 fn model_dependencies_available(python: &str) -> bool {
     std::process::Command::new(python)
-        .args(["-c", "import numpy, torch"])
+        .args(["-c", "import lamquant_neural, numpy, torch"])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -56,11 +57,22 @@ fn required_model_test() -> bool {
 }
 
 fn required_model_provenance() -> Result<ModelProvenance, String> {
-    let encoded = std::env::var("LAMQUANT_LMQ_CHECKPOINT_SHA256")
-        .map_err(|_| "LAMQUANT_LMQ_CHECKPOINT_SHA256 is required".to_owned())?;
-    let checkpoint_sha256 = parse_checkpoint_sha256(&encoded)?;
+    let encoded = std::env::var("LAMQUANT_LMQ_ARTIFACT_SET_SHA256")
+        .map_err(|_| "LAMQUANT_LMQ_ARTIFACT_SET_SHA256 is required".to_owned())?;
+    let checkpoint_sha256 = parse_artifact_set_sha256(&encoded)?;
+    let weights = std::env::var("LAMQUANT_WEIGHTS_DIR")
+        .map_err(|_| "LAMQUANT_WEIGHTS_DIR is required".to_owned())?;
+    let manifest = PathBuf::from(weights).join("codec_artifact_set.json");
+    let manifest_bytes = std::fs::read(&manifest)
+        .map_err(|error| format!("read {}: {error}", manifest.display()))?;
+    let actual_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
+    if actual_sha256 != checkpoint_sha256 {
+        return Err("artifact-set bytes differ from configured SHA-256".to_owned());
+    }
     Ok(ModelProvenance {
-        checkpoint_content_id: ContentId::from_bytes([7; 32]),
+        // ABIR ModelProvenance calls the promoted artifact a checkpoint. For
+        // LMQ this payload is the canonical manifest binding both weight files.
+        checkpoint_content_id: payload_content_id(ElementType::Bytes, &manifest_bytes),
         checkpoint_sha256,
         pccp_change_id: "LMQ-PY-REAL-MODEL-TEST".to_owned(),
         pccp_evidence_id: ContentId::from_bytes([9; 32]),
@@ -68,9 +80,15 @@ fn required_model_provenance() -> Result<ModelProvenance, String> {
     })
 }
 
-fn parse_checkpoint_sha256(encoded: &str) -> Result<[u8; 32], String> {
-    if encoded.len() != 64 || !encoded.is_ascii() {
-        return Err("LAMQUANT_LMQ_CHECKPOINT_SHA256 must contain 64 hex digits".to_owned());
+fn parse_artifact_set_sha256(encoded: &str) -> Result<[u8; 32], String> {
+    if encoded.len() != 64
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(
+            "LAMQUANT_LMQ_ARTIFACT_SET_SHA256 must contain 64 lowercase hex digits".to_owned(),
+        );
     }
     let mut checkpoint_sha256 = [0_u8; 32];
     for (byte, pair) in checkpoint_sha256
@@ -78,19 +96,20 @@ fn parse_checkpoint_sha256(encoded: &str) -> Result<[u8; 32], String> {
         .zip(encoded.as_bytes().chunks_exact(2))
     {
         let pair = std::str::from_utf8(pair)
-            .map_err(|_| "LAMQUANT_LMQ_CHECKPOINT_SHA256 is not ASCII".to_owned())?;
+            .map_err(|_| "LAMQUANT_LMQ_ARTIFACT_SET_SHA256 is not ASCII".to_owned())?;
         *byte = u8::from_str_radix(pair, 16)
-            .map_err(|_| "LAMQUANT_LMQ_CHECKPOINT_SHA256 is not hexadecimal".to_owned())?;
+            .map_err(|_| "LAMQUANT_LMQ_ARTIFACT_SET_SHA256 is not hexadecimal".to_owned())?;
     }
     Ok(checkpoint_sha256)
 }
 
 #[test]
-fn checkpoint_sha256_parser_rejects_non_ascii_without_panicking() {
+fn artifact_set_sha256_parser_rejects_non_ascii_without_panicking() {
     let mut malformed = "0".repeat(61);
     malformed.push('é');
     malformed.push('0');
-    assert!(parse_checkpoint_sha256(&malformed).is_err());
+    assert!(parse_artifact_set_sha256(&malformed).is_err());
+    assert!(parse_artifact_set_sha256(&"AA".repeat(32)).is_err());
 }
 
 fn eeg(signal: Vec<Vec<i64>>) -> OpenedDataset<InMemoryPayloadAccess> {
@@ -327,7 +346,6 @@ fn py_backend_model_rejects_invalid_numeric_results() {
     }
     let script = r#"
 import importlib.util
-import json
 import sys
 import torch
 
@@ -335,69 +353,77 @@ spec = importlib.util.spec_from_file_location("lmq_infer", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-class NonFiniteCodec:
-    def encode(self, _signal):
-        return torch.full((1, 32, 79), float("nan")), []
+class Encoded:
+    symbols = torch.zeros((1, 32, 79), dtype=torch.int32)
+    level = 32
+    alphabet = 33
 
-module._load_bound_model = lambda _request: (NonFiniteCodec(), "00" * 32)
-request = {
+class EncodeCodec:
+    def encode(self, _signal):
+        return Encoded()
+
+module._load_bound_model = lambda _request: (EncodeCodec(), "00" * 32)
+encoded = module.model_encode({
     "signal_domain": module.MODEL_DOMAIN,
-    "signal": [[0] * 8],
-    "expected_checkpoint_sha256": "00" * 32,
-}
-try:
-    module.model_encode(request)
-except ValueError as error:
-    assert "non-finite" in str(error)
-else:
-    raise AssertionError("non-finite latent was accepted")
+    "sample_rate": 250.0,
+    "signal": [[0] * 2500 for _ in range(21)],
+    "expected_artifact_set_sha256": "00" * 32,
+})
+assert len(encoded["tokens"]) == 32 * 79
+assert encoded["schedule"] == [32] * 79
+assert encoded["alphabet"] == 33
+assert encoded["backend_meta"] == []
+assert encoded["artifact_set_sha256"] == "00" * 32
 
 class DecodeMustNotRun:
-    def decode(self, _latent, _metadata):
-        raise AssertionError("decode ran with non-finite metadata")
+    def decode(self, _encoded):
+        raise AssertionError("decode ran with invalid envelope")
 
 module._load_bound_model = lambda _request: (DecodeMustNotRun(), "00" * 32)
-metadata = {
-    "vmin": float("nan"),
-    "vmax": 1.0,
-    "shape": [1, 1],
-    "metadata": [],
-}
 request = {
     "signal_domain": module.MODEL_DOMAIN,
-    "tokens": [0],
-    "alphabet": 32,
-    "backend_meta": list(json.dumps(metadata).encode("utf-8")),
+    "expected_artifact_set_sha256": "00" * 32,
+    "tokens": [0] * (32 * 79),
+    "schedule": [32] * 79,
+    "alphabet": 33,
+    "n_channels": 21,
+    "n_samples": 2500,
+    "backend_meta": [],
 }
-try:
-    module.model_decode(request)
-except ValueError as error:
-    assert "non-finite" in str(error)
-else:
-    raise AssertionError("non-finite metadata reached model inference")
+for field, invalid in (
+    ("alphabet", 32),
+    ("n_channels", 20),
+    ("n_samples", 2499),
+    ("backend_meta", [1]),
+    ("schedule", [32] * 78),
+    ("tokens", [0] * (32 * 79 - 1) + [33]),
+):
+    malformed = dict(request)
+    malformed[field] = invalid
+    try:
+        module.model_decode(malformed)
+    except ValueError as error:
+        assert "envelope" in str(error)
+    else:
+        raise AssertionError(f"invalid {field} reached model inference")
 
-request["backend_meta"] = list(
-    json.dumps({"__ndarray__": [0], "dtype": "V1048576"}).encode("utf-8")
-)
+class NonFiniteCodec:
+    def decode(self, _encoded):
+        return torch.full((1, 21, 2500), float("nan"))
+
+module._load_bound_model = lambda _request: (NonFiniteCodec(), "00" * 32)
 try:
     module.model_decode(request)
 except ValueError as error:
-    assert "dtype" in str(error)
+    assert "invalid reconstruction" in str(error)
 else:
-    raise AssertionError("wire-controlled NumPy dtype was accepted")
+    raise AssertionError("non-finite reconstruction was accepted")
 
 class OverflowCodec:
-    def decode(self, _latent, _metadata):
-        return torch.tensor([[[float(2**47)]]])
+    def decode(self, _encoded):
+        return torch.full((1, 21, 2500), float(2**47))
 
 module._load_bound_model = lambda _request: (OverflowCodec(), "00" * 32)
-metadata = {
-    "vmin": 0.0,
-    "vmax": 1.0,
-    "shape": [1, 1],
-    "metadata": [],
-}
-request["backend_meta"] = list(json.dumps(metadata).encode("utf-8"))
 try:
     module.model_decode(request)
 except OverflowError:
