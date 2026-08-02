@@ -5,7 +5,7 @@ version = 3
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=4eec3689abd67b2e9bc1117ea246a1fbb919e4b0#4eec3689abd67b2e9bc1117ea246a1fbb919e4b0"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=4eec3689abd67b2e9bc1117ea246a1fbb919e4b0#4eec3689abd67b2e9bc1117ea246a1fbb919e4b0"
 dependencies = [
  "abir",
  "blake3",
@@ -25,7 +25,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=4eec3689abd67b2e9bc1117ea246a1fbb919e4b0#4eec3689abd67b2e9bc1117ea246a1fbb919e4b0"
 dependencies = [
  "abir",
  "blake3",
@@ -39,7 +39,7 @@ dependencies = [
 [[package]]
 name = "abir-training"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=4eec3689abd67b2e9bc1117ea246a1fbb919e4b0#4eec3689abd67b2e9bc1117ea246a1fbb919e4b0"
 dependencies = [
  "abir",
  "abir-bcs",
@@ -926,16 +926,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-dependencies = [
- "blake3",
- "postcard",
- "serde",
-]
-
-[[package]]
-name = "blut-graph-core"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=4d80951056bb7c464ee4ff4412131dc607f57199#4d80951056bb7c464ee4ff4412131dc607f57199"
+source = "git+https://github.com/Quitetall/blut.git?rev=98d74f1197dd14d2241806954863f9cb57dc57f2#98d74f1197dd14d2241806954863f9cb57dc57f2"
 dependencies = [
  "blake3",
  "postcard",
@@ -3482,7 +3473,7 @@ name = "lamquant-abir-graph"
 version = "0.1.0"
 dependencies = [
  "abir",
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=4d80951056bb7c464ee4ff4412131dc607f57199)",
+ "blut-graph-core",
  "lamquant-abir-montage",
  "serde_json",
 ]
@@ -3684,7 +3675,7 @@ dependencies = [
  "abir-adapter",
  "abir-bcs",
  "blake3",
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=4d80951056bb7c464ee4ff4412131dc607f57199)",
+ "blut-graph-core",
  "ed25519-dalek",
  "flate2",
  "fs2",
@@ -3702,7 +3693,7 @@ dependencies = [
 name = "lamquant-ops"
 version = "0.1.0"
 dependencies = [
- "blut-graph-core 0.1.0-alpha.1",
+ "blut-graph-core",
  "lamquant-history",
  "lamquant-runtime",
  "libc",
@@ -3729,7 +3720,7 @@ name = "lamquant-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "blut-graph-core 0.1.0-alpha.1",
+ "blut-graph-core",
  "command-group",
  "ed25519-dalek",
  "libc",

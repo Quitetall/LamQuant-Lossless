@@ -166,12 +166,19 @@ fn decode_subband_payload(data: &[u8], offset: usize) -> LmlResult<(Vec<i64>, us
     Ok((vals, consumed + 1))
 }
 /// ADR 0023 Track B5: Witten-Neal-Cleary arithmetic coding with a
-/// static Laplace probability model. Decoder support is always
-/// compiled in on host builds; firmware (no_std) decoder fails
-/// closed on tag 0x02 with `unknown per-subband codec tag`. Encoder
-/// considers arithmetic a candidate only when
-/// `LAMQUANT_TRY_ARITHMETIC=1`, so default-built archives never
-/// carry this tag and existing readers are unaffected.
+/// static Laplace probability model.
+///
+/// READING requires the `experimental_arithmetic` feature — on host as
+/// well as firmware. Every build without it fails closed on tags 0x02
+/// and 0x03 with an explicit "requires an experimental_arithmetic
+/// build" error (see the decode arms above). Only a matching feature-enabled
+/// build can read these tags, so producers cannot assume host readers support
+/// arithmetic payloads.
+///
+/// WRITING is locked twice. The encoder adds arithmetic to the
+/// per-subband candidate set only when this feature is compiled AND
+/// `LAMQUANT_TRY_ARITHMETIC=1` at run time, so a default build cannot
+/// emit this tag for any input and existing archives are unaffected.
 #[cfg(feature = "experimental_arithmetic")]
 pub(crate) const SUBBAND_TAG_ARITHMETIC: u8 = 0x02;
 
