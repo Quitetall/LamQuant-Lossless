@@ -36,6 +36,8 @@ pub const TRANSPORT_ATTEMPT_RECEIPT_SEMANTIC_TYPE: &str = "abir.transport.attemp
 pub const TRANSPORT_MAX_PAYLOAD_BYTES: u64 = 8 * 1024;
 /// Fixed `LQTR` v1 receipt length emitted by firmware transport executors.
 pub const TRANSPORT_ATTEMPT_RECEIPT_BYTES: u64 = 92;
+/// One LQF2 v2 header plus one maximum fragment, reused for every fragment.
+pub const TRANSPORT_LQF2_SCRATCH_BYTES: u64 = 116 + 256;
 
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.transport";
 
@@ -163,7 +165,7 @@ const fn lowering(kind: TransportKind) -> &'static str {
 }
 
 const fn resources() -> ResourceEnvelope {
-    ResourceEnvelope::bounded(0, 0, 1)
+    ResourceEnvelope::bounded(0, TRANSPORT_LQF2_SCRATCH_BYTES, 1)
 }
 
 fn payload_port() -> PortDescriptor {

@@ -9,8 +9,8 @@ use lamquant_nodes::{
     BLE_TRANSMIT_KERNEL, BLE_TRANSMIT_NODE_TYPE, CAP_BCS2_STREAM_BOUNDED, CAP_BLE_TRANSPORT,
     CAP_LQF2_TRANSPORT, CAP_USB_TRANSPORT, POLICY_DEVICE_EXPORT, POLICY_NETWORK_EXPORT,
     TRANSPORT_ATTEMPT_RECEIPT_BYTES, TRANSPORT_ATTEMPT_RECEIPT_SEMANTIC_TYPE,
-    TRANSPORT_MAX_PAYLOAD_BYTES, TRANSPORT_PAYLOAD_SEMANTIC_TYPE, USB_TRANSMIT_KERNEL,
-    USB_TRANSMIT_NODE_TYPE,
+    TRANSPORT_LQF2_SCRATCH_BYTES, TRANSPORT_MAX_PAYLOAD_BYTES, TRANSPORT_PAYLOAD_SEMANTIC_TYPE,
+    USB_TRANSMIT_KERNEL, USB_TRANSMIT_NODE_TYPE,
 };
 
 const BLE_IMPLEMENTATION: ImplementationId = ImplementationId([0x42; 32]);
@@ -25,6 +25,11 @@ fn ble_and_usb_descriptors_are_bounded_idempotent_mcu_effects() {
         assert_eq!(descriptor.targets, vec![Target::McuAot]);
         assert_eq!(descriptor.effect, Effect::Idempotent);
         assert_eq!(descriptor.retry_limit, 0);
+        assert_eq!(descriptor.resources.peak_bytes, 0);
+        assert_eq!(
+            descriptor.resources.scratch_bytes,
+            TRANSPORT_LQF2_SCRATCH_BYTES
+        );
         assert_eq!(descriptor.state.scope, StateScope::Stateless);
         assert_eq!(descriptor.partiality, Partiality::Atomic);
         assert_eq!(descriptor.inputs.len(), 1);
