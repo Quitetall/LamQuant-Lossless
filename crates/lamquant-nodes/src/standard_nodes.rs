@@ -46,6 +46,30 @@ pub const DICOM_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.dicom.si
 pub const NWB_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.nwb.sink";
 pub const XDF_SINK_NODE_TYPE: &str = "org.quitetall.lamquant.standard.xdf.sink";
 
+const EDFPLUS_IMPORT_KERNEL: KernelId = KernelId(0x5354_0101);
+const EDFPLUS_RESTORE_KERNEL: KernelId = KernelId(0x5354_0102);
+const EDFPLUS_SINK_KERNEL: KernelId = KernelId(0x5354_0103);
+const EDFPLUS_EXPORT_KERNEL: KernelId = KernelId(0x5354_0104);
+const BIDS_IMPORT_KERNEL: KernelId = KernelId(0x5354_0201);
+const BIDS_RESTORE_KERNEL: KernelId = KernelId(0x5354_0202);
+const BIDS_SINK_KERNEL: KernelId = KernelId(0x5354_0203);
+const BIDS_EXPORT_KERNEL: KernelId = KernelId(0x5354_0204);
+const DICOM_IMPORT_KERNEL: KernelId = KernelId(0x5354_0301);
+const DICOM_RESTORE_KERNEL: KernelId = KernelId(0x5354_0302);
+const DICOM_SINK_KERNEL: KernelId = KernelId(0x5354_0303);
+const DICOM_EXPORT_KERNEL: KernelId = KernelId(0x5354_0304);
+#[cfg(feature = "standard-nwb")]
+const NWB_IMPORT_KERNEL: KernelId = KernelId(0x5354_0401);
+#[cfg(feature = "standard-nwb")]
+const NWB_RESTORE_KERNEL: KernelId = KernelId(0x5354_0402);
+#[cfg(feature = "standard-nwb")]
+const NWB_SINK_KERNEL: KernelId = KernelId(0x5354_0403);
+#[cfg(feature = "standard-nwb")]
+const NWB_EXPORT_KERNEL: KernelId = KernelId(0x5354_0404);
+const XDF_IMPORT_KERNEL: KernelId = KernelId(0x5354_0501);
+const XDF_RESTORE_KERNEL: KernelId = KernelId(0x5354_0502);
+const XDF_SINK_KERNEL: KernelId = KernelId(0x5354_0503);
+
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_SOURCE_CAPSULE: &str = "abir.source-capsule.identity-bound-v1";
 const SOURCE_CAPSULE_PROOF: &str = "org.quitetall.abir.proof.identity-bound-source-capsule-v1";
@@ -82,7 +106,10 @@ const STANDARD_SPECS: &[StandardSpec] = &[
         restore_type: EDFPLUS_RESTORE_NODE_TYPE,
         sink_type: EDFPLUS_SINK_NODE_TYPE,
         profile: "edfplus.1",
-        kernel_base: 0x5354_0100,
+        import_kernel: EDFPLUS_IMPORT_KERNEL,
+        export_kernel: Some(EDFPLUS_EXPORT_KERNEL),
+        restore_kernel: EDFPLUS_RESTORE_KERNEL,
+        sink_kernel: EDFPLUS_SINK_KERNEL,
         adapter: AdapterKind::EdfPlus,
     },
     StandardSpec {
@@ -91,7 +118,10 @@ const STANDARD_SPECS: &[StandardSpec] = &[
         restore_type: BIDS_RESTORE_NODE_TYPE,
         sink_type: BIDS_SINK_NODE_TYPE,
         profile: "bids.1.11.1",
-        kernel_base: 0x5354_0200,
+        import_kernel: BIDS_IMPORT_KERNEL,
+        export_kernel: Some(BIDS_EXPORT_KERNEL),
+        restore_kernel: BIDS_RESTORE_KERNEL,
+        sink_kernel: BIDS_SINK_KERNEL,
         adapter: AdapterKind::Bids,
     },
     StandardSpec {
@@ -100,7 +130,10 @@ const STANDARD_SPECS: &[StandardSpec] = &[
         restore_type: DICOM_RESTORE_NODE_TYPE,
         sink_type: DICOM_SINK_NODE_TYPE,
         profile: "dicom.ps3.2026c",
-        kernel_base: 0x5354_0300,
+        import_kernel: DICOM_IMPORT_KERNEL,
+        export_kernel: Some(DICOM_EXPORT_KERNEL),
+        restore_kernel: DICOM_RESTORE_KERNEL,
+        sink_kernel: DICOM_SINK_KERNEL,
         adapter: AdapterKind::Dicom,
     },
     #[cfg(feature = "standard-nwb")]
@@ -110,7 +143,10 @@ const STANDARD_SPECS: &[StandardSpec] = &[
         restore_type: NWB_RESTORE_NODE_TYPE,
         sink_type: NWB_SINK_NODE_TYPE,
         profile: "nwb.2.10.0",
-        kernel_base: 0x5354_0400,
+        import_kernel: NWB_IMPORT_KERNEL,
+        export_kernel: Some(NWB_EXPORT_KERNEL),
+        restore_kernel: NWB_RESTORE_KERNEL,
+        sink_kernel: NWB_SINK_KERNEL,
         adapter: AdapterKind::Nwb,
     },
     StandardSpec {
@@ -119,7 +155,10 @@ const STANDARD_SPECS: &[StandardSpec] = &[
         restore_type: XDF_RESTORE_NODE_TYPE,
         sink_type: XDF_SINK_NODE_TYPE,
         profile: "xdf.1.0",
-        kernel_base: 0x5354_0500,
+        import_kernel: XDF_IMPORT_KERNEL,
+        export_kernel: None,
+        restore_kernel: XDF_RESTORE_KERNEL,
+        sink_kernel: XDF_SINK_KERNEL,
         adapter: AdapterKind::Xdf,
     },
 ];
@@ -131,7 +170,10 @@ struct StandardSpec {
     restore_type: &'static str,
     sink_type: &'static str,
     profile: &'static str,
-    kernel_base: u32,
+    import_kernel: KernelId,
+    export_kernel: Option<KernelId>,
+    restore_kernel: KernelId,
+    sink_kernel: KernelId,
     adapter: AdapterKind,
 }
 
@@ -746,20 +788,16 @@ pub fn register_standard_nodes(registry: &mut KernelRegistry) -> Result<(), Comp
             }
             let descriptor = descriptor(*spec, operation);
             let type_name = descriptor.type_name.clone();
+            let kernel = match operation {
+                Operation::Import => spec.import_kernel,
+                Operation::Restore => spec.restore_kernel,
+                Operation::Sink => spec.sink_kernel,
+                Operation::Export => spec
+                    .export_kernel
+                    .expect("export operation requires an allocated kernel"),
+            };
             registry.register_descriptor(descriptor)?;
-            registry.register_kernel(standard_kernel(
-                KernelId(
-                    spec.kernel_base
-                        + match operation {
-                            Operation::Import => 1,
-                            Operation::Restore => 2,
-                            Operation::Sink => 3,
-                            Operation::Export => 4,
-                        },
-                ),
-                &type_name,
-                operation,
-            ))?;
+            registry.register_kernel(standard_kernel(kernel, &type_name, operation))?;
         }
     }
     Ok(())
@@ -804,7 +842,7 @@ pub fn standard_sink_kernel_binding(profile: &str) -> Option<(KernelId, Implemen
         .find(|spec| spec.profile == profile)
         .map(|spec| {
             (
-                KernelId(spec.kernel_base + 3),
+                spec.sink_kernel,
                 implementation_id(spec.sink_type, Target::Host),
             )
         })
@@ -817,7 +855,7 @@ pub fn standard_restore_kernel_binding(profile: &str) -> Option<(KernelId, Imple
         .find(|spec| spec.profile == profile)
         .map(|spec| {
             (
-                KernelId(spec.kernel_base + 2),
+                spec.restore_kernel,
                 implementation_id(spec.restore_type, Target::Host),
             )
         })
@@ -829,12 +867,9 @@ pub fn standard_export_kernel_binding(profile: &str) -> Option<(KernelId, Implem
         .copied()
         .find(|spec| spec.profile == profile)
         .and_then(|spec| {
-            spec.export_type.map(|export_type| {
-                (
-                    KernelId(spec.kernel_base + 4),
-                    implementation_id(export_type, Target::Host),
-                )
-            })
+            spec.export_type
+                .zip(spec.export_kernel)
+                .map(|(export_type, kernel)| (kernel, implementation_id(export_type, Target::Host)))
         })
 }
 
