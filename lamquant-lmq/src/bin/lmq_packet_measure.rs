@@ -80,16 +80,19 @@ fn measure() -> Result<Response, String> {
 
 fn main() -> ExitCode {
     match measure() {
-        Ok(response) => match serde_json::to_writer(io::stdout().lock(), &response) {
-            Ok(()) => {
-                let _ = io::stdout().lock().write_all(b"\n");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
+        Ok(response) => {
+            let stdout = io::stdout();
+            let mut output = stdout.lock();
+            if let Err(error) = serde_json::to_writer(&mut output, &response) {
                 eprintln!("could not write response: {error}");
-                ExitCode::from(2)
+                return ExitCode::from(2);
             }
-        },
+            if let Err(error) = output.write_all(b"\n") {
+                eprintln!("could not finish response: {error}");
+                return ExitCode::from(2);
+            }
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("{error}");
             ExitCode::from(2)
