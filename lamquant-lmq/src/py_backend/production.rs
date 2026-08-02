@@ -42,6 +42,7 @@ pub struct ProductionDeploymentAttestation {
     checkpoint_sha256: [u8; 32],
     encoder_sha256: [u8; 32],
     decoder_sha256: [u8; 32],
+    fitted_state_sha256: [u8; 32],
     process_limits: BackendProcessLimits,
     io_limits: BackendIoLimits,
 }
@@ -71,6 +72,11 @@ impl ProductionDeploymentAttestation {
     /// SHA-256 of the Vocos decoder member bound by the checkpoint manifest.
     pub const fn decoder_sha256(&self) -> [u8; 32] {
         self.decoder_sha256
+    }
+
+    /// SHA-256 of standardized full-fold fitted state bound by the manifest.
+    pub const fn fitted_state_sha256(&self) -> [u8; 32] {
+        self.fitted_state_sha256
     }
 
     pub const fn process_limits(&self) -> BackendProcessLimits {
@@ -149,7 +155,9 @@ struct RuntimeManifestFile {
 struct CodecArtifactSetManifest {
     decoder: ArtifactSetMember<DecoderArchitecture>,
     encoder: ArtifactSetMember<EncoderArchitecture>,
+    fitted_state: FittedStateMember,
     input: ArtifactSetInput,
+    preprocessing: PreprocessingContract,
     quantizer: ArtifactSetQuantizer,
     schema: String,
 }
@@ -189,11 +197,47 @@ struct DecoderArchitecture {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct FittedStateMember {
+    bytes: u64,
+    // Semantic training-state identity. Rust binds the containing file SHA into
+    // the immutable runtime closure; codec-neural then checks this value against
+    // the canonical fitted-state document before loading model weights.
+    content_id: String,
+    path: String,
+    role: String,
+    sha256: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ArtifactSetInput {
     channels: u16,
-    pipeline: String,
+    element: String,
     sample_rate_hz: u32,
     samples: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreprocessingContract {
+    autocorr_len: u16,
+    bands: Vec<PreprocessingBand>,
+    input_row: String,
+    lifting: String,
+    lpc_order: u16,
+    output_channels: u16,
+    output_row: String,
+    output_samples: u16,
+    pipeline: String,
+    standardization: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreprocessingBand {
+    fold_groups: u16,
+    name: String,
+    native_samples: u16,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -206,13 +250,16 @@ struct ArtifactSetQuantizer {
 struct VerifiedArtifactSet {
     encoder_relative: PathBuf,
     decoder_relative: PathBuf,
+    fitted_state_relative: PathBuf,
     encoder_sha256: [u8; 32],
     decoder_sha256: [u8; 32],
+    fitted_state_sha256: [u8; 32],
 }
 
 const MAX_RUNTIME_FILES: usize = 200_000;
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARTIFACT_SET_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_ARTIFACT_FITTED_STATE_BYTES: u64 = 64 * 1024;
 const MAX_ARTIFACT_ENCODER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARTIFACT_DECODER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const FULL_RUNTIME_REVALIDATION_INTERVAL: std::time::Duration =
@@ -341,10 +388,12 @@ impl ProductionPyBackend {
                 &artifact_set_relative,
                 &artifact_binding.encoder_relative,
                 &artifact_binding.decoder_relative,
+                &artifact_binding.fitted_state_relative,
                 checkpoint_content_id,
                 checkpoint_sha256_expected,
                 artifact_binding.encoder_sha256,
                 artifact_binding.decoder_sha256,
+                artifact_binding.fitted_state_sha256,
                 config.process_limits,
                 config.io_limits,
                 config.timeout,
@@ -378,6 +427,7 @@ impl ProductionPyBackend {
                     checkpoint_sha256: checkpoint_sha256_expected,
                     encoder_sha256: artifact_binding.encoder_sha256,
                     decoder_sha256: artifact_binding.decoder_sha256,
+                    fitted_state_sha256: artifact_binding.fitted_state_sha256,
                     process_limits: config.process_limits,
                     io_limits: config.io_limits,
                 },
@@ -600,9 +650,9 @@ fn verify_artifact_set_manifest(
             "artifact-set manifest is not canonical JSON".into(),
         ));
     }
-    if manifest.schema != "lamquant.neural-codec-artifact-set/v1"
+    if manifest.schema != "lamquant.neural-codec-artifact-set/v2"
         || manifest.input.channels != 21
-        || manifest.input.pipeline != "subband-l3-v1"
+        || manifest.input.element != "f32"
         || manifest.input.sample_rate_hz != 250
         || manifest.input.samples != 2_500
         || manifest.quantizer.kind != "scalar-fsq-round-v1"
@@ -612,11 +662,42 @@ fn verify_artifact_set_manifest(
             "artifact-set semantic contract is outside production profile".into(),
         ));
     }
+    let preprocessing = &manifest.preprocessing;
+    let expected_bands = [
+        ("l3_approx", 1, 313),
+        ("l3_detail", 1, 312),
+        ("l2_detail", 2, 625),
+        ("l1_detail", 4, 1_250),
+    ];
+    if preprocessing.autocorr_len != 256
+        || preprocessing.input_row != "lamquant.eeg.fullband.f32.c21.t2500.v1"
+        || preprocessing.lifting != "integer-three-level-v1"
+        || preprocessing.lpc_order != 8
+        || preprocessing.output_channels != 168
+        || preprocessing.output_row != "lamquant.eeg.l3-full-fold-standardized.f32.c168.t313.v2"
+        || preprocessing.output_samples != 313
+        || preprocessing.pipeline != "subband-full-fold-standardized-v2"
+        || preprocessing.standardization != "fitted-state-ratio-to-l3-approx-v1"
+        || preprocessing.bands.len() != expected_bands.len()
+        || preprocessing
+            .bands
+            .iter()
+            .zip(expected_bands)
+            .any(|(actual, expected)| {
+                actual.name != expected.0
+                    || actual.fold_groups != expected.1
+                    || actual.native_samples != expected.2
+            })
+    {
+        return Err(ProductionBackendLoadError(
+            "artifact-set preprocessing is outside production profile".into(),
+        ));
+    }
     let encoder = &manifest.encoder.architecture;
     if encoder.family != "TernaryMobileNetV5_Subband"
-        || encoder.in_channels != 21
+        || encoder.in_channels != 168
         || encoder.latent_dim != 32
-        || !matches!(encoder.width, 96 | 128 | 160)
+        || encoder.width != 80
         || encoder.blocks != 3
         || encoder.kernels.as_slice() != [3, 5, 7]
         || encoder.channel_agnostic
@@ -651,7 +732,12 @@ fn verify_artifact_set_manifest(
         files,
         MAX_ARTIFACT_DECODER_BYTES,
     )?;
-    if encoder_relative == decoder_relative {
+    let (fitted_state_relative, fitted_state_sha256) =
+        verify_fitted_state_member(&manifest.fitted_state, artifact_set_relative, files)?;
+    if encoder_relative == decoder_relative
+        || encoder_relative == fitted_state_relative
+        || decoder_relative == fitted_state_relative
+    {
         return Err(ProductionBackendLoadError(
             "artifact-set members must use distinct paths".into(),
         ));
@@ -659,9 +745,41 @@ fn verify_artifact_set_manifest(
     Ok(VerifiedArtifactSet {
         encoder_relative,
         decoder_relative,
+        fitted_state_relative,
         encoder_sha256,
         decoder_sha256,
+        fitted_state_sha256,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn verify_fitted_state_member(
+    member: &FittedStateMember,
+    artifact_set_relative: &Path,
+    files: &[VerifiedRuntimeFile],
+) -> Result<(PathBuf, [u8; 32]), ProductionBackendLoadError> {
+    if member.role != "fitted-state"
+        || member.path != "codec_fitted_state.json"
+        || member.content_id.len() != 64
+        || !member
+            .content_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ProductionBackendLoadError(
+            "artifact-set fitted-state member is invalid".into(),
+        ));
+    }
+    verify_artifact_member_fields(
+        member.bytes,
+        &member.path,
+        &member.role,
+        &member.sha256,
+        "fitted-state",
+        artifact_set_relative,
+        files,
+        MAX_ARTIFACT_FITTED_STATE_BYTES,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -672,14 +790,37 @@ fn verify_artifact_member<A>(
     files: &[VerifiedRuntimeFile],
     maximum_bytes: u64,
 ) -> Result<(PathBuf, [u8; 32]), ProductionBackendLoadError> {
-    if member.role != role
-        || member.path.is_empty()
-        || member.path.contains(['/', '\\'])
-        || member.bytes == 0
-        || member.bytes > maximum_bytes
-        || member.sha256.len() != 64
-        || !member
-            .sha256
+    verify_artifact_member_fields(
+        member.bytes,
+        &member.path,
+        &member.role,
+        &member.sha256,
+        role,
+        artifact_set_relative,
+        files,
+        maximum_bytes,
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn verify_artifact_member_fields(
+    bytes: u64,
+    path: &str,
+    declared_role: &str,
+    sha256: &str,
+    role: &str,
+    artifact_set_relative: &Path,
+    files: &[VerifiedRuntimeFile],
+    maximum_bytes: u64,
+) -> Result<(PathBuf, [u8; 32]), ProductionBackendLoadError> {
+    if declared_role != role
+        || path.is_empty()
+        || path.contains(['/', '\\'])
+        || bytes == 0
+        || bytes > maximum_bytes
+        || sha256.len() != 64
+        || !sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
@@ -687,7 +828,7 @@ fn verify_artifact_member<A>(
             "artifact-set {role} member is invalid"
         )));
     }
-    let member_path = Path::new(&member.path);
+    let member_path = Path::new(path);
     if !matches!(member_path.components().next(), Some(Component::Normal(_)))
         || member_path.components().count() != 1
     {
@@ -707,8 +848,8 @@ fn verify_artifact_member<A>(
                 "artifact-set {role} member is absent from runtime closure"
             ))
         })?;
-    let declared_sha256 = parse_sha256(&member.sha256).expect("validated lowercase SHA-256");
-    if entry.sha256 != declared_sha256 || entry.bytes != member.bytes {
+    let declared_sha256 = parse_sha256(sha256).expect("validated lowercase SHA-256");
+    if entry.sha256 != declared_sha256 || entry.bytes != bytes {
         return Err(ProductionBackendLoadError(format!(
             "artifact-set {role} member differs from runtime closure"
         )));
@@ -948,10 +1089,12 @@ fn production_execution_id(
     artifact_set_relative: &Path,
     encoder_relative: &Path,
     decoder_relative: &Path,
+    fitted_state_relative: &Path,
     checkpoint_content_id: ContentId,
     checkpoint_sha256: [u8; 32],
     encoder_sha256: [u8; 32],
     decoder_sha256: [u8; 32],
+    fitted_state_sha256: [u8; 32],
     process_limits: BackendProcessLimits,
     io_limits: BackendIoLimits,
     timeout: std::time::Duration,
@@ -959,7 +1102,7 @@ fn production_execution_id(
     use std::os::unix::ffi::OsStrExt;
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"org.quitetall.lamquant.lmq.production-py-execution-v2\0");
+    hasher.update(b"org.quitetall.lamquant.lmq.production-py-execution-v3\0");
     hash_closure_field(&mut hasher, PRODUCTION_EXECUTION_POLICY);
     hash_closure_field(&mut hasher, closure_id.as_bytes());
     hash_closure_field(&mut hasher, python_relative.as_os_str().as_bytes());
@@ -967,10 +1110,12 @@ fn production_execution_id(
     hash_closure_field(&mut hasher, artifact_set_relative.as_os_str().as_bytes());
     hash_closure_field(&mut hasher, encoder_relative.as_os_str().as_bytes());
     hash_closure_field(&mut hasher, decoder_relative.as_os_str().as_bytes());
+    hash_closure_field(&mut hasher, fitted_state_relative.as_os_str().as_bytes());
     hash_closure_field(&mut hasher, checkpoint_content_id.as_bytes());
     hash_closure_field(&mut hasher, &checkpoint_sha256);
     hash_closure_field(&mut hasher, &encoder_sha256);
     hash_closure_field(&mut hasher, &decoder_sha256);
+    hash_closure_field(&mut hasher, &fitted_state_sha256);
     hash_closure_field(
         &mut hasher,
         &process_limits.memory_bytes.get().to_le_bytes(),
@@ -1275,6 +1420,7 @@ mod tests {
     fn artifact_set_manifest_binds_canonical_encoder_and_decoder_members() {
         let encoder_sha256 = [0x11; 32];
         let decoder_sha256 = [0x22; 32];
+        let fitted_state_sha256 = [0x33; 32];
         let files = vec![
             VerifiedRuntimeFile {
                 relative_path: PathBuf::from("weights/decoder.ckpt"),
@@ -1288,14 +1434,22 @@ mod tests {
                 bytes: 123,
                 executable: false,
             },
+            VerifiedRuntimeFile {
+                relative_path: PathBuf::from("weights/codec_fitted_state.json"),
+                sha256: fitted_state_sha256,
+                bytes: 321,
+                executable: false,
+            },
         ];
         let bytes = format!(
             concat!(
-                r#"{{"decoder":{{"architecture":{{"channel_agnostic":false,"family":"VocosDecoder","latent_dim":32,"n_channels":21,"target_len":2500,"tier":3}},"bytes":456,"path":"decoder.ckpt","role":"decoder","sha256":"{}"}},"encoder":{{"architecture":{{"blocks":3,"channel_agnostic":false,"family":"TernaryMobileNetV5_Subband","in_channels":21,"kernels":[3,5,7],"latent_dim":32,"width":96}},"bytes":123,"path":"encoder.ckpt","role":"encoder","sha256":"{}"}},"input":{{"channels":21,"pipeline":"subband-l3-v1","sample_rate_hz":250,"samples":2500}},"quantizer":{{"kind":"scalar-fsq-round-v1","level":32}},"schema":"lamquant.neural-codec-artifact-set/v1"}}"#,
+                r#"{{"decoder":{{"architecture":{{"channel_agnostic":false,"family":"VocosDecoder","latent_dim":32,"n_channels":21,"target_len":2500,"tier":3}},"bytes":456,"path":"decoder.ckpt","role":"decoder","sha256":"{}"}},"encoder":{{"architecture":{{"blocks":3,"channel_agnostic":false,"family":"TernaryMobileNetV5_Subband","in_channels":168,"kernels":[3,5,7],"latent_dim":32,"width":80}},"bytes":123,"path":"encoder.ckpt","role":"encoder","sha256":"{}"}},"fitted_state":{{"bytes":321,"content_id":"{}","path":"codec_fitted_state.json","role":"fitted-state","sha256":"{}"}},"input":{{"channels":21,"element":"f32","sample_rate_hz":250,"samples":2500}},"preprocessing":{{"autocorr_len":256,"bands":[{{"fold_groups":1,"name":"l3_approx","native_samples":313}},{{"fold_groups":1,"name":"l3_detail","native_samples":312}},{{"fold_groups":2,"name":"l2_detail","native_samples":625}},{{"fold_groups":4,"name":"l1_detail","native_samples":1250}}],"input_row":"lamquant.eeg.fullband.f32.c21.t2500.v1","lifting":"integer-three-level-v1","lpc_order":8,"output_channels":168,"output_row":"lamquant.eeg.l3-full-fold-standardized.f32.c168.t313.v2","output_samples":313,"pipeline":"subband-full-fold-standardized-v2","standardization":"fitted-state-ratio-to-l3-approx-v1"}},"quantizer":{{"kind":"scalar-fsq-round-v1","level":32}},"schema":"lamquant.neural-codec-artifact-set/v2"}}"#,
                 "\n"
             ),
             "22".repeat(32),
             "11".repeat(32),
+            "44".repeat(32),
+            "33".repeat(32),
         );
         let binding = verify_artifact_set_manifest(
             bytes.as_bytes(),
@@ -1307,6 +1461,11 @@ mod tests {
         assert_eq!(binding.decoder_relative, Path::new("weights/decoder.ckpt"));
         assert_eq!(binding.encoder_sha256, encoder_sha256);
         assert_eq!(binding.decoder_sha256, decoder_sha256);
+        assert_eq!(
+            binding.fitted_state_relative,
+            Path::new("weights/codec_fitted_state.json")
+        );
+        assert_eq!(binding.fitted_state_sha256, fitted_state_sha256);
 
         let mut drifted = files;
         drifted[0].sha256[0] ^= 1;
@@ -1362,71 +1521,89 @@ mod tests {
             maximum_stdout_bytes: 2_048,
             maximum_stderr_bytes: 512,
         };
-        let identity = production_execution_id(
-            closure,
-            Path::new("opt/python"),
+        let execution_id = |helper: &Path,
+                            fitted_path: &Path,
+                            decoder_sha256: [u8; 32],
+                            fitted_state_sha256: [u8; 32],
+                            selected_io: BackendIoLimits,
+                            timeout: Duration| {
+            production_execution_id(
+                closure,
+                Path::new("opt/python"),
+                helper,
+                Path::new("weights/codec_artifact_set.json"),
+                Path::new("weights/encoder.ckpt"),
+                Path::new("weights/decoder.ckpt"),
+                fitted_path,
+                checkpoint,
+                [0x33; 32],
+                [0x44; 32],
+                decoder_sha256,
+                fitted_state_sha256,
+                process,
+                selected_io,
+                timeout,
+            )
+        };
+        let identity = execution_id(
             Path::new("opt/helper.py"),
-            Path::new("weights/codec_artifact_set.json"),
-            Path::new("weights/encoder.ckpt"),
-            Path::new("weights/decoder.ckpt"),
-            checkpoint,
-            [0x33; 32],
-            [0x44; 32],
+            Path::new("weights/codec_fitted_state.json"),
             [0x55; 32],
-            process,
+            [0x66; 32],
             io,
             Duration::from_secs(30),
         );
         assert_ne!(
             identity,
-            production_execution_id(
-                closure,
-                Path::new("opt/python"),
+            execution_id(
                 Path::new("opt/helper.py"),
-                Path::new("weights/codec_artifact_set.json"),
-                Path::new("weights/encoder.ckpt"),
-                Path::new("weights/decoder.ckpt"),
-                checkpoint,
-                [0x33; 32],
-                [0x44; 32],
+                Path::new("weights/codec_fitted_state.json"),
                 [0x56; 32],
-                process,
+                [0x66; 32],
                 io,
                 Duration::from_secs(30),
             )
         );
         assert_ne!(
             identity,
-            production_execution_id(
-                closure,
-                Path::new("opt/python"),
-                Path::new("opt/alternate-helper.py"),
-                Path::new("weights/codec_artifact_set.json"),
-                Path::new("weights/encoder.ckpt"),
-                Path::new("weights/decoder.ckpt"),
-                checkpoint,
-                [0x33; 32],
-                [0x44; 32],
-                [0x55; 32],
-                process,
-                io,
-                Duration::from_secs(30),
-            )
-        );
-        assert_ne!(
-            identity,
-            production_execution_id(
-                closure,
-                Path::new("opt/python"),
+            execution_id(
                 Path::new("opt/helper.py"),
-                Path::new("weights/codec_artifact_set.json"),
-                Path::new("weights/encoder.ckpt"),
-                Path::new("weights/decoder.ckpt"),
-                checkpoint,
-                [0x33; 32],
-                [0x44; 32],
+                Path::new("weights/codec_fitted_state.json"),
                 [0x55; 32],
-                process,
+                [0x67; 32],
+                io,
+                Duration::from_secs(30),
+            )
+        );
+        assert_ne!(
+            identity,
+            execution_id(
+                Path::new("opt/helper.py"),
+                Path::new("weights/alternate_fitted_state.json"),
+                [0x55; 32],
+                [0x66; 32],
+                io,
+                Duration::from_secs(30),
+            )
+        );
+        assert_ne!(
+            identity,
+            execution_id(
+                Path::new("opt/alternate-helper.py"),
+                Path::new("weights/codec_fitted_state.json"),
+                [0x55; 32],
+                [0x66; 32],
+                io,
+                Duration::from_secs(30),
+            )
+        );
+        assert_ne!(
+            identity,
+            execution_id(
+                Path::new("opt/helper.py"),
+                Path::new("weights/codec_fitted_state.json"),
+                [0x55; 32],
+                [0x66; 32],
                 BackendIoLimits {
                     maximum_request_bytes: 512,
                     maximum_stdout_bytes: 2_560,
@@ -1437,18 +1614,11 @@ mod tests {
         );
         assert_ne!(
             identity,
-            production_execution_id(
-                closure,
-                Path::new("opt/python"),
+            execution_id(
                 Path::new("opt/helper.py"),
-                Path::new("weights/codec_artifact_set.json"),
-                Path::new("weights/encoder.ckpt"),
-                Path::new("weights/decoder.ckpt"),
-                checkpoint,
-                [0x33; 32],
-                [0x44; 32],
+                Path::new("weights/codec_fitted_state.json"),
                 [0x55; 32],
-                process,
+                [0x66; 32],
                 io,
                 Duration::from_secs(31),
             )
