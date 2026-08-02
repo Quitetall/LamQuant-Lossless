@@ -12,6 +12,7 @@ mod lmq_node;
 mod lsl_nodes;
 #[cfg(feature = "standard-adapters")]
 mod standard_nodes;
+mod transport_nodes;
 
 pub use abir_value::{AbirDatasetValue, AbirDatasetValueError, NodePayloadStore};
 pub use lml_reference::{
@@ -59,6 +60,14 @@ pub use standard_nodes::{
     STANDARD_MAX_FOREIGN_PATH_BYTES, STANDARD_MAX_FOREIGN_PATH_DEPTH,
     STANDARD_MAX_FOREIGN_TREE_BYTES, STANDARD_MAX_SOURCE_BYTES, XDF_IMPORT_NODE_TYPE,
     XDF_RESTORE_NODE_TYPE, XDF_SINK_NODE_TYPE,
+};
+pub use transport_nodes::{
+    ble_transmit_descriptor, register_mcu_transport_nodes, usb_transmit_descriptor,
+    BLE_TRANSMIT_KERNEL, BLE_TRANSMIT_NODE_TYPE, CAP_BCS2_STREAM_BOUNDED, CAP_BLE_TRANSPORT,
+    CAP_LQF2_TRANSPORT, CAP_USB_TRANSPORT, POLICY_DEVICE_EXPORT, POLICY_NETWORK_EXPORT,
+    TRANSPORT_ATTEMPT_RECEIPT_BYTES, TRANSPORT_ATTEMPT_RECEIPT_PROOF,
+    TRANSPORT_ATTEMPT_RECEIPT_SEMANTIC_TYPE, TRANSPORT_MAX_PAYLOAD_BYTES, TRANSPORT_PAYLOAD_PROOF,
+    TRANSPORT_PAYLOAD_SEMANTIC_TYPE, USB_TRANSMIT_KERNEL, USB_TRANSMIT_NODE_TYPE,
 };
 
 pub const LML_TRANSFORM_NODE_TYPE: &str = lml_reference::LML_TRANSFORM_NODE_TYPE;
