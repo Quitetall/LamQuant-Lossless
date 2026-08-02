@@ -353,6 +353,22 @@ spec = importlib.util.spec_from_file_location("lmq_infer", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
+def load_must_not_run(_request):
+    raise AssertionError("model loaded for malformed input")
+
+module._load_bound_model = load_must_not_run
+try:
+    module.model_encode({
+        "signal_domain": module.MODEL_DOMAIN,
+        "sample_rate": 250.0,
+        "signal": [[0] * 2499 for _ in range(21)],
+        "expected_artifact_set_sha256": "00" * 32,
+    })
+except ValueError as error:
+    assert "[21, 2500]" in str(error)
+else:
+    raise AssertionError("malformed input reached model loader")
+
 class Encoded:
     symbols = torch.zeros((1, 32, 79), dtype=torch.int32)
     level = 32

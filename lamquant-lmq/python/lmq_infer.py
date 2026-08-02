@@ -115,6 +115,15 @@ def model_encode(req):
     signal = req["signal"]
     if req.get("sample_rate") != 250.0:
         raise ValueError("production model requires 250 Hz input")
+    if (
+        not isinstance(signal, list)
+        or len(signal) != MODEL_CHANNELS
+        or any(
+            not isinstance(channel, list) or len(channel) != MODEL_SAMPLES
+            for channel in signal
+        )
+    ):
+        raise ValueError("production model requires exact [21, 2500] input")
     codec, artifact_set_sha256 = _load_bound_model(req)
     # Rust shell already applied exact ABIR calibration. Integer transport keeps
     # JSON deterministic and avoids binary64 text becoming a second unit seam.
