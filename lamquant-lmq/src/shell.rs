@@ -1124,9 +1124,19 @@ const fn reference_kind_name(reference: ReferenceKind) -> &'static [u8] {
     }
 }
 
+/// Encode one backend token envelope into exact production LMQP1 bytes.
+///
+/// Evaluation tooling uses this seam to measure real packet bytes without
+/// constructing a BCS2 catalog. Runtime bundle encoding calls the same bounded
+/// implementation, so measured entropy/header bytes cannot drift into a
+/// parallel estimator.
+pub fn encode_token_packet(tokens: &NeuralTokens) -> Result<Vec<u8>, LmqError> {
+    encode_packet_bounded(tokens, LmqResourceBounds::default())
+}
+
 #[cfg(test)]
 fn encode_packet(tokens: &NeuralTokens) -> Result<Vec<u8>, LmqError> {
-    encode_packet_bounded(tokens, LmqResourceBounds::default())
+    encode_token_packet(tokens)
 }
 
 fn encode_packet_bounded(

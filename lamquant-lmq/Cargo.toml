@@ -12,6 +12,11 @@ homepage = "https://github.com/Quitetall/LamQuant-Lossless"
 name = "lamquant_lmq"
 crate-type = ["rlib"]
 
+[[bin]]
+name = "lmq-packet-measure"
+path = "src/bin/lmq_packet_measure.rs"
+required-features = ["python"]
+
 [features]
 default = ["std"]
 # Host build (default). The no_std firmware floor is `--no-default-features`.
