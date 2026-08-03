@@ -935,7 +935,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=02579d4f255a265e3408ebcb3f48750556595aa4#02579d4f255a265e3408ebcb3f48750556595aa4"
+source = "git+https://github.com/Quitetall/blut.git?rev=879368d3fc7f6185eac562b52e7dde2228f013e6#879368d3fc7f6185eac562b52e7dde2228f013e6"
 dependencies = [
  "blake3",
  "postcard",
@@ -3482,7 +3482,7 @@ name = "lamquant-abir-graph"
 version = "0.1.0"
 dependencies = [
  "abir",
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=02579d4f255a265e3408ebcb3f48750556595aa4)",
+ "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=879368d3fc7f6185eac562b52e7dde2228f013e6)",
  "lamquant-abir-montage",
  "serde_json",
 ]
@@ -3684,7 +3684,7 @@ dependencies = [
  "abir-adapter",
  "abir-bcs",
  "blake3",
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=02579d4f255a265e3408ebcb3f48750556595aa4)",
+ "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=879368d3fc7f6185eac562b52e7dde2228f013e6)",
  "ed25519-dalek",
  "flate2",
  "fs2",
