@@ -24,7 +24,7 @@ std = ["semantic-abir/std", "blut-graph-core/std", "lamquant-abir-montage/std"]
 # NO ABIR dependency. That independence is correct and this crate preserves it --
 # the projection lives HERE, on the LamQuant side, depending on both.
 semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "3f5c47cb76d0707f4443c001a4e1c37d19ccb2da", default-features = false, features = ["alloc"] }
-blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "aeef7fe9d6a6f7cd8dd2ab818578bd014dcd6d69", default-features = false }
+blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "6060dd9893b297e8894ade305e244cac42bf44c4", default-features = false }
 lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", default-features = false }
 
 [dev-dependencies]
