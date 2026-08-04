@@ -33,7 +33,7 @@ const PACKET_MAGIC: &[u8; 4] = b"LMQP";
 const PACKET_VERSION: u8 = 1;
 const PACKET_HEADER_LEN: usize = 15;
 const LMQ_WIRE_ABIR_REVISION: &str = "c101513167ad8d7cdefa6387b20c644fdaf66432";
-const LINKED_ABIR_REVISION: &str = "5f2858342ca5823d5acae225756bb8e67a0dddde";
+const LINKED_ABIR_REVISION: &str = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc";
 
 #[derive(Debug)]
 pub struct OpenedLmqBundle<'a> {
