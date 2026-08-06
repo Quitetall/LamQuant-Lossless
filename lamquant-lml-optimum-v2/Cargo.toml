@@ -7,6 +7,10 @@ description = "LamQuant Optimum v2 learned-lossless EEG and biosignal codec"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/LamQuant-Lossless"
 
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
 [lib]
 name = "lamquant_lml_optimum_v2"
 crate-type = ["rlib"]
@@ -18,5 +22,16 @@ path = "src/bin/optimum_v2_codec.rs"
 [dependencies]
 lamquant-model-pack = { version = "0.1.0", path = "../crates/lamquant-model-pack" }
 libc = "0.2"
+rayon = { version = "1.12", optional = true }
 serde_json = "1"
 sha2 = "0.10"
+
+[build-dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "peer_codec"
+harness = false

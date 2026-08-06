@@ -9,14 +9,16 @@ use crate::mix1_entropy;
 use crate::mix1_lattice::{self, LatticeSide, ORDER};
 use crate::mix1_multivariate::MultivariateSession;
 use crate::{canonical_i32_bytes, crc32c, OptimumV2Error};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 const HEADER_LEN: usize = 72;
 const COMPACT_HEADER_LEN: usize = 40;
 const ULTRA_COMPACT_HEADER_LEN: usize = 24;
-const MAX_CHANNELS: usize = 256;
-const MAX_SAMPLES: usize = 32_768;
-const MAX_VALUES: usize = 131_072;
+pub(crate) const MAX_CHANNELS: usize = 256;
+pub(crate) const MAX_SAMPLES: usize = 32_768;
+pub(crate) const MAX_VALUES: usize = 131_072;
 const MAX_EVENTS_PER_VALUE: usize = 129;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -718,72 +720,172 @@ impl Mix1Codec {
         sample_rate_mhz: u32,
         bit_depth: u8,
     ) -> Result<Vec<u8>, OptimumV2Error> {
-        let mut candidates =
-            vec![self.encode_baseline_peer_window(signal, sample_rate_mhz, bit_depth)?];
-        candidates.push(self.encode_tuned_permuted_window(
-            signal,
-            sample_rate_mhz,
+        let frame = PortfolioFrame::new(signal, sample_rate_mhz, bit_depth)?;
+        let universal = universal_residuals(signal, bit_depth)?;
+        let (side, lattice) = mix1_lattice::fit_and_analyze(signal)?;
+        let multivariate = multivariate_residuals(signal, &side.parents, bit_depth)?;
+        let common_mode = common_mode_residuals(signal)?;
+        let permutation = fit_channel_permutation(signal)?;
+        let permuted = permutation
+            .iter()
+            .map(|&channel| signal[channel].clone())
+            .collect::<Vec<_>>();
+        let permuted_universal = universal_residuals(&permuted, bit_depth)?;
+        let permuted_common_mode = common_mode_residuals(&permuted)?;
+        let (permuted_side, permuted_lattice) = mix1_lattice::fit_and_analyze(&permuted)?;
+        let permuted_multivariate =
+            multivariate_residuals(&permuted, &permuted_side.parents, bit_depth)?;
+        let (side_six, lattice_six) =
+            mix1_lattice::fit_and_analyze_with_parent_penalty(&permuted, 6)?;
+        let multivariate_six =
+            multivariate_residuals_with_parent_history(&permuted, &side_six.parents, bit_depth, 2)?;
+        let (side_thirty_two, lattice_thirty_two) =
+            mix1_lattice::fit_and_analyze_with_parent_penalty(&permuted, 32)?;
+        let multivariate_thirty_two = multivariate_residuals_with_parent_history(
+            &permuted,
+            &side_thirty_two.parents,
             bit_depth,
-            Mix1TunedProfile {
-                entropy: Mix1EntropyProfile {
-                    score_shift: 8,
-                    channel_context_mask: 7,
-                    history_context: 52,
+            1,
+        )?;
+
+        // Candidate order is wire policy. Indexed parallel iteration preserves
+        // this order; strict replacement then preserves generation-v4 ties.
+        let score_shifts = [2, 3, 4, 5, 6, 7, 8];
+        let mut profiles = Vec::with_capacity(49);
+        profiles.extend(score_shifts.map(PortfolioCandidate::Score));
+        for hierarchical in [false, true] {
+            for score_shift in score_shifts {
+                profiles.push(PortfolioCandidate::Multivariate {
+                    hierarchical,
+                    score_shift,
+                });
+            }
+        }
+        profiles.push(PortfolioCandidate::ChannelContext);
+        profiles.extend([5, 6, 8].map(PortfolioCandidate::CommonMode));
+        for channel_context_mask in [3, 4, 5, 7] {
+            for score_shift in [3, 5, 6, 7, 8] {
+                profiles.push(PortfolioCandidate::Permuted {
+                    channel_context_mask,
+                    score_shift,
+                });
+            }
+        }
+        profiles.push(PortfolioCandidate::TunedSix);
+        profiles.extend([11, 8].map(PortfolioCandidate::TunedThirtyTwo));
+        profiles.push(PortfolioCandidate::Compact);
+
+        let candidates = encode_ordered_candidates(&profiles, |profile| match *profile {
+            PortfolioCandidate::Score(score_shift) => {
+                portfolio_score_candidate(&frame, &side, &universal, &lattice, score_shift)
+            }
+            PortfolioCandidate::Multivariate {
+                hierarchical,
+                score_shift,
+            } => portfolio_multivariate_candidate(
+                &frame,
+                &side,
+                &universal,
+                &lattice,
+                &multivariate,
+                score_shift,
+                hierarchical,
+            ),
+            PortfolioCandidate::ChannelContext => portfolio_channel_context_candidate(
+                &frame,
+                &side,
+                &universal,
+                &lattice,
+                &multivariate,
+                8,
+                5,
+            ),
+            PortfolioCandidate::CommonMode(score_shift) => portfolio_common_mode_candidate(
+                &frame,
+                &side,
+                &universal,
+                &lattice,
+                &multivariate,
+                &common_mode,
+                score_shift,
+                3,
+            ),
+            PortfolioCandidate::Permuted {
+                channel_context_mask,
+                score_shift,
+            } => portfolio_permuted_candidate(
+                &frame,
+                &permuted_side,
+                &permuted_universal,
+                &permuted_lattice,
+                &permuted_multivariate,
+                &permuted_common_mode,
+                &permutation,
+                score_shift,
+                channel_context_mask,
+            ),
+            PortfolioCandidate::TunedSix => portfolio_tuned_candidate(
+                &frame,
+                &side_six,
+                &permuted_universal,
+                &lattice_six,
+                &multivariate_six,
+                &permuted_common_mode,
+                &permutation,
+                Mix1TunedProfile {
+                    entropy: Mix1EntropyProfile {
+                        score_shift: 8,
+                        channel_context_mask: 7,
+                        history_context: 52,
+                        scale_profile: 4,
+                    },
+                    parent_history_depth: 2,
+                    parent_penalty: 6,
+                },
+            ),
+            PortfolioCandidate::TunedThirtyTwo(score_shift) => portfolio_tuned_candidate(
+                &frame,
+                &side_thirty_two,
+                &permuted_universal,
+                &lattice_thirty_two,
+                &multivariate_thirty_two,
+                &permuted_common_mode,
+                &permutation,
+                Mix1TunedProfile {
+                    entropy: Mix1EntropyProfile {
+                        score_shift,
+                        channel_context_mask: 3,
+                        history_context: 84,
+                        scale_profile: 6,
+                    },
+                    parent_history_depth: 1,
+                    parent_penalty: 32,
+                },
+            ),
+            PortfolioCandidate::Compact => portfolio_compact_candidate(
+                &frame,
+                &side,
+                &universal,
+                &lattice,
+                &multivariate,
+                &common_mode,
+                Mix1EntropyProfile {
+                    score_shift: 10,
+                    channel_context_mask: 3,
+                    history_context: 84,
                     scale_profile: 4,
                 },
-                parent_history_depth: 2,
-                parent_penalty: 6,
-            },
-        )?);
-        candidates.push(self.encode_tuned_permuted_window(
-            signal,
-            sample_rate_mhz,
-            bit_depth,
-            Mix1TunedProfile {
-                entropy: Mix1EntropyProfile {
-                    score_shift: 11,
-                    channel_context_mask: 3,
-                    history_context: 84,
-                    scale_profile: 6,
-                },
-                parent_history_depth: 1,
-                parent_penalty: 32,
-            },
-        )?);
-        candidates.push(self.encode_tuned_permuted_window(
-            signal,
-            sample_rate_mhz,
-            bit_depth,
-            Mix1TunedProfile {
-                entropy: Mix1EntropyProfile {
-                    score_shift: 8,
-                    channel_context_mask: 3,
-                    history_context: 84,
-                    scale_profile: 6,
-                },
-                parent_history_depth: 1,
-                parent_penalty: 32,
-            },
-        )?);
-        candidates.push(self.encode_compact_common_profile_window(
-            signal,
-            sample_rate_mhz,
-            bit_depth,
-            Mix1EntropyProfile {
-                score_shift: 10,
-                channel_context_mask: 3,
-                history_context: 84,
-                scale_profile: 4,
-            },
-        )?);
-        candidates
-            .into_iter()
-            .enumerate()
-            .min_by_key(|(priority, packet)| (packet.len(), *priority))
-            .map(|(_, packet)| packet)
-            .ok_or_else(|| input_error("MIX peer portfolio is empty"))
+            ),
+        })?;
+        let mut best = None;
+        for candidate in candidates {
+            consider_shorter(&mut best, candidate);
+        }
+
+        best.ok_or_else(|| input_error("MIX peer portfolio is empty"))
     }
 
+    #[cfg(test)]
     fn encode_baseline_peer_window(
         &self,
         signal: &[Vec<i64>],
@@ -1530,6 +1632,274 @@ struct Frame {
     graph: Vec<u8>,
     payload: Vec<u8>,
     decoded_crc: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PortfolioFrame {
+    bit_depth: u8,
+    sample_rate_mhz: u32,
+    channels: usize,
+    samples: usize,
+    decoded_crc: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PortfolioCandidate {
+    Score(u8),
+    Multivariate {
+        hierarchical: bool,
+        score_shift: u8,
+    },
+    ChannelContext,
+    CommonMode(u8),
+    Permuted {
+        channel_context_mask: u8,
+        score_shift: u8,
+    },
+    TunedSix,
+    TunedThirtyTwo(u8),
+    Compact,
+}
+
+impl PortfolioFrame {
+    fn new(
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Self, OptimumV2Error> {
+        let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
+        Ok(Self {
+            bit_depth,
+            sample_rate_mhz,
+            channels,
+            samples,
+            decoded_crc: crc32c(&canonical_i32_bytes(signal)?),
+        })
+    }
+
+    fn packet_frame(self, event_count: u32, graph: Vec<u8>, payload: Vec<u8>) -> Frame {
+        Frame {
+            bit_depth: self.bit_depth,
+            sample_rate_mhz: self.sample_rate_mhz,
+            channels: self.channels,
+            samples: self.samples,
+            event_count,
+            graph,
+            payload,
+            decoded_crc: self.decoded_crc,
+        }
+    }
+}
+
+fn consider_shorter(best: &mut Option<Vec<u8>>, candidate: Vec<u8>) {
+    if best
+        .as_ref()
+        .map_or(true, |incumbent| candidate.len() < incumbent.len())
+    {
+        *best = Some(candidate);
+    }
+}
+
+fn encode_ordered_candidates<T, F>(
+    profiles: &[T],
+    encode: F,
+) -> Result<Vec<Vec<u8>>, OptimumV2Error>
+where
+    T: Sync,
+    F: Fn(&T) -> Result<Vec<u8>, OptimumV2Error> + Send + Sync,
+{
+    #[cfg(feature = "parallel")]
+    {
+        profiles.par_iter().map(encode).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        profiles.iter().map(encode).collect()
+    }
+}
+
+fn portfolio_score_candidate(
+    frame: &PortfolioFrame,
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    score_shift: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let selected = select_residuals(universal, lattice, score_shift)?;
+    let (payload, event_count) = mix1_entropy::encode(&selected, &side.parents)?;
+    let graph = mix1_lattice::pack_side(side, score_shift)?;
+    pack_frame(frame.packet_frame(event_count, graph, payload))
+}
+
+fn portfolio_multivariate_candidate(
+    frame: &PortfolioFrame,
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    score_shift: u8,
+    hierarchical: bool,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let selected = select_three_residuals(universal, lattice, multivariate, score_shift)?;
+    let (payload, event_count) = if hierarchical {
+        mix1_entropy::encode_hierarchical(&selected, &side.parents)?
+    } else {
+        mix1_entropy::encode(&selected, &side.parents)?
+    };
+    let mut graph = mix1_lattice::pack_side(side, score_shift)?;
+    graph[..4].copy_from_slice(if hierarchical { b"MCH1" } else { b"MMV1" });
+    pack_frame(frame.packet_frame(event_count, graph, payload))
+}
+
+fn portfolio_channel_context_candidate(
+    frame: &PortfolioFrame,
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    score_shift: u8,
+    channel_context_mask: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let selected = select_three_residuals(universal, lattice, multivariate, score_shift)?;
+    let (payload, event_count) =
+        mix1_entropy::encode_channel_context(&selected, &side.parents, channel_context_mask)?;
+    let mut graph = mix1_lattice::pack_side(side, score_shift)?;
+    graph[..4].copy_from_slice(b"MCX1");
+    graph.insert(6, channel_context_mask);
+    pack_frame(frame.packet_frame(event_count, graph, payload))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_common_mode_candidate(
+    frame: &PortfolioFrame,
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    score_shift: u8,
+    channel_context_mask: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let selected =
+        select_four_residuals(universal, lattice, multivariate, common_mode, score_shift)?;
+    let (payload, event_count) =
+        mix1_entropy::encode_channel_context(&selected, &side.parents, channel_context_mask)?;
+    let mut graph = mix1_lattice::pack_side(side, score_shift)?;
+    graph[..4].copy_from_slice(b"MQX1");
+    graph.insert(6, channel_context_mask);
+    pack_frame(frame.packet_frame(event_count, graph, payload))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_permuted_candidate(
+    frame: &PortfolioFrame,
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    permutation: &[usize],
+    score_shift: u8,
+    channel_context_mask: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let selected =
+        select_four_residuals(universal, lattice, multivariate, common_mode, score_shift)?;
+    let (payload, event_count) =
+        mix1_entropy::encode_channel_context(&selected, &side.parents, channel_context_mask)?;
+    let mut graph = mix1_lattice::pack_side(side, score_shift)?;
+    graph[..4].copy_from_slice(b"MPX1");
+    let tail = graph.split_off(6);
+    graph.push(channel_context_mask);
+    for &channel in permutation {
+        graph.push(
+            u8::try_from(channel)
+                .map_err(|_| input_error("MIX peer permutation channel exceeds u8"))?,
+        );
+    }
+    graph.extend_from_slice(&tail);
+    pack_frame(frame.packet_frame(event_count, graph, payload))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_tuned_candidate(
+    frame: &PortfolioFrame,
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    permutation: &[usize],
+    profile: Mix1TunedProfile,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let entropy = profile.entropy;
+    let selected = select_four_residuals(
+        universal,
+        lattice,
+        multivariate,
+        common_mode,
+        entropy.score_shift,
+    )?;
+    let (payload, event_count) = mix1_entropy::encode_profile_channel_context(
+        &selected,
+        &side.parents,
+        entropy.channel_context_mask,
+        entropy.history_context,
+        entropy.scale_profile,
+    )?;
+    let (mut graph, coefficient_rice_k, weight_rice_k) =
+        mix1_lattice::pack_side_adaptive(side, entropy.score_shift)?;
+    graph[..4].copy_from_slice(b"APX1");
+    let tail = graph.split_off(6);
+    graph.extend_from_slice(&[
+        entropy.channel_context_mask,
+        entropy.history_context,
+        entropy.scale_profile,
+        profile.parent_history_depth,
+        coefficient_rice_k,
+        weight_rice_k,
+    ]);
+    graph.extend_from_slice(&pack_permutation_indices(permutation)?);
+    graph.extend_from_slice(&tail);
+    pack_frame_ultracompact(frame.packet_frame(event_count, graph, payload))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_compact_candidate(
+    frame: &PortfolioFrame,
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    profile: Mix1EntropyProfile,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let selected = select_four_residuals(
+        universal,
+        lattice,
+        multivariate,
+        common_mode,
+        profile.score_shift,
+    )?;
+    let (payload, event_count) = mix1_entropy::encode_profile_channel_context(
+        &selected,
+        &side.parents,
+        profile.channel_context_mask,
+        profile.history_context,
+        profile.scale_profile,
+    )?;
+    let (mut graph, coefficient_rice_k, weight_rice_k) =
+        mix1_lattice::pack_side_adaptive(side, profile.score_shift)?;
+    graph[..4].copy_from_slice(b"BQX1");
+    let tail = graph.split_off(6);
+    graph.extend_from_slice(&[
+        profile.channel_context_mask,
+        profile.history_context,
+        profile.scale_profile,
+        coefficient_rice_k,
+        weight_rice_k,
+    ]);
+    graph.extend_from_slice(&tail);
+    pack_frame_ultracompact(frame.packet_frame(event_count, graph, payload))
 }
 
 fn pack_frame(frame: Frame) -> Result<Vec<u8>, OptimumV2Error> {
@@ -2925,6 +3295,93 @@ fn as_packet_error(error: OptimumV2Error) -> OptimumV2Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn portfolio_fixture() -> Vec<Vec<i64>> {
+        vec![
+            (0..32)
+                .map(|time| i64::from((time * 7 + time / 5) % 61) - 30)
+                .collect(),
+            (0..32)
+                .map(|time| i64::from((time * 11 + time / 3) % 73) - 36)
+                .collect(),
+        ]
+    }
+
+    #[test]
+    fn shared_portfolio_matches_frozen_independent_candidate_path() {
+        let signal = portfolio_fixture();
+        let codec = Mix1Codec;
+        let optimized = codec
+            .encode_best_peer_window_without_alias(&signal, 256_000, 16)
+            .expect("encode shared portfolio");
+        let mut reference = codec
+            .encode_baseline_peer_window(&signal, 256_000, 16)
+            .expect("encode baseline portfolio");
+        for candidate in [
+            codec.encode_tuned_permuted_window(
+                &signal,
+                256_000,
+                16,
+                Mix1TunedProfile {
+                    entropy: Mix1EntropyProfile {
+                        score_shift: 8,
+                        channel_context_mask: 7,
+                        history_context: 52,
+                        scale_profile: 4,
+                    },
+                    parent_history_depth: 2,
+                    parent_penalty: 6,
+                },
+            ),
+            codec.encode_tuned_permuted_window(
+                &signal,
+                256_000,
+                16,
+                Mix1TunedProfile {
+                    entropy: Mix1EntropyProfile {
+                        score_shift: 11,
+                        channel_context_mask: 3,
+                        history_context: 84,
+                        scale_profile: 6,
+                    },
+                    parent_history_depth: 1,
+                    parent_penalty: 32,
+                },
+            ),
+            codec.encode_tuned_permuted_window(
+                &signal,
+                256_000,
+                16,
+                Mix1TunedProfile {
+                    entropy: Mix1EntropyProfile {
+                        score_shift: 8,
+                        channel_context_mask: 3,
+                        history_context: 84,
+                        scale_profile: 6,
+                    },
+                    parent_history_depth: 1,
+                    parent_penalty: 32,
+                },
+            ),
+            codec.encode_compact_common_profile_window(
+                &signal,
+                256_000,
+                16,
+                Mix1EntropyProfile {
+                    score_shift: 10,
+                    channel_context_mask: 3,
+                    history_context: 84,
+                    scale_profile: 4,
+                },
+            ),
+        ] {
+            let candidate = candidate.expect("encode independent candidate");
+            if candidate.len() < reference.len() {
+                reference = candidate;
+            }
+        }
+        assert_eq!(optimized, reference);
+    }
 
     #[test]
     fn low_bit_modes_choose_constant_raw_and_run_encodings() {

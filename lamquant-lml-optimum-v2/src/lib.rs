@@ -34,6 +34,14 @@ mod mix1_entropy;
 mod mix1_lattice;
 mod mix1_multivariate;
 pub mod model_pack;
+mod peer;
+
+pub use peer::{
+    peer_implementation_identity, PeerCodec, PeerDecodedWindow, PeerEncodeContext,
+    PeerEncodeReport, PeerEncodedWindow, PeerImplementationIdentity, PeerPacketKind, PEER_BUILD_ID,
+    PEER_KERNEL_ID, PEER_MAX_CHANNELS, PEER_MAX_PARALLEL_CANDIDATES, PEER_MAX_SAMPLES,
+    PEER_MAX_VALUES, PEER_SOURCE_ID,
+};
 
 pub const LMO_MAGIC: &[u8; 4] = b"LMO1";
 pub const LMO_VERSION: u8 = 3;

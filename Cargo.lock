@@ -3465,6 +3465,7 @@ dependencies = [
  "lamquant-lml-desktop",
  "lamquant-lml-mcu",
  "lamquant-lml-optimum",
+ "lamquant-lml-optimum-v2",
  "sha2 0.10.9",
 ]
 
@@ -3629,8 +3630,10 @@ dependencies = [
 name = "lamquant-lml-optimum-v2"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "lamquant-model-pack",
  "libc",
+ "rayon",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -3681,6 +3684,7 @@ dependencies = [
  "fs2",
  "lamquant-abir-codec",
  "lamquant-lml-mcu",
+ "lamquant-lml-optimum-v2",
  "lamquant-lmq",
  "lamquant-standard-adapters",
  "libc",
