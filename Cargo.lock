@@ -5,7 +5,7 @@ version = 3
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140#f1cfbcb649cc4f602ffedfd4d6820e49f45a1140"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140#f1cfbcb649cc4f602ffedfd4d6820e49f45a1140"
 dependencies = [
  "abir",
  "blake3",
@@ -25,7 +25,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140#f1cfbcb649cc4f602ffedfd4d6820e49f45a1140"
 dependencies = [
  "abir",
  "blake3",
@@ -39,7 +39,7 @@ dependencies = [
 [[package]]
 name = "abir-training"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140#f1cfbcb649cc4f602ffedfd4d6820e49f45a1140"
 dependencies = [
  "abir",
  "abir-bcs",
@@ -926,7 +926,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=c2464ae63c1cfbb282e207393a81ec2921e6be69#c2464ae63c1cfbb282e207393a81ec2921e6be69"
+source = "git+https://github.com/Quitetall/blut.git?rev=adb6a874f7047670f6c3ae0d5603acac5ffeeb11#adb6a874f7047670f6c3ae0d5603acac5ffeeb11"
 dependencies = [
  "blake3",
  "postcard",
