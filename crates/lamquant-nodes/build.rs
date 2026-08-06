@@ -101,6 +101,11 @@ fn main() {
         files.push(repository.join("lamquant-lossless/Cargo.toml"));
         collect_files(&repository.join("lamquant-lossless/src"), &mut files);
     }
+    if env::var_os("CARGO_FEATURE_OPTIMUM_V2").is_some() {
+        files.push(repository.join("lamquant-lml-optimum-v2/Cargo.toml"));
+        files.push(repository.join("lamquant-lml-optimum-v2/build.rs"));
+        collect_files(&repository.join("lamquant-lml-optimum-v2/src"), &mut files);
+    }
     if env::var_os("CARGO_FEATURE_LMQ").is_some() {
         files.push(repository.join("lamquant-lmq/Cargo.toml"));
         collect_files(&repository.join("lamquant-lmq/src"), &mut files);

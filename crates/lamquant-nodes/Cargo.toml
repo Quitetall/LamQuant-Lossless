@@ -26,6 +26,11 @@ experimental-arithmetic = [
     "lamquant-abir-codec/experimental-arithmetic",
     "lamquant-lml-mcu/experimental_arithmetic",
 ]
+optimum-v2 = [
+    "std",
+    "lamquant-abir-codec/optimum-v2",
+    "dep:lamquant-lml-optimum-v2",
+]
 lmq = [
     "std",
     "dep:ed25519-dalek",
@@ -59,6 +64,7 @@ fs2 = { version = "0.4.3", optional = true }
 lamquant-abir-codec = { version = "0.1.0", path = "../lamquant-abir-codec", default-features = false }
 lamquant-lmq = { version = "0.0.2", path = "../../lamquant-lmq", default-features = false, optional = true }
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
+lamquant-lml-optimum-v2 = { version = "0.1.0", path = "../../lamquant-lml-optimum-v2", features = ["parallel"], optional = true }
 lamquant-standard-adapters = { version = "0.1.0", path = "../lamquant-standard-adapters", default-features = false, optional = true }
 semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "f1cfbcb649cc4f602ffedfd4d6820e49f45a1140", default-features = false, features = ["alloc"] }
 semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "f1cfbcb649cc4f602ffedfd4d6820e49f45a1140", default-features = false, features = ["alloc"] }

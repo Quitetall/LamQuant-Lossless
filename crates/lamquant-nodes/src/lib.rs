@@ -96,14 +96,24 @@ use blut_graph_core::{
     ProofContract, ResourceEnvelope, StateContract, StateScope, Target, TransactionalSink,
 };
 use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
+#[cfg(feature = "optimum-v2")]
+use lamquant_abir_codec::{optimum_v2_implementation_identity, seal_optimum_v2_packets};
 use lamquant_lml_mcu::lml::EncodeFeatures;
 use lamquant_lml_mcu::lpc::LpcMode;
+#[cfg(feature = "optimum-v2")]
+use lamquant_lml_optimum_v2::{
+    PeerCodec, PeerEncodeContext, PEER_MAX_PARALLEL_CANDIDATES, PEER_MAX_VALUES,
+};
 use semantic_abir::AbirDataset;
 use semantic_abir_bcs::ResourceBounds;
 
 pub const LML_BASELINE_NODE_TYPE: &str = "org.quitetall.lamquant.lml.encode.baseline";
 pub const LML_ARITHMETIC_NODE_TYPE: &str = "org.quitetall.lamquant.lml.encode.arithmetic";
 pub const CAP_LML_ARITHMETIC_NODE: &str = "bcs2.cap.lml-arithmetic-v1";
+#[cfg(feature = "optimum-v2")]
+pub const OPTIMUM_V2_PEER_NODE_TYPE: &str = "org.quitetall.lamquant.lml.encode.optimum-v2-peer-r1";
+#[cfg(feature = "optimum-v2")]
+pub const CAP_LML_OPTIMUM_V2_PEER_NODE: &str = "bcs2.cap.lml-optimum-v2-peer-v1";
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_LML: &str = "bcs.lml.lossless-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.lml.encode";
@@ -112,6 +122,16 @@ const BUNDLE_SEMANTIC_TYPE: &str = "bcs2.bundle.lml-lossless";
 const MAX_SIGNAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PACKET_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PARALLEL_CHANNELS: u16 = 1024;
+#[cfg(feature = "optimum-v2")]
+const PEER_MAX_SIGNAL_BYTES: u64 = (PEER_MAX_VALUES * core::mem::size_of::<i64>()) as u64;
+#[cfg(feature = "optimum-v2")]
+const PEER_MAX_PACKET_BYTES: u64 = 64 * 1024 * 1024;
+// Current graph extent cannot express C*T <= 131_072. This rectangular
+// profile covers common 21-channel, 10-second EEG windows without overclaiming.
+#[cfg(feature = "optimum-v2")]
+const PEER_NODE_MAX_CHANNELS: usize = 32;
+#[cfg(feature = "optimum-v2")]
+const PEER_NODE_MAX_SAMPLES: usize = PEER_MAX_VALUES / PEER_NODE_MAX_CHANNELS;
 const SOURCE_ID: &str = env!("LAMQUANT_NODES_SOURCE_ID");
 const FEATURE_SET: &str = env!("LAMQUANT_NODES_FEATURE_SET");
 
@@ -121,6 +141,10 @@ const BASELINE_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0103);
 const ARITHMETIC_HOST_KERNEL: KernelId = KernelId(0x4c4d_0201);
 #[cfg(feature = "experimental-arithmetic")]
 const ARITHMETIC_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0202);
+#[cfg(feature = "optimum-v2")]
+const OPTIMUM_V2_PEER_R1_HOST_KERNEL: KernelId = KernelId(0x4c4d_0401);
+#[cfg(feature = "optimum-v2")]
+const OPTIMUM_V2_PEER_R1_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0403);
 
 /// Borrowed input shape accepted by LML encoder nodes.
 ///
@@ -209,8 +233,10 @@ pub enum LamQuantNodeValue<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LmlNodeConfigError {
+    BitDepthOutOfRange,
     LiveDeadlineUnsupported,
     MaxOrderOutOfRange,
+    SampleRateOutOfRange,
     WindowSizeOutOfRange,
 }
 
@@ -289,6 +315,8 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
             LML_BASELINE_NODE_TYPE | LML_ARITHMETIC_NODE_TYPE => {
                 execute_fused_outer(node, type_name, inputs)
             }
+            #[cfg(feature = "optimum-v2")]
+            OPTIMUM_V2_PEER_NODE_TYPE => execute_optimum_v2_peer(node, inputs),
             _ => Err(lml_reference::kernel_failure(
                 node,
                 "unsupported-node",
@@ -296,6 +324,79 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
             )),
         }
     }
+}
+
+#[cfg(feature = "optimum-v2")]
+fn execute_optimum_v2_peer<'a>(
+    node: &CompiledNode,
+    inputs: &[Option<&LamQuantNodeValue<'a>>],
+) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
+    let signal = match inputs {
+        [Some(LamQuantNodeValue::LmlSignal(signal))] => signal,
+        _ => {
+            return Err(lml_reference::kernel_failure(
+                node,
+                "invalid-input",
+                "Optimum-v2 encoder requires one signal input",
+            ))
+        }
+    };
+    let config = node.semantic_configs.first().ok_or_else(|| {
+        lml_reference::kernel_failure(node, "invalid-plan", "missing semantic config")
+    })?;
+    let context = parse_optimum_v2_config(config)
+        .map_err(|message| lml_reference::kernel_failure(node, "invalid-config", message))?;
+    if signal.channels.len() > PEER_NODE_MAX_CHANNELS
+        || signal.channels[0].len() > PEER_NODE_MAX_SAMPLES
+    {
+        return Err(lml_reference::kernel_failure(
+            node,
+            "resource-limit",
+            "Optimum-v2 Node input exceeds bounded matrix contract",
+        ));
+    }
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(signal.channels.len())
+        .map_err(|_| {
+            lml_reference::kernel_failure(
+                node,
+                "resource-limit",
+                "Optimum-v2 channel view allocation failed",
+            )
+        })?;
+    for channel in signal.channels {
+        let mut samples = Vec::new();
+        samples.try_reserve_exact(channel.len()).map_err(|_| {
+            lml_reference::kernel_failure(
+                node,
+                "resource-limit",
+                "Optimum-v2 sample view allocation failed",
+            )
+        })?;
+        samples.extend_from_slice(channel);
+        owned.push(samples);
+    }
+    let packet = PeerCodec.encode_window(&owned, context).map_err(|error| {
+        let message = error.to_string();
+        lml_reference::kernel_failure(node, "codec-failure", &message)
+    })?;
+    let max_frame_bytes = lml_reference::max_frame_bytes(node, signal.bounds)?;
+    if packet.len() > max_frame_bytes || packet.len() as u64 > PEER_MAX_PACKET_BYTES {
+        return Err(lml_reference::kernel_failure(
+            node,
+            "resource-limit",
+            "Optimum-v2 packet exceeds declared frame budget",
+        ));
+    }
+    let bytes = seal_optimum_v2_packets(
+        signal.dataset,
+        &[packet.as_slice()],
+        optimum_v2_implementation_identity(),
+        signal.bounds,
+    )
+    .map_err(|error| lml_reference::codec_failure(node, error))?;
+    Ok(vec![LamQuantNodeValue::Bcs2(bytes)])
 }
 
 fn execute_fused_outer<'a>(
@@ -423,6 +524,103 @@ pub fn arithmetic_lml_descriptor() -> NodeDescriptor {
     lml_descriptor(LML_ARITHMETIC_NODE_TYPE, true)
 }
 
+#[cfg(feature = "optimum-v2")]
+pub fn optimum_v2_peer_descriptor() -> NodeDescriptor {
+    NodeDescriptor {
+        type_name: OPTIMUM_V2_PEER_NODE_TYPE.into(),
+        version: 1,
+        inputs: vec![optimum_v2_signal_port()],
+        outputs: vec![bundle_port()],
+        capabilities: vec![
+            Capability(CAP_ABIR.into()),
+            Capability(CAP_LML.into()),
+            Capability(CAP_LML_OPTIMUM_V2_PEER_NODE.into()),
+        ],
+        targets: vec![Target::Host, Target::BlutDurable],
+        resources: ResourceEnvelope::bounded(
+            PEER_MAX_SIGNAL_BYTES,
+            PEER_MAX_PACKET_BYTES,
+            PEER_MAX_PARALLEL_CANDIDATES,
+        ),
+        determinism: Determinism::BitExact,
+        config: optimum_v2_config_schema(),
+        state: StateContract {
+            scope: StateScope::Stateless,
+            max_bytes: 0,
+            checkpoint: blut_graph_core::CheckpointContract {
+                mode: CheckpointMode::Disabled,
+                max_snapshot_bytes: 0,
+                max_interval_invocations: 0,
+            },
+        },
+        subgraph: None,
+        proof: ProofContract {
+            requires: vec![],
+            provides: vec!["org.quitetall.lamquant.proof.exact-lml-closure-v1".into()],
+            invalidates: vec![],
+        },
+        policy: PolicyContract {
+            requires: vec![],
+            adds: vec![],
+        },
+        fidelity: FidelityContract {
+            minimum_input: u16::MAX,
+            maximum_loss: 0,
+        },
+        partiality: Partiality::Atomic,
+        failure: FailureContract {
+            domains: vec![FAILURE_DOMAIN.into()],
+        },
+        effect: Effect::Pure,
+        retry_limit: 0,
+    }
+}
+
+#[cfg(feature = "optimum-v2")]
+pub fn optimum_v2_node_config(
+    sample_rate_mhz: u32,
+    bit_depth: u8,
+) -> Result<BTreeMap<String, ConfigValue>, LmlNodeConfigError> {
+    if sample_rate_mhz == 0 {
+        return Err(LmlNodeConfigError::SampleRateOutOfRange);
+    }
+    if !(1..=32).contains(&bit_depth) {
+        return Err(LmlNodeConfigError::BitDepthOutOfRange);
+    }
+    Ok(BTreeMap::from([
+        (
+            "sample_rate_mhz".into(),
+            ConfigValue::U64(u64::from(sample_rate_mhz)),
+        ),
+        ("bit_depth".into(), ConfigValue::U64(u64::from(bit_depth))),
+    ]))
+}
+
+#[cfg(feature = "optimum-v2")]
+fn parse_optimum_v2_config(
+    config: &BTreeMap<String, ConfigValue>,
+) -> Result<PeerEncodeContext, &'static str> {
+    let sample_rate_mhz = match config.get("sample_rate_mhz") {
+        Some(ConfigValue::U64(value)) => {
+            u32::try_from(*value).map_err(|_| "sample_rate_mhz out of range")?
+        }
+        _ => return Err("missing sample_rate_mhz"),
+    };
+    let bit_depth = match config.get("bit_depth") {
+        Some(ConfigValue::U64(value)) => {
+            u8::try_from(*value).map_err(|_| "bit_depth out of range")?
+        }
+        _ => return Err("missing bit_depth"),
+    };
+    if sample_rate_mhz == 0 || !(1..=32).contains(&bit_depth) {
+        return Err("Optimum-v2 context is out of range");
+    }
+    Ok(PeerEncodeContext {
+        sample_rate_mhz,
+        bit_depth,
+    })
+}
+
 pub fn lml_node_config(
     mode: LpcMode,
     window_size: usize,
@@ -509,6 +707,8 @@ pub fn register_lml_nodes_with_fused_mcu_implementation(
     registry.register_descriptor(baseline_lml_packet_descriptor())?;
     registry.register_descriptor(baseline_lml_descriptor())?;
     registry.register_descriptor(arithmetic_lml_descriptor())?;
+    #[cfg(feature = "optimum-v2")]
+    registry.register_descriptor(optimum_v2_peer_descriptor())?;
 
     for (offset, type_name) in reference_stage_types().iter().enumerate() {
         registry.register_kernel(reference_kernel(
@@ -547,6 +747,13 @@ pub fn register_lml_nodes_with_fused_mcu_implementation(
         (ARITHMETIC_BLUT_KERNEL, Target::BlutDurable),
     ] {
         registry.register_kernel(lml_kernel(id, LML_ARITHMETIC_NODE_TYPE, target))?;
+    }
+    #[cfg(feature = "optimum-v2")]
+    for (id, target) in [
+        (OPTIMUM_V2_PEER_R1_HOST_KERNEL, Target::Host),
+        (OPTIMUM_V2_PEER_R1_BLUT_KERNEL, Target::BlutDurable),
+    ] {
+        registry.register_kernel(optimum_v2_kernel(id, target))?;
     }
     Ok(())
 }
@@ -654,6 +861,47 @@ fn signal_port() -> PortDescriptor {
     }
 }
 
+#[cfg(feature = "optimum-v2")]
+fn optimum_v2_signal_port() -> PortDescriptor {
+    PortDescriptor {
+        name: "signal".into(),
+        semantic_type: SIGNAL_SEMANTIC_TYPE.into(),
+        optional: false,
+        layouts: vec![Layout::ChannelMajor],
+        max_bytes: PEER_MAX_SIGNAL_BYTES,
+        abir: AbirSemanticType {
+            root: AbirRootType::Dataset,
+            view: AbirViewType::Root,
+        },
+        proof: ProofContract {
+            requires: vec![],
+            provides: vec![],
+            invalidates: vec![],
+        },
+        policy: PolicyContract {
+            requires: vec![],
+            adds: vec![],
+        },
+        fidelity: FidelityContract {
+            minimum_input: u16::MAX,
+            maximum_loss: 0,
+        },
+        extent: ExtentContract {
+            rank: 2,
+            maximum_shape: vec![PEER_NODE_MAX_CHANNELS as u64, PEER_NODE_MAX_SAMPLES as u64],
+            max_elements: PEER_MAX_VALUES as u64,
+            ragged: false,
+            sparse: false,
+        },
+        lease: LeaseContract {
+            access: LeaseAccess::ReadOnly,
+            lifetime: LeaseLifetime::Invocation,
+            zero_copy_permitted: true,
+            contiguous_required: true,
+        },
+    }
+}
+
 fn bundle_port() -> PortDescriptor {
     PortDescriptor {
         name: "bundle".into(),
@@ -718,6 +966,32 @@ fn lml_config_schema() -> ConfigSchema {
     }
 }
 
+#[cfg(feature = "optimum-v2")]
+fn optimum_v2_config_schema() -> ConfigSchema {
+    ConfigSchema {
+        fields: vec![
+            ConfigField {
+                name: "sample_rate_mhz".into(),
+                value_type: ConfigType::U64 {
+                    minimum: 1,
+                    maximum: u32::MAX as u64,
+                },
+                required: true,
+                default: None,
+            },
+            ConfigField {
+                name: "bit_depth".into(),
+                value_type: ConfigType::U64 {
+                    minimum: 1,
+                    maximum: 32,
+                },
+                required: true,
+                default: None,
+            },
+        ],
+    }
+}
+
 fn lml_kernel(id: KernelId, type_name: &str, target: Target) -> KernelDescriptor {
     let threads = match target {
         Target::Host | Target::BlutDurable => MAX_PARALLEL_CHANNELS,
@@ -737,6 +1011,30 @@ fn lml_kernel(id: KernelId, type_name: &str, target: Target) -> KernelDescriptor
         resources: ResourceEnvelope::bounded(MAX_SIGNAL_BYTES, MAX_PACKET_BYTES, threads),
         determinism: Determinism::BitExact,
         lowering: format!("fused:{type_name}:encode_lml_bundle_from_views_explicit:v1"),
+    }
+}
+
+#[cfg(feature = "optimum-v2")]
+fn optimum_v2_kernel(id: KernelId, target: Target) -> KernelDescriptor {
+    KernelDescriptor {
+        id,
+        implements: vec![NodeTypeRef {
+            type_name: OPTIMUM_V2_PEER_NODE_TYPE.into(),
+            version: 1,
+        }],
+        implementation_id: implementation_id(OPTIMUM_V2_PEER_NODE_TYPE, target),
+        conversion: None,
+        target,
+        input_layouts: vec![Layout::ChannelMajor],
+        output_layouts: vec![Layout::Packed],
+        resources: ResourceEnvelope::bounded(
+            PEER_MAX_SIGNAL_BYTES,
+            PEER_MAX_PACKET_BYTES,
+            PEER_MAX_PARALLEL_CANDIDATES,
+        ),
+        determinism: Determinism::BitExact,
+        lowering: "fused:org.quitetall.lamquant.lml.encode.optimum-v2-peer-r1:peer-v4-parallel-v1"
+            .into(),
     }
 }
 
