@@ -102,7 +102,8 @@ use lamquant_lml_mcu::lml::EncodeFeatures;
 use lamquant_lml_mcu::lpc::LpcMode;
 #[cfg(feature = "optimum-v2")]
 use lamquant_lml_optimum_v2::{
-    PeerCodec, PeerEncodeContext, PEER_MAX_PARALLEL_CANDIDATES, PEER_MAX_VALUES,
+    PeerCodec, PeerEncodeContext, PEER_MAX_PACKET_BYTES, PEER_MAX_PARALLEL_CANDIDATES,
+    PEER_MAX_PEAK_BYTES, PEER_MAX_SCRATCH_BYTES, PEER_MAX_SIGNAL_BYTES, PEER_MAX_VALUES,
 };
 use semantic_abir::AbirDataset;
 use semantic_abir_bcs::ResourceBounds;
@@ -122,16 +123,14 @@ const BUNDLE_SEMANTIC_TYPE: &str = "bcs2.bundle.lml-lossless";
 const MAX_SIGNAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PACKET_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PARALLEL_CHANNELS: u16 = 1024;
-#[cfg(feature = "optimum-v2")]
-const PEER_MAX_SIGNAL_BYTES: u64 = (PEER_MAX_VALUES * core::mem::size_of::<i64>()) as u64;
-#[cfg(feature = "optimum-v2")]
-const PEER_MAX_PACKET_BYTES: u64 = 64 * 1024 * 1024;
 // Current graph extent cannot express C*T <= 131_072. This rectangular
 // profile covers common 21-channel, 10-second EEG windows without overclaiming.
 #[cfg(feature = "optimum-v2")]
-const PEER_NODE_MAX_CHANNELS: usize = 32;
+pub const PEER_NODE_MAX_CHANNELS: usize = 32;
 #[cfg(feature = "optimum-v2")]
-const PEER_NODE_MAX_SAMPLES: usize = PEER_MAX_VALUES / PEER_NODE_MAX_CHANNELS;
+pub const PEER_NODE_MAX_SAMPLES: usize = PEER_MAX_VALUES / PEER_NODE_MAX_CHANNELS;
+#[cfg(feature = "optimum-v2")]
+pub const PEER_MAX_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
 const SOURCE_ID: &str = env!("LAMQUANT_NODES_SOURCE_ID");
 const FEATURE_SET: &str = env!("LAMQUANT_NODES_FEATURE_SET");
 
@@ -396,6 +395,13 @@ fn execute_optimum_v2_peer<'a>(
         signal.bounds,
     )
     .map_err(|error| lml_reference::codec_failure(node, error))?;
+    if bytes.len() as u64 > PEER_MAX_BUNDLE_BYTES {
+        return Err(lml_reference::kernel_failure(
+            node,
+            "resource-limit",
+            "Optimum-v2 BCS2 bundle exceeds declared output budget",
+        ));
+    }
     Ok(vec![LamQuantNodeValue::Bcs2(bytes)])
 }
 
@@ -530,7 +536,7 @@ pub fn optimum_v2_peer_descriptor() -> NodeDescriptor {
         type_name: OPTIMUM_V2_PEER_NODE_TYPE.into(),
         version: 1,
         inputs: vec![optimum_v2_signal_port()],
-        outputs: vec![bundle_port()],
+        outputs: vec![optimum_v2_bundle_port()],
         capabilities: vec![
             Capability(CAP_ABIR.into()),
             Capability(CAP_LML.into()),
@@ -538,8 +544,8 @@ pub fn optimum_v2_peer_descriptor() -> NodeDescriptor {
         ],
         targets: vec![Target::Host, Target::BlutDurable],
         resources: ResourceEnvelope::bounded(
-            PEER_MAX_SIGNAL_BYTES,
-            PEER_MAX_PACKET_BYTES,
+            PEER_MAX_PEAK_BYTES,
+            PEER_MAX_SCRATCH_BYTES,
             PEER_MAX_PARALLEL_CANDIDATES,
         ),
         determinism: Determinism::BitExact,
@@ -902,6 +908,15 @@ fn optimum_v2_signal_port() -> PortDescriptor {
     }
 }
 
+#[cfg(feature = "optimum-v2")]
+fn optimum_v2_bundle_port() -> PortDescriptor {
+    let mut port = bundle_port();
+    port.max_bytes = PEER_MAX_BUNDLE_BYTES;
+    port.extent.maximum_shape = vec![PEER_MAX_BUNDLE_BYTES];
+    port.extent.max_elements = PEER_MAX_BUNDLE_BYTES;
+    port
+}
+
 fn bundle_port() -> PortDescriptor {
     PortDescriptor {
         name: "bundle".into(),
@@ -1028,8 +1043,8 @@ fn optimum_v2_kernel(id: KernelId, target: Target) -> KernelDescriptor {
         input_layouts: vec![Layout::ChannelMajor],
         output_layouts: vec![Layout::Packed],
         resources: ResourceEnvelope::bounded(
-            PEER_MAX_SIGNAL_BYTES,
-            PEER_MAX_PACKET_BYTES,
+            PEER_MAX_PEAK_BYTES,
+            PEER_MAX_SCRATCH_BYTES,
             PEER_MAX_PARALLEL_CANDIDATES,
         ),
         determinism: Determinism::BitExact,

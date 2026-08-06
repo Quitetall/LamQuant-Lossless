@@ -23,7 +23,8 @@ use lamquant_nodes::{
 #[cfg(feature = "optimum-v2")]
 use lamquant_nodes::{
     optimum_v2_node_config, optimum_v2_peer_descriptor, CAP_LML_OPTIMUM_V2_PEER_NODE,
-    OPTIMUM_V2_PEER_NODE_TYPE,
+    OPTIMUM_V2_PEER_NODE_TYPE, PEER_MAX_BUNDLE_BYTES, PEER_NODE_MAX_CHANNELS,
+    PEER_NODE_MAX_SAMPLES,
 };
 use semantic_abir::{
     payload_content_id, AbirDataset, Atom, AtomTag, ByteOrder, ConceptId, DatasetDraft, DatasetTag,
@@ -311,6 +312,14 @@ fn optimum_v2_peer_node_matches_direct_codec_and_bcs2_closure() {
     assert!(descriptor
         .capabilities
         .contains(&Capability(CAP_LML_OPTIMUM_V2_PEER_NODE.into())));
+    assert_eq!(descriptor.inputs[0].extent.maximum_shape, vec![32, 4_096]);
+    assert_eq!(descriptor.inputs[0].extent.max_elements, 131_072);
+    assert_eq!(descriptor.inputs[0].max_bytes, 1024 * 1024);
+    assert_eq!(descriptor.outputs[0].max_bytes, PEER_MAX_BUNDLE_BYTES);
+    assert_eq!(descriptor.outputs[0].extent.max_elements, 128 * 1024 * 1024);
+    assert_eq!(descriptor.resources.threads, 49);
+    assert!(descriptor.resources.scratch_bytes >= 10 * 1024 * 1024 * 1024);
+    assert!(descriptor.resources.peak_bytes > descriptor.resources.scratch_bytes);
 
     let mut registry = KernelRegistry::default();
     register_lml_nodes(&mut registry).unwrap();
@@ -382,6 +391,61 @@ fn optimum_v2_peer_node_matches_direct_codec_and_bcs2_closure() {
     assert!(Compiler::new(&registry, ExecutionRealm::McuAot)
         .compile(&graph)
         .is_err());
+}
+
+#[cfg(feature = "optimum-v2")]
+#[test]
+fn optimum_v2_peer_node_rejects_each_matrix_bound_crossing() {
+    fn execute(signal: Vec<Vec<i64>>) -> Result<(), String> {
+        let dataset = fixture_dataset(&signal);
+        let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let bounds = ResourceBounds::default();
+        let descriptor = optimum_v2_peer_descriptor();
+        let mut registry = KernelRegistry::default();
+        register_lml_nodes(&mut registry).unwrap();
+        let graph = single_lml_graph(
+            OPTIMUM_V2_PEER_NODE_TYPE,
+            descriptor.capabilities,
+            optimum_v2_node_config(256_000, 16).unwrap(),
+        );
+        let plan = Compiler::new(&registry, ExecutionRealm::HostStream)
+            .compile(&graph)
+            .map_err(|error| error.to_string())?;
+        let mut kernels = lamquant_nodes::LamQuantKernelExecutor::default();
+        let mut sink = NoopTransactionalSink;
+        let mut executor = PlanExecutor::new(&mut kernels, &mut sink);
+        executor
+            .execute(
+                &plan,
+                [0x91; 32],
+                BTreeMap::from([(
+                    PortRef {
+                        node: NodeId(0),
+                        port: "signal".into(),
+                    },
+                    LamQuantNodeValue::LmlSignal(
+                        LmlSignalView::new(&dataset, &views, bounds).unwrap(),
+                    ),
+                )]),
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    let channels = vec![vec![0_i64; 1]; PEER_NODE_MAX_CHANNELS + 1];
+    assert!(execute(channels)
+        .unwrap_err()
+        .contains("bounded matrix contract"));
+
+    let samples = vec![vec![0_i64; PEER_NODE_MAX_SAMPLES + 1]];
+    assert!(execute(samples)
+        .unwrap_err()
+        .contains("bounded matrix contract"));
+
+    let values = vec![vec![0_i64; PEER_NODE_MAX_SAMPLES + 1]; PEER_NODE_MAX_CHANNELS];
+    assert!(execute(values)
+        .unwrap_err()
+        .contains("bounded matrix contract"));
 }
 
 #[test]

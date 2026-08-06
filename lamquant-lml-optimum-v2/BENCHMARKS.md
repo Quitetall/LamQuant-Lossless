@@ -44,6 +44,14 @@ channel, and 131,072 total values.
 Generation-v4 bytes did not change. Facade equivalence, frozen SHA-256, and the
 independent candidate-path characterization pass with and without `parallel`.
 
+Production resource declarations do not substitute measured RSS for a bound.
+The facade caps input at 1 MiB of i64 samples and each packet at 64 MiB. Its
+12-GiB scratch declaration conservatively covers 49 simultaneous worst-shape
+candidate event/rANS/packet worksets, including vector capacity growth. Node
+peak adds input plus packet and bundle copies. Independent Python decoding is
+required by the meta-repository P1 gate; standalone downstream checkouts may
+run the Rust-only vector when that governed oracle is absent.
+
 ## 2026-07-30 — pre-optimization production facade
 
 Same CPU and workload. Decode median was 2.0865 seconds. Criterion estimated

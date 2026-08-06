@@ -10,9 +10,24 @@ use crate::OptimumV2Error;
 pub const PEER_KERNEL_ID: &str = "org.quitetall.lamquant.lml-optimum-v2.peer-v4";
 pub const PEER_SOURCE_ID: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_SOURCE_ID");
 pub const PEER_BUILD_ID: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_BUILD_ID");
+pub const PEER_FEATURE_SET: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_FEATURE_SET");
 pub const PEER_MAX_CHANNELS: usize = crate::mix1::MAX_CHANNELS;
 pub const PEER_MAX_SAMPLES: usize = crate::mix1::MAX_SAMPLES;
 pub const PEER_MAX_VALUES: usize = crate::mix1::MAX_VALUES;
+/// Maximum borrowed/owned i64 signal matrix accepted by one peer invocation.
+pub const PEER_MAX_SIGNAL_BYTES: u64 = (PEER_MAX_VALUES * core::mem::size_of::<i64>()) as u64;
+/// Maximum complete generation-v4 packet accepted or emitted by the facade.
+pub const PEER_MAX_PACKET_BYTES: u64 = 64 * 1024 * 1024;
+/// Conservative portfolio workspace bound at maximum shape and concurrency.
+///
+/// Each of 49 candidates can transiently retain a power-of-two-grown binary
+/// event vector plus rANS and packet buffers. Twelve GiB covers that bounded
+/// worst case plus shared predictor analyses; measured 21x2,560 peak RSS is
+/// recorded separately and is much smaller.
+pub const PEER_MAX_SCRATCH_BYTES: u64 = 12 * 1024 * 1024 * 1024;
+/// Scheduler-visible peak: workspace, input matrix, packet, and BCS2 copy.
+pub const PEER_MAX_PEAK_BYTES: u64 =
+    PEER_MAX_SCRATCH_BYTES + PEER_MAX_SIGNAL_BYTES + 2 * PEER_MAX_PACKET_BYTES;
 /// Maximum number of complete portfolio candidates encoded concurrently.
 pub const PEER_MAX_PARALLEL_CANDIDATES: u16 = 49;
 
@@ -21,6 +36,7 @@ pub struct PeerImplementationIdentity {
     pub kernel_id: &'static str,
     pub source_id: &'static str,
     pub build_id: &'static str,
+    pub feature_set: &'static str,
 }
 
 pub const fn peer_implementation_identity() -> PeerImplementationIdentity {
@@ -28,6 +44,7 @@ pub const fn peer_implementation_identity() -> PeerImplementationIdentity {
         kernel_id: PEER_KERNEL_ID,
         source_id: PEER_SOURCE_ID,
         build_id: PEER_BUILD_ID,
+        feature_set: PEER_FEATURE_SET,
     }
 }
 
@@ -82,7 +99,13 @@ impl PeerCodec {
         signal: &[Vec<i64>],
         context: PeerEncodeContext,
     ) -> Result<Vec<u8>, OptimumV2Error> {
-        Mix1Codec.encode_best_peer_window(signal, context.sample_rate_mhz, context.bit_depth)
+        let packet = Mix1Codec.encode_best_peer_window(
+            signal,
+            context.sample_rate_mhz,
+            context.bit_depth,
+        )?;
+        validate_packet_size(&packet, InputKind::Caller)?;
+        Ok(packet)
     }
 
     pub fn encode_window_with_report(
@@ -111,11 +134,13 @@ impl PeerCodec {
     }
 
     pub fn decode_window(&self, packet: &[u8]) -> Result<PeerDecodedWindow, OptimumV2Error> {
+        validate_packet_size(packet, InputKind::Packet)?;
         let decoded = Mix1Codec.decode_window(packet)?;
         Ok(decoded.into())
     }
 
     pub fn inspect_packet(&self, packet: &[u8]) -> Result<PeerEncodeReport, OptimumV2Error> {
+        validate_packet_size(packet, InputKind::Packet)?;
         let decoded = Mix1Codec.decode_window(packet)?;
         let selected_kind = packet_kind(packet)?;
         let channel_count = decoded.samples.len();
@@ -135,6 +160,22 @@ impl PeerCodec {
             sample_count,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum InputKind {
+    Caller,
+    Packet,
+}
+
+fn validate_packet_size(packet: &[u8], kind: InputKind) -> Result<(), OptimumV2Error> {
+    if packet.len() as u64 <= PEER_MAX_PACKET_BYTES {
+        return Ok(());
+    }
+    Err(match kind {
+        InputKind::Caller => input_error("peer packet exceeds its byte bound"),
+        InputKind::Packet => packet_error("peer packet exceeds its byte bound"),
+    })
 }
 
 impl From<Mix1Decoded> for PeerDecodedWindow {

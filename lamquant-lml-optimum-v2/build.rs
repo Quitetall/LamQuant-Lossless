@@ -79,13 +79,20 @@ fn main() {
     let debug = env::var("DEBUG").unwrap_or_else(|_| "unknown".to_owned());
     let panic_strategy = env::var("CARGO_CFG_PANIC").unwrap_or_else(|_| "unknown".to_owned());
     let rustflags = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PARALLEL");
+    let feature_set = if env::var_os("CARGO_FEATURE_PARALLEL").is_some() {
+        "parallel"
+    } else {
+        "none"
+    };
     let build_id = digest_hex(
         format!(
-            "source={source_id};target={target};profile={profile};opt={opt_level};debug={debug};panic={panic_strategy};rustc={rustc_version};rustflags={rustflags}"
+            "source={source_id};target={target};profile={profile};opt={opt_level};debug={debug};panic={panic_strategy};features={feature_set};rustc={rustc_version};rustflags={rustflags}"
         )
         .as_bytes(),
     );
 
     emit("LAMQUANT_OPTIMUM_V2_PEER_SOURCE_ID", &source_id);
     emit("LAMQUANT_OPTIMUM_V2_PEER_BUILD_ID", &build_id);
+    emit("LAMQUANT_OPTIMUM_V2_PEER_FEATURE_SET", feature_set);
 }
