@@ -1,0 +1,418 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d1f8df7..e49a726 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3565,11 +3565,15 @@ name = "lamquant-nodes"
+ version = "0.1.0"
+ dependencies = [
+  "abir",
++ "abir-adapter",
+  "abir-bcs",
+  "blake3",
+  "blut-graph-core",
++ "hdf5-metno",
+  "lamquant-abir-codec",
+  "lamquant-lml-mcu",
++ "lamquant-standard-adapters",
++ "tempfile",
+ ]
+ 
+ [[package]]
+diff --git a/crates/lamquant-nodes/Cargo.toml b/crates/lamquant-nodes/Cargo.toml
+index 7055db9..ac64901 100644
+--- a/crates/lamquant-nodes/Cargo.toml
++++ b/crates/lamquant-nodes/Cargo.toml
+@@ -17,6 +17,11 @@ std = [
+     "semantic-abir/std",
+     "semantic-abir-bcs/std",
+ ]
++standards = [
++    "std",
++    "dep:abir-adapter",
++    "dep:lamquant-standard-adapters",
++]
+ experimental-arithmetic = [
+     "std",
+     "lamquant-abir-codec/experimental-arithmetic",
+@@ -24,12 +29,18 @@ experimental-arithmetic = [
+ ]
+ 
+ [dependencies]
++abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc", optional = true }
+ blake3 = { version = "=1.5.5", default-features = false }
+ blut-graph-core = { git = "https://github.com/Quitetall/blut.git", rev = "7e9dccb9dedac65eb0d6e36f5ee7f4a934168403", default-features = false }
+ lamquant-abir-codec = { version = "0.1.0", path = "../lamquant-abir-codec", default-features = false }
+ lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
++lamquant-standard-adapters = { version = "0.1.0", path = "../lamquant-standard-adapters", optional = true }
+ semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc", default-features = false, features = ["alloc"] }
+ semantic-abir-bcs = { package = "abir-bcs", git = "https://github.com/Quitetall/ABIR.git", rev = "a02ad44fa36899dcb7d53d95c9e640f17e885ffc", default-features = false, features = ["alloc"] }
+ 
+ [build-dependencies]
+ blake3 = { version = "=1.5.5" }
++
++[dev-dependencies]
++hdf5-metno = "0.12"
++tempfile = "3"
+diff --git a/crates/lamquant-nodes/build.rs b/crates/lamquant-nodes/build.rs
+index 072e7cf..747ede2 100644
+--- a/crates/lamquant-nodes/build.rs
++++ b/crates/lamquant-nodes/build.rs
+@@ -40,6 +40,27 @@ fn main() {
+         files.push(repository.join("lamquant-lml-desktop/Cargo.toml"));
+         collect_files(&repository.join("lamquant-lml-desktop/src"), &mut files);
+     }
++    if env::var_os("CARGO_FEATURE_STANDARDS").is_some() {
++        files.push(repository.join("crates/lamquant-standard-adapters/Cargo.toml"));
++        collect_files(
++            &repository.join("crates/lamquant-standard-adapters/src"),
++            &mut files,
++        );
++        // Standards adapters execute these local crates directly. Bind their
++        // source into ImplementationId so parser changes cannot reuse durable
++        // plan/cache identities.
++        for crate_root in [
++            "lamquant-lossless",
++            "crates/lamquant-common",
++            "lamquant-lml-optimum",
++            "lamquant-lml-optimum-v2",
++            "crates/lamquant-abir-montage",
++        ] {
++            let crate_root = repository.join(crate_root);
++            files.push(crate_root.join("Cargo.toml"));
++            collect_files(&crate_root.join("src"), &mut files);
++        }
++    }
+     files.sort();
+ 
+     let mut hasher = blake3::Hasher::new();
+diff --git a/crates/lamquant-nodes/src/lib.rs b/crates/lamquant-nodes/src/lib.rs
+index b371ea1..9d02f0b 100644
+--- a/crates/lamquant-nodes/src/lib.rs
++++ b/crates/lamquant-nodes/src/lib.rs
+@@ -5,10 +5,21 @@
+ extern crate alloc;
+ 
+ mod lml_reference;
++#[cfg(feature = "standards")]
++mod standard_sources;
+ 
+ pub use lml_reference::{
+     LmlPackets, ReferenceEntropy, ReferencePredicted, ReferenceQuantized, ReferenceSubbands,
+ };
++#[cfg(feature = "standards")]
++pub use standard_sources::{
++    bids_source_descriptor, dicom_source_descriptor, edf_bdf_source_descriptor,
++    nwb_source_descriptor, register_standard_source_nodes, standard_source_config,
++    standard_source_content_id, xdf_source_descriptor, RegisteredStandardSource,
++    StandardSourceConfigError, StandardSourceImport, StandardSourceLimits,
++    StandardSourceRegistryError, StandardSourceResolver, BIDS_SOURCE_NODE_TYPE,
++    DICOM_SOURCE_NODE_TYPE, EDF_BDF_SOURCE_NODE_TYPE, NWB_SOURCE_NODE_TYPE, XDF_SOURCE_NODE_TYPE,
++};
+ 
+ pub const LML_TRANSFORM_NODE_TYPE: &str = lml_reference::LML_TRANSFORM_NODE_TYPE;
+ pub const LML_QUANTIZE_NODE_TYPE: &str = lml_reference::LML_QUANTIZE_NODE_TYPE;
+@@ -17,9 +28,13 @@ pub const LML_ENTROPY_NODE_TYPE: &str = lml_reference::LML_ENTROPY_NODE_TYPE;
+ pub const LML_ASSEMBLE_NODE_TYPE: &str = lml_reference::LML_ASSEMBLE_NODE_TYPE;
+ pub const LML_PACKET_BASELINE_NODE_TYPE: &str = lml_reference::LML_PACKET_BASELINE_NODE_TYPE;
+ 
++#[cfg(feature = "standards")]
++use alloc::boxed::Box;
+ use alloc::collections::BTreeMap;
+ use alloc::format;
+ use alloc::string::String;
++#[cfg(feature = "standards")]
++use alloc::sync::Arc;
+ use alloc::vec;
+ use alloc::vec::Vec;
+ use core::fmt;
+@@ -123,6 +138,8 @@ impl std::error::Error for LmlSignalViewError {}
+ #[derive(Debug)]
+ pub enum LamQuantNodeValue<'a> {
+     LmlSignal(LmlSignalView<'a>),
++    #[cfg(feature = "standards")]
++    AbirImport(Box<StandardSourceImport>),
+     #[doc(hidden)]
+     ReferenceSubbands(ReferenceSubbands),
+     #[doc(hidden)]
+@@ -154,16 +171,47 @@ impl std::error::Error for LmlNodeConfigError {}
+ 
+ pub struct LamQuantKernelExecutor<'a> {
+     marker: PhantomData<&'a ()>,
++    #[cfg(feature = "standards")]
++    standard_sources: BTreeMap<[u8; 32], Arc<RegisteredStandardSource>>,
++    #[cfg(feature = "standards")]
++    standard_source_resolver: Option<Arc<dyn StandardSourceResolver>>,
+ }
+ 
+ impl Default for LamQuantKernelExecutor<'_> {
+     fn default() -> Self {
+         Self {
+             marker: PhantomData,
++            #[cfg(feature = "standards")]
++            standard_sources: BTreeMap::new(),
++            #[cfg(feature = "standards")]
++            standard_source_resolver: None,
+         }
+     }
+ }
+ 
++#[cfg(feature = "standards")]
++impl LamQuantKernelExecutor<'_> {
++    /// Register one canonical, content-addressed foreign source.
++    ///
++    /// Returns the content identity used by source-node configuration.
++    pub fn register_standard_source(
++        &mut self,
++        source: RegisteredStandardSource,
++    ) -> Result<[u8; 32], StandardSourceRegistryError> {
++        let content_id = source.content_id();
++        if self.standard_sources.contains_key(&content_id) {
++            return Err(StandardSourceRegistryError::DuplicateContent);
++        }
++        self.standard_sources.insert(content_id, Arc::new(source));
++        Ok(content_id)
++    }
++
++    /// Inject a content-addressed resolver for durable/remote source plans.
++    pub fn set_standard_source_resolver(&mut self, resolver: Arc<dyn StandardSourceResolver>) {
++        self.standard_source_resolver = Some(resolver);
++    }
++}
++
+ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
+     type Value = LamQuantNodeValue<'a>;
+ 
+@@ -183,6 +231,16 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
+         let type_name = semantic_types.first().copied().ok_or_else(|| {
+             lml_reference::kernel_failure(node, "invalid-plan", "missing semantic node type")
+         })?;
++        #[cfg(feature = "standards")]
++        if standard_sources::is_standard_source_node(type_name) {
++            return standard_sources::execute(
++                node,
++                type_name,
++                inputs,
++                &self.standard_sources,
++                self.standard_source_resolver.as_deref(),
++            );
++        }
+         match type_name {
+             LML_TRANSFORM_NODE_TYPE => execute_transform(node, inputs),
+             LML_QUANTIZE_NODE_TYPE => execute_quantize(node, inputs),
+@@ -618,7 +676,7 @@ fn reference_kernel(id: KernelId, type_names: &[&str], target: Target) -> Kernel
+     lml_reference::reference_kernel(id, type_names, target)
+ }
+ 
+-fn implementation_id(type_name: &str, target: Target) -> ImplementationId {
++pub(crate) fn implementation_id(type_name: &str, target: Target) -> ImplementationId {
+     let mut hasher = blake3::Hasher::new();
+     hasher.update(b"org.quitetall.lamquant.nodes.implementation-v1\0");
+     hasher.update(SOURCE_ID.as_bytes());
+diff --git a/crates/lamquant-standard-adapters/src/bids_full.rs b/crates/lamquant-standard-adapters/src/bids_full.rs
+index 9268ccb..70ca316 100644
+--- a/crates/lamquant-standard-adapters/src/bids_full.rs
++++ b/crates/lamquant-standard-adapters/src/bids_full.rs
+@@ -251,15 +251,42 @@ fn read_edf_bundle(bytes: &[u8]) -> Result<SignalBundle, AdapterError> {
+     EdfReader::new(&path).read_bundle().map_err(invalid)
+ }
+ 
+-fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
++fn parse_bids(
++    entries: &[ForeignEntry],
++    max_decoded_bytes: u64,
++) -> Result<ParsedBids, AdapterError> {
++    let description = entries
++        .iter()
++        .find(|entry| entry.path == "dataset_description.json")
++        .ok_or_else(|| {
++            AdapterError::InvalidSource(
++                "BIDS root dataset_description.json is required".to_owned(),
++            )
++        })?;
++    let description: serde_json::Value =
++        serde_json::from_slice(&description.bytes).map_err(invalid)?;
++    let dataset_name = description
++        .get("Name")
++        .and_then(serde_json::Value::as_str)
++        .unwrap_or_default()
++        .to_owned();
++    let bids_version = description
++        .get("BIDSVersion")
++        .and_then(serde_json::Value::as_str)
++        .unwrap_or_default()
++        .to_owned();
++    if bids_version != "1.11.1" {
++        return Err(AdapterError::UnsupportedMeaning(format!(
++            "BIDS profile 1.11.1 cannot import declared version {bids_version:?}"
++        )));
++    }
++
+     let mut recordings = Vec::new();
+     let mut events = Vec::new();
+     let mut electrodes = Vec::new();
+     let mut coordinate_system = None;
+     let mut derivatives = Vec::new();
+     let mut subjects = BTreeSet::new();
+-    let mut dataset_name = String::new();
+-    let mut bids_version = String::new();
+ 
+     for entry in entries {
+         let path = entry.path.as_str();
+@@ -269,19 +296,7 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
+             derivatives.push(path.to_owned());
+             continue;
+         }
+-        if path.ends_with("dataset_description.json") {
+-            let document: serde_json::Value =
+-                serde_json::from_slice(&entry.bytes).map_err(invalid)?;
+-            dataset_name = document
+-                .get("Name")
+-                .and_then(serde_json::Value::as_str)
+-                .unwrap_or_default()
+-                .to_owned();
+-            bids_version = document
+-                .get("BIDSVersion")
+-                .and_then(serde_json::Value::as_str)
+-                .unwrap_or_default()
+-                .to_owned();
++        if path == "dataset_description.json" {
+             continue;
+         }
+         if path.ends_with("_coordsystem.json") {
+@@ -342,13 +357,17 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
+             // BIDS mandates gzip for continuous recordings, so the table is
+             // decompressed rather than the naming rule being relaxed.
+             let mut plain = Vec::new();
++            let mut decoder = flate2::read::GzDecoder::new(entry.bytes.as_slice());
+             std::io::Read::read_to_end(
+-                &mut flate2::read::GzDecoder::new(entry.bytes.as_slice()),
++                &mut std::io::Read::take(&mut decoder, max_decoded_bytes.saturating_add(1)),
+                 &mut plain,
+             )
+             .map_err(|error| {
+                 AdapterError::InvalidSource(format!("physio table is not gzip: {error}"))
+             })?;
++            if plain.len() as u64 > max_decoded_bytes {
++                return Err(AdapterError::SourceTooLarge);
++            }
+             let (header, rows) = read_tsv(&plain)?;
+             let mut signal = vec![Vec::new(); header.len()];
+             for row in &rows {
+@@ -413,11 +432,6 @@ fn parse_bids(entries: &[ForeignEntry]) -> Result<ParsedBids, AdapterError> {
+             "BIDS dataset carries no importable recording".to_owned(),
+         ));
+     }
+-    if bids_version.is_empty() {
+-        return Err(AdapterError::InvalidSource(
+-            "BIDS dataset declares no BIDSVersion".to_owned(),
+-        ));
+-    }
+     Ok(ParsedBids {
+         recordings,
+         events,
+@@ -496,7 +510,7 @@ impl BidsSemanticAdapter {
+         entries: &[ForeignEntry],
+         limits: ValidationLimits,
+     ) -> Result<ParsedDataset, AdapterError> {
+-        let parsed = parse_bids(entries)?;
++        let parsed = parse_bids(entries, limits.max_logical_payload_bytes)?;
+         // The dataset identity is every file, in a stable order: a BIDS dataset
+         // IS its tree, so a seed derived from one file would not name it.
+         let mut hasher = blake3::Hasher::new();
+@@ -773,7 +787,7 @@ impl Adapter for BidsSemanticAdapter {
+ 
+     fn inspect(&self, source: &ForeignObject) -> Result<InspectReport, AdapterError> {
+         let entries = self.check(source)?;
+-        let parsed = parse_bids(entries)?;
++        let parsed = parse_bids(entries, self.max_source_bytes)?;
+         Ok(InspectReport {
+             profile: self.profile.id.clone(),
+             entry_count: entries.len(),
+diff --git a/crates/lamquant-standard-adapters/src/nwb_full.rs b/crates/lamquant-standard-adapters/src/nwb_full.rs
+index 992aa8b..71a62d6 100644
+--- a/crates/lamquant-standard-adapters/src/nwb_full.rs
++++ b/crates/lamquant-standard-adapters/src/nwb_full.rs
+@@ -463,9 +463,9 @@ fn parse_nwb(path: &std::path::Path) -> Result<ParsedNwb, AdapterError> {
+         .map_err(|_| {
+             AdapterError::InvalidSource("file declares no nwb_version attribute".to_owned())
+         })?;
+-    if !nwb_version.starts_with("2.") {
++    if nwb_version != "2.10.0" {
+         return Err(AdapterError::UnsupportedMeaning(format!(
+-            "this profile covers NWB 2.x; the file declares {nwb_version}"
++            "NWB profile 2.10.0 cannot import declared version {nwb_version}"
+         )));
+     }
+ 
+diff --git a/crates/lamquant-standard-adapters/tests/bids_semantic_adapter.rs b/crates/lamquant-standard-adapters/tests/bids_semantic_adapter.rs
+index 69d0928..936d5ec 100644
+--- a/crates/lamquant-standard-adapters/tests/bids_semantic_adapter.rs
++++ b/crates/lamquant-standard-adapters/tests/bids_semantic_adapter.rs
+@@ -198,6 +198,18 @@ fn bids_rejects_wrong_profile_duplicates_and_incomplete_datasets() {
+         Err(AdapterError::DuplicatePath(_))
+     ));
+ 
++    let mut wrong_edition = foreign(dataset());
++    wrong_edition
++        .entries
++        .iter_mut()
++        .find(|entry| entry.path == "dataset_description.json")
++        .unwrap()
++        .bytes = br#"{"Name":"wrong edition","BIDSVersion":"1.10.1"}"#.to_vec();
++    assert!(matches!(
++        adapter.import(&wrong_edition, ValidationLimits::default()),
++        Err(AdapterError::UnsupportedMeaning(_))
++    ));
++
+     assert!(matches!(
+         adapter.import(&foreign(Vec::new()), ValidationLimits::default()),
+         Err(AdapterError::EmptySource)
+diff --git a/crates/lamquant-standard-adapters/tests/nwb_semantic_adapter.rs b/crates/lamquant-standard-adapters/tests/nwb_semantic_adapter.rs
+index d570a2a..6843084 100644
+--- a/crates/lamquant-standard-adapters/tests/nwb_semantic_adapter.rs
++++ b/crates/lamquant-standard-adapters/tests/nwb_semantic_adapter.rs
+@@ -14,6 +14,7 @@ use abir_adapter::{
+ use lamquant_standard_adapters::NwbAdapter;
+ use semantic_abir::{ContentId, ValidationLimits};
+ use std::collections::BTreeMap;
++use std::str::FromStr;
+ 
+ struct Payloads(BTreeMap<ContentId, Vec<u8>>);
+ 
+@@ -30,6 +31,21 @@ fn fixture() -> Vec<u8> {
+     include_bytes!("fixtures/multi_container_session.nwb").to_vec()
+ }
+ 
++fn fixture_with_version(version: &str) -> Vec<u8> {
++    let temporary = tempfile::NamedTempFile::new().unwrap();
++    std::fs::write(temporary.path(), fixture()).unwrap();
++    {
++        let file = hdf5_metno::File::open_rw(temporary.path()).unwrap();
++        let version = hdf5_metno::types::VarLenUnicode::from_str(version).unwrap();
++        file.attr("nwb_version")
++            .unwrap()
++            .write_scalar(&version)
++            .unwrap();
++        file.flush().unwrap();
++    }
++    std::fs::read(temporary.path()).unwrap()
++}
++
+ fn foreign(bytes: Vec<u8>) -> ForeignObject {
+     ForeignObject {
+         profile: ProfileId("nwb.2.10.0".to_owned()),
+@@ -164,6 +180,14 @@ fn nwb_rejects_wrong_profile_multiple_files_and_malformed_bytes() {
+         Err(AdapterError::ProfileMismatch { .. })
+     ));
+ 
++    assert!(matches!(
++        adapter.import(
++            &foreign(fixture_with_version("2.9.0")),
++            ValidationLimits::default()
++        ),
++        Err(AdapterError::UnsupportedMeaning(_))
++    ));
++
+     let mut two_files = foreign(valid.clone());
+     two_files.entries.push(two_files.entries[0].clone());
+     assert!(adapter

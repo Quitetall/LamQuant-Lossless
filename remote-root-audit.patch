@@ -1,0 +1,1313 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 2cb66f8..4a2255f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3337,9 +3337,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "kqueue"
+-version = "1.2.0"
++version = "1.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "273c0752728918e0ac4976f2b275b6fefb9ecd400585dec929419f3844cd87b5"
++checksum = "eac30106d7dce88daf4a3fcb4879ea939476d5074a9b7ddd0fb97fa4bed5596a"
+ dependencies = [
+  "kqueue-sys",
+  "libc",
+@@ -4715,13 +4715,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "proptest"
+-version = "1.11.0"
++version = "1.8.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
++checksum = "2bb0be07becd10686a0bb407298fb425360a5c44a663774406340c59a22de4ce"
+ dependencies = [
+  "bit-set 0.8.0",
+  "bit-vec 0.8.0",
+  "bitflags 2.13.0",
++ "lazy_static",
+  "num-traits",
+  "rand 0.9.4",
+  "rand_chacha 0.9.0",
+diff --git a/crates/lamquant-nodes/src/lib.rs b/crates/lamquant-nodes/src/lib.rs
+index e504268..bf55ac2 100644
+--- a/crates/lamquant-nodes/src/lib.rs
++++ b/crates/lamquant-nodes/src/lib.rs
+@@ -39,6 +39,12 @@ const BUNDLE_SEMANTIC_TYPE: &str = "bcs2.bundle.lml-lossless";
+ const MAX_SIGNAL_BYTES: u64 = 1024 * 1024 * 1024;
+ const MAX_PACKET_BYTES: u64 = 1024 * 1024 * 1024;
+ const MAX_PARALLEL_CHANNELS: u16 = 1024;
++// Fused encoding can retain transformed/residual channel state, selected
++// payloads, finalized metadata/payload buffers, LML packets, and final BCS2
++// output concurrently. Charge a conservative whole-kernel peak plus transient
++// coder/LPC scratch; input leases remain declared separately by port contract.
++const MAX_NODE_PEAK_BYTES: u64 = MAX_SIGNAL_BYTES * 6;
++const MAX_NODE_SCRATCH_BYTES: u64 = MAX_SIGNAL_BYTES * 2;
+ const SOURCE_ID: &str = env!("LAMQUANT_NODES_SOURCE_ID");
+ const FEATURE_SET: &str = env!("LAMQUANT_NODES_FEATURE_SET");
+ 
+@@ -316,8 +322,8 @@ fn lml_descriptor(type_name: &str, arithmetic: bool) -> NodeDescriptor {
+         capabilities,
+         targets: vec![Target::Host, Target::BlutDurable],
+         resources: ResourceEnvelope::bounded(
+-            MAX_SIGNAL_BYTES,
+-            MAX_PACKET_BYTES,
++            MAX_NODE_PEAK_BYTES,
++            MAX_NODE_SCRATCH_BYTES,
+             MAX_PARALLEL_CHANNELS,
+         ),
+         determinism: Determinism::BitExact,
+@@ -484,7 +490,7 @@ fn lml_kernel(id: KernelId, type_name: &str, target: Target) -> KernelDescriptor
+         target,
+         input_layouts: vec![Layout::ChannelMajor],
+         output_layouts: vec![Layout::Packed],
+-        resources: ResourceEnvelope::bounded(MAX_SIGNAL_BYTES, MAX_PACKET_BYTES, threads),
++        resources: ResourceEnvelope::bounded(MAX_NODE_PEAK_BYTES, MAX_NODE_SCRATCH_BYTES, threads),
+         determinism: Determinism::BitExact,
+         lowering: format!("fused:{type_name}:encode_lml_bundle_from_views_explicit:v1"),
+     }
+@@ -569,11 +575,21 @@ fn kernel_failure(node: &CompiledNode, code: &str, message: &str) -> ExecutionEr
+ }
+ 
+ fn codec_failure(node: &CompiledNode, error: LmlBundleError) -> ExecutionError {
++    let code = match &error {
++        LmlBundleError::EncodedResourceLimit | LmlBundleError::DecodedResourceLimit => {
++            "resource-limit"
++        }
++        LmlBundleError::Lml(lamquant_lml_mcu::error::LmlError::OutputLimit { .. })
++        | LmlBundleError::Lml(lamquant_lml_mcu::error::LmlError::Golomb(
++            lamquant_lml_mcu::codec_errors::GolombError::OutputLimitExceeded { .. },
++        )) => "resource-limit",
++        _ => "codec-failure",
++    };
+     ExecutionError::KernelFailed {
+         kernel: node.kernel,
+         failure: StructuredFailure {
+             domain: FAILURE_DOMAIN.into(),
+-            code: "codec-failure".into(),
++            code: code.into(),
+             message: format!("{error:?}"),
+             retryable: false,
+         },
+diff --git a/crates/lamquant-nodes/tests/lml_node.rs b/crates/lamquant-nodes/tests/lml_node.rs
+index d78efb0..392b3a0 100644
+--- a/crates/lamquant-nodes/tests/lml_node.rs
++++ b/crates/lamquant-nodes/tests/lml_node.rs
+@@ -1,8 +1,8 @@
+ use std::collections::BTreeMap;
+ 
+ use blut_graph_core::{
+-    AbirRootType, AbirViewType, Capability, Compiler, ExecutionRealm, Graph, KernelRegistry,
+-    NodeId, NodeInstance, PlanExecutor, PortRef, Target,
++    AbirRootType, AbirViewType, Capability, Compiler, ExecutionError, ExecutionRealm, Graph,
++    KernelRegistry, NodeId, NodeInstance, PlanExecutor, PortRef, Target,
+ };
+ use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
+ use lamquant_lml_mcu::{lml::EncodeFeatures, lpc::LpcMode};
+@@ -128,6 +128,8 @@ fn descriptor_identity_is_feature_specific() {
+         .capabilities
+         .contains(&Capability(CAP_LML_ARITHMETIC_NODE.into())));
+     assert_eq!(baseline.resources.threads, 1024);
++    assert!(baseline.resources.peak_bytes >= baseline.inputs[0].max_bytes.saturating_mul(6));
++    assert!(baseline.resources.scratch_bytes >= baseline.inputs[0].max_bytes.saturating_mul(2));
+     assert_eq!(baseline.inputs[0].abir.root, AbirRootType::Dataset);
+     assert_eq!(baseline.inputs[0].abir.view, AbirViewType::Root);
+     assert_eq!(baseline.outputs[0].abir.root, AbirRootType::Dataset);
+@@ -270,7 +272,12 @@ fn node_rejects_pathological_entropy_output_without_allocating_it() {
+         )]),
+     );
+ 
+-    assert!(result.is_err());
++    let failure = result.expect_err("pathological output must fail");
++    assert!(matches!(
++        failure.error,
++        ExecutionError::KernelFailed { failure, .. }
++            if failure.code == "resource-limit" && !failure.retryable
++    ));
+ }
+ 
+ #[cfg(feature = "experimental-arithmetic")]
+diff --git a/lamquant-lml-desktop/src/parallel.rs b/lamquant-lml-desktop/src/parallel.rs
+index 70d7d79..07bf29b 100644
+--- a/lamquant-lml-desktop/src/parallel.rs
++++ b/lamquant-lml-desktop/src/parallel.rs
+@@ -216,6 +216,13 @@ pub fn compress_with_mode_parallel_views_explicit(
+     mode: LpcMode,
+     features: EncodeFeatures,
+ ) -> LmlResult<Vec<u8>> {
++    // Complete bounded accounting is aggregate across channels and candidate
++    // coders. Until parallel sizing has an allocation-free first pass, route
++    // bounded calls through the serial reference implementation so exact
++    // ceilings remain accepted and memory bounds remain honest.
++    if features.max_packet_bytes.is_some() {
++        return lml::compress_with_mode_views_explicit(windows, noise_bits, mode, features);
++    }
+     let n_ch = windows.len();
+     let t = windows.first().map(|w| w.len()).unwrap_or(0);
+     let shape = validate_and_levels(n_ch, t, noise_bits)?;
+diff --git a/lamquant-lml-mcu/Cargo.toml b/lamquant-lml-mcu/Cargo.toml
+index e571400..7649195 100644
+--- a/lamquant-lml-mcu/Cargo.toml
++++ b/lamquant-lml-mcu/Cargo.toml
+@@ -64,6 +64,6 @@ probability = { version = "0.20", optional = true }
+ [dev-dependencies]
+ # Core-level tests relocated from the facade (conformance, property_roundtrip,
+ # bounded_mae_property, target_bps_property, byte_equal_backends).
+-proptest = "1"
++proptest = { version = "=1.8.0", default-features = false, features = ["std"] }
+ # byte_equal_backends.rs hashes encoded bytes for the golden table.
+ sha2 = "0.10"
+diff --git a/lamquant-lml-mcu/src/error.rs b/lamquant-lml-mcu/src/error.rs
+index 9efb6b6..85f8a7c 100644
+--- a/lamquant-lml-mcu/src/error.rs
++++ b/lamquant-lml-mcu/src/error.rs
+@@ -33,6 +33,13 @@ pub enum LmlError {
+     /// callers can match on the specific failure (i64::MIN, OversizeQ,
+     /// truncated bitstream, etc.) instead of stringly-typed lookups.
+     Golomb(crate::codec_errors::GolombError),
++    /// A bounded encoder proved its complete output cannot fit the
++    /// caller-declared resource envelope.
++    OutputLimit {
++        required_bytes: u64,
++        maximum_bytes: u64,
++        context: &'static str,
++    },
+ }
+ 
+ impl fmt::Display for LmlError {
+@@ -67,6 +74,15 @@ impl fmt::Display for LmlError {
+             Self::InvalidHeader(msg) => write!(f, "Invalid header: {}", msg),
+             Self::DecompressFailure(msg) => write!(f, "Decompression failed: {}", msg),
+             Self::Golomb(e) => write!(f, "Golomb: {}", e),
++            Self::OutputLimit {
++                required_bytes,
++                maximum_bytes,
++                context,
++            } => write!(
++                f,
++                "{} requires {} bytes, exceeding output limit {}",
++                context, required_bytes, maximum_bytes
++            ),
+         }
+     }
+ }
+diff --git a/lamquant-lml-mcu/src/golomb.rs b/lamquant-lml-mcu/src/golomb.rs
+index d6dfea7..1d828e1 100644
+--- a/lamquant-lml-mcu/src/golomb.rs
++++ b/lamquant-lml-mcu/src/golomb.rs
+@@ -40,11 +40,11 @@ fn zigzag_decode(v: u64) -> i64 {
+ }
+ 
+ fn compute_k(zz: &[u64]) -> u8 {
+-    let mut sum: u64 = 0;
++    let mut sum: u128 = 0;
+     let mut count: u64 = 0;
+     for &v in zz {
+         if v != 0 {
+-            sum += v;
++            sum += u128::from(v);
+             count += 1;
+         }
+     }
+@@ -54,16 +54,23 @@ fn compute_k(zz: &[u64]) -> u8 {
+     compute_k_from_mean(sum as f64 / count as f64)
+ }
+ 
+-fn compute_k_bounded(zz: &[u64]) -> u8 {
++fn compute_k_for_coeffs(coeffs: &[i64]) -> Result<u8, GolombError> {
+     let mut sum = 0_u128;
+-    let mut count = 0_u128;
+-    for &value in zz {
+-        if value != 0 {
+-            sum += u128::from(value);
++    let mut count = 0_u64;
++    for (index, &value) in coeffs.iter().enumerate() {
++        if value == i64::MIN {
++            return Err(GolombError::I64Min { index });
++        }
++        let zigzag = zigzag_encode(value);
++        if zigzag != 0 {
++            sum += u128::from(zigzag);
+             count += 1;
+         }
+     }
+-    compute_k_from_mean(sum as f64 / count as f64)
++    if count == 0 {
++        return Ok(0);
++    }
++    Ok(compute_k_from_mean(sum as f64 / count as f64))
+ }
+ 
+ fn compute_k_from_mean(mut mean: f64) -> u8 {
+@@ -75,6 +82,18 @@ fn compute_k_from_mean(mut mean: f64) -> u8 {
+     k
+ }
+ 
++/// Exact encoded byte count without allocating the output bitstream.
++pub fn encoded_byte_len(coeffs: &[i64]) -> Result<usize, GolombError> {
++    if coeffs.len() > u16::MAX as usize {
++        return Err(GolombError::HeaderOverflow {
++            n_total: coeffs.len(),
++            payload_bytes: 0,
++        });
++    }
++    let k = compute_k_for_coeffs(coeffs)?;
++    encoded_byte_len_coeffs_for(coeffs, k)
++}
++
+ /// Encode dense int64 array → Golomb-Rice bytes.
+ /// Format: [k:u8][n_total:u16 LE][bitstream...]
+ ///
+@@ -129,11 +148,7 @@ fn encode_dense_impl(coeffs: &[i64], max_bytes: Option<usize>) -> Result<Vec<u8>
+     // Zigzag all values. After the i64::MIN early-return above no
+     // value can reach `u64::MAX`.
+     let zz: Vec<u64> = coeffs.iter().map(|&v| zigzag_encode(v)).collect();
+-    let k = if max_bytes.is_some() {
+-        compute_k_bounded(&zz)
+-    } else {
+-        compute_k(&zz)
+-    };
++    let k = compute_k(&zz);
+     let capacity = if let Some(limit) = max_bytes {
+         let encoded_bytes = encoded_byte_len_for(&zz, k)?;
+         if encoded_bytes > limit {
+@@ -260,6 +275,36 @@ fn encoded_byte_len_for(zz: &[u64], k: u8) -> Result<usize, GolombError> {
+     })
+ }
+ 
++fn encoded_byte_len_coeffs_for(coeffs: &[i64], k: u8) -> Result<usize, GolombError> {
++    let mut bits = 0_u128;
++    for (index, &value) in coeffs.iter().enumerate() {
++        let q = zigzag_encode(value) >> k;
++        if q > MAX_Q {
++            return Err(GolombError::OversizeQ {
++                index,
++                q_estimate: q,
++            });
++        }
++        bits = bits.checked_add(u128::from(q) + 1 + u128::from(k)).ok_or(
++            GolombError::OutputLimitExceeded {
++                encoded_bytes: usize::MAX,
++                limit: usize::MAX,
++            },
++        )?;
++    }
++    let payload_bytes = bits.div_ceil(8);
++    let total = payload_bytes
++        .checked_add(3)
++        .ok_or(GolombError::OutputLimitExceeded {
++            encoded_bytes: usize::MAX,
++            limit: usize::MAX,
++        })?;
++    usize::try_from(total).map_err(|_| GolombError::OutputLimitExceeded {
++        encoded_bytes: usize::MAX,
++        limit: usize::MAX,
++    })
++}
++
+ /// Decode dense Golomb-Rice bitstream.
+ /// Returns (values, bytes_consumed from data[offset..]).
+ ///
+@@ -570,4 +615,24 @@ mod tests {
+             other => panic!("expected bounded output rejection, got {other:?}"),
+         }
+     }
++
++    #[test]
++    fn encoded_byte_len_matches_encoder_without_materializing_zigzag_values() {
++        for data in [
++            vec![],
++            vec![0; 64],
++            vec![-3, -2, -1, 0, 1, 2, 3],
++            vec![1_i64 << 30, (1_i64 << 30) - 1, -((1_i64 << 30) - 1)],
++            (0..257)
++                .map(|index| (index * 7919) % 100_003 - 50_001)
++                .collect(),
++        ] {
++            let encoded = encode_dense(&data).expect("fixture must encode");
++            assert_eq!(encoded_byte_len(&data), Ok(encoded.len()));
++        }
++        assert_eq!(
++            encoded_byte_len(&[0, i64::MIN]),
++            Err(GolombError::I64Min { index: 1 })
++        );
++    }
+ }
+diff --git a/lamquant-lml-mcu/src/lml.rs b/lamquant-lml-mcu/src/lml.rs
+index 5b8d6cf..2afc1c7 100644
+--- a/lamquant-lml-mcu/src/lml.rs
++++ b/lamquant-lml-mcu/src/lml.rs
+@@ -642,6 +642,206 @@ pub fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u
+     }
+ }
+ 
++fn output_limit_error(
++    required_bytes: usize,
++    maximum_bytes: usize,
++    context: &'static str,
++) -> LmlError {
++    LmlError::OutputLimit {
++        required_bytes: required_bytes as u64,
++        maximum_bytes: maximum_bytes as u64,
++        context,
++    }
++}
++
++fn enforce_output_limit(
++    required_bytes: usize,
++    maximum_bytes: usize,
++    context: &'static str,
++) -> LmlResult<()> {
++    if required_bytes > maximum_bytes {
++        Err(output_limit_error(required_bytes, maximum_bytes, context))
++    } else {
++        Ok(())
++    }
++}
++
++fn output_limit_required(error: &LmlError) -> Option<u64> {
++    match error {
++        LmlError::OutputLimit { required_bytes, .. } => Some(*required_bytes),
++        LmlError::Golomb(crate::codec_errors::GolombError::OutputLimitExceeded {
++            encoded_bytes,
++            ..
++        }) => Some(*encoded_bytes as u64),
++        _ => None,
++    }
++}
++
++#[derive(Debug)]
++enum BoundedGolomb {
++    Encoded(Vec<u8>),
++    #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
++    Deferred(Vec<i64>),
++}
++
++#[derive(Debug)]
++struct CompleteBoundedSubband {
++    golomb_len: usize,
++    golomb: BoundedGolomb,
++    winner_tag: u8,
++    winner_bytes: Option<Vec<u8>>,
++    savings: usize,
++}
++
++#[derive(Debug)]
++struct CompleteBoundedChannel {
++    meta: Vec<u8>,
++    subbands: Vec<CompleteBoundedSubband>,
++}
++
++fn bounded_tagged_payload(per_channel: &[CompleteBoundedChannel]) -> bool {
++    let (subband_count, savings) = per_channel
++        .iter()
++        .flat_map(|channel| &channel.subbands)
++        .fold((0usize, 0usize), |(count, total), subband| {
++            (
++                count.saturating_add(1),
++                total.saturating_add(subband.savings),
++            )
++        });
++    savings > subband_count
++}
++
++fn bounded_subband_minimum_len(golomb_len: usize, winner_bytes: Option<&[u8]>) -> usize {
++    let tagged_len = winner_bytes
++        .map(<[u8]>::len)
++        .unwrap_or(golomb_len)
++        .saturating_add(1);
++    golomb_len.min(tagged_len)
++}
++
++fn bounded_channel_minimum_len(metadata_len: usize, subbands: &[CompleteBoundedSubband]) -> usize {
++    subbands.iter().fold(metadata_len, |total, subband| {
++        total.saturating_add(bounded_subband_minimum_len(
++            subband.golomb_len,
++            subband.winner_bytes.as_deref(),
++        ))
++    })
++}
++
++fn bounded_minimum_body_len(per_channel: &[CompleteBoundedChannel]) -> usize {
++    per_channel.iter().fold(0usize, |total, channel| {
++        total.saturating_add(bounded_channel_minimum_len(
++            channel.meta.len(),
++            &channel.subbands,
++        ))
++    })
++}
++
++fn bounded_payload_len(per_channel: &[CompleteBoundedChannel], tagged: bool) -> usize {
++    per_channel
++        .iter()
++        .flat_map(|channel| &channel.subbands)
++        .fold(0usize, |total, subband| {
++            let encoded_len = if tagged {
++                subband
++                    .winner_bytes
++                    .as_ref()
++                    .map(Vec::len)
++                    .unwrap_or(subband.golomb_len)
++                    .saturating_add(1)
++            } else {
++                subband.golomb_len
++            };
++            total.saturating_add(encoded_len)
++        })
++}
++
++fn append_bounded_golomb(out: &mut Vec<u8>, subband: &CompleteBoundedSubband) -> LmlResult<()> {
++    match &subband.golomb {
++        BoundedGolomb::Encoded(bytes) => out.extend_from_slice(bytes),
++        #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
++        BoundedGolomb::Deferred(residual) => {
++            let bytes = golomb::encode_dense_bounded(residual, subband.golomb_len)?;
++            out.extend_from_slice(&bytes);
++        }
++    }
++    Ok(())
++}
++
++fn assemble_complete_bounded_channels(
++    per_channel: &[CompleteBoundedChannel],
++    n_ch: usize,
++    t: usize,
++    n_levels: u8,
++    noise_bits: u8,
++    maximum_output_bytes: usize,
++) -> LmlResult<Vec<u8>> {
++    let tagged = bounded_tagged_payload(per_channel);
++    let lpc_meta_len = per_channel.iter().fold(0usize, |total, channel| {
++        total.saturating_add(channel.meta.len())
++    });
++    let payload_len = bounded_payload_len(per_channel, tagged);
++    let mode_label = if noise_bits == 0 { "lossless" } else { "noise" };
++    let prefix = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode_label);
++    let packet_len = prefix
++        .len()
++        .saturating_add(HEADER_SIZE)
++        .saturating_add(lpc_meta_len)
++        .saturating_add(payload_len);
++    enforce_output_limit(packet_len, maximum_output_bytes, "LML packet")?;
++
++    let lpc_meta_len_u32 = u32::try_from(lpc_meta_len)
++        .map_err(|_| output_limit_error(lpc_meta_len, u32::MAX as usize, "LML LPC metadata"))?;
++    let payload_len_u32 = u32::try_from(payload_len)
++        .map_err(|_| output_limit_error(payload_len, u32::MAX as usize, "LML payload"))?;
++    let mut flags = (noise_bits & 0x3f) << 2;
++    if tagged {
++        flags |= FLAG_BIT_PER_SUBBAND_TAG;
++    }
++    let mut header_var = [0u8; 14];
++    header_var[0..2].copy_from_slice(&(n_ch as u16).to_le_bytes());
++    header_var[2..4].copy_from_slice(&(t as u16).to_le_bytes());
++    header_var[4] = n_levels;
++    header_var[5] = flags;
++    header_var[6..10].copy_from_slice(&lpc_meta_len_u32.to_le_bytes());
++    header_var[10..14].copy_from_slice(&payload_len_u32.to_le_bytes());
++
++    let mut out = Vec::with_capacity(packet_len);
++    out.extend_from_slice(prefix.as_bytes());
++    out.extend_from_slice(MAGIC);
++    out.extend_from_slice(&header_var);
++    let crc_offset = out.len();
++    out.extend_from_slice(&[0u8; 4]);
++    let metadata_offset = out.len();
++    for channel in per_channel {
++        out.extend_from_slice(&channel.meta);
++    }
++    let payload_offset = out.len();
++    for channel in per_channel {
++        for subband in &channel.subbands {
++            if tagged {
++                out.push(subband.winner_tag);
++                if let Some(bytes) = &subband.winner_bytes {
++                    out.extend_from_slice(bytes);
++                } else {
++                    append_bounded_golomb(&mut out, subband)?;
++                }
++            } else {
++                append_bounded_golomb(&mut out, subband)?;
++            }
++        }
++    }
++    debug_assert_eq!(out.len(), packet_len);
++
++    let mut crc_state = CRC32_INIT;
++    crc_state = crc32_update(crc_state, &header_var);
++    crc_state = crc32_update(crc_state, &out[metadata_offset..payload_offset]);
++    crc_state = crc32_update(crc_state, &out[payload_offset..]);
++    out[crc_offset..crc_offset + 4].copy_from_slice(&(crc_state ^ CRC32_INIT).to_le_bytes());
++    Ok(out)
++}
++
+ /// Build the framed LML1 packet (ASCII prefix + magic + 14-byte header + CRC-32
+ /// + lpc_meta + payload) from finalized channel bytes. Byte-identical regardless
+ /// of which orchestrator (serial/parallel) produced the inputs.
+@@ -789,43 +989,76 @@ fn encode_channels_core(
+     policy: EncodePolicy,
+     mode: lpc::LpcMode,
+ ) -> LmlResult<Vec<u8>> {
+-    let per_channel_limit = channel_payload_limit(policy.max_packet_bytes, n_ch, t, n_levels)?;
++    if let Some(maximum_output_bytes) = policy.max_packet_bytes {
++        return encode_channels_core_complete_bounded(
++            channels,
++            n_ch,
++            t,
++            n_levels,
++            noise_bits,
++            policy.flags,
++            mode,
++            maximum_output_bytes,
++        );
++    }
+     let mut per_channel = Vec::with_capacity(n_ch);
+     for &ch in channels.iter() {
+-        let encoded = if policy.max_packet_bytes.is_some() {
+-            encode_one_channel_bounded(
+-                ch,
+-                n_levels,
+-                mode,
+-                policy.flags.0,
+-                policy.flags.1,
+-                policy.flags.2,
+-                per_channel_limit,
+-            )?
+-        } else {
+-            encode_one_channel(
+-                ch,
+-                n_levels,
+-                mode,
+-                policy.flags.0,
+-                policy.flags.1,
+-                policy.flags.2,
+-            )?
+-        };
+-        per_channel.push(encoded);
++        per_channel.push(encode_one_channel(
++            ch,
++            n_levels,
++            mode,
++            policy.flags.0,
++            policy.flags.1,
++            policy.flags.2,
++        )?);
+     }
+     let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
+-    let packet = assemble_lml_packet(n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload);
+-    if let Some(limit) = policy.max_packet_bytes {
+-        if packet.len() > limit {
+-            return Err(LmlError::InvalidHeader(alloc::format!(
+-                "encoded packet requires {} bytes, limit is {}",
+-                packet.len(),
+-                limit
+-            )));
+-        }
++    Ok(assemble_lml_packet(
++        n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload,
++    ))
++}
++
++#[allow(clippy::too_many_arguments)]
++fn encode_channels_core_complete_bounded(
++    channels: &[&[i64]],
++    n_ch: usize,
++    t: usize,
++    n_levels: u8,
++    noise_bits: u8,
++    flags: (bool, bool, bool),
++    mode: lpc::LpcMode,
++    maximum_output_bytes: usize,
++) -> LmlResult<Vec<u8>> {
++    let mode_label = if noise_bits == 0 { "lossless" } else { "noise" };
++    let packet_overhead = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode_label)
++        .len()
++        .saturating_add(HEADER_SIZE);
++    enforce_output_limit(packet_overhead, maximum_output_bytes, "LML packet header")?;
++
++    let mut per_channel = Vec::with_capacity(n_ch);
++    for &channel in channels {
++        let retained_body = bounded_minimum_body_len(&per_channel);
++        let remaining_body = maximum_output_bytes
++            .saturating_sub(packet_overhead)
++            .saturating_sub(retained_body);
++        per_channel.push(encode_one_channel_complete_bounded(
++            channel,
++            n_levels,
++            mode,
++            flags.0,
++            flags.1,
++            flags.2,
++            remaining_body,
++        )?);
+     }
+-    Ok(packet)
++    assemble_complete_bounded_channels(
++        &per_channel,
++        n_ch,
++        t,
++        n_levels,
++        noise_bits,
++        maximum_output_bytes,
++    )
+ }
+ 
+ /// Conservative per-channel entropy budget used before any large payload
+@@ -946,15 +1179,39 @@ fn encode_maybe_skip_explicit(
+         noise_bits,
+         policy,
+         mode,
+-    )?;
+-    if try_transform_skip && shape.n_levels > 0 {
+-        let skip =
+-            encode_channels_core(channels, shape.n_ch, shape.t, 0, noise_bits, policy, mode)?;
+-        if skip.len() < full.len() {
+-            return Ok(skip);
++    );
++    if !try_transform_skip || shape.n_levels == 0 {
++        return full;
++    }
++    let skip = encode_channels_core(channels, shape.n_ch, shape.t, 0, noise_bits, policy, mode);
++    // Output ceilings apply independently to each candidate. Keep any successful
++    // candidate; when both exceed the ceiling, return the tighter exact requirement.
++    // Non-limit failures still propagate instead of being hidden by transform skip.
++    match (full, skip) {
++        (Ok(full), Ok(skip)) => {
++            if skip.len() < full.len() {
++                Ok(skip)
++            } else {
++                Ok(full)
++            }
++        }
++        (Ok(full), Err(skip_error)) if output_limit_required(&skip_error).is_some() => Ok(full),
++        (Err(full_error), Ok(skip)) if output_limit_required(&full_error).is_some() => Ok(skip),
++        (Ok(_), Err(skip_error)) => Err(skip_error),
++        (Err(full_error), Ok(_)) => Err(full_error),
++        (Err(full_error), Err(skip_error)) => {
++            match (
++                output_limit_required(&full_error),
++                output_limit_required(&skip_error),
++            ) {
++                (Some(full_required), Some(skip_required)) if skip_required < full_required => {
++                    Err(skip_error)
++                }
++                (Some(_), Some(_)) | (None, _) => Err(full_error),
++                (Some(_), None) => Err(skip_error),
++            }
+         }
+     }
+-    Ok(full)
+ }
+ 
+ /// Compress [n_ch][T] signal → LML1 packet bytes with explicit LPC mode.
+@@ -1210,6 +1467,15 @@ pub fn compress_target_bps(
+         return compress_target_bps_pcrd(signal, target_bps, mode);
+     }
+ 
++    compress_target_bps_global(signal, target_bps, mode)
++}
++
++#[cfg(feature = "std")]
++fn compress_target_bps_global(
++    signal: &[Vec<i64>],
++    target_bps: f64,
++    mode: lpc::LpcMode,
++) -> LmlResult<Vec<u8>> {
+     let n_ch = signal.len();
+     let t = if n_ch > 0 { signal[0].len() } else { 0 };
+     validate_track2_dims(signal, n_ch, t)?;
+@@ -1463,14 +1729,42 @@ pub fn compress_target_bps_pcrd(
+     }
+     lpc_meta.extend_from_slice(&meta_body);
+ 
+-    Ok(assemble_track2_packet(
+-        n_ch,
+-        t,
+-        n_levels,
+-        "lossy-bps",
+-        &lpc_meta,
+-        &payload,
+-    ))
++    let pcrd_packet = assemble_track2_packet(n_ch, t, n_levels, "lossy-bps", &lpc_meta, &payload);
++
++    // Weighted coefficient-domain SSE is only an approximation of final
++    // signal-domain error. Encoder feature sets can change measured R-D curves
++    // enough for PCRD to lose against the global-scale baseline. Preserve the
++    // public no-regression contract by comparing both final decodable packets.
++    let global_packet = compress_target_bps_global(signal, target_bps, mode)?;
++    if reconstruction_sse(signal, &global_packet)? < reconstruction_sse(signal, &pcrd_packet)? {
++        Ok(global_packet)
++    } else {
++        Ok(pcrd_packet)
++    }
++}
++
++#[cfg(feature = "std")]
++fn reconstruction_sse(signal: &[Vec<i64>], packet: &[u8]) -> LmlResult<u128> {
++    let reconstructed = decompress(packet)?;
++    if reconstructed.len() != signal.len()
++        || reconstructed
++            .iter()
++            .zip(signal)
++            .any(|(actual, expected)| actual.len() != expected.len())
++    {
++        return Err(LmlError::InvalidHeader(
++            "rate-control candidate reconstructed with mismatched shape".into(),
++        ));
++    }
++    Ok(signal
++        .iter()
++        .zip(reconstructed)
++        .flat_map(|(expected, actual)| expected.iter().zip(actual))
++        .fold(0u128, |total, (expected, actual)| {
++            let delta = i128::from(*expected) - i128::from(actual);
++            let squared = delta.unsigned_abs().saturating_mul(delta.unsigned_abs());
++            total.saturating_add(squared)
++        }))
+ }
+ 
+ /// Decode a track-2 packet (lpc_meta begins with a `mode_id`). Shared by the
+@@ -1833,6 +2127,168 @@ pub fn encode_one_channel_bounded(
+     )
+ }
+ 
++#[allow(clippy::too_many_arguments)]
++fn encode_one_channel_complete_bounded(
++    signal_ch: &[i64],
++    n_levels: u8,
++    mode: lpc::LpcMode,
++    try_arithmetic: bool,
++    try_bit_pack: bool,
++    try_extended_lpc: bool,
++    maximum_body_bytes: usize,
++) -> LmlResult<CompleteBoundedChannel> {
++    let subbands = forward_subbands(signal_ch, n_levels);
++    let mut meta = Vec::with_capacity(subbands.len() * 40);
++    let mut outputs = Vec::with_capacity(subbands.len());
++
++    for (sb_idx, subband) in subbands.iter().enumerate() {
++        #[cfg(feature = "std")]
++        let burg_ceiling = if try_extended_lpc {
++            lpc_max_order_extended(subband.len())
++        } else {
++            lpc_max_order(subband.len())
++        };
++        #[cfg(not(feature = "std"))]
++        let burg_ceiling = {
++            let _ = try_extended_lpc;
++            lpc_max_order(subband.len())
++        };
++        let scoped_mode = scope_lpc_mode(mode, burg_ceiling);
++        let (coeffs, residual, chosen_order) =
++            lpc::analyze_with_mode(subband, sb_idx, scoped_mode, BIAS_CTX, None);
++        meta.push(chosen_order as u8);
++        for coefficient in coeffs {
++            meta.extend_from_slice(&coefficient.to_le_bytes());
++        }
++
++        let golomb_len = golomb::encoded_byte_len(&residual)?;
++
++        #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
++        {
++            let (winner_tag, winner_bytes, savings) = if try_arithmetic || try_bit_pack {
++                let max_abs = residual
++                    .iter()
++                    .map(|&value| {
++                        if value == i64::MIN {
++                            i64::MAX
++                        } else {
++                            value.abs()
++                        }
++                    })
++                    .fold(0i64, i64::max);
++
++                #[cfg(feature = "experimental_bit_pack")]
++                let bit_pack_size = if try_bit_pack && max_abs <= (1i64 << 12) {
++                    bit_pack::encoded_byte_len(&residual).unwrap_or(usize::MAX)
++                } else {
++                    usize::MAX
++                };
++                #[cfg(not(feature = "experimental_bit_pack"))]
++                let bit_pack_size = usize::MAX;
++
++                #[cfg(feature = "experimental_arithmetic")]
++                let arithmetic_bytes = if try_arithmetic && max_abs <= (1i64 << 12) {
++                    Some(crate::arithmetic::encode_dense(&residual))
++                } else {
++                    None
++                };
++                #[cfg(not(feature = "experimental_arithmetic"))]
++                let arithmetic_bytes: Option<Vec<u8>> = None;
++                let arithmetic_size = arithmetic_bytes
++                    .as_ref()
++                    .map(Vec::len)
++                    .unwrap_or(usize::MAX);
++
++                if arithmetic_size < golomb_len && arithmetic_size < bit_pack_size {
++                    #[cfg(feature = "experimental_arithmetic")]
++                    {
++                        (
++                            SUBBAND_TAG_ARITHMETIC,
++                            arithmetic_bytes,
++                            golomb_len - arithmetic_size,
++                        )
++                    }
++                    #[cfg(not(feature = "experimental_arithmetic"))]
++                    {
++                        unreachable!("arithmetic cannot win when feature is disabled");
++                    }
++                } else if bit_pack_size < golomb_len {
++                    #[cfg(feature = "experimental_bit_pack")]
++                    {
++                        let bytes = bit_pack::encode_dense(&residual).map_err(|error| {
++                            LmlError::InvalidHeader(alloc::format!(
++                                "bit_pack::encode_dense failed: {error}"
++                            ))
++                        })?;
++                        (
++                            SUBBAND_TAG_BIT_PACK,
++                            Some(bytes),
++                            golomb_len - bit_pack_size,
++                        )
++                    }
++                    #[cfg(not(feature = "experimental_bit_pack"))]
++                    {
++                        unreachable!("bit-pack cannot win when feature is disabled");
++                    }
++                } else {
++                    (SUBBAND_TAG_GOLOMB, None, 0)
++                }
++            } else {
++                (SUBBAND_TAG_GOLOMB, None, 0)
++            };
++
++            let required_body = bounded_channel_minimum_len(meta.len(), &outputs).saturating_add(
++                bounded_subband_minimum_len(golomb_len, winner_bytes.as_deref()),
++            );
++            enforce_output_limit(required_body, maximum_body_bytes, "LML channel lower bound")?;
++            if winner_bytes.is_some() {
++                outputs.push(CompleteBoundedSubband {
++                    golomb_len,
++                    golomb: BoundedGolomb::Deferred(residual),
++                    winner_tag,
++                    winner_bytes,
++                    savings,
++                });
++            } else {
++                let remaining_bytes = maximum_body_bytes
++                    .saturating_sub(bounded_channel_minimum_len(meta.len(), &outputs));
++                let golomb_bytes = golomb::encode_dense_bounded(&residual, remaining_bytes)?;
++                outputs.push(CompleteBoundedSubband {
++                    golomb_len,
++                    golomb: BoundedGolomb::Encoded(golomb_bytes),
++                    winner_tag,
++                    winner_bytes: None,
++                    savings,
++                });
++            }
++        }
++
++        #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
++        {
++            let _ = try_arithmetic;
++            let _ = try_bit_pack;
++            let required_body =
++                bounded_channel_minimum_len(meta.len(), &outputs).saturating_add(golomb_len);
++            enforce_output_limit(required_body, maximum_body_bytes, "LML channel lower bound")?;
++            let remaining_bytes = maximum_body_bytes
++                .saturating_sub(bounded_channel_minimum_len(meta.len(), &outputs));
++            let golomb_bytes = golomb::encode_dense_bounded(&residual, remaining_bytes)?;
++            outputs.push(CompleteBoundedSubband {
++                golomb_len,
++                golomb: BoundedGolomb::Encoded(golomb_bytes),
++                winner_tag: SUBBAND_TAG_GOLOMB,
++                winner_bytes: None,
++                savings: 0,
++            });
++        }
++    }
++
++    Ok(CompleteBoundedChannel {
++        meta,
++        subbands: outputs,
++    })
++}
++
+ fn encode_one_channel_impl(
+     signal_ch: &[i64],
+     n_levels: u8,
+@@ -2674,6 +3130,45 @@ mod tests {
+         assert!(requires_arithmetic_coders(&disguised));
+     }
+ 
++    #[cfg(feature = "experimental_arithmetic")]
++    #[test]
++    fn bounded_arithmetic_accepts_its_exact_packet_ceiling() {
++        let signal = [alloc::vec![0_i64; 4096]];
++        let views = [signal[0].as_slice()];
++        let arithmetic = compress_with_mode_views_explicit(
++            &views,
++            0,
++            lpc::LpcMode::Fixed,
++            EncodeFeatures {
++                arithmetic: true,
++                ..EncodeFeatures::default()
++            },
++        )
++        .expect("unbounded arithmetic packet");
++        let golomb = compress_with_mode_views_explicit(
++            &views,
++            0,
++            lpc::LpcMode::Fixed,
++            EncodeFeatures::default(),
++        )
++        .expect("unbounded Golomb packet");
++        assert!(requires_arithmetic_coders(&arithmetic));
++        assert!(arithmetic.len() < golomb.len());
++
++        let bounded = compress_with_mode_views_explicit(
++            &views,
++            0,
++            lpc::LpcMode::Fixed,
++            EncodeFeatures {
++                arithmetic: true,
++                max_packet_bytes: Some(arithmetic.len()),
++                ..EncodeFeatures::default()
++            },
++        )
++        .expect("winning arithmetic packet fits exact ceiling");
++        assert_eq!(bounded, arithmetic);
++    }
++
+     #[test]
+     fn channel_payload_limit_rejects_zero_channels() {
+         assert!(channel_payload_limit(Some(1024), 0, 1, 0).is_err());
+@@ -3043,6 +3538,91 @@ mod tests {
+     }
+ }
+ 
++#[test]
++fn bounded_explicit_baseline_matches_unbounded_at_exact_ceiling() {
++    let signal = [
++        (0..313).map(|sample| sample as i64 * 7 - 91).collect(),
++        (0..313)
++            .map(|sample| ((sample * sample) % 97) as i64 - 48)
++            .collect(),
++    ];
++    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
++    let unbounded = compress_with_mode_views_explicit(
++        &views,
++        0,
++        lpc::LpcMode::Fixed,
++        EncodeFeatures::default(),
++    )
++    .expect("unbounded baseline encode");
++    let bounded = compress_with_mode_views_explicit(
++        &views,
++        0,
++        lpc::LpcMode::Fixed,
++        EncodeFeatures {
++            max_packet_bytes: Some(unbounded.len()),
++            ..EncodeFeatures::default()
++        },
++    )
++    .expect("exact packet ceiling must admit output");
++    assert_eq!(bounded, unbounded);
++    assert!(matches!(
++        compress_with_mode_views_explicit(
++            &views,
++            0,
++            lpc::LpcMode::Fixed,
++            EncodeFeatures {
++                max_packet_bytes: Some(unbounded.len() - 1),
++                ..EncodeFeatures::default()
++            },
++        ),
++        Err(LmlError::OutputLimit { .. })
++            | Err(LmlError::Golomb(
++                crate::codec_errors::GolombError::OutputLimitExceeded { .. }
++            ))
++    ));
++}
++
++#[test]
++fn bounded_channel_rejects_cumulative_subbands_before_retaining_all_outputs() {
++    let signal = (0..4096)
++        .map(|sample| ((sample * 7919) % 65_521) as i64 - 32_760)
++        .collect::<Vec<_>>();
++    let subbands = forward_subbands(&signal, 3);
++    let mut body_sizes = Vec::new();
++    for (subband_index, subband) in subbands.iter().enumerate() {
++        let scoped = scope_lpc_mode(lpc::LpcMode::Fixed, lpc_max_order(subband.len()));
++        let (coefficients, residual, _) =
++            lpc::analyze_with_mode(subband, subband_index, scoped, BIAS_CTX, None);
++        body_sizes.push(
++            1usize
++                .saturating_add(coefficients.len().saturating_mul(4))
++                .saturating_add(golomb::encoded_byte_len(&residual).expect("Golomb size")),
++        );
++    }
++    let largest_subband = body_sizes.iter().copied().max().expect("subbands");
++    let complete_body = body_sizes.iter().copied().sum::<usize>();
++    assert!(complete_body > largest_subband);
++    let ceiling = largest_subband + (complete_body - largest_subband) / 2;
++
++    let error = encode_one_channel_complete_bounded(
++        &signal,
++        3,
++        lpc::LpcMode::Fixed,
++        false,
++        false,
++        false,
++        ceiling,
++    )
++    .expect_err("cumulative subbands must exceed channel budget");
++    assert!(matches!(
++        error,
++        LmlError::OutputLimit {
++            context: "LML channel lower bound",
++            ..
++        }
++    ));
++}
++
+ #[test]
+ fn roundtrip_small_windows() {
+     // Test various small window sizes that can occur as the last window
+diff --git a/lamquant-lml-mcu/src/lpc.rs b/lamquant-lml-mcu/src/lpc.rs
+index edb2c98..5bb4884 100644
+--- a/lamquant-lml-mcu/src/lpc.rs
++++ b/lamquant-lml-mcu/src/lpc.rs
+@@ -801,10 +801,9 @@ pub fn analyze_blockfloat(subband: &[i64], order: usize, ctx_len: usize) -> (Vec
+     (coeffs, residual)
+ }
+ 
+-/// Floor division (rounds toward -infinity), matching Python's `//` operator.
+-/// Rust's `/` truncates toward zero, which diverges for negative dividends.
++/// Floor division on wide running sums, matching Python's `//` for negatives.
+ #[inline(always)]
+-fn floor_div(a: i64, b: i64) -> i64 {
++fn floor_div_wide(a: i128, b: i128) -> i128 {
+     let d = a / b;
+     if (a ^ b) < 0 && d * b != a {
+         d - 1
+@@ -813,27 +812,87 @@ fn floor_div(a: i64, b: i64) -> i64 {
+     }
+ }
+ 
++#[inline(always)]
++fn checked_running_sum(running_sum: i64, value: i64, old: i64) -> Option<i64> {
++    running_sum
++        .checked_add(value)
++        .and_then(|sum| sum.checked_sub(old))
++}
++
+ /// Causal running-mean subtraction (Sriraam), exactly invertible by [`bias_restore`]. `pub` so
+ /// the Optimum tier's `CODER_MV_RLS_BC` can reuse this one source (integer, `no_std`, reversible).
+ pub fn bias_cancel(data: &mut [i64], ctx_len: usize) {
+-    let mask = if ctx_len.is_power_of_two() {
+-        ctx_len - 1
+-    } else {
+-        0
+-    };
+-    let use_mask = mask != 0;
++    if ctx_len == 0 || data.is_empty() {
++        return;
++    }
+     let mut buf = vec![0i64; ctx_len];
+     let mut running_sum = 0i64;
+-    let ctx = ctx_len as i64;
+-
+-    for i in 0..data.len() {
+-        let bias = floor_div(running_sum, ctx);
+-        let val = data[i];
+-        data[i] -= bias;
+-        let slot = if use_mask { i & mask } else { i % ctx_len };
+-        let old = buf[slot];
+-        buf[slot] = val;
+-        running_sum += val - old;
++    if ctx_len.is_power_of_two() {
++        let mask = ctx_len - 1;
++        let shift = ctx_len.trailing_zeros();
++        let mut wide_tail = None;
++        for i in 0..data.len() {
++            let bias = running_sum >> shift;
++            let value = data[i];
++            data[i] = value.wrapping_sub(bias);
++            let slot = i & mask;
++            let old = buf[slot];
++            buf[slot] = value;
++            match checked_running_sum(running_sum, value, old) {
++                Some(next) => running_sum = next,
++                None => {
++                    wide_tail = Some((
++                        i + 1,
++                        i128::from(running_sum) + i128::from(value) - i128::from(old),
++                    ));
++                    break;
++                }
++            }
++        }
++        if let Some((start, mut wide_sum)) = wide_tail {
++            for i in start..data.len() {
++                let bias = (wide_sum >> shift) as i64;
++                let value = data[i];
++                data[i] = value.wrapping_sub(bias);
++                let slot = i & mask;
++                let old = buf[slot];
++                buf[slot] = value;
++                wide_sum += i128::from(value) - i128::from(old);
++            }
++        }
++    } else {
++        let ctx = ctx_len as i64;
++        let mut wide_tail = None;
++        for i in 0..data.len() {
++            let bias = floor_div_wide(i128::from(running_sum), i128::from(ctx)) as i64;
++            let value = data[i];
++            data[i] = value.wrapping_sub(bias);
++            let slot = i % ctx_len;
++            let old = buf[slot];
++            buf[slot] = value;
++            match checked_running_sum(running_sum, value, old) {
++                Some(next) => running_sum = next,
++                None => {
++                    wide_tail = Some((
++                        i + 1,
++                        i128::from(running_sum) + i128::from(value) - i128::from(old),
++                    ));
++                    break;
++                }
++            }
++        }
++        if let Some((start, mut wide_sum)) = wide_tail {
++            let wide_ctx = i128::from(ctx);
++            for i in start..data.len() {
++                let bias = floor_div_wide(wide_sum, wide_ctx) as i64;
++                let value = data[i];
++                data[i] = value.wrapping_sub(bias);
++                let slot = i % ctx_len;
++                let old = buf[slot];
++                buf[slot] = value;
++                wide_sum += i128::from(value) - i128::from(old);
++            }
++        }
+     }
+ }
+ 
+@@ -841,23 +900,73 @@ pub fn bias_cancel(data: &mut [i64], ctx_len: usize) {
+ /// the Optimum tier's `CODER_MV_RLS_BC` decode.
+ #[inline]
+ pub fn bias_restore(data: &mut [i64], ctx_len: usize) {
+-    let mask = if ctx_len.is_power_of_two() {
+-        ctx_len - 1
+-    } else {
+-        0
+-    };
+-    let use_mask = mask != 0;
++    if ctx_len == 0 || data.is_empty() {
++        return;
++    }
+     let mut buf = vec![0i64; ctx_len];
+     let mut running_sum = 0i64;
+-    let ctx = ctx_len as i64;
+-
+-    for i in 0..data.len() {
+-        let bias = floor_div(running_sum, ctx);
+-        data[i] += bias;
+-        let slot = if use_mask { i & mask } else { i % ctx_len };
+-        let old = buf[slot];
+-        buf[slot] = data[i];
+-        running_sum += data[i] - old;
++    if ctx_len.is_power_of_two() {
++        let mask = ctx_len - 1;
++        let shift = ctx_len.trailing_zeros();
++        let mut wide_tail = None;
++        for i in 0..data.len() {
++            let bias = running_sum >> shift;
++            data[i] = data[i].wrapping_add(bias);
++            let slot = i & mask;
++            let old = buf[slot];
++            buf[slot] = data[i];
++            match checked_running_sum(running_sum, data[i], old) {
++                Some(next) => running_sum = next,
++                None => {
++                    wide_tail = Some((
++                        i + 1,
++                        i128::from(running_sum) + i128::from(data[i]) - i128::from(old),
++                    ));
++                    break;
++                }
++            }
++        }
++        if let Some((start, mut wide_sum)) = wide_tail {
++            for i in start..data.len() {
++                let bias = (wide_sum >> shift) as i64;
++                data[i] = data[i].wrapping_add(bias);
++                let slot = i & mask;
++                let old = buf[slot];
++                buf[slot] = data[i];
++                wide_sum += i128::from(data[i]) - i128::from(old);
++            }
++        }
++    } else {
++        let ctx = ctx_len as i64;
++        let mut wide_tail = None;
++        for i in 0..data.len() {
++            let bias = floor_div_wide(i128::from(running_sum), i128::from(ctx)) as i64;
++            data[i] = data[i].wrapping_add(bias);
++            let slot = i % ctx_len;
++            let old = buf[slot];
++            buf[slot] = data[i];
++            match checked_running_sum(running_sum, data[i], old) {
++                Some(next) => running_sum = next,
++                None => {
++                    wide_tail = Some((
++                        i + 1,
++                        i128::from(running_sum) + i128::from(data[i]) - i128::from(old),
++                    ));
++                    break;
++                }
++            }
++        }
++        if let Some((start, mut wide_sum)) = wide_tail {
++            let wide_ctx = i128::from(ctx);
++            for i in start..data.len() {
++                let bias = floor_div_wide(wide_sum, wide_ctx) as i64;
++                data[i] = data[i].wrapping_add(bias);
++                let slot = i % ctx_len;
++                let old = buf[slot];
++                buf[slot] = data[i];
++                wide_sum += i128::from(data[i]) - i128::from(old);
++            }
++        }
+     }
+ }
+ 
+@@ -914,6 +1023,24 @@ mod tests {
+         assert_eq!(synthesize(&r, &c, 2, 16), signal);
+     }
+ 
++    #[test]
++    fn bias_transform_roundtrips_extreme_values_without_overflow() {
++        let original = vec![
++            i64::MAX,
++            i64::MAX,
++            i64::MIN + 1,
++            0,
++            i64::MAX - 1,
++            i64::MIN + 2,
++        ];
++        for context in [1, 2, 3, 4, 7, 16] {
++            let mut transformed = original.clone();
++            bias_cancel(&mut transformed, context);
++            bias_restore(&mut transformed, context);
++            assert_eq!(transformed, original, "context={context}");
++        }
++    }
++
+     #[test]
+     fn fixed_mode_uses_legacy_schedule() {
+         let sub: Vec<i64> = (0..1250).map(|i| ((i * 31) % 4000 - 2000) as i64).collect();

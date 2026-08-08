@@ -1,0 +1,193 @@
+diff --git a/lamquant-lml-mcu/src/lml.rs b/lamquant-lml-mcu/src/lml.rs
+index 1dad0d6..1698803 100644
+--- a/lamquant-lml-mcu/src/lml.rs
++++ b/lamquant-lml-mcu/src/lml.rs
+@@ -686,6 +686,7 @@ fn output_limit_required(error: &LmlError) -> Option<u64> {
+     }
+ }
+ 
++#[derive(Debug)]
+ struct BoundedSubbandOutput {
+     golomb_len: usize,
+     golomb_bytes: Option<Vec<u8>>,
+@@ -695,6 +696,7 @@ struct BoundedSubbandOutput {
+     savings: usize,
+ }
+ 
++#[derive(Debug)]
+ struct BoundedChannelOutput {
+     meta: Vec<u8>,
+     subbands: Vec<BoundedSubbandOutput>,
+@@ -749,6 +751,29 @@ fn bounded_minimum_body_len(per_channel: &[BoundedChannelOutput]) -> usize {
+     })
+ }
+ 
++fn bounded_subband_minimum_len(
++    golomb_len: usize,
++    winner_bytes: Option<&Vec<u8>>,
++) -> usize {
++    let tagged_len = winner_bytes
++        .map(Vec::len)
++        .unwrap_or(golomb_len)
++        .saturating_add(1);
++    golomb_len.min(tagged_len)
++}
++
++fn bounded_channel_minimum_len(
++    metadata_len: usize,
++    subbands: &[BoundedSubbandOutput],
++) -> usize {
++    subbands.iter().fold(metadata_len, |total, subband| {
++        total.saturating_add(bounded_subband_minimum_len(
++            subband.golomb_len,
++            subband.winner_bytes.as_ref(),
++        ))
++    })
++}
++
+ fn append_bounded_golomb(out: &mut Vec<u8>, subband: &BoundedSubbandOutput) -> LmlResult<()> {
+     if let Some(bytes) = &subband.golomb_bytes {
+         out.extend_from_slice(bytes);
+@@ -1006,7 +1031,16 @@ fn encode_channels_core_bounded(
+     maximum_output_bytes: usize,
+ ) -> LmlResult<Vec<u8>> {
+     let mut per_channel = Vec::with_capacity(n_ch);
++    let mode_label = if noise_bits == 0 { "lossless" } else { "noise" };
++    let packet_overhead = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode_label)
++        .len()
++        .saturating_add(HEADER_SIZE);
++    enforce_output_limit(packet_overhead, maximum_output_bytes, "LML packet header")?;
+     for &ch in channels.iter() {
++        let retained_body = bounded_minimum_body_len(&per_channel);
++        let remaining_body = maximum_output_bytes
++            .saturating_sub(packet_overhead)
++            .saturating_sub(retained_body);
+         per_channel.push(encode_one_channel_bounded(
+             ch,
+             n_levels,
+@@ -1014,18 +1048,8 @@ fn encode_channels_core_bounded(
+             flags.0,
+             flags.1,
+             flags.2,
+-            maximum_output_bytes,
++            remaining_body,
+         )?);
+-        let mode_label = if noise_bits == 0 { "lossless" } else { "noise" };
+-        let minimum_packet_len = format!("LML | {}ch | {} | CRC-32\n", n_ch, mode_label)
+-            .len()
+-            .saturating_add(HEADER_SIZE)
+-            .saturating_add(bounded_minimum_body_len(&per_channel));
+-        enforce_output_limit(
+-            minimum_packet_len,
+-            maximum_output_bytes,
+-            "LML packet lower bound",
+-        )?;
+     }
+     assemble_bounded_channels(
+         &per_channel,
+@@ -2263,7 +2287,7 @@ fn encode_one_channel_bounded(
+     try_arithmetic: bool,
+     try_bit_pack: bool,
+     try_extended_lpc: bool,
+-    maximum_output_bytes: usize,
++    maximum_body_bytes: usize,
+ ) -> LmlResult<BoundedChannelOutput> {
+     let subbands = forward_subbands(signal_ch, n_levels);
+     let mut meta = Vec::with_capacity(subbands.len() * 40);
+@@ -2370,6 +2394,16 @@ fn encode_one_channel_bounded(
+                 (SUBBAND_TAG_GOLOMB, None, 0)
+             };
+ 
++            let required_body = bounded_channel_minimum_len(meta.len(), &outputs)
++                .saturating_add(bounded_subband_minimum_len(
++                    golomb_len,
++                    winner_bytes.as_ref(),
++                ));
++            enforce_output_limit(
++                required_body,
++                maximum_body_bytes,
++                "LML channel lower bound",
++            )?;
+             if winner_bytes.is_some() {
+                 outputs.push(BoundedSubbandOutput {
+                     golomb_len,
+@@ -2380,7 +2414,10 @@ fn encode_one_channel_bounded(
+                     savings,
+                 });
+             } else {
+-                let golomb_bytes = golomb::encode_dense_bounded(&residual, maximum_output_bytes)?;
++                let remaining_bytes = maximum_body_bytes.saturating_sub(
++                    bounded_channel_minimum_len(meta.len(), &outputs),
++                );
++                let golomb_bytes = golomb::encode_dense_bounded(&residual, remaining_bytes)?;
+                 outputs.push(BoundedSubbandOutput {
+                     golomb_len,
+                     golomb_bytes: Some(golomb_bytes),
+@@ -2396,7 +2433,17 @@ fn encode_one_channel_bounded(
+         {
+             let _ = try_arithmetic;
+             let _ = try_bit_pack;
+-            let golomb_bytes = golomb::encode_dense_bounded(&residual, maximum_output_bytes)?;
++            let required_body = bounded_channel_minimum_len(meta.len(), &outputs)
++                .saturating_add(golomb_len);
++            enforce_output_limit(
++                required_body,
++                maximum_body_bytes,
++                "LML channel lower bound",
++            )?;
++            let remaining_bytes = maximum_body_bytes.saturating_sub(
++                bounded_channel_minimum_len(meta.len(), &outputs),
++            );
++            let golomb_bytes = golomb::encode_dense_bounded(&residual, remaining_bytes)?;
+             outputs.push(BoundedSubbandOutput {
+                 golomb_len,
+                 golomb_bytes: Some(golomb_bytes),
+@@ -3446,6 +3493,48 @@ fn bounded_explicit_options_reject_extreme_packet_without_large_allocation() {
+     ));
+ }
+ 
++#[test]
++fn bounded_channel_rejects_cumulative_subbands_before_retaining_all_outputs() {
++    let signal = (0..4096)
++        .map(|sample| ((sample * 7919) % 65_521) as i64 - 32_760)
++        .collect::<Vec<_>>();
++    let subbands = forward_subbands(&signal, 3);
++    let mut body_sizes = Vec::new();
++    for (subband_index, subband) in subbands.iter().enumerate() {
++        let scoped = scope_lpc_mode(lpc::LpcMode::Fixed, lpc_max_order(subband.len()));
++        let (coefficients, residual, _) =
++            lpc::analyze_with_mode(subband, subband_index, scoped, BIAS_CTX, None);
++        body_sizes.push(
++            1usize
++                .saturating_add(coefficients.len().saturating_mul(4))
++                .saturating_add(golomb::encoded_byte_len(&residual).expect("Golomb size")),
++        );
++    }
++    let largest_subband = body_sizes.iter().copied().max().expect("subbands");
++    let complete_body = body_sizes.iter().copied().sum::<usize>();
++    assert!(complete_body > largest_subband);
++    let ceiling = largest_subband + (complete_body - largest_subband) / 2;
++
++    let error =
++        encode_one_channel_bounded(
++            &signal,
++            3,
++            lpc::LpcMode::Fixed,
++            false,
++            false,
++            false,
++            ceiling,
++        )
++        .expect_err("cumulative subbands must exceed channel budget");
++    assert!(matches!(
++        error,
++        LmlError::OutputLimit {
++            context: "LML channel lower bound",
++            ..
++        }
++    ));
++}
++
+ #[test]
+ #[cfg(not(feature = "experimental_arithmetic"))]
+ fn explicit_arithmetic_option_fails_closed_when_not_compiled() {
