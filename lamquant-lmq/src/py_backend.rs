@@ -52,7 +52,19 @@ pub use production::{
     ProductionPyBackendConfig,
 };
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a single helper invocation may take before it is killed.
+///
+/// Generous on purpose: loading a checkpoint onto CPU and running inference over
+/// a window is slow, and a timeout that fires during ordinary work is worse than
+/// none -- it would turn a slow machine into a failing one. The value that
+/// matters is that it is FINITE; a helper that stalls forever used to stall its
+/// caller forever with it.
+///
+/// 120s here and 600s on the published main were independent implementations of
+/// the same bound. Reconciled to the more conservative value, with the reasoning
+/// that argued for it, because the failure modes are not symmetric: too generous
+/// still bounds a hang, too tight kills real inference.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const HELPER_MODEL_REJECTION_EXIT_CODE: i32 = 64;
 const DEFAULT_REQUEST_BYTES: u64 = 32 * 1024 * 1024;

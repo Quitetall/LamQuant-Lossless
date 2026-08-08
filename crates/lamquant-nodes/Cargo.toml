@@ -79,4 +79,13 @@ rustix = { version = "1", features = ["process"], optional = true }
 blake3 = { version = "=1.5.5" }
 
 [dev-dependencies]
+# criterion + the [[bench]] below arrived on published main with the P8.3
+# node-vs-direct benchmark. The merge resolved this manifest to our side for the
+# ABIR/blut rev pins, which silently dropped them and left the bench source with
+# no harness -- caught by cargo check, restored here.
+criterion = { version = "0.5", features = ["cargo_bench_support"] }
 flate2 = "1"
+
+[[bench]]
+name = "node_vs_direct"
+harness = false

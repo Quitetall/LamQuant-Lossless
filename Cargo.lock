@@ -3679,6 +3679,7 @@ dependencies = [
  "abir-bcs",
  "blake3",
  "blut-graph-core",
+ "criterion",
  "ed25519-dalek",
  "flate2",
  "fs2",
