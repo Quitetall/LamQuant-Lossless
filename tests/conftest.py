@@ -58,6 +58,12 @@ for _rel in (
     "ai_models/validation",
     "ai_models",           # for `from snn import ...` etc.
     "firmware",
+    # The Python export toolchain lives here as the package `c_firmware`
+    # (renamed from `firmware` when it moved under reference_implementations/).
+    # Without this entry every tests/firmware/* suite dies at collection on
+    # `No module named 'firmware.export'` -- which it did, in this repo AND
+    # in the meta-repo copy, for as long as both have existed.
+    "reference_implementations",
     str(_REPO_ROOT),       # for `from ai_models.validation import ...`
 ):
     _p = str((_REPO_ROOT / _rel).resolve()) if _rel != str(_REPO_ROOT) else str(_REPO_ROOT)

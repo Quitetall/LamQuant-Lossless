@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from firmware.export.snn_emitter import (
+from c_firmware.export.snn_emitter import (
     _emit_linear,
     _emit_ssm_block,
     _format_f32_const,

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from firmware.export.checkpoint import (
+from c_firmware.export.checkpoint import (
     LoadedCheckpoint,
     _grade_of,
     detect_arch,
@@ -22,7 +22,7 @@ from firmware.export.checkpoint import (
     load_checkpoint,
     sha256_of,
 )
-from firmware.export.schema import ArchSpec
+from c_firmware.export.schema import ArchSpec
 
 pytestmark = pytest.mark.l1
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from firmware.export.schema import (
+from c_firmware.export.schema import (
     ArchSpec,
     FsqSpec,
     LayerSpec,

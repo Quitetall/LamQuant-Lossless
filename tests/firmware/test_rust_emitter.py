@@ -9,9 +9,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from firmware.export.checkpoint import LoadedCheckpoint
-from firmware.export.fsq import FsqCalibration
-from firmware.export.rust_emitter import (
+from c_firmware.export.checkpoint import LoadedCheckpoint
+from c_firmware.export.fsq import FsqCalibration
+from c_firmware.export.rust_emitter import (
     EmitContext,
     Int8LayerData,
     RustEmitter,
@@ -22,7 +22,7 @@ from firmware.export.rust_emitter import (
     extract_int8_layer,
     extract_ternary_layer,
 )
-from firmware.export.schema import ArchSpec, ResolvedLayer, load_schema
+from c_firmware.export.schema import ArchSpec, ResolvedLayer, load_schema
 
 pytestmark = pytest.mark.l2
 
