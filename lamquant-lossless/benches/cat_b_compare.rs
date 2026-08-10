@@ -31,7 +31,7 @@ use lamquant_core::arithmetic;
 const RESIDUAL_LEN: usize = 1250;
 const SAMPLE_BYTES: usize = 8; // i64
 
-const CHBMIT_LMA_PATH: &str = "/mnt/4tb/data/Archive/lma/physionet/chbmit.lma";
+const CHBMIT_LMA_PATH: &str = "/mnt/4tb/data/corpora/physionet/chbmit.lma";
 /// Fallback list of CHB-MIT inner paths to try. Some EDFs in this
 /// corpus have non-standard header fields the reader rejects;
 /// iterate until one parses. (Verified 2026-05-22: chb01_01 is
@@ -44,7 +44,7 @@ const CHBMIT_INNER_CANDIDATES: &[&str] = &[
 ];
 /// Direct on-disk fallback when the LMA isn't installed or the inner
 /// EDF parse fails for every candidate.
-const CHBMIT_DIRECT_DIR: &str = "/mnt/4tb/data/Archive/edf/physionet/chbmit";
+const CHBMIT_DIRECT_DIR: &str = "/mnt/4tb/data/corpora/edf/physionet/chbmit";
 
 fn xorshift64(state: &mut u64) -> u64 {
     let mut x = *state;
