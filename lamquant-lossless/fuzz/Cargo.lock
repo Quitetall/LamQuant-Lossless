@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=37cd630497751462030cdc2068548243cf69ffa4#37cd630497751462030cdc2068548243cf69ffa4"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=37cd630497751462030cdc2068548243cf69ffa4#37cd630497751462030cdc2068548243cf69ffa4"
 dependencies = [
  "abir",
  "blake3",
@@ -28,7 +28,7 @@ dependencies = [
 [[package]]
 name = "abir-training"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=37cd630497751462030cdc2068548243cf69ffa4#37cd630497751462030cdc2068548243cf69ffa4"
 dependencies = [
  "abir",
  "abir-bcs",
@@ -261,7 +261,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=879368d3fc7f6185eac562b52e7dde2228f013e6#879368d3fc7f6185eac562b52e7dde2228f013e6"
+source = "git+https://github.com/Quitetall/blut.git?rev=c1444fe2bd1f773816edae184e7256cfe7983d01#c1444fe2bd1f773816edae184e7256cfe7983d01"
 dependencies = [
  "blake3",
  "postcard",
@@ -1296,6 +1296,7 @@ version = "0.1.0"
 dependencies = [
  "lamquant-model-pack",
  "libc",
+ "rayon",
  "serde_json",
  "sha2",
 ]
