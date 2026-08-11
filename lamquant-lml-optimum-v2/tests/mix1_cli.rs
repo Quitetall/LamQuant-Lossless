@@ -181,6 +181,24 @@ fn peer_stdio_worker_emits_a_complete_exact_packet() {
 }
 
 #[test]
+fn peer_r2_stdio_worker_is_exact_and_never_larger_than_peer_r1() {
+    let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
+    let raw = lqraw_fixture();
+    let peer_r1 = stdio_worker(binary, &["mix1-peer-encode-best-stdio"], &raw);
+    let peer_r2 = stdio_worker(binary, &["mix1-peer-r2-encode-best-stdio"], &raw);
+
+    assert!(peer_r1.status.success());
+    assert!(
+        peer_r2.status.success(),
+        "peer-r2 encode failed: {}",
+        String::from_utf8_lossy(&peer_r2.stderr)
+    );
+    assert!(peer_r2.stdout.len() <= peer_r1.stdout.len());
+    let restored = stdio_worker(binary, &["mix1-peer-r2-decode-stdio"], &peer_r2.stdout);
+    assert_eq!(restored.stdout, raw);
+}
+
+#[test]
 fn peer_candidate_bundle_worker_is_ordered_exact_and_matches_production() {
     let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
     let raw = lqraw_fixture();

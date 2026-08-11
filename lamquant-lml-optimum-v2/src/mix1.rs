@@ -58,6 +58,12 @@ pub struct PeerPortfolioCandidate {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Mix1Codec;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerRevision {
+    R1,
+    R2,
+}
+
 impl Mix1Codec {
     pub fn encode_window(
         &self,
@@ -607,6 +613,21 @@ impl Mix1Codec {
         sample_rate_mhz: u32,
         bit_depth: u8,
     ) -> Result<Vec<u8>, OptimumV2Error> {
+        self.encode_bitplane_layer_window_for_revision(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            PeerRevision::R1,
+        )
+    }
+
+    fn encode_bitplane_layer_window_for_revision(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+        revision: PeerRevision,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
         let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
         if bit_depth < 2 {
             return Err(input_error("BLX1 requires bit depth of at least two"));
@@ -615,8 +636,18 @@ impl Mix1Codec {
             .iter()
             .map(|channel| channel.iter().map(|sample| sample >> 1).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        let nested =
-            self.encode_best_peer_window_without_bitplane(&upper, sample_rate_mhz, bit_depth - 1)?;
+        let nested = match revision {
+            PeerRevision::R1 => self.encode_best_peer_window_without_bitplane(
+                &upper,
+                sample_rate_mhz,
+                bit_depth - 1,
+            )?,
+            PeerRevision::R2 => self.encode_best_peer_r2_window_without_bitplane(
+                &upper,
+                sample_rate_mhz,
+                bit_depth - 1,
+            )?,
+        };
         let nested_len = u32::try_from(nested.len())
             .map_err(|_| input_error("BLX1 nested packet exceeds u32"))?;
         let modes = fit_low_bit_modes(signal)?;
@@ -658,6 +689,55 @@ impl Mix1Codec {
         Ok(best)
     }
 
+    /// Encode peer-r2 by strictly admitting one charged best-single expert.
+    ///
+    /// Every recursive admission retains the exact peer-r1 incumbent on ties,
+    /// so the returned complete packet cannot exceed peer-r1 for the same
+    /// accepted input.
+    pub fn encode_best_peer_r2_window(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let mut best =
+            self.encode_best_peer_r2_window_without_bitplane(signal, sample_rate_mhz, bit_depth)?;
+        let has_exact_alias = fit_channel_aliases(signal)?.0.len() != signal.len();
+        if bit_depth >= 2 && !has_exact_alias {
+            let bitplane = self.encode_bitplane_layer_window_for_revision(
+                signal,
+                sample_rate_mhz,
+                bit_depth,
+                PeerRevision::R2,
+            )?;
+            if bitplane.len() < best.len() {
+                best = bitplane;
+            }
+        }
+        Ok(best)
+    }
+
+    fn encode_best_peer_r2_window_without_bitplane(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let mut best =
+            self.encode_best_peer_r2_window_without_alias(signal, sample_rate_mhz, bit_depth)?;
+        if let Some(alias) = self.encode_alias_window_optional_for_revision(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            PeerRevision::R2,
+        )? {
+            if alias.len() < best.len() {
+                best = alias;
+            }
+        }
+        Ok(best)
+    }
+
     fn encode_best_peer_window_without_bitplane(
         &self,
         signal: &[Vec<i64>],
@@ -692,6 +772,21 @@ impl Mix1Codec {
         sample_rate_mhz: u32,
         bit_depth: u8,
     ) -> Result<Option<Vec<u8>>, OptimumV2Error> {
+        self.encode_alias_window_optional_for_revision(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            PeerRevision::R1,
+        )
+    }
+
+    fn encode_alias_window_optional_for_revision(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+        revision: PeerRevision,
+    ) -> Result<Option<Vec<u8>>, OptimumV2Error> {
         let (channels, samples) = validate_signal(signal, sample_rate_mhz, bit_depth)?;
         let (representatives, aliases) = fit_channel_aliases(signal)?;
         if representatives.len() == channels {
@@ -701,8 +796,14 @@ impl Mix1Codec {
             .iter()
             .map(|&index| signal[index].clone())
             .collect::<Vec<_>>();
-        let nested =
-            self.encode_best_peer_window_without_alias(&unique, sample_rate_mhz, bit_depth)?;
+        let nested = match revision {
+            PeerRevision::R1 => {
+                self.encode_best_peer_window_without_alias(&unique, sample_rate_mhz, bit_depth)?
+            }
+            PeerRevision::R2 => {
+                self.encode_best_peer_r2_window_without_alias(&unique, sample_rate_mhz, bit_depth)?
+            }
+        };
         let unique_count = u8::try_from(unique.len())
             .map_err(|_| input_error("ALX1 unique channel count exceeds u8"))?;
         let mut graph = Vec::with_capacity(7 + channels);
@@ -725,12 +826,13 @@ impl Mix1Codec {
         })?))
     }
 
-    fn encode_peer_core_candidates(
+    fn encode_peer_core_candidates_with_best_single(
         &self,
         signal: &[Vec<i64>],
         sample_rate_mhz: u32,
         bit_depth: u8,
-    ) -> Result<Vec<(PortfolioCandidate, Vec<u8>)>, OptimumV2Error> {
+        admit_best_single: bool,
+    ) -> Result<PeerCoreAdmission, OptimumV2Error> {
         let frame = PortfolioFrame::new(signal, sample_rate_mhz, bit_depth)?;
         let universal = universal_residuals(signal, bit_depth)?;
         let (side, lattice) = mix1_lattice::fit_and_analyze(signal)?;
@@ -891,7 +993,136 @@ impl Mix1Codec {
         if profiles.len() != candidates.len() {
             return Err(input_error("MIX peer portfolio cardinality drifted"));
         }
-        Ok(profiles.into_iter().zip(candidates).collect())
+        let best_single = if admit_best_single {
+            let (winner_index, winner) = candidates
+                .iter()
+                .enumerate()
+                .min_by_key(|(index, packet)| (packet.len(), *index))
+                .map(|(index, _)| (index, profiles[index]))
+                .ok_or_else(|| input_error("MIX peer portfolio is empty"))?;
+            let incumbent = &candidates[winner_index];
+            Some(match winner {
+                PortfolioCandidate::Score(score_shift) => portfolio_score_fixed_candidate(
+                    incumbent,
+                    &side,
+                    &universal,
+                    &lattice,
+                    score_shift,
+                )?,
+                PortfolioCandidate::Multivariate {
+                    hierarchical,
+                    score_shift,
+                } => portfolio_multivariate_fixed_candidate(
+                    incumbent,
+                    &side,
+                    &universal,
+                    &lattice,
+                    &multivariate,
+                    score_shift,
+                    hierarchical,
+                )?,
+                PortfolioCandidate::ChannelContext => portfolio_channel_context_fixed_candidate(
+                    incumbent,
+                    &side,
+                    &universal,
+                    &lattice,
+                    &multivariate,
+                    8,
+                    5,
+                )?,
+                PortfolioCandidate::CommonMode(score_shift) => {
+                    portfolio_common_mode_fixed_candidate(
+                        incumbent,
+                        &side,
+                        &universal,
+                        &lattice,
+                        &multivariate,
+                        &common_mode,
+                        score_shift,
+                        3,
+                    )?
+                }
+                PortfolioCandidate::Permuted {
+                    channel_context_mask,
+                    score_shift,
+                } => portfolio_permuted_fixed_candidate(
+                    incumbent,
+                    &permuted_side,
+                    &permuted_universal,
+                    &permuted_lattice,
+                    &permuted_multivariate,
+                    &permuted_common_mode,
+                    score_shift,
+                    channel_context_mask,
+                )?,
+                PortfolioCandidate::TunedSix => portfolio_tuned_fixed_candidate(
+                    incumbent,
+                    &side_six,
+                    &permuted_universal,
+                    &lattice_six,
+                    &multivariate_six,
+                    &permuted_common_mode,
+                    Mix1TunedProfile {
+                        entropy: Mix1EntropyProfile {
+                            score_shift: 8,
+                            channel_context_mask: 7,
+                            history_context: 52,
+                            scale_profile: 4,
+                        },
+                        parent_history_depth: 2,
+                        parent_penalty: 6,
+                    },
+                )?,
+                PortfolioCandidate::TunedThirtyTwo(score_shift) => portfolio_tuned_fixed_candidate(
+                    incumbent,
+                    &side_thirty_two,
+                    &permuted_universal,
+                    &lattice_thirty_two,
+                    &multivariate_thirty_two,
+                    &permuted_common_mode,
+                    Mix1TunedProfile {
+                        entropy: Mix1EntropyProfile {
+                            score_shift,
+                            channel_context_mask: 3,
+                            history_context: 84,
+                            scale_profile: 6,
+                        },
+                        parent_history_depth: 1,
+                        parent_penalty: 32,
+                    },
+                )?,
+                PortfolioCandidate::Compact => portfolio_compact_fixed_candidate(
+                    incumbent,
+                    &side,
+                    &universal,
+                    &lattice,
+                    &multivariate,
+                    &common_mode,
+                    Mix1EntropyProfile {
+                        score_shift: 10,
+                        channel_context_mask: 3,
+                        history_context: 84,
+                        scale_profile: 4,
+                    },
+                )?,
+            })
+        } else {
+            None
+        };
+        Ok(PeerCoreAdmission {
+            candidates: profiles.into_iter().zip(candidates).collect(),
+            best_single,
+        })
+    }
+
+    fn encode_peer_core_candidates(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<(PortfolioCandidate, Vec<u8>)>, OptimumV2Error> {
+        self.encode_peer_core_candidates_with_best_single(signal, sample_rate_mhz, bit_depth, false)
+            .map(|admission| admission.candidates)
     }
 
     pub fn encode_best_peer_window_without_alias(
@@ -907,6 +1138,31 @@ impl Mix1Codec {
             consider_shorter(&mut best, candidate);
         }
         best.ok_or_else(|| input_error("MIX peer portfolio is empty"))
+    }
+
+    fn encode_best_peer_r2_window_without_alias(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let admission = self.encode_peer_core_candidates_with_best_single(
+            signal,
+            sample_rate_mhz,
+            bit_depth,
+            true,
+        )?;
+        let mut best = None;
+        for (_, candidate) in admission.candidates {
+            consider_shorter(&mut best, candidate);
+        }
+        let mut best = best.ok_or_else(|| input_error("MIX peer portfolio is empty"))?;
+        if let Some(best_single) = admission.best_single {
+            if best_single.len() < best.len() {
+                best = best_single;
+            }
+        }
+        Ok(best)
     }
 
     /// Emit production-ordered top-level candidates for development ablation.
@@ -1019,13 +1275,26 @@ impl Mix1Codec {
     }
 
     pub fn decode_window(&self, packet: &[u8]) -> Result<Mix1Decoded, OptimumV2Error> {
+        self.decode_window_internal(packet, false)
+    }
+
+    /// Decode peer-r2 packets, including unchanged peer-r1 incumbents.
+    pub fn decode_r2_window(&self, packet: &[u8]) -> Result<Mix1Decoded, OptimumV2Error> {
+        self.decode_window_internal(packet, true)
+    }
+
+    fn decode_window_internal(
+        &self,
+        packet: &[u8],
+        allow_fixed_expert: bool,
+    ) -> Result<Mix1Decoded, OptimumV2Error> {
         let frame = unpack_frame(packet)?;
         let magic = frame.graph.get(..4);
         if magic == Some(&b"ALX1"[..]) {
-            return decode_alias_frame(frame);
+            return decode_alias_frame(frame, allow_fixed_expert);
         }
         if magic == Some(&b"BLX1"[..]) {
-            return decode_bitplane_layer_frame(frame);
+            return decode_bitplane_layer_frame(frame, allow_fixed_expert);
         }
         let hierarchical = magic == Some(&b"MCH1"[..]);
         let channel_context = magic == Some(&b"MCX1"[..]);
@@ -1039,6 +1308,7 @@ impl Mix1Codec {
         let multivariate =
             magic == Some(&b"MMV1"[..]) || hierarchical || channel_context || common_mode;
         let mut graph = frame.graph.clone();
+        let fixed_expert = extract_fixed_expert(&mut graph, magic, allow_fixed_expert)?;
 
         let tuned_profile = if tuned_permuted {
             let history = *graph
@@ -1232,6 +1502,7 @@ impl Mix1Codec {
                     &side.parents,
                     frame.bit_depth,
                     usize::from(parent_history_depth),
+                    fixed_expert,
                 )?
             } else {
                 decode_common_mode_samples(
@@ -1240,6 +1511,7 @@ impl Mix1Codec {
                     &side,
                     &side.parents,
                     frame.bit_depth,
+                    fixed_expert,
                 )?
             }
         } else if multivariate {
@@ -1249,9 +1521,16 @@ impl Mix1Codec {
                 &side,
                 &side.parents,
                 frame.bit_depth,
+                fixed_expert,
             )?
         } else {
-            decode_samples(&residuals, score_shift, &side, frame.bit_depth)?
+            decode_samples(
+                &residuals,
+                score_shift,
+                &side,
+                frame.bit_depth,
+                fixed_expert,
+            )?
         };
         if let Some(permutation) = permutation {
             samples = unpermute_signal(&samples, &permutation)?;
@@ -1512,7 +1791,41 @@ fn packet_contains_bitplane(packet: &[u8]) -> Result<bool, OptimumV2Error> {
     }
 }
 
-fn decode_bitplane_layer_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
+fn extract_fixed_expert(
+    graph: &mut Vec<u8>,
+    magic: Option<&[u8]>,
+    allow_fixed_expert: bool,
+) -> Result<Option<u8>, OptimumV2Error> {
+    match graph.get(4).copied() {
+        Some(0xa7) => Ok(None),
+        Some(0xa8) if !allow_fixed_expert => {
+            Err(packet_error("peer-r1 does not support fixed-expert cores"))
+        }
+        Some(0xa8) => {
+            let expert_count = match magic {
+                Some(b"MIX1") => 2,
+                Some(b"MMV1" | b"MCH1" | b"MCX1") => 3,
+                Some(b"MQX1" | b"MPX1" | b"APX1" | b"BQX1") => 4,
+                _ => return Err(packet_error("peer-r2 fixed core magic is unsupported")),
+            };
+            let expert_id = *graph
+                .get(5)
+                .ok_or_else(|| packet_error("peer-r2 fixed expert ID is truncated"))?;
+            if expert_id >= expert_count {
+                return Err(packet_error("peer-r2 fixed expert ID is out of range"));
+            }
+            graph.remove(5);
+            graph[4] = 0xa7;
+            Ok(Some(expert_id))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn decode_bitplane_layer_frame(
+    frame: Frame,
+    allow_fixed_expert: bool,
+) -> Result<Mix1Decoded, OptimumV2Error> {
     let mode_len = (frame.channels * 2).div_ceil(8);
     if frame.graph.len() != 7 + mode_len
         || frame.graph.get(..7) != Some(&b"BLX1\xa7\x02\x01"[..])
@@ -1533,7 +1846,7 @@ fn decode_bitplane_layer_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Err
     if packet_contains_bitplane(nested_packet)? {
         return Err(packet_error("BLX1 nesting depth exceeds one"));
     }
-    let nested = Mix1Codec.decode_window(nested_packet)?;
+    let nested = Mix1Codec.decode_window_internal(nested_packet, allow_fixed_expert)?;
     if nested.samples.len() != frame.channels
         || nested
             .samples
@@ -1607,7 +1920,10 @@ fn fit_channel_aliases(signal: &[Vec<i64>]) -> Result<(Vec<usize>, Vec<u8>), Opt
     Ok((representatives, aliases))
 }
 
-fn decode_alias_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
+fn decode_alias_frame(
+    frame: Frame,
+    allow_fixed_expert: bool,
+) -> Result<Mix1Decoded, OptimumV2Error> {
     let expected_graph_len = 7usize
         .checked_add(frame.channels)
         .ok_or_else(|| packet_error("ALX1 map length overflows"))?;
@@ -1644,7 +1960,7 @@ fn decode_alias_frame(frame: Frame) -> Result<Mix1Decoded, OptimumV2Error> {
     if nested_frame.graph.get(..4) == Some(&b"ALX1"[..]) {
         return Err(packet_error("ALX1 nesting depth exceeds one"));
     }
-    let nested = Mix1Codec.decode_window(&frame.payload)?;
+    let nested = Mix1Codec.decode_window_internal(&frame.payload, allow_fixed_expert)?;
     if nested.samples.len() != unique_count
         || nested
             .samples
@@ -1706,6 +2022,12 @@ struct PortfolioFrame {
     channels: usize,
     samples: usize,
     decoded_crc: u32,
+}
+
+#[derive(Debug)]
+struct PeerCoreAdmission {
+    candidates: Vec<(PortfolioCandidate, Vec<u8>)>,
+    best_single: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2011,6 +2333,215 @@ fn portfolio_compact_candidate(
     ]);
     graph.extend_from_slice(&tail);
     pack_frame_ultracompact(frame.packet_frame(event_count, graph, payload))
+}
+
+fn encode_best_fixed_expert<F>(
+    experts: &[&[Vec<i64>]],
+    mut encode: F,
+) -> Result<Vec<u8>, OptimumV2Error>
+where
+    F: FnMut(u8, &[Vec<i64>]) -> Result<Vec<u8>, OptimumV2Error>,
+{
+    if experts.len() < 2 || experts.len() > 4 {
+        return Err(input_error("MIX peer fixed expert count is invalid"));
+    }
+    let mut best = None;
+    for (expert_id, residuals) in experts.iter().enumerate() {
+        let expert_id = u8::try_from(expert_id)
+            .map_err(|_| input_error("MIX peer fixed expert ID exceeds u8"))?;
+        consider_shorter(&mut best, encode(expert_id, residuals)?);
+    }
+    best.ok_or_else(|| input_error("MIX peer fixed expert set is empty"))
+}
+
+fn mark_fixed_expert(graph: &mut Vec<u8>, expert_id: u8) -> Result<(), OptimumV2Error> {
+    if graph.len() < 6 || graph[4] != 0xa7 {
+        return Err(input_error("MIX peer fixed core side identity is invalid"));
+    }
+    graph[4] = 0xa8;
+    graph.insert(5, expert_id);
+    Ok(())
+}
+
+fn repack_fixed_expert(
+    incumbent: &[u8],
+    expert_id: u8,
+    event_count: u32,
+    payload: Vec<u8>,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let version = incumbent
+        .get(4)
+        .copied()
+        .ok_or_else(|| input_error("MIX peer incumbent version is truncated"))?;
+    let mut frame = unpack_frame(incumbent).map_err(|error| input_error(error.to_string()))?;
+    mark_fixed_expert(&mut frame.graph, expert_id)?;
+    frame.event_count = event_count;
+    frame.payload = payload;
+    match version {
+        2 => pack_frame(frame),
+        4 => pack_frame_ultracompact(frame),
+        _ => Err(input_error(
+            "MIX peer incumbent frame version is unsupported",
+        )),
+    }
+}
+
+fn portfolio_score_fixed_candidate(
+    incumbent: &[u8],
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    _score_shift: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    encode_best_fixed_expert(&[universal, lattice], |expert_id, residuals| {
+        let (payload, event_count) = mix1_entropy::encode(residuals, &side.parents)?;
+        repack_fixed_expert(incumbent, expert_id, event_count, payload)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_multivariate_fixed_candidate(
+    incumbent: &[u8],
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    _score_shift: u8,
+    hierarchical: bool,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    encode_best_fixed_expert(
+        &[universal, lattice, multivariate],
+        |expert_id, residuals| {
+            let (payload, event_count) = if hierarchical {
+                mix1_entropy::encode_hierarchical(residuals, &side.parents)?
+            } else {
+                mix1_entropy::encode(residuals, &side.parents)?
+            };
+            repack_fixed_expert(incumbent, expert_id, event_count, payload)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_channel_context_fixed_candidate(
+    incumbent: &[u8],
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    _score_shift: u8,
+    channel_context_mask: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    encode_best_fixed_expert(
+        &[universal, lattice, multivariate],
+        |expert_id, residuals| {
+            let (payload, event_count) = mix1_entropy::encode_channel_context(
+                residuals,
+                &side.parents,
+                channel_context_mask,
+            )?;
+            repack_fixed_expert(incumbent, expert_id, event_count, payload)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_common_mode_fixed_candidate(
+    incumbent: &[u8],
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    _score_shift: u8,
+    channel_context_mask: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    encode_best_fixed_expert(
+        &[universal, lattice, multivariate, common_mode],
+        |expert_id, residuals| {
+            let (payload, event_count) = mix1_entropy::encode_channel_context(
+                residuals,
+                &side.parents,
+                channel_context_mask,
+            )?;
+            repack_fixed_expert(incumbent, expert_id, event_count, payload)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_permuted_fixed_candidate(
+    incumbent: &[u8],
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    _score_shift: u8,
+    channel_context_mask: u8,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    encode_best_fixed_expert(
+        &[universal, lattice, multivariate, common_mode],
+        |expert_id, residuals| {
+            let (payload, event_count) = mix1_entropy::encode_channel_context(
+                residuals,
+                &side.parents,
+                channel_context_mask,
+            )?;
+            repack_fixed_expert(incumbent, expert_id, event_count, payload)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_tuned_fixed_candidate(
+    incumbent: &[u8],
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    profile: Mix1TunedProfile,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    let entropy = profile.entropy;
+    encode_best_fixed_expert(
+        &[universal, lattice, multivariate, common_mode],
+        |expert_id, residuals| {
+            let (payload, event_count) = mix1_entropy::encode_profile_channel_context(
+                residuals,
+                &side.parents,
+                entropy.channel_context_mask,
+                entropy.history_context,
+                entropy.scale_profile,
+            )?;
+            repack_fixed_expert(incumbent, expert_id, event_count, payload)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portfolio_compact_fixed_candidate(
+    incumbent: &[u8],
+    side: &LatticeSide,
+    universal: &[Vec<i64>],
+    lattice: &[Vec<i64>],
+    multivariate: &[Vec<i64>],
+    common_mode: &[Vec<i64>],
+    profile: Mix1EntropyProfile,
+) -> Result<Vec<u8>, OptimumV2Error> {
+    encode_best_fixed_expert(
+        &[universal, lattice, multivariate, common_mode],
+        |expert_id, residuals| {
+            let (payload, event_count) = mix1_entropy::encode_profile_channel_context(
+                residuals,
+                &side.parents,
+                profile.channel_context_mask,
+                profile.history_context,
+                profile.scale_profile,
+            )?;
+            repack_fixed_expert(incumbent, expert_id, event_count, payload)
+        },
+    )
 }
 
 fn pack_frame(frame: Frame) -> Result<Vec<u8>, OptimumV2Error> {
@@ -2675,6 +3206,7 @@ fn decode_samples(
     score_shift: u8,
     side: &LatticeSide,
     bit_depth: u8,
+    fixed_expert: Option<u8>,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     let channels = residuals.len();
     if channels == 0
@@ -2700,7 +3232,10 @@ fn decode_samples(
     )
     .map_err(as_packet_error)?;
     let mut universal = UniversalSession::new(graph, bit_depth).map_err(as_packet_error)?;
-    let mut selector = Selector::new(channels, score_shift).map_err(as_packet_error)?;
+    let mut selector = fixed_expert
+        .is_none()
+        .then(|| Selector::new(channels, score_shift).map_err(as_packet_error))
+        .transpose()?;
     let mut previous_backward = vec![vec![0i128; ORDER + 1]; channels];
     let mut reconstructed = vec![vec![0i64; samples]; channels];
     let magnitude = 1i64 << (bit_depth - 1);
@@ -2718,7 +3253,16 @@ fn decode_samples(
             let graph_prediction =
                 mix1_lattice::graph_prediction(side, channel, &current_innovations)
                     .map_err(as_packet_error)?;
-            let choose_universal = selector.universal(channel).map_err(as_packet_error)?;
+            let choose_universal = match fixed_expert {
+                Some(0) => true,
+                Some(1) => false,
+                Some(_) => return Err(packet_error("MIX1 fixed expert ID is out of range")),
+                None => selector
+                    .as_ref()
+                    .expect("dynamic MIX1 selector exists")
+                    .universal(channel)
+                    .map_err(as_packet_error)?,
+            };
             let coded = residuals[channel][time];
             let sample = if choose_universal {
                 prediction
@@ -2766,9 +3310,11 @@ fn decode_samples(
             universal
                 .observe(channel, &current_samples, sample, prediction)
                 .map_err(as_packet_error)?;
-            selector
-                .observe(channel, universal_residual, lattice_residual)
-                .map_err(as_packet_error)?;
+            if let Some(selector) = &mut selector {
+                selector
+                    .observe(channel, universal_residual, lattice_residual)
+                    .map_err(as_packet_error)?;
+            }
             reconstructed[channel][time] = sample;
             current_samples[channel] = sample;
             current_innovations[channel] = innovation;
@@ -2787,6 +3333,7 @@ fn decode_multivariate_samples(
     side: &LatticeSide,
     multivariate_parents: &[Vec<usize>],
     bit_depth: u8,
+    fixed_expert: Option<u8>,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     let channels = residuals.len();
     if channels == 0
@@ -2816,7 +3363,10 @@ fn decode_multivariate_samples(
     let mut universal = UniversalSession::new(graph, bit_depth).map_err(as_packet_error)?;
     let mut multivariate =
         MultivariateSession::new(multivariate_parents, bit_depth).map_err(as_packet_error)?;
-    let mut selector = TripleSelector::new(channels, score_shift).map_err(as_packet_error)?;
+    let mut selector = fixed_expert
+        .is_none()
+        .then(|| TripleSelector::new(channels, score_shift).map_err(as_packet_error))
+        .transpose()?;
     let mut previous_backward = vec![vec![0i128; ORDER + 1]; channels];
     let mut reconstructed = vec![vec![0i64; samples]; channels];
     let magnitude = 1i64 << (bit_depth - 1);
@@ -2837,7 +3387,21 @@ fn decode_multivariate_samples(
             let graph_prediction =
                 mix1_lattice::graph_prediction(side, channel, &current_innovations)
                     .map_err(as_packet_error)?;
-            let choice = selector.choice(channel).map_err(as_packet_error)?;
+            let choice = match fixed_expert {
+                Some(0) => ExpertChoice::Universal,
+                Some(1) => ExpertChoice::Lattice,
+                Some(2) => ExpertChoice::Multivariate,
+                Some(_) => {
+                    return Err(packet_error(
+                        "MIX1 multivariate fixed expert ID is out of range",
+                    ))
+                }
+                None => selector
+                    .as_ref()
+                    .expect("dynamic multivariate selector exists")
+                    .choice(channel)
+                    .map_err(as_packet_error)?,
+            };
             let coded = residuals[channel][time];
             let sample = match choice {
                 ExpertChoice::Universal => universal_prediction
@@ -2895,14 +3459,16 @@ fn decode_multivariate_samples(
             multivariate
                 .observe(channel, &current_samples, sample, multivariate_prediction)
                 .map_err(as_packet_error)?;
-            selector
-                .observe(
-                    channel,
-                    universal_residual,
-                    lattice_residual,
-                    multivariate_residual,
-                )
-                .map_err(as_packet_error)?;
+            if let Some(selector) = &mut selector {
+                selector
+                    .observe(
+                        channel,
+                        universal_residual,
+                        lattice_residual,
+                        multivariate_residual,
+                    )
+                    .map_err(as_packet_error)?;
+            }
             reconstructed[channel][time] = sample;
             current_samples[channel] = sample;
             current_innovations[channel] = innovation;
@@ -2924,6 +3490,7 @@ fn decode_common_mode_samples(
     side: &LatticeSide,
     multivariate_parents: &[Vec<usize>],
     bit_depth: u8,
+    fixed_expert: Option<u8>,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     decode_four_mode_samples(
         residuals,
@@ -2932,6 +3499,7 @@ fn decode_common_mode_samples(
         multivariate_parents,
         bit_depth,
         1,
+        fixed_expert,
     )
 }
 
@@ -2942,6 +3510,7 @@ fn decode_common_mode_samples_with_parent_history(
     multivariate_parents: &[Vec<usize>],
     bit_depth: u8,
     parent_history_depth: usize,
+    fixed_expert: Option<u8>,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     decode_four_mode_samples(
         residuals,
@@ -2950,6 +3519,7 @@ fn decode_common_mode_samples_with_parent_history(
         multivariate_parents,
         bit_depth,
         parent_history_depth,
+        fixed_expert,
     )
 }
 
@@ -2960,6 +3530,7 @@ fn decode_four_mode_samples(
     multivariate_parents: &[Vec<usize>],
     bit_depth: u8,
     parent_history_depth: usize,
+    fixed_expert: Option<u8>,
 ) -> Result<Vec<Vec<i64>>, OptimumV2Error> {
     let channels = residuals.len();
     if channels == 0
@@ -2993,7 +3564,10 @@ fn decode_four_mode_samples(
         parent_history_depth,
     )
     .map_err(as_packet_error)?;
-    let mut selector = QuadSelector::new(channels, score_shift).map_err(as_packet_error)?;
+    let mut selector = fixed_expert
+        .is_none()
+        .then(|| QuadSelector::new(channels, score_shift).map_err(as_packet_error))
+        .transpose()?;
     let mut previous_backward = vec![vec![0i128; ORDER + 1]; channels];
     let mut previous_samples = vec![0i64; channels];
     let mut reconstructed = vec![vec![0i64; samples]; channels];
@@ -3018,7 +3592,22 @@ fn decode_four_mode_samples(
             let graph_prediction =
                 mix1_lattice::graph_prediction(side, channel, &current_innovations)
                     .map_err(as_packet_error)?;
-            let choice = selector.choice(channel).map_err(as_packet_error)?;
+            let choice = match fixed_expert {
+                Some(0) => QuadExpertChoice::Universal,
+                Some(1) => QuadExpertChoice::Lattice,
+                Some(2) => QuadExpertChoice::Multivariate,
+                Some(3) => QuadExpertChoice::CommonMode,
+                Some(_) => {
+                    return Err(packet_error(
+                        "MIX1 four-mode fixed expert ID is out of range",
+                    ))
+                }
+                None => selector
+                    .as_ref()
+                    .expect("dynamic four-mode selector exists")
+                    .choice(channel)
+                    .map_err(as_packet_error)?,
+            };
             let coded = residuals[channel][time];
             let sample = match choice {
                 QuadExpertChoice::Universal => universal_prediction
@@ -3083,15 +3672,17 @@ fn decode_four_mode_samples(
             multivariate
                 .observe(channel, &current_samples, sample, multivariate_prediction)
                 .map_err(as_packet_error)?;
-            selector
-                .observe(
-                    channel,
-                    universal_residual,
-                    lattice_residual,
-                    multivariate_residual,
-                    fourth_residual,
-                )
-                .map_err(as_packet_error)?;
+            if let Some(selector) = &mut selector {
+                selector
+                    .observe(
+                        channel,
+                        universal_residual,
+                        lattice_residual,
+                        multivariate_residual,
+                        fourth_residual,
+                    )
+                    .map_err(as_packet_error)?;
+            }
             reconstructed[channel][time] = sample;
             current_samples[channel] = sample;
             current_innovations[channel] = innovation;
@@ -3406,6 +3997,9 @@ fn as_packet_error(error: OptimumV2Error) -> OptimumV2Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
 
     fn portfolio_fixture() -> Vec<Vec<i64>> {
         vec![
@@ -3416,6 +4010,14 @@ mod tests {
                 .map(|time| i64::from((time * 11 + time / 3) % 73) - 36)
                 .collect(),
         ]
+    }
+
+    fn fixed_score_packet(signal: &[Vec<i64>], bit_depth: u8) -> Vec<u8> {
+        let frame = PortfolioFrame::new(signal, 256_000, bit_depth).unwrap();
+        let universal = universal_residuals(signal, bit_depth).unwrap();
+        let (side, lattice) = mix1_lattice::fit_and_analyze(signal).unwrap();
+        let incumbent = portfolio_score_candidate(&frame, &side, &universal, &lattice, 4).unwrap();
+        portfolio_score_fixed_candidate(&incumbent, &side, &universal, &lattice, 4).unwrap()
     }
 
     #[test]
@@ -3492,6 +4094,140 @@ mod tests {
             }
         }
         assert_eq!(optimized, reference);
+    }
+
+    #[test]
+    fn fixed_expert_core_roundtrips_only_through_peer_r2_decoder() {
+        let signal = portfolio_fixture();
+        let packet = fixed_score_packet(&signal, 16);
+        let fixed = unpack_frame(&packet).unwrap();
+        assert_eq!(fixed.graph.get(4), Some(&0xa8));
+        assert!(fixed.graph.get(5).is_some_and(|expert| *expert < 2));
+
+        let decoded = Mix1Codec
+            .decode_r2_window(&packet)
+            .expect("peer-r2 decodes fixed core");
+        assert_eq!(decoded.samples, signal);
+        assert!(Mix1Codec.decode_window(&packet).is_err());
+    }
+
+    #[test]
+    fn fixed_expert_decoder_rejects_out_of_range_id_with_valid_crc() {
+        let signal = portfolio_fixture();
+        let packet = fixed_score_packet(&signal, 16);
+        let mut invalid = unpack_frame(&packet).unwrap();
+        invalid.graph[5] = 2;
+        let invalid = pack_frame(invalid).expect("repack malformed fixed core");
+        assert!(Mix1Codec.decode_r2_window(&invalid).is_err());
+    }
+
+    #[test]
+    fn alias_wrapper_recurses_into_fixed_expert_core_only_for_peer_r2() {
+        let unique = portfolio_fixture();
+        let nested = fixed_score_packet(&unique, 16);
+        let signal = vec![unique[0].clone(), unique[1].clone(), unique[0].clone()];
+        let graph = b"ALX1\xa7\x01\x02\x00\x01\x00".to_vec();
+        let packet = pack_frame_ultracompact(Frame {
+            bit_depth: 16,
+            sample_rate_mhz: 256_000,
+            channels: signal.len(),
+            samples: signal[0].len(),
+            event_count: u32::try_from(signal.len() * signal[0].len()).unwrap(),
+            graph,
+            payload: nested,
+            decoded_crc: crc32c(&canonical_i32_bytes(&signal).unwrap()),
+        })
+        .unwrap();
+
+        assert_eq!(Mix1Codec.decode_r2_window(&packet).unwrap().samples, signal);
+        assert!(Mix1Codec.decode_window(&packet).is_err());
+    }
+
+    #[test]
+    fn bitplane_wrapper_recurses_into_fixed_expert_core_only_for_peer_r2() {
+        let upper = portfolio_fixture();
+        let signal = upper
+            .iter()
+            .map(|channel| channel.iter().map(|sample| sample * 2).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let nested = fixed_score_packet(&upper, 15);
+        let modes = fit_low_bit_modes(&signal).unwrap();
+        assert_eq!(modes, vec![0, 0]);
+        let mut payload = u32::try_from(nested.len()).unwrap().to_le_bytes().to_vec();
+        payload.extend_from_slice(&nested);
+        let mut graph = b"BLX1\xa7\x02\x01".to_vec();
+        graph.extend_from_slice(&pack_low_bit_modes(&modes).unwrap());
+        let packet = pack_frame_ultracompact(Frame {
+            bit_depth: 16,
+            sample_rate_mhz: 256_000,
+            channels: signal.len(),
+            samples: signal[0].len(),
+            event_count: u32::try_from(signal.len() * signal[0].len()).unwrap(),
+            graph,
+            payload,
+            decoded_crc: crc32c(&canonical_i32_bytes(&signal).unwrap()),
+        })
+        .unwrap();
+
+        assert_eq!(Mix1Codec.decode_r2_window(&packet).unwrap().samples, signal);
+        assert!(Mix1Codec.decode_window(&packet).is_err());
+    }
+
+    #[test]
+    fn independent_python_peer_r2_decoder_reconstructs_fixed_core() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Some(meta_root) = manifest.parent().and_then(Path::parent) else {
+            panic!("Optimum-v2 manifest has no meta-repository ancestor");
+        };
+        let decoder = meta_root.join("tools/hbwc_bench/optimum_v2_mix1_codec.py");
+        let cookbook = meta_root.join("training/cookbooks/lamquant/python");
+        if !decoder.is_file() || !cookbook.is_dir() {
+            assert_ne!(
+                std::env::var("LAMQUANT_REQUIRE_PEER_PYTHON_ORACLE").as_deref(),
+                Ok("1"),
+                "required independent Python peer-r2 decoder is unavailable"
+            );
+            eprintln!("skipping peer-r2 Python oracle outside LamQuant checkout");
+            return;
+        }
+
+        let signal = portfolio_fixture();
+        let packet = fixed_score_packet(&signal, 16);
+        let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let mut child = Command::new(&python)
+            .arg(&decoder)
+            .arg("decode-r2-stdio")
+            .env("PYTHONPATH", &cookbook)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("cannot start {python}: {error}"));
+        child
+            .stdin
+            .take()
+            .expect("Python decoder stdin")
+            .write_all(&packet)
+            .expect("write peer-r2 packet to Python decoder");
+        let output = child.wait_with_output().expect("wait for Python decoder");
+        assert!(
+            output.status.success(),
+            "Python peer-r2 decoder failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"LQR1");
+        expected.extend_from_slice(&[1, 4, 16, 0]);
+        expected.extend_from_slice(&256_000_u32.to_le_bytes());
+        expected.extend_from_slice(&(signal.len() as u32).to_le_bytes());
+        expected.extend_from_slice(&(signal[0].len() as u32).to_le_bytes());
+        for channel in &signal {
+            for &sample in channel {
+                expected.extend_from_slice(&(sample as i32).to_le_bytes());
+            }
+        }
+        assert_eq!(output.stdout, expected);
     }
 
     #[test]

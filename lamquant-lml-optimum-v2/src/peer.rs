@@ -8,6 +8,7 @@ use crate::mix1::{Mix1Codec, Mix1Decoded};
 use crate::OptimumV2Error;
 
 pub const PEER_KERNEL_ID: &str = "org.quitetall.lamquant.lml-optimum-v2.peer-v4";
+pub const PEER_R2_KERNEL_ID: &str = "org.quitetall.lamquant.lml-optimum-v2.peer-r2";
 pub const PEER_SOURCE_ID: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_SOURCE_ID");
 pub const PEER_BUILD_ID: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_BUILD_ID");
 pub const PEER_FEATURE_SET: &str = env!("LAMQUANT_OPTIMUM_V2_PEER_FEATURE_SET");
@@ -42,6 +43,15 @@ pub struct PeerImplementationIdentity {
 pub const fn peer_implementation_identity() -> PeerImplementationIdentity {
     PeerImplementationIdentity {
         kernel_id: PEER_KERNEL_ID,
+        source_id: PEER_SOURCE_ID,
+        build_id: PEER_BUILD_ID,
+        feature_set: PEER_FEATURE_SET,
+    }
+}
+
+pub const fn peer_r2_implementation_identity() -> PeerImplementationIdentity {
+    PeerImplementationIdentity {
+        kernel_id: PEER_R2_KERNEL_ID,
         source_id: PEER_SOURCE_ID,
         build_id: PEER_BUILD_ID,
         feature_set: PEER_FEATURE_SET,
@@ -114,22 +124,7 @@ impl PeerCodec {
         context: PeerEncodeContext,
     ) -> Result<PeerEncodedWindow, OptimumV2Error> {
         let packet = self.encode_window(signal, context)?;
-        let channel_count = signal.len();
-        let sample_count = signal.first().map_or(0, Vec::len);
-        let source_value_count = channel_count
-            .checked_mul(sample_count)
-            .ok_or_else(|| input_error("peer source value count overflows"))?;
-        let source_bytes = source_value_count
-            .checked_mul(core::mem::size_of::<i32>())
-            .ok_or_else(|| input_error("peer source byte count overflows"))?;
-        let report = PeerEncodeReport {
-            selected_kind: packet_kind(&packet)?,
-            packet_bytes: packet.len(),
-            source_value_count,
-            source_bytes,
-            channel_count,
-            sample_count,
-        };
+        let report = report_for_signal(&packet, signal)?;
         Ok(PeerEncodedWindow { packet, report })
     }
 
@@ -142,24 +137,97 @@ impl PeerCodec {
     pub fn inspect_packet(&self, packet: &[u8]) -> Result<PeerEncodeReport, OptimumV2Error> {
         validate_packet_size(packet, InputKind::Packet)?;
         let decoded = Mix1Codec.decode_window(packet)?;
-        let selected_kind = packet_kind(packet)?;
-        let channel_count = decoded.samples.len();
-        let sample_count = decoded.samples.first().map_or(0, Vec::len);
-        let source_value_count = channel_count
-            .checked_mul(sample_count)
-            .ok_or_else(|| packet_error("peer source value count overflows"))?;
-        let source_bytes = source_value_count
-            .checked_mul(core::mem::size_of::<i32>())
-            .ok_or_else(|| packet_error("peer source byte count overflows"))?;
-        Ok(PeerEncodeReport {
-            selected_kind,
-            packet_bytes: packet.len(),
-            source_value_count,
-            source_bytes,
-            channel_count,
-            sample_count,
-        })
+        report_for_decoded(packet, &decoded)
     }
+}
+
+/// Standalone peer-r2 facade with strict best-single admission.
+///
+/// Peer-r1 remains frozen in [`PeerCodec`]. This facade accepts both unchanged
+/// peer-r1 incumbents and peer-r2 fixed-expert cores on decode.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PeerR2Codec;
+
+impl PeerR2Codec {
+    pub fn encode_window(
+        &self,
+        signal: &[Vec<i64>],
+        context: PeerEncodeContext,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
+        let packet = Mix1Codec.encode_best_peer_r2_window(
+            signal,
+            context.sample_rate_mhz,
+            context.bit_depth,
+        )?;
+        validate_packet_size(&packet, InputKind::Caller)?;
+        Ok(packet)
+    }
+
+    pub fn encode_window_with_report(
+        &self,
+        signal: &[Vec<i64>],
+        context: PeerEncodeContext,
+    ) -> Result<PeerEncodedWindow, OptimumV2Error> {
+        let packet = self.encode_window(signal, context)?;
+        let report = report_for_signal(&packet, signal)?;
+        Ok(PeerEncodedWindow { packet, report })
+    }
+
+    pub fn decode_window(&self, packet: &[u8]) -> Result<PeerDecodedWindow, OptimumV2Error> {
+        validate_packet_size(packet, InputKind::Packet)?;
+        let decoded = Mix1Codec.decode_r2_window(packet)?;
+        Ok(decoded.into())
+    }
+
+    pub fn inspect_packet(&self, packet: &[u8]) -> Result<PeerEncodeReport, OptimumV2Error> {
+        validate_packet_size(packet, InputKind::Packet)?;
+        let decoded = Mix1Codec.decode_r2_window(packet)?;
+        report_for_decoded(packet, &decoded)
+    }
+}
+
+fn report_for_signal(
+    packet: &[u8],
+    signal: &[Vec<i64>],
+) -> Result<PeerEncodeReport, OptimumV2Error> {
+    let channel_count = signal.len();
+    let sample_count = signal.first().map_or(0, Vec::len);
+    let source_value_count = channel_count
+        .checked_mul(sample_count)
+        .ok_or_else(|| input_error("peer source value count overflows"))?;
+    let source_bytes = source_value_count
+        .checked_mul(core::mem::size_of::<i32>())
+        .ok_or_else(|| input_error("peer source byte count overflows"))?;
+    Ok(PeerEncodeReport {
+        selected_kind: packet_kind(packet)?,
+        packet_bytes: packet.len(),
+        source_value_count,
+        source_bytes,
+        channel_count,
+        sample_count,
+    })
+}
+
+fn report_for_decoded(
+    packet: &[u8],
+    decoded: &Mix1Decoded,
+) -> Result<PeerEncodeReport, OptimumV2Error> {
+    let channel_count = decoded.samples.len();
+    let sample_count = decoded.samples.first().map_or(0, Vec::len);
+    let source_value_count = channel_count
+        .checked_mul(sample_count)
+        .ok_or_else(|| packet_error("peer source value count overflows"))?;
+    let source_bytes = source_value_count
+        .checked_mul(core::mem::size_of::<i32>())
+        .ok_or_else(|| packet_error("peer source byte count overflows"))?;
+    Ok(PeerEncodeReport {
+        selected_kind: packet_kind(packet)?,
+        packet_bytes: packet.len(),
+        source_value_count,
+        source_bytes,
+        channel_count,
+        sample_count,
+    })
 }
 
 #[derive(Clone, Copy)]

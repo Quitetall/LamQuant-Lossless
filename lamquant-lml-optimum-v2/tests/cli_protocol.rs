@@ -55,7 +55,15 @@ fn benchmark_cli_protocol_round_trips_lqraw() {
     let value: serde_json::Value = serde_json::from_slice(&fs::read(descriptor).unwrap()).unwrap();
     assert_eq!(
         value["wire"],
-        "LMO1-v3/BGF1-v1/OV2P-v2-v4-MIX1-ALX1-BLX1/DIX1-v2/DIX2-v1-construction"
+        "LMO1-v3/BGF1-v1/OV2P-v2-v4-MIX1-A7-A8-ALX1-BLX1/DIX1-v2/DIX2-v1-construction"
+    );
+    assert_eq!(
+        value["mix1_worker"]["encode_peer_r2_best_stdio"],
+        "mix1-peer-r2-encode-best-stdio"
+    );
+    assert_eq!(
+        value["mix1_worker"]["decode_peer_r2_stdio"],
+        "mix1-peer-r2-decode-stdio"
     );
     assert_eq!(
         value["mix1_worker"]["peer_magics"],

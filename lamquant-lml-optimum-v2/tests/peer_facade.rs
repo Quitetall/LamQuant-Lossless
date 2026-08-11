@@ -1,8 +1,9 @@
 use lamquant_lml_optimum_v2::mix1::Mix1Codec;
 use lamquant_lml_optimum_v2::{
-    peer_implementation_identity, PeerCodec, PeerEncodeContext, PeerPacketKind, PEER_KERNEL_ID,
-    PEER_MAX_CHANNELS, PEER_MAX_PACKET_BYTES, PEER_MAX_PEAK_BYTES, PEER_MAX_SAMPLES,
-    PEER_MAX_SCRATCH_BYTES, PEER_MAX_SIGNAL_BYTES, PEER_MAX_VALUES,
+    peer_implementation_identity, peer_r2_implementation_identity, PeerCodec, PeerEncodeContext,
+    PeerPacketKind, PeerR2Codec, PEER_KERNEL_ID, PEER_MAX_CHANNELS, PEER_MAX_PACKET_BYTES,
+    PEER_MAX_PEAK_BYTES, PEER_MAX_SAMPLES, PEER_MAX_SCRATCH_BYTES, PEER_MAX_SIGNAL_BYTES,
+    PEER_MAX_VALUES, PEER_R2_KERNEL_ID,
 };
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -67,6 +68,54 @@ fn production_facade_is_byte_equal_to_frozen_peer_portfolio() {
         .expect("decode production packet");
     assert_eq!(decoded.samples, signal);
     assert_eq!(decoded.context, context);
+}
+
+#[test]
+fn peer_r2_is_exact_and_never_larger_than_frozen_peer_r1() {
+    let signal = fixture();
+    let context = PeerEncodeContext {
+        sample_rate_mhz: 256_000,
+        bit_depth: 16,
+    };
+    let peer_r1 = PeerCodec
+        .encode_window(&signal, context)
+        .expect("encode frozen peer-r1 packet");
+    let peer_r2 = PeerR2Codec
+        .encode_window(&signal, context)
+        .expect("encode strict-admission peer-r2 packet");
+
+    assert!(peer_r2.len() <= peer_r1.len());
+    let decoded = PeerR2Codec
+        .decode_window(&peer_r2)
+        .expect("decode peer-r2 packet");
+    assert_eq!(decoded.samples, signal);
+    assert_eq!(decoded.context, context);
+
+    let legacy = PeerR2Codec
+        .decode_window(&peer_r1)
+        .expect("peer-r2 decoder accepts frozen peer-r1 packet");
+    assert_eq!(legacy.samples, signal);
+}
+
+#[test]
+fn peer_r2_has_distinct_kernel_identity_without_mutating_r1() {
+    assert_eq!(
+        PEER_KERNEL_ID,
+        "org.quitetall.lamquant.lml-optimum-v2.peer-v4"
+    );
+    assert_eq!(
+        PEER_R2_KERNEL_ID,
+        "org.quitetall.lamquant.lml-optimum-v2.peer-r2"
+    );
+    assert_ne!(PEER_KERNEL_ID, PEER_R2_KERNEL_ID);
+    assert_eq!(
+        peer_r2_implementation_identity().kernel_id,
+        PEER_R2_KERNEL_ID
+    );
+    assert_eq!(
+        peer_r2_implementation_identity().source_id,
+        peer_implementation_identity().source_id
+    );
 }
 
 #[test]

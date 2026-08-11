@@ -758,7 +758,7 @@ fn run(args: &[String]) -> Result<(), String> {
         let bytes = fs::read(&executable).map_err(|error| error.to_string())?;
         let descriptor = json!({
             "codec": "LamQuant Optimum v2 native, MIX1, DIX1/DIX2 construction, and BGF1 learned carrier",
-            "wire": "LMO1-v3/BGF1-v1/OV2P-v2-v4-MIX1-ALX1-BLX1/DIX1-v2/DIX2-v1-construction",
+            "wire": "LMO1-v3/BGF1-v1/OV2P-v2-v4-MIX1-A7-A8-ALX1-BLX1/DIX1-v2/DIX2-v1-construction",
             "binary": executable,
             "binary_bytes": bytes.len(),
             "package_version": env!("CARGO_PKG_VERSION"),
@@ -802,12 +802,14 @@ fn run(args: &[String]) -> Result<(), String> {
                 "encode_stdio": "mix1-encode-stdio SCORE_SHIFT",
                 "encode_best_stdio": "mix1-encode-best-stdio",
                 "encode_peer_best_stdio": "mix1-peer-encode-best-stdio",
+                "encode_peer_r2_best_stdio": "mix1-peer-r2-encode-best-stdio",
                 "encode_peer_candidate_bundle_stdio": "mix1-peer-candidate-bundle-stdio",
                 "encode_peer_best_no_alias_stdio": "mix1-peer-encode-best-no-alias-stdio",
                 "encode_peer_permuted_stdio": "mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK",
                 "encode_peer_tuned_stdio": "mix1-peer-tuned-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE PARENT_HISTORY_DEPTH PARENT_PENALTY",
                 "encode_peer_compact_common_profile_stdio": "mix1-peer-compact-common-profile-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE",
                 "decode_stdio": "mix1-decode-stdio",
+                "decode_peer_r2_stdio": "mix1-peer-r2-decode-stdio",
                 "score_shifts": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                 "channel_context_masks": [2, 3, 4, 5, 6, 7],
                 "peer_magics": ["MIX1", "MMV1", "MCH1", "MCX1", "MQX1", "MPX1", "APX1", "BQX1", "ALX1", "BLX1"],
@@ -925,6 +927,18 @@ fn run(args: &[String]) -> Result<(), String> {
             parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
         let packet = Mix1Codec
             .encode_best_peer_window(&signal, context.sample_rate_mhz, context.bit_depth)
+            .map_err(|error| error.to_string())?;
+        return write_standard_output(&packet);
+    }
+    if args.len() == 2 && args[1] == "mix1-peer-r2-encode-best-stdio" {
+        let raw = read_standard_input(
+            lqraw_maximum_bytes(MAX_LEARNED_VALUES)?,
+            "MIX peer-r2 LQR1 standard input",
+        )?;
+        let (signal, context) =
+            parse_lqraw_with_limits(raw, MAX_CHANNELS, MAX_SAMPLES, MAX_LEARNED_VALUES, false)?;
+        let packet = Mix1Codec
+            .encode_best_peer_r2_window(&signal, context.sample_rate_mhz, context.bit_depth)
             .map_err(|error| error.to_string())?;
         return write_standard_output(&packet);
     }
@@ -1083,6 +1097,21 @@ fn run(args: &[String]) -> Result<(), String> {
         };
         return write_standard_output(&encode_lqraw(&decoded.samples, &context)?);
     }
+    if args.len() == 2 && args[1] == "mix1-peer-r2-decode-stdio" {
+        let packet = read_standard_input(
+            MAX_LEARNED_PACKET_BYTES,
+            "MIX peer-r2 packet standard input",
+        )?;
+        let decoded = Mix1Codec
+            .decode_r2_window(&packet)
+            .map_err(|error| error.to_string())?;
+        let context = EncodeContext {
+            sample_rate_mhz: decoded.sample_rate_mhz,
+            bit_depth: decoded.bit_depth,
+            channel_labels: Vec::new(),
+        };
+        return write_standard_output(&encode_lqraw(&decoded.samples, &context)?);
+    }
     if args.len() == 6 && args[1] == "dix1-encode" {
         let profile = args[2].as_str();
         if !matches!(
@@ -1184,7 +1213,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if args.len() != 4 || !matches!(args[1].as_str(), "encode" | "decode") {
         return Err(
-            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-peer-candidate-bundle-stdio | mix1-peer-encode-best-no-alias-stdio | mix1-peer-bitplane-encode-stdio | mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK | mix1-peer-tuned-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE PARENT_HISTORY_DEPTH PARENT_PENALTY | mix1-peer-compact-common-profile-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE | mix1-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
+            "usage: optimum-v2-codec encode|decode INPUT OUTPUT | describe OUTPUT | mix1-encode-stdio SCORE_SHIFT | mix1-encode-best-stdio | mix1-peer-encode-best-stdio | mix1-peer-r2-encode-best-stdio | mix1-peer-candidate-bundle-stdio | mix1-peer-encode-best-no-alias-stdio | mix1-peer-bitplane-encode-stdio | mix1-peer-permuted-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK | mix1-peer-tuned-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE PARENT_HISTORY_DEPTH PARENT_PENALTY | mix1-peer-compact-common-profile-encode-stdio SCORE_SHIFT CHANNEL_CONTEXT_MASK HISTORY_CONTEXT SCALE_PROFILE | mix1-decode-stdio | mix1-peer-r2-decode-stdio | dix1-encode PROFILE INPUT META_JSON OUTPUT | dix1-decode INPUT OUTPUT | dix1-encode-stdio PROFILE META_JSON | dix1-decode-stdio | dix2-encode-stdio PROFILE META_JSON | dix2-decode-stdio | learned-encode MODE MODEL INPUT META_JSON OUTPUT | learned-decode MODEL INPUT OUTPUT"
                 .into(),
         );
     }
