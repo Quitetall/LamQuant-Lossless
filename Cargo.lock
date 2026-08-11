@@ -926,7 +926,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=14f14c3f4289dfd3c8e9897c4f615ad625412f02#14f14c3f4289dfd3c8e9897c4f615ad625412f02"
+source = "git+https://github.com/Quitetall/blut.git?rev=e198b68e4e959af89261d73d1e3c36b93832bff6#e198b68e4e959af89261d73d1e3c36b93832bff6"
 dependencies = [
  "blake3",
  "postcard",
@@ -3501,7 +3501,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dirs",
- "serde",
  "toml_edit 0.22.27",
  "tracing",
 ]
@@ -3764,11 +3763,9 @@ dependencies = [
  "serde",
  "serde_json",
  "throbber-widgets-tui",
- "tracing",
  "tui-piechart",
  "tui-scrollview",
  "tui-tree-widget",
- "tui-widget-list",
  "walkdir",
 ]
 
@@ -6743,16 +6740,6 @@ dependencies = [
  "ratatui-core",
  "ratatui-widgets",
  "unicode-width",
-]
-
-[[package]]
-name = "tui-widget-list"
-version = "0.15.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fbf7f6c7d04beb3602630d83db44e81d7a1de1fea11ca3435d82e094c5c0192"
-dependencies = [
- "ratatui-core",
- "ratatui-widgets",
 ]
 
 [[package]]
