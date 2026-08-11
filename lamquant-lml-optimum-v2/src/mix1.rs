@@ -700,21 +700,31 @@ impl Mix1Codec {
         sample_rate_mhz: u32,
         bit_depth: u8,
     ) -> Result<Vec<u8>, OptimumV2Error> {
-        let mut best =
-            self.encode_best_peer_r2_window_without_bitplane(signal, sample_rate_mhz, bit_depth)?;
-        let has_exact_alias = fit_channel_aliases(signal)?.0.len() != signal.len();
-        if bit_depth >= 2 && !has_exact_alias {
-            let bitplane = self.encode_bitplane_layer_window_for_revision(
+        let incumbent = self.encode_best_peer_window(signal, sample_rate_mhz, bit_depth)?;
+        let frame = unpack_frame(&incumbent)?;
+        let candidate = if frame.graph.get(..4) == Some(&b"ALX1"[..]) {
+            self.encode_alias_window_optional_for_revision(
                 signal,
                 sample_rate_mhz,
                 bit_depth,
                 PeerRevision::R2,
-            )?;
-            if bitplane.len() < best.len() {
-                best = bitplane;
-            }
-        }
-        Ok(best)
+            )?
+            .ok_or_else(|| input_error("peer-r2 ALX1 incumbent lost its alias partition"))?
+        } else if frame.graph.get(..4) == Some(&b"BLX1"[..]) {
+            self.encode_bitplane_layer_window_for_revision(
+                signal,
+                sample_rate_mhz,
+                bit_depth,
+                PeerRevision::R2,
+            )?
+        } else {
+            self.encode_best_peer_r2_window_without_alias(signal, sample_rate_mhz, bit_depth)?
+        };
+        Ok(if candidate.len() < incumbent.len() {
+            candidate
+        } else {
+            incumbent
+        })
     }
 
     fn encode_best_peer_r2_window_without_bitplane(
@@ -723,19 +733,25 @@ impl Mix1Codec {
         sample_rate_mhz: u32,
         bit_depth: u8,
     ) -> Result<Vec<u8>, OptimumV2Error> {
-        let mut best =
-            self.encode_best_peer_r2_window_without_alias(signal, sample_rate_mhz, bit_depth)?;
-        if let Some(alias) = self.encode_alias_window_optional_for_revision(
-            signal,
-            sample_rate_mhz,
-            bit_depth,
-            PeerRevision::R2,
-        )? {
-            if alias.len() < best.len() {
-                best = alias;
-            }
-        }
-        Ok(best)
+        let incumbent =
+            self.encode_best_peer_window_without_bitplane(signal, sample_rate_mhz, bit_depth)?;
+        let frame = unpack_frame(&incumbent)?;
+        let candidate = if frame.graph.get(..4) == Some(&b"ALX1"[..]) {
+            self.encode_alias_window_optional_for_revision(
+                signal,
+                sample_rate_mhz,
+                bit_depth,
+                PeerRevision::R2,
+            )?
+            .ok_or_else(|| input_error("peer-r2 ALX1 incumbent lost its alias partition"))?
+        } else {
+            self.encode_best_peer_r2_window_without_alias(signal, sample_rate_mhz, bit_depth)?
+        };
+        Ok(if candidate.len() < incumbent.len() {
+            candidate
+        } else {
+            incumbent
+        })
     }
 
     fn encode_best_peer_window_without_bitplane(
@@ -4171,6 +4187,41 @@ mod tests {
 
         assert_eq!(Mix1Codec.decode_r2_window(&packet).unwrap().samples, signal);
         assert!(Mix1Codec.decode_window(&packet).is_err());
+    }
+
+    #[test]
+    fn peer_r2_preserves_the_peer_r1_outer_wrapper_admission() {
+        let samples = 384usize;
+        let aliased = (0..samples)
+            .map(|time| if time < samples / 2 { 163 } else { -163 })
+            .collect::<Vec<_>>();
+        let mut signal = vec![aliased; 33];
+        let mut state = 17u32;
+        for channel in 0..8i64 {
+            signal.push(
+                (0..samples)
+                    .map(|_| {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        6_334 + channel * 20 + i64::from(state % 9) - 4
+                    })
+                    .collect(),
+            );
+        }
+
+        let peer_r1 = Mix1Codec
+            .encode_best_peer_window(&signal, 250_000, 16)
+            .expect("encode peer-r1 wrapper incumbent");
+        let peer_r2 = Mix1Codec
+            .encode_best_peer_r2_window(&signal, 250_000, 16)
+            .expect("encode peer-r2 matching wrapper");
+
+        assert_eq!(&unpack_frame(&peer_r1).unwrap().graph[..4], b"ALX1");
+        assert_eq!(&unpack_frame(&peer_r2).unwrap().graph[..4], b"ALX1");
+        assert!(peer_r2.len() <= peer_r1.len());
+        assert_eq!(
+            Mix1Codec.decode_r2_window(&peer_r2).unwrap().samples,
+            signal
+        );
     }
 
     #[test]
