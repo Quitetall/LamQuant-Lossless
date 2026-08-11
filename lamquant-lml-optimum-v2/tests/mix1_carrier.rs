@@ -220,6 +220,99 @@ fn peer_multivariate_carriers_are_exact_deterministic_and_never_larger_than_mix1
 }
 
 #[test]
+fn peer_portfolio_diagnostic_preserves_order_and_strict_minimum() {
+    let candidates = Mix1Codec
+        .encode_peer_portfolio_candidates(&signal(), 256_000, 16)
+        .expect("encode diagnostic peer portfolio");
+
+    let mut expected_ids = (2..=8)
+        .map(|shift| format!("score-s{shift}"))
+        .collect::<Vec<_>>();
+    expected_ids.extend((2..=8).map(|shift| format!("mv-flat-s{shift}")));
+    expected_ids.extend((2..=8).map(|shift| format!("mv-hier-s{shift}")));
+    expected_ids.push("channel-context-m8-s5".into());
+    expected_ids.extend([5, 6, 8].map(|shift| format!("common-s{shift}-m3")));
+    for mask in [3, 4, 5, 7] {
+        expected_ids.extend([3, 5, 6, 7, 8].map(|shift| format!("permuted-m{mask}-s{shift}")));
+    }
+    expected_ids.push("tuned-p6-s8-m7-h52-z4-d2".into());
+    expected_ids.extend([11, 8].map(|shift| format!("tuned-p32-s{shift}-m3-h84-z6-d1")));
+    expected_ids.push("compact-s10-m3-h84-z4".into());
+    expected_ids.push("bitplane".into());
+
+    assert_eq!(candidates.len(), 50);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect::<Vec<_>>(),
+        expected_ids.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.family == "permuted")
+            .count(),
+        20
+    );
+    for candidate in &candidates {
+        assert_eq!(
+            Mix1Codec
+                .decode_window(&candidate.packet)
+                .expect("decode diagnostic candidate")
+                .samples,
+            signal(),
+            "candidate {} failed exact decode",
+            candidate.id
+        );
+    }
+
+    let strict_minimum = candidates
+        .iter()
+        .min_by_key(|candidate| candidate.packet.len())
+        .expect("nonempty diagnostic portfolio");
+    assert_eq!(
+        strict_minimum.packet,
+        Mix1Codec
+            .encode_best_peer_window(&signal(), 256_000, 16)
+            .expect("encode production peer packet")
+    );
+    assert_eq!(
+        candidates,
+        Mix1Codec
+            .encode_peer_portfolio_candidates(&signal(), 256_000, 16)
+            .expect("repeat diagnostic peer portfolio")
+    );
+}
+
+#[test]
+fn peer_portfolio_diagnostic_exposes_alias_as_atomic_last_candidate() {
+    let base = signal();
+    let aliased = vec![base[0].clone(), base[0].clone(), base[1].clone()];
+    let candidates = Mix1Codec
+        .encode_peer_portfolio_candidates(&aliased, 250_000, 16)
+        .expect("encode aliased diagnostic portfolio");
+
+    assert_eq!(candidates.len(), 50);
+    assert_eq!(candidates.last().unwrap().id, "alias");
+    assert_eq!(candidates.last().unwrap().family, "alias");
+    assert_eq!(peer_magic(&candidates.last().unwrap().packet), b"ALX1");
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate.id != "bitplane"));
+    assert_eq!(
+        candidates
+            .iter()
+            .min_by_key(|candidate| candidate.packet.len())
+            .unwrap()
+            .packet,
+        Mix1Codec
+            .encode_best_peer_window(&aliased, 250_000, 16)
+            .expect("encode production aliased packet")
+    );
+}
+
+#[test]
 fn peer_channel_context_carrier_roundtrips_and_rejects_noncanonical_masks() {
     let packet = Mix1Codec
         .encode_channel_context_window(&signal(), 256_000, 16, 4, 7)

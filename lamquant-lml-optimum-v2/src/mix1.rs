@@ -44,6 +44,17 @@ pub struct Mix1TunedProfile {
     pub parent_penalty: u64,
 }
 
+/// One complete packet exposed by development-only portfolio instrumentation.
+///
+/// Ordering is production admission order. Packets remain ordinary peer codec
+/// packets; this metadata is not part of the codec wire format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerPortfolioCandidate {
+    pub id: String,
+    pub family: &'static str,
+    pub packet: Vec<u8>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Mix1Codec;
 
@@ -714,12 +725,12 @@ impl Mix1Codec {
         })?))
     }
 
-    pub fn encode_best_peer_window_without_alias(
+    fn encode_peer_core_candidates(
         &self,
         signal: &[Vec<i64>],
         sample_rate_mhz: u32,
         bit_depth: u8,
-    ) -> Result<Vec<u8>, OptimumV2Error> {
+    ) -> Result<Vec<(PortfolioCandidate, Vec<u8>)>, OptimumV2Error> {
         let frame = PortfolioFrame::new(signal, sample_rate_mhz, bit_depth)?;
         let universal = universal_residuals(signal, bit_depth)?;
         let (side, lattice) = mix1_lattice::fit_and_analyze(signal)?;
@@ -877,12 +888,66 @@ impl Mix1Codec {
                 },
             ),
         })?;
+        if profiles.len() != candidates.len() {
+            return Err(input_error("MIX peer portfolio cardinality drifted"));
+        }
+        Ok(profiles.into_iter().zip(candidates).collect())
+    }
+
+    pub fn encode_best_peer_window_without_alias(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<u8>, OptimumV2Error> {
         let mut best = None;
-        for candidate in candidates {
+        for (_, candidate) in
+            self.encode_peer_core_candidates(signal, sample_rate_mhz, bit_depth)?
+        {
             consider_shorter(&mut best, candidate);
         }
-
         best.ok_or_else(|| input_error("MIX peer portfolio is empty"))
+    }
+
+    /// Emit production-ordered top-level candidates for development ablation.
+    ///
+    /// ALX1 and BLX1 remain atomic: their nested production selection is not
+    /// expanded into this flat list. Selecting first shortest packet therefore
+    /// reproduces `encode_best_peer_window` exactly.
+    pub fn encode_peer_portfolio_candidates(
+        &self,
+        signal: &[Vec<i64>],
+        sample_rate_mhz: u32,
+        bit_depth: u8,
+    ) -> Result<Vec<PeerPortfolioCandidate>, OptimumV2Error> {
+        let mut candidates = self
+            .encode_peer_core_candidates(signal, sample_rate_mhz, bit_depth)?
+            .into_iter()
+            .map(|(profile, packet)| PeerPortfolioCandidate {
+                id: profile.id(),
+                family: profile.family(),
+                packet,
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(packet) =
+            self.encode_alias_window_optional(signal, sample_rate_mhz, bit_depth)?
+        {
+            candidates.push(PeerPortfolioCandidate {
+                id: "alias".into(),
+                family: "alias",
+                packet,
+            });
+        }
+        let has_exact_alias = fit_channel_aliases(signal)?.0.len() != signal.len();
+        if bit_depth >= 2 && !has_exact_alias {
+            candidates.push(PeerPortfolioCandidate {
+                id: "bitplane".into(),
+                family: "bitplane",
+                packet: self.encode_bitplane_layer_window(signal, sample_rate_mhz, bit_depth)?,
+            });
+        }
+        Ok(candidates)
     }
 
     #[cfg(test)]
@@ -1659,6 +1724,52 @@ enum PortfolioCandidate {
     TunedSix,
     TunedThirtyTwo(u8),
     Compact,
+}
+
+impl PortfolioCandidate {
+    fn id(self) -> String {
+        match self {
+            Self::Score(score_shift) => format!("score-s{score_shift}"),
+            Self::Multivariate {
+                hierarchical: false,
+                score_shift,
+            } => format!("mv-flat-s{score_shift}"),
+            Self::Multivariate {
+                hierarchical: true,
+                score_shift,
+            } => format!("mv-hier-s{score_shift}"),
+            Self::ChannelContext => "channel-context-m8-s5".into(),
+            Self::CommonMode(score_shift) => format!("common-s{score_shift}-m3"),
+            Self::Permuted {
+                channel_context_mask,
+                score_shift,
+            } => format!("permuted-m{channel_context_mask}-s{score_shift}"),
+            Self::TunedSix => "tuned-p6-s8-m7-h52-z4-d2".into(),
+            Self::TunedThirtyTwo(score_shift) => {
+                format!("tuned-p32-s{score_shift}-m3-h84-z6-d1")
+            }
+            Self::Compact => "compact-s10-m3-h84-z4".into(),
+        }
+    }
+
+    fn family(self) -> &'static str {
+        match self {
+            Self::Score(_) => "score",
+            Self::Multivariate {
+                hierarchical: false,
+                ..
+            } => "multivariate-flat",
+            Self::Multivariate {
+                hierarchical: true, ..
+            } => "multivariate-hierarchical",
+            Self::ChannelContext => "channel-context",
+            Self::CommonMode(_) => "common-mode",
+            Self::Permuted { .. } => "permuted",
+            Self::TunedSix => "tuned-six",
+            Self::TunedThirtyTwo(_) => "tuned-thirty-two",
+            Self::Compact => "compact",
+        }
+    }
 }
 
 impl PortfolioFrame {

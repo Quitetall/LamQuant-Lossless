@@ -3,23 +3,72 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-fn lqraw_fixture() -> Vec<u8> {
+use lamquant_lml_optimum_v2::mix1::Mix1Codec;
+
+fn fixture_signal() -> Vec<Vec<i64>> {
     let channels = 3usize;
     let samples = 48usize;
+    (0..channels)
+        .map(|channel| {
+            (0..samples)
+                .map(|time| {
+                    i64::from(
+                        (channel as i32 + 1) * (time as i32 * 3 - 17)
+                            + ((time + channel * 5) % 7) as i32,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn lqraw_fixture() -> Vec<u8> {
+    let signal = fixture_signal();
+    let channels = signal.len();
+    let samples = signal[0].len();
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"LQR1");
     bytes.extend_from_slice(&[1, 4, 16, 0]);
     bytes.extend_from_slice(&256_000u32.to_le_bytes());
     bytes.extend_from_slice(&(channels as u32).to_le_bytes());
     bytes.extend_from_slice(&(samples as u32).to_le_bytes());
-    for channel in 0..channels {
-        for time in 0..samples {
-            let value =
-                (channel as i32 + 1) * (time as i32 * 3 - 17) + ((time + channel * 5) % 7) as i32;
-            bytes.extend_from_slice(&value.to_le_bytes());
+    for channel in signal {
+        for value in channel {
+            bytes.extend_from_slice(&(value as i32).to_le_bytes());
         }
     }
     bytes
+}
+
+fn parse_candidate_bundle(packed: &[u8]) -> Vec<(String, String, Vec<u8>)> {
+    assert_eq!(&packed[..4], b"A5B1");
+    let count = usize::from(u16::from_le_bytes(packed[4..6].try_into().unwrap()));
+    let mut offset = 6usize;
+    let mut candidates = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id_len = usize::from(u16::from_le_bytes(
+            packed[offset..offset + 2].try_into().unwrap(),
+        ));
+        offset += 2;
+        let family_len = usize::from(u16::from_le_bytes(
+            packed[offset..offset + 2].try_into().unwrap(),
+        ));
+        offset += 2;
+        let packet_len = usize::try_from(u32::from_le_bytes(
+            packed[offset..offset + 4].try_into().unwrap(),
+        ))
+        .unwrap();
+        offset += 4;
+        let id = String::from_utf8(packed[offset..offset + id_len].to_vec()).unwrap();
+        offset += id_len;
+        let family = String::from_utf8(packed[offset..offset + family_len].to_vec()).unwrap();
+        offset += family_len;
+        let packet = packed[offset..offset + packet_len].to_vec();
+        offset += packet_len;
+        candidates.push((id, family, packet));
+    }
+    assert_eq!(offset, packed.len());
+    candidates
 }
 
 fn peer_magic(packet: &[u8]) -> &[u8] {
@@ -129,6 +178,42 @@ fn peer_stdio_worker_emits_a_complete_exact_packet() {
     ));
     let restored = stdio_worker(binary, &["mix1-decode-stdio"], &best.stdout);
     assert_eq!(restored.stdout, raw);
+}
+
+#[test]
+fn peer_candidate_bundle_worker_is_ordered_exact_and_matches_production() {
+    let binary = env!("CARGO_BIN_EXE_optimum-v2-codec");
+    let raw = lqraw_fixture();
+    let bundled = stdio_worker(binary, &["mix1-peer-candidate-bundle-stdio"], &raw);
+    assert!(
+        bundled.status.success(),
+        "candidate bundle failed: {}",
+        String::from_utf8_lossy(&bundled.stderr)
+    );
+    let candidates = parse_candidate_bundle(&bundled.stdout);
+
+    assert_eq!(candidates.len(), 50);
+    assert_eq!(candidates.first().unwrap().0, "score-s2");
+    assert_eq!(candidates.first().unwrap().1, "score");
+    assert_eq!(candidates.last().unwrap().0, "bitplane");
+    assert_eq!(candidates.last().unwrap().1, "bitplane");
+    for (id, _family, packet) in &candidates {
+        assert_eq!(
+            Mix1Codec
+                .decode_window(packet)
+                .unwrap_or_else(|error| panic!("decode {id}: {error}"))
+                .samples,
+            fixture_signal()
+        );
+    }
+
+    let production = stdio_worker(binary, &["mix1-peer-encode-best-stdio"], &raw);
+    assert!(production.status.success());
+    let strict_minimum = candidates
+        .iter()
+        .min_by_key(|(_, _, packet)| packet.len())
+        .unwrap();
+    assert_eq!(strict_minimum.2, production.stdout);
 }
 
 #[test]
