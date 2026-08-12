@@ -3721,43 +3721,78 @@ pub fn classify_error(e: &(dyn std::error::Error + Send + Sync)) -> LmaErrorKind
     }
 }
 
-/// A memory-mapped `.lma` archive for low-RSS, lazy-I/O reads (ADR 0075). Maps the
-/// file once and hands back **borrowed** slices of an entry's raw payload bytes — no
-/// per-entry `Vec<u8>` copy (contrast [`read_entry`], which pulls the whole entry into
-/// memory). The OS demand-pages only the touched windows, so decoding a handful of
-/// windows out of a multi-hour recording never materialises the ~1.4 GB compressed
-/// entry. Used by the training decode path + the pack builder.
-///
-/// This maps the **compressed archive** — orthogonal to any decoded-fullband memmap.
-pub struct MmapArchive {
+/// Internal source adapter that gives [`LmaArchive`] seekable access to a
+/// read-only memory map. Public only because it appears in the concrete return
+/// type of [`LmaArchive::open_mmap`]; callers should use the facade, not construct
+/// this adapter.
+#[doc(hidden)]
+pub struct MmapSource {
     mmap: memmap2::Mmap,
-    entries: Vec<ArchiveEntry>,
-    payload_start: u64,
-    payload_end: u64,
+    position: u64,
 }
 
-impl MmapArchive {
-    /// Map `archive_path` read-only and parse its index from the mapped bytes (no
-    /// extra I/O). The archive is treated as immutable for the handle's lifetime (the
-    /// training + build paths never mutate archives); a concurrent truncation could
-    /// SIGBUS on access — the same immutability assumption the rest of the reader makes.
-    pub fn open(archive_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+impl Read for MmapSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let start = usize::try_from(self.position).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "mmap position exceeds usize on this platform",
+            )
+        })?;
+        if start >= self.mmap.len() {
+            return Ok(0);
+        }
+        let read_len = buffer.len().min(self.mmap.len() - start);
+        buffer[..read_len].copy_from_slice(&self.mmap[start..start + read_len]);
+        self.position = self.position.checked_add(read_len as u64).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "mmap position overflow")
+        })?;
+        Ok(read_len)
+    }
+}
+
+impl Seek for MmapSource {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let base = match position {
+            SeekFrom::Start(offset) => {
+                self.position = offset;
+                return Ok(offset);
+            }
+            SeekFrom::Current(_) => i128::from(self.position),
+            SeekFrom::End(_) => self.mmap.len() as i128,
+        };
+        let delta = match position {
+            SeekFrom::Current(delta) | SeekFrom::End(delta) => i128::from(delta),
+            SeekFrom::Start(_) => unreachable!(),
+        };
+        let next = base.checked_add(delta).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "mmap seek overflow")
+        })?;
+        if !(0..=i128::from(u64::MAX)).contains(&next) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "mmap seek before start or beyond u64",
+            ));
+        }
+        self.position = next as u64;
+        Ok(self.position)
+    }
+}
+
+impl LmaArchive<MmapSource> {
+    /// Map `archive_path` read-only and construct the same archive facade used
+    /// by buffered and borrowed sources. The file must remain immutable for the
+    /// facade lifetime; concurrent truncation may fault mapped access.
+    pub fn open_mmap(
+        archive_path: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let file = std::fs::File::open(archive_path)?;
         let file_size = file.metadata()?.len();
         // SAFETY: read-only mapping of a file we treat as immutable for this handle.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        let idx = LmaArchive::from_source(std::io::Cursor::new(&mmap[..]), file_size)?.index;
-        Ok(Self {
-            mmap,
-            entries: idx.entries,
-            payload_start: idx.payload_base,
-            payload_end: idx.payload_end,
-        })
-    }
-
-    /// The parsed manifest entries (enumeration / window counts).
-    pub fn entries(&self) -> &[ArchiveEntry] {
-        &self.entries
+        let mut archive = Self::from_source(MmapSource { mmap, position: 0 }, file_size)?;
+        archive.path = Some(archive_path.to_path_buf());
+        Ok(archive)
     }
 
     /// A borrowed slice of an entry's raw payload bytes — **no copy**. Valid for
@@ -3771,6 +3806,7 @@ impl MmapArchive {
         entry_name: &str,
     ) -> Result<&[u8], Box<dyn std::error::Error + Send + Sync>> {
         let entry = self
+            .index
             .entries
             .iter()
             .find(|e| e.path == entry_name)
@@ -3778,8 +3814,9 @@ impl MmapArchive {
                 format!("Entry '{entry_name}' not found in mmap'd archive").into()
             })?;
         let payload_section_size = self
+            .index
             .payload_end
-            .checked_sub(self.payload_start)
+            .checked_sub(self.index.payload_base)
             .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
                 "archive payload_start > payload_end (underflow)".into()
             })?;
@@ -3799,11 +3836,17 @@ impl MmapArchive {
         }
         // u64 → usize via try_from (not `as`): a >4 GB offset must not silently
         // truncate on a 32-bit host — archives can be hundreds of GB.
-        let start = usize::try_from(self.payload_start + entry.offset).map_err(
-            |_| -> Box<dyn std::error::Error + Send + Sync> {
+        let absolute = self
+            .index
+            .payload_base
+            .checked_add(entry.offset)
+            .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                "entry absolute offset overflow".into()
+            })?;
+        let start =
+            usize::try_from(absolute).map_err(|_| -> Box<dyn std::error::Error + Send + Sync> {
                 "entry offset exceeds usize on this platform".into()
-            },
-        )?;
+            })?;
         let size = usize::try_from(entry.compressed_size).map_err(
             |_| -> Box<dyn std::error::Error + Send + Sync> {
                 "entry size exceeds usize on this platform".into()
@@ -3812,15 +3855,15 @@ impl MmapArchive {
         let end = start.checked_add(size).ok_or_else(
             || -> Box<dyn std::error::Error + Send + Sync> { "entry byte range overflow".into() },
         )?;
-        if end > self.mmap.len() {
+        if end > self.source.mmap.len() {
             return Err(format!(
                 "Entry '{}' byte range [{start}, {end}) exceeds mapped length {}",
                 entry.path,
-                self.mmap.len()
+                self.source.mmap.len()
             )
             .into());
         }
-        Ok(&self.mmap[start..end])
+        Ok(&self.source.mmap[start..end])
     }
 }
 
@@ -5112,7 +5155,7 @@ mod tests {
         let archive = tempfile::NamedTempFile::new().unwrap();
         pack_archive(src.path(), archive.path(), 9, false, None).unwrap();
 
-        let m = MmapArchive::open(archive.path()).unwrap();
+        let m = LmaArchive::open_mmap(archive.path()).unwrap();
         // Store entry: the mmap borrow equals the read_entry copy AND the original bytes.
         let via_read = read_entry(archive.path(), "rec.lml").unwrap();
         let via_mmap = m.entry_bytes("rec.lml").unwrap();
@@ -5138,7 +5181,7 @@ mod tests {
     }
 
     // A3 (ADR 0075) — the mmap + selected decode (what `lma_mmap_read_phys_selected`
-    // wraps: `MmapArchive::open` → `entry_bytes` → `read_bytes_into_f32_calibrated_selected`)
+    // wraps: `LmaArchive::open_mmap` → `entry_bytes` → `read_bytes_into_f32_calibrated_selected`)
     // is bit-identical to the full decode's corresponding rows. This is the combined
     // path the canonical training decode now takes.
     #[test]

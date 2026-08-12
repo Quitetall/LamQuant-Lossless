@@ -18,12 +18,12 @@ fn legacy_v1_store(path: &str, payload: &[u8]) -> Vec<u8> {
             "offset": 0,
         }]
     });
-    let manifest = serde_json::to_vec(&manifest).unwrap();
+    let manifest = zstd::encode_all(serde_json::to_vec(&manifest).unwrap().as_slice(), 3).unwrap();
     let mut archive = Vec::new();
     archive.extend_from_slice(b"LMA1");
     archive.extend_from_slice(&1u32.to_le_bytes());
     archive.extend_from_slice(&1u32.to_le_bytes());
-    archive.extend_from_slice(&((manifest.len() as u32) | 0x8000_0000).to_le_bytes());
+    archive.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
     archive.extend_from_slice(&manifest);
     archive.extend_from_slice(payload);
     let digest = Sha256::digest(&archive);
@@ -65,6 +65,55 @@ fn v1_borrowed_bytes_adapter_lists_reads_and_verifies() {
     let verification = archive.verify().unwrap();
     assert!(verification.passed());
     assert!(verification.archive_path.is_none());
+}
+
+#[test]
+fn v1_file_and_mmap_facade_cover_read_extract_unpack_append_and_verify() {
+    let root = tempfile::tempdir().unwrap();
+    let archive_path = root.path().join("legacy.lma");
+    std::fs::write(
+        &archive_path,
+        legacy_v1_store("legacy.bin", b"legacy-v1-payload"),
+    )
+    .unwrap();
+
+    let mut buffered = LmaArchive::open(&archive_path).unwrap();
+    assert_eq!(buffered.entries().len(), 1);
+    assert_eq!(
+        buffered.read_raw("legacy.bin").unwrap(),
+        b"legacy-v1-payload"
+    );
+    assert!(buffered.verify().unwrap().passed());
+
+    let extracted = root.path().join("legacy-extracted.bin");
+    buffered.extract_to("legacy.bin", &extracted).unwrap();
+    assert_eq!(std::fs::read(&extracted).unwrap(), b"legacy-v1-payload");
+
+    let unpacked = root.path().join("legacy-unpacked");
+    buffered.unpack_to(&unpacked, true, false, None).unwrap();
+    assert_eq!(
+        std::fs::read(unpacked.join("legacy.bin")).unwrap(),
+        b"legacy-v1-payload"
+    );
+    drop(buffered);
+
+    let mut mapped = LmaArchive::open_mmap(&archive_path).unwrap();
+    assert_eq!(mapped.entries().len(), 1);
+    assert_eq!(
+        mapped.entry_bytes("legacy.bin").unwrap(),
+        b"legacy-v1-payload"
+    );
+    assert_eq!(mapped.read_raw("legacy.bin").unwrap(), b"legacy-v1-payload");
+    assert!(mapped.verify().unwrap().passed());
+    drop(mapped);
+
+    let extra = root.path().join("extra.png");
+    std::fs::write(&extra, b"v1-appended").unwrap();
+    LmaArchive::append_file(&archive_path, &extra, Some("extra.png"), 3, false, false).unwrap();
+    let mut upgraded = LmaArchive::open(&archive_path).unwrap();
+    assert_eq!(upgraded.entries().len(), 2);
+    assert_eq!(upgraded.read_raw("extra.png").unwrap(), b"v1-appended");
+    assert!(upgraded.verify().unwrap().passed());
 }
 
 #[test]
@@ -115,15 +164,13 @@ fn v2_file_facade_covers_list_read_extract_unpack_append_and_verify() {
 }
 
 #[test]
-fn v2_mmap_like_borrowed_bytes_matches_buffered_file_result() {
+fn v2_mmap_facade_matches_buffered_file_result() {
     let (_root, archive_path) = v2_fixture();
-    let bytes = std::fs::read(&archive_path).unwrap();
-    let mut borrowed =
-        LmaArchive::from_source(Cursor::new(bytes.as_slice()), bytes.len() as u64).unwrap();
+    let mut mapped = LmaArchive::open_mmap(&archive_path).unwrap();
     let mut buffered = LmaArchive::open(&archive_path).unwrap();
 
     assert_eq!(
-        borrowed
+        mapped
             .entries()
             .iter()
             .map(|entry| &entry.path)
@@ -134,28 +181,35 @@ fn v2_mmap_like_borrowed_bytes_matches_buffered_file_result() {
             .map(|entry| &entry.path)
             .collect::<Vec<_>>()
     );
+    assert_eq!(mapped.entry_bytes("image.png").unwrap(), b"stored-payload");
     assert_eq!(
-        borrowed.read_decoded("notes.txt").unwrap(),
+        mapped.read_decoded("notes.txt").unwrap(),
         buffered.read_decoded("notes.txt").unwrap()
     );
     assert_eq!(
-        borrowed.verify().unwrap().passed(),
+        mapped.verify().unwrap().passed(),
         buffered.verify().unwrap().passed()
     );
 }
 
 #[test]
-fn corruption_returns_one_structured_verification_result() {
+fn v1_and_v2_corruption_return_structured_verification_results() {
     let (_root, archive_path) = v2_fixture();
-    let mut bytes = std::fs::read(&archive_path).unwrap();
-    bytes[16] ^= 0x40;
-    let mut archive =
-        LmaArchive::from_source(Cursor::new(bytes.as_slice()), bytes.len() as u64).unwrap();
-    let verification = archive.verify().unwrap();
+    let mut v2 = std::fs::read(&archive_path).unwrap();
+    v2[16] ^= 0x40;
 
-    assert!(!verification.archive_hash_matches);
-    assert!(!verification.passed());
-    assert!(verification.failed_entries() >= 1);
+    let mut v1 = legacy_v1_store("legacy.bin", b"legacy-v1-payload");
+    let manifest_len = u32::from_le_bytes(v1[12..16].try_into().unwrap()) as usize;
+    v1[16 + manifest_len] ^= 0x40;
+
+    for bytes in [&v1, &v2] {
+        let mut archive =
+            LmaArchive::from_source(Cursor::new(bytes.as_slice()), bytes.len() as u64).unwrap();
+        let verification = archive.verify().unwrap();
+        assert!(!verification.archive_hash_matches);
+        assert!(!verification.passed());
+        assert!(verification.failed_entries() >= 1);
+    }
 }
 
 #[test]
@@ -181,4 +235,6 @@ fn archive_layout_parser_is_private_to_facade_construction() {
     );
     assert!(archive.contains("fn read_lma_index<R: Read + Seek>("));
     assert!(!archive.contains("pub fn read_lma_index"));
+    assert!(archive.contains("impl LmaArchive<MmapSource>"));
+    assert!(!archive.contains("pub struct MmapArchive"));
 }
