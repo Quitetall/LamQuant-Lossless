@@ -2674,11 +2674,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hdf5-metno-src"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9f4d3e1f2a19838c64d33c32eb7354e5dd5bfe3ef600e1f530a1dc15b51d8ff"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
 name = "hdf5-metno-sys"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b546cf84b629a51ea1e68c783b37ce2045c80f3d56e4ba1d2d882cfba0364738"
 dependencies = [
+ "hdf5-metno-src",
  "libc",
  "libloading",
  "parking_lot",

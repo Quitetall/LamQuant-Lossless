@@ -17,7 +17,11 @@ dicom-core = "0.8"
 # BIDS mandates gzipped continuous-recording tables.
 flate2 = "1"
 dicom-object = "0.8"
-hdf5-metno = { version = "0.12", optional = true }
+# Build the binding's pinned HDF5 source. Rolling distributions now ship HDF5
+# 2.x, which the current binding rejects before even non-NWB adapter tests run.
+# Keeping the native dependency hermetic also makes archive conformance gates
+# independent of host pkg-config state.
+hdf5-metno = { version = "0.12", optional = true, features = ["static"] }
 lamquant-lml = { version = "0.9.3", path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom"] }
 semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4" }
 serde_json = "1"
