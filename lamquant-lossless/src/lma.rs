@@ -445,6 +445,31 @@ struct LmaIndex {
     directories: Vec<(String, u64)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LmaFormat {
+    V1,
+    V2,
+}
+
+pub fn probe_format(
+    path: &Path,
+) -> Result<Option<LmaFormat>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut source = std::fs::File::open(path)?;
+    let mut magic = [0u8; 4];
+    if let Err(error) = source.read_exact(&mut magic) {
+        return if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            Ok(None)
+        } else {
+            Err(error.into())
+        };
+    }
+    Ok(match &magic {
+        bytes if bytes == LMA_MAGIC => Some(LmaFormat::V1),
+        bytes if bytes == LMA_MAGIC_V2 => Some(LmaFormat::V2),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ArchiveEntryVerification {
     pub path: String,

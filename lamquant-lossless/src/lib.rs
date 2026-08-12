@@ -124,6 +124,8 @@ pub use lamquant_common::ingest;
 pub mod io;
 #[cfg(feature = "archive")]
 pub mod lma;
+#[cfg(feature = "archive")]
+pub mod workflows;
 // LMA directory archives expressed as BCS2 forensic capsules (ADR 0139
 // contract 5). Additive: `lma` keeps reading and writing LMA1/LMA2.
 #[cfg(feature = "archive")]
