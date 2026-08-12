@@ -8209,387 +8209,164 @@ fn cmd_volume_assemble(input: &Path, output: Option<&Path>, force: bool) -> R {
 /// v1.2 X — dispatches to the explainer when `--explain` is set;
 /// otherwise calls the compact existing verifier.
 fn cmd_verify_archive_explain(input: &Path, explain: bool) -> R {
+    let started = Instant::now();
+    let result = lma::verify_archive(input)?;
     if explain {
-        cmd_verify_archive_explainer(input)
+        render_archive_verification_explained(&result, started.elapsed());
     } else {
-        cmd_verify_archive(input)
+        render_archive_verification_compact(&result, started.elapsed());
     }
-}
-
-/// v1.2 X — auditable per-step readout. Prints the literal chain
-/// of checks the verifier performs:
-///   1. Archive size + structural minimum
-///   2. Archive-wide SHA-256 over content+footer
-///   3. Manifest section (zstd decompress + parse)
-///   4. Per-entry payload read + method-specific verify + SHA match
-///   5. Decompression byte counts + per-entry CR
-///   6. Cumulative elapsed time + OK/FAIL summary
-///
-/// No black box. Operator sees exactly what was checked.
-fn cmd_verify_archive_explainer(input: &Path) -> R {
-    use sha2::Digest;
-
-    let file_size = std::fs::metadata(input)?.len();
-    if file_size < 48 {
-        return Err(format!("Archive too small ({} bytes)", file_size).into());
-    }
-
-    let t0 = Instant::now();
-    println!("Verifying {} (auditable readout)", input.display());
-    println!("─────────────────────────────────────────────────────────");
-    println!(
-        "[1/5] Archive size:        {} ({:.2} KB)",
-        file_size,
-        file_size as f64 / 1024.0
-    );
-
-    // 2. Archive-wide SHA-256 (content + everything before the 32-byte footer)
-    print!("[2/5] Archive SHA-256:     ");
-    {
-        use std::io::Read;
-        let mut f = std::io::BufReader::new(std::fs::File::open(input)?);
-        let mut hasher = Sha256::new();
-        let content_size = file_size - 32;
-        let mut remaining = content_size;
-        let mut buf = vec![0u8; 8 * 1024 * 1024];
-        while remaining > 0 {
-            let to_read = (remaining as usize).min(buf.len());
-            let n = f.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            remaining -= n as u64;
-        }
-        let computed = hasher.finalize();
-        let mut stored = [0u8; 32];
-        f.read_exact(&mut stored)?;
-        let computed_bytes = computed.as_slice();
-        if computed_bytes != stored {
-            println!("FAILED");
-            print!("       stored:    ");
-            for b in &stored {
-                print!("{:02x}", b);
-            }
-            println!();
-            print!("       computed:  ");
-            for b in computed_bytes {
-                print!("{:02x}", b);
-            }
-            println!();
-            return Err("Archive SHA-256 mismatch — file is corrupted".into());
-        }
-        print!("OK  sha256:");
-        for b in &stored[..8] {
-            print!("{:02x}", b);
-        }
-        println!();
-    }
-
-    // 3. Manifest decompress + parse
-    let entries = lma::list_archive(input)?;
-    println!(
-        "[3/5] Manifest:            OK ({} entries enumerated)",
-        entries.len()
-    );
-
-    // 4. Per-entry payload read + verify
-    println!("[4/5] Per-entry verify:");
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::io::BufReader::new(std::fs::File::open(input)?);
-    let mut header = [0u8; 16];
-    f.read_exact(&mut header)?;
-    let manifest_len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as u64;
-    let payload_start = 16 + manifest_len;
-
-    let mut verified = 0usize;
-    let mut failed = 0usize;
-    let mut total_compressed: u64 = 0;
-    let mut total_decompressed: u64 = 0;
-
-    for (i, entry) in entries.iter().enumerate() {
-        f.seek(SeekFrom::Start(payload_start + entry.offset))?;
-        let mut payload = vec![0u8; entry.compressed_size as usize];
-        f.read_exact(&mut payload)?;
-
-        let method_str = match entry.method {
-            lma::Method::Lml => "lml",
-            lma::Method::Zstd => "zstd",
-            lma::Method::Store => "store",
-            _ => "unknown",
-        };
-        let sha_prefix = &entry.sha256[..entry.sha256.len().min(12)];
-
-        let (ok, decompressed_size, detail) = match entry.method {
-            lma::Method::Lml => {
-                let tmp = tempfile::NamedTempFile::new()?;
-                std::fs::write(tmp.path(), &payload)?;
-                match decode_lml_file(tmp.path()) {
-                    Ok((signal, _)) => {
-                        let bytes = signal.iter().map(|ch| ch.len() * 8).sum::<usize>() as u64;
-                        (true, bytes, "LML decode OK".to_string())
-                    }
-                    Err(e) => (false, 0, format!("LML decode error: {}", e)),
-                }
-            }
-            lma::Method::Zstd => match zstd::decode_all(payload.as_slice()) {
-                Ok(decompressed) => {
-                    let hash = format!("{:x}", Sha256::digest(&decompressed));
-                    if hash == entry.sha256 {
-                        (true, decompressed.len() as u64, "zstd OK".to_string())
-                    } else {
-                        (
-                            false,
-                            decompressed.len() as u64,
-                            format!(
-                                "SHA-256 mismatch (got {}, expected {})",
-                                &hash[..12],
-                                sha_prefix
-                            ),
-                        )
-                    }
-                }
-                Err(e) => (false, 0, format!("zstd error: {}", e)),
-            },
-            lma::Method::Store => {
-                let hash = format!("{:x}", Sha256::digest(&payload));
-                if hash == entry.sha256 {
-                    (true, payload.len() as u64, "store OK".to_string())
-                } else {
-                    (
-                        false,
-                        payload.len() as u64,
-                        format!(
-                            "SHA-256 mismatch (got {}, expected {})",
-                            &hash[..12],
-                            sha_prefix
-                        ),
-                    )
-                }
-            }
-            _ => (
-                false,
-                0,
-                "unknown compression method (writer newer than reader)".to_string(),
-            ),
-        };
-
-        let cr = if entry.compressed_size > 0 {
-            decompressed_size as f64 / entry.compressed_size as f64
-        } else {
-            0.0
-        };
-        let marker = if ok { "✓" } else { "✗" };
-        println!(
-            "       [{}/{}] {} {:<32}  {:>10}  {:<6}  sha256:{}  CR {:.2}x  ({})",
-            i + 1,
-            entries.len(),
-            marker,
-            entry.path,
-            human_bytes(entry.compressed_size),
-            method_str,
-            sha_prefix,
-            cr,
-            detail,
-        );
-        if ok {
-            verified += 1;
-        } else {
-            failed += 1;
-        }
-        total_compressed += entry.compressed_size;
-        total_decompressed += decompressed_size;
-    }
-
-    let elapsed = t0.elapsed();
-    let cr = if total_compressed > 0 {
-        total_decompressed as f64 / total_compressed as f64
+    if !result.archive_hash_matches {
+        Err("Archive SHA-256 mismatch — file is corrupted".into())
+    } else if result.failed_entries() > 0 {
+        Err(format!("{} files failed verification", result.failed_entries()).into())
     } else {
-        0.0
-    };
-    println!("[5/5] Summary:");
-    println!(
-        "       Compressed total:   {} ({} bytes)",
-        human_bytes(total_compressed),
-        total_compressed
-    );
-    println!(
-        "       Decompressed total: {} ({} bytes)",
-        human_bytes(total_decompressed),
-        total_decompressed
-    );
-    println!("       Archive CR:         {:.2}x", cr);
-    println!("       Verified:           {}/{}", verified, entries.len());
-    println!("       Failed:             {}/{}", failed, entries.len());
-    println!("       Elapsed:            {:.3}s", elapsed.as_secs_f64());
-    println!("─────────────────────────────────────────────────────────");
-    if failed > 0 {
-        println!("Result: FAIL ({} failed entries)", failed);
-        Err(format!("{} files failed verification", failed).into())
-    } else {
-        println!("Result: PASS (archive-wide hash OK + all entries verified)");
         Ok(())
     }
 }
 
-fn cmd_verify_archive(input: &Path) -> R {
-    let file_size = std::fs::metadata(input)?.len();
-    if file_size < 48 {
-        return Err(format!("Archive too small ({} bytes)", file_size).into());
+fn archive_method_name(method: lma::Method) -> &'static str {
+    match method {
+        lma::Method::Lml => "lml",
+        lma::Method::Zstd => "zstd",
+        lma::Method::Store => "store",
+        _ => "unknown",
     }
+}
 
-    let t0 = Instant::now();
-    println!("Verifying {}", input.display());
-
-    // 1. Archive-level SHA-256
-    print!("  Archive SHA-256... ");
-    {
-        use std::io::Read;
-        let mut f = std::io::BufReader::new(std::fs::File::open(input)?);
-        let mut hasher = Sha256::new();
-        let content_size = file_size - 32;
-        let mut remaining = content_size;
-        let mut buf = vec![0u8; 8 * 1024 * 1024];
-        while remaining > 0 {
-            let to_read = (remaining as usize).min(buf.len());
-            let n = f.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            remaining -= n as u64;
-        }
-        let computed = hasher.finalize();
-        let mut stored = [0u8; 32];
-        f.read_exact(&mut stored)?;
-        if computed.as_slice() != stored {
-            println!("FAILED");
-            return Err("Archive SHA-256 mismatch — file is corrupted".into());
-        }
-        println!("OK");
+fn render_archive_verification_compact(
+    result: &lma::ArchiveVerification,
+    elapsed: std::time::Duration,
+) {
+    println!(
+        "Verifying {}",
+        result
+            .archive_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<memory>".into())
+    );
+    if result.archive_hash_matches {
+        println!("  Archive SHA-256... OK");
+    } else {
+        println!("  Archive SHA-256... FAILED");
+        return;
     }
-
-    // 2. Read manifest
-    let entries = lma::list_archive(input)?;
-    println!("  Manifest: {} files", entries.len());
-
-    // 3. Verify each entry's payload is readable and consistent.
-    use rayon::prelude::*;
-    use std::io::{Read, Seek, SeekFrom};
-
-    // Parse the 16-byte header once to locate the payload region.
-    let payload_start = {
-        let mut header = [0u8; 16];
-        std::io::BufReader::new(std::fs::File::open(input)?).read_exact(&mut header)?;
-        let manifest_len =
-            u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as u64;
-        16 + manifest_len
-    };
-
-    // Verify entries IN PARALLEL: each rayon worker opens its OWN file handle and
-    // decode-checks its payload independently (verify is read-only — no ordering
-    // constraint). The per-file LML verify uses a uniquely-named tempfile, so
-    // concurrent verifies never collide. `None` = pass; `Some(msg)` = fail.
-    // Messages are printed IN MANIFEST ORDER below, so output stays deterministic.
-    let verdicts: Vec<Option<String>> = entries
-        .par_iter()
-        .map(|entry| -> Option<String> {
-            let mut f = match std::fs::File::open(input) {
-                Ok(f) => f,
-                Err(e) => return Some(format!("  FAIL: {} — open error: {}", entry.path, e)),
-            };
-            if let Err(e) = f.seek(SeekFrom::Start(payload_start + entry.offset)) {
-                return Some(format!("  FAIL: {} — seek error: {}", entry.path, e));
-            }
-            let mut payload = vec![0u8; entry.compressed_size as usize];
-            if let Err(e) = f.read_exact(&mut payload) {
-                return Some(format!("  FAIL: {} — read error: {}", entry.path, e));
-            }
-
-            match entry.method {
-                lma::Method::Lml => {
-                    // Decodable LML payload (CRC checked inside decode_lml_file).
-                    let tmp = match tempfile::NamedTempFile::new() {
-                        Ok(t) => t,
-                        Err(e) => return Some(format!("  FAIL: {} — tempfile: {}", entry.path, e)),
-                    };
-                    if let Err(e) = std::fs::write(tmp.path(), &payload) {
-                        return Some(format!("  FAIL: {} — tempfile write: {}", entry.path, e));
-                    }
-                    match decode_lml_file(tmp.path()) {
-                        Ok(_) => None,
-                        Err(e) => Some(format!("  FAIL: {} — LML decode error: {}", entry.path, e)),
-                    }
-                }
-                lma::Method::Zstd => match zstd::decode_all(payload.as_slice()) {
-                    Ok(decompressed) => {
-                        let hash = format!("{:x}", Sha256::digest(&decompressed));
-                        if hash == entry.sha256 {
-                            None
-                        } else {
-                            Some(format!("  FAIL: {} — SHA-256 mismatch", entry.path))
-                        }
-                    }
-                    Err(e) => Some(format!(
-                        "  FAIL: {} — zstd decompress error: {}",
-                        entry.path, e
-                    )),
-                },
-                lma::Method::Store => {
-                    let hash = format!("{:x}", Sha256::digest(&payload));
-                    if hash == entry.sha256 {
-                        None
-                    } else {
-                        Some(format!("  FAIL: {} — SHA-256 mismatch", entry.path))
-                    }
-                }
-                // Unknown method (future Method variant). Fail-closed — clinical
-                // contract: never treat unknown as Store.
-                _ => Some(format!(
-                    "  FAIL: {} — unknown compression method (writer is newer than this reader)",
-                    entry.path
-                )),
-            }
-        })
-        .collect();
-
-    // Aggregate + report in deterministic (manifest) order.
-    let mut verified = 0usize;
-    let mut failed = 0usize;
-    for (i, verdict) in verdicts.iter().enumerate() {
-        match verdict {
-            None => verified += 1,
-            Some(msg) => {
-                failed += 1;
-                println!("{}", msg);
-            }
+    println!("  Manifest: {} files", result.entries.len());
+    for (index, entry) in result.entries.iter().enumerate() {
+        if !entry.passed {
+            println!("  FAIL: {} — {}", entry.path, entry.detail);
         }
-        if (i + 1) % 500 == 0 {
-            println!("    {}/{} verified...", i + 1, entries.len());
+        if (index + 1) % 500 == 0 {
+            println!("    {}/{} verified...", index + 1, result.entries.len());
         }
     }
-
-    let elapsed = t0.elapsed();
+    let failed = result.failed_entries();
+    let verified = result.entries.len() - failed;
     println!(
         "\n  {} files verified, {} failed, {:.1}s",
         verified,
         failed,
         elapsed.as_secs_f64()
     );
-
-    if failed > 0 {
-        Err(format!("{} files failed verification", failed).into())
-    } else {
+    if failed == 0 {
         println!("  INTEGRITY OK — archive is valid.");
-        Ok(())
     }
 }
 
-/// ADR 0051 track 2: encode a single EDF/BDF to a bare bounded-MAE `.lml`
-/// (closed-loop DPCM, guarantees max|orig-recon| <= delta). Self-contained —
-/// bypasses the batch/bundle path; the lossy stream has no per-recording
-/// `.lma` sibling-envelope semantics. For the H.BWC working-point bench +
-/// clinical near-lossless. Prints BPS (and, with --verify, the measured MAE).
+fn render_archive_verification_explained(
+    result: &lma::ArchiveVerification,
+    elapsed: std::time::Duration,
+) {
+    println!(
+        "Verifying {} (auditable readout)",
+        result
+            .archive_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<memory>".into())
+    );
+    println!("─────────────────────────────────────────────────────────");
+    println!(
+        "[1/5] Archive size:        {} ({:.2} KB)",
+        result.archive_size,
+        result.archive_size as f64 / 1024.0
+    );
+    if result.archive_hash_matches {
+        println!(
+            "[2/5] Archive SHA-256:     OK  sha256:{}",
+            &result.archive_sha256[..result.archive_sha256.len().min(16)]
+        );
+    } else {
+        println!("[2/5] Archive SHA-256:     FAILED");
+        println!("       stored:    {}", result.archive_sha256);
+        println!("       computed:  {}", result.computed_archive_sha256);
+        return;
+    }
+    println!(
+        "[3/5] Manifest:            OK ({} entries enumerated)",
+        result.entries.len()
+    );
+    println!("[4/5] Per-entry verify:");
+    for (index, entry) in result.entries.iter().enumerate() {
+        let ratio = if entry.compressed_size > 0 {
+            entry.reconstructed_size as f64 / entry.compressed_size as f64
+        } else {
+            0.0
+        };
+        println!(
+            "       [{}/{}] {} {:<32}  {:>10}  {:<6}  sha256:{}  CR {:.2}x  ({})",
+            index + 1,
+            result.entries.len(),
+            if entry.passed { "✓" } else { "✗" },
+            entry.path,
+            human_bytes(entry.compressed_size),
+            archive_method_name(entry.method),
+            &entry.sha256[..entry.sha256.len().min(12)],
+            ratio,
+            entry.detail
+        );
+    }
+    let failed = result.failed_entries();
+    let verified = result.entries.len() - failed;
+    let compressed = result.compressed_bytes();
+    let reconstructed = result.reconstructed_bytes();
+    let ratio = if compressed > 0 {
+        reconstructed as f64 / compressed as f64
+    } else {
+        0.0
+    };
+    println!("[5/5] Summary:");
+    println!(
+        "       Compressed total:   {} ({} bytes)",
+        human_bytes(compressed),
+        compressed
+    );
+    println!(
+        "       Decompressed total: {} ({} bytes)",
+        human_bytes(reconstructed),
+        reconstructed
+    );
+    println!("       Archive CR:         {:.2}x", ratio);
+    println!(
+        "       Verified:           {}/{}",
+        verified,
+        result.entries.len()
+    );
+    println!(
+        "       Failed:             {}/{}",
+        failed,
+        result.entries.len()
+    );
+    println!("       Elapsed:            {:.3}s", elapsed.as_secs_f64());
+    println!("─────────────────────────────────────────────────────────");
+    if failed == 0 {
+        println!("Result: PASS (archive-wide hash OK + all entries verified)");
+    } else {
+        println!("Result: FAIL ({} failed entries)", failed);
+    }
+}
+
 fn cmd_encode_bounded_mae(
     _input: &Path,
     _output: Option<&Path>,
