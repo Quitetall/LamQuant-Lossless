@@ -22,7 +22,7 @@
 //! `target/criterion/` before any optimisation work so we have a
 //! stable baseline to diff against.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use std::time::Duration;
 
 use lamquant_core::backend::{compress_with_backend, ComputeBackend};
@@ -286,8 +286,17 @@ fn bench_container_roundtrip_32ch_100k(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("container_roundtrip_32ch_100k");
     group.throughput(Throughput::Bytes(bytes as u64));
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(20);
+    if std::env::var("LAMQUANT_BENCH_HIGH_PRECISION").as_deref() == Ok("1") {
+        // Baseline creation needs confidence intervals narrower than the 5%
+        // regression ceiling. Flat sampling keeps this slow benchmark's
+        // per-sample work constant; routine comparisons retain the fast path.
+        group.sampling_mode(SamplingMode::Flat);
+        group.measurement_time(Duration::from_secs(120));
+        group.sample_size(400);
+    } else {
+        group.measurement_time(Duration::from_secs(10));
+        group.sample_size(20);
+    }
 
     lamquant_core::backend::set_global_backend(ComputeBackend::Firmware);
     group.bench_function("firmware", |b| {
