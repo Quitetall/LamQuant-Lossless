@@ -444,41 +444,40 @@ pub fn compress(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<Vec<u8>> {
     compress_with_mode(signal, noise_bits, lpc::LpcMode::default())
 }
 
-// ─── Shared encode primitives (ADR 0058 carve-full) ───────────────────────
-// The MCU tier owns the per-channel codec + LML packet assembly. The Desktop
-// tier (`lamquant-lml-desktop`) builds a *parallel* orchestrator over these
-// SAME primitives, so its output is byte-identical to the serial path below by
-// construction — the only difference is `map` vs `into_par_iter().map`. These
-// are #[doc(hidden)]: a workspace-internal seam, not a stable public API.
+// ─── Internal execution primitives ────────────────────────────────────────
+// Serial and host-parallel profiles share these primitives inside the codec
+// owner; packet orchestration never crosses a crate boundary.
 
 /// Validated, noise-stripped encode inputs. `signal` borrows the caller's slice
 /// when `noise_bits == 0` (no clone on the hot path) via `Cow`.
-#[doc(hidden)]
-pub struct EncodePrep<'a> {
-    pub n_ch: usize,
-    pub t: usize,
-    pub n_levels: u8,
-    /// (try_arithmetic, try_bit_pack, try_extended_lpc)
-    pub flags: (bool, bool, bool),
-    pub signal: alloc::borrow::Cow<'a, [Vec<i64>]>,
+pub(crate) struct EncodePrep<'a> {
+    pub(crate) n_ch: usize,
+    pub(crate) t: usize,
+    pub(crate) n_levels: u8,
+    pub(crate) flags: EncoderFlags,
+    pub(crate) signal: alloc::borrow::Cow<'a, [Vec<i64>]>,
 }
 
 /// Validated encode-shape output shared by every entry point:
 /// dimension-checked `n_ch`/`t`, the resolved wavelet depth `n_levels`, and
-/// the experimental encoder flags `(try_arithmetic, try_bit_pack,
-/// try_extended_lpc)`. Carries no signal data — [`prepare_encode`] (owns the
+/// experimental encoder flags. Carries no signal data — [`prepare_encode`] (owns the
 /// `noise_bits` shift) and [`crate::lml::compress_with_mode_views`] /
-/// the Desktop parallel-views orchestrator (borrow-only, no shift when
+/// the host parallel-views profile (borrow-only, no shift when
 /// `noise_bits == 0`) both build on top of this so every caller agrees on
 /// header fields and candidate selection (ADR 0069 L6.3).
-#[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
-pub struct EncodeShape {
-    pub n_ch: usize,
-    pub t: usize,
-    pub n_levels: u8,
-    /// (try_arithmetic, try_bit_pack, try_extended_lpc)
-    pub flags: (bool, bool, bool),
+pub(crate) struct EncodeShape {
+    pub(crate) n_ch: usize,
+    pub(crate) t: usize,
+    pub(crate) n_levels: u8,
+    pub(crate) flags: EncoderFlags,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EncoderFlags {
+    arithmetic: bool,
+    bit_pack: bool,
+    extended_lpc: bool,
 }
 
 /// Explicit experimental encoder choices for deterministic graph execution.
@@ -497,8 +496,7 @@ pub struct EncodeFeatures {
 }
 
 impl EncodeFeatures {
-    #[doc(hidden)]
-    pub fn resolve(self) -> LmlResult<((bool, bool, bool), bool, Option<usize>)> {
+    fn resolve(self) -> LmlResult<ResolvedEncodeFeatures> {
         if self.arithmetic && !cfg!(feature = "experimental_arithmetic") {
             return Err(LmlError::InvalidHeader(
                 "arithmetic encoder feature was requested but not compiled".into(),
@@ -514,27 +512,51 @@ impl EncodeFeatures {
                 "extended LPC encoder feature requires std".into(),
             ));
         }
-        Ok((
-            (self.arithmetic, self.bit_pack, self.extended_lpc),
-            self.transform_skip,
-            self.max_packet_bytes,
-        ))
+        Ok(ResolvedEncodeFeatures {
+            flags: EncoderFlags {
+                arithmetic: self.arithmetic,
+                bit_pack: self.bit_pack,
+                extended_lpc: self.extended_lpc,
+            },
+            transform_skip: self.transform_skip,
+            max_packet_bytes: self.max_packet_bytes,
+        })
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct EncodePolicy {
-    flags: (bool, bool, bool),
+struct ResolvedEncodeFeatures {
+    flags: EncoderFlags,
+    transform_skip: bool,
     max_packet_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EncodePolicy {
+    pub(crate) flags: EncoderFlags,
+    pub(crate) max_packet_bytes: Option<usize>,
+}
+
+/// Channel execution preference selected by host adapters.
+///
+/// Packet validation, candidate selection, finalization, framing, and limits
+/// remain identical. `Rayon` requests parallel independent-channel execution;
+/// live `Anytime` deadlines fall back to `Serial` so clock-sensitive candidate
+/// selection stays byte-identical to firmware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutionProfile {
+    #[default]
+    Serial,
+    #[cfg(feature = "parallel")]
+    Rayon,
 }
 
 /// Validate `n_ch`/`t`/`noise_bits` ranges and resolve level depth + the
 /// experimental encoder flags. Pulled out of [`prepare_encode`] so the
-/// zero-copy views entry points (`compress_with_mode_views` and the Desktop
-/// parallel-views orchestrator) can run the identical checks without forcing
+/// zero-copy views entry points (`compress_with_mode_views` and the host
+/// parallel-views profile) can run the identical checks without forcing
 /// a `Vec<Vec<i64>>` materialization first (ADR 0069 L6.3).
-#[doc(hidden)]
-pub fn validate_and_levels(n_ch: usize, t: usize, noise_bits: u8) -> LmlResult<EncodeShape> {
+pub(crate) fn validate_and_levels(n_ch: usize, t: usize, noise_bits: u8) -> LmlResult<EncodeShape> {
     if n_ch == 0 || n_ch > 1024 {
         return Err(LmlError::InvalidHeader(format!(
             "n_ch={} out of range 1..=1024",
@@ -589,15 +611,18 @@ pub fn validate_and_levels(n_ch: usize, t: usize, noise_bits: u8) -> LmlResult<E
         n_ch,
         t,
         n_levels,
-        flags: (try_arithmetic, try_bit_pack, try_extended_lpc),
+        flags: EncoderFlags {
+            arithmetic: try_arithmetic,
+            bit_pack: try_bit_pack,
+            extended_lpc: try_extended_lpc,
+        },
     })
 }
 
 /// Validate dimensions, strip `noise_bits`, resolve level depth + the
-/// experimental encoder flags. Shared by the serial (MCU) and parallel (Desktop)
-/// orchestrators so both agree on header fields and candidate selection.
-#[doc(hidden)]
-pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePrep<'_>> {
+/// experimental encoder flags. Shared by serial and host-parallel profiles so
+/// both agree on header fields and candidate selection.
+pub(crate) fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePrep<'_>> {
     let n_ch = signal.len();
     let t = if n_ch > 0 { signal[0].len() } else { 0 };
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
@@ -623,8 +648,7 @@ pub fn prepare_encode(signal: &[Vec<i64>], noise_bits: u8) -> LmlResult<EncodePr
 /// Concatenate per-channel `lpc_meta`, assemble the `payload`, and return the
 /// `any_bit_pack_wins_global` flag selecting tagged framing. Encapsulates the
 /// experimental-feature branching so the orchestrators stay shape-agnostic.
-#[doc(hidden)]
-pub fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u8>, bool) {
+pub(crate) fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u8>, bool) {
     let lpc_meta_total: usize = per_channel.iter().map(|c| c.meta.len()).sum();
     let mut lpc_meta = Vec::with_capacity(lpc_meta_total);
     for c in per_channel {
@@ -649,11 +673,80 @@ pub fn finalize_channels(per_channel: &[ChannelEncodeOutput]) -> (Vec<u8>, Vec<u
     }
 }
 
-/// Build the framed LML1 packet (ASCII prefix + magic + 14-byte header + CRC-32
-/// + lpc_meta + payload) from finalized channel bytes. Byte-identical regardless
-/// of which orchestrator (serial/parallel) produced the inputs.
-#[doc(hidden)]
-pub fn assemble_lml_packet(
+/// Validated input to the staged lossless reference encoder.
+///
+/// This is the narrow owner-controlled seam used by the graph reference. Raw
+/// wire assembly remains private to the codec.
+pub struct PrecomputedLosslessPacket<'a> {
+    n_ch: usize,
+    t: usize,
+    n_levels: u8,
+    lpc_meta: &'a [u8],
+    payload: &'a [u8],
+}
+
+impl<'a> PrecomputedLosslessPacket<'a> {
+    pub fn new(
+        n_ch: usize,
+        t: usize,
+        n_levels: u8,
+        lpc_meta: &'a [u8],
+        payload: &'a [u8],
+    ) -> LmlResult<Self> {
+        validate_and_levels(n_ch, t, 0)?;
+        if n_levels > 3 {
+            return Err(LmlError::InvalidHeader(format!(
+                "n_levels must be 0..=3, got {n_levels}"
+            )));
+        }
+        if lpc_meta.len() > u32::MAX as usize || payload.len() > u32::MAX as usize {
+            return Err(LmlError::InvalidHeader(
+                "precomputed packet fields exceed wire width".into(),
+            ));
+        }
+        Ok(Self {
+            n_ch,
+            t,
+            n_levels,
+            lpc_meta,
+            payload,
+        })
+    }
+
+    pub fn payload_limit(
+        max_packet_bytes: Option<usize>,
+        n_ch: usize,
+        t: usize,
+        n_levels: u8,
+    ) -> LmlResult<usize> {
+        channel_payload_limit(max_packet_bytes, n_ch, t, n_levels)
+    }
+
+    pub fn encode(self) -> Vec<u8> {
+        assemble_lml_packet(
+            self.n_ch,
+            self.t,
+            self.n_levels,
+            0,
+            false,
+            self.lpc_meta,
+            self.payload,
+        )
+    }
+
+    pub fn encode_bounded(self, max_packet_bytes: usize) -> LmlResult<Vec<u8>> {
+        let packet = self.encode();
+        if packet.len() > max_packet_bytes {
+            return Err(LmlError::InvalidHeader(format!(
+                "assembled packet requires {} bytes, limit is {max_packet_bytes}",
+                packet.len()
+            )));
+        }
+        Ok(packet)
+    }
+}
+
+fn assemble_lml_packet(
     n_ch: usize,
     t: usize,
     n_levels: u8,
@@ -787,42 +880,86 @@ fn assemble_track2_packet(
 /// `channels.len()` MUST equal `n_ch`; callers control both, so this is not
 /// re-validated here (the public entry points validate via
 /// [`validate_and_levels`] before calling in).
+pub(crate) fn encode_channel_with_policy(
+    channel: &[i64],
+    n_levels: u8,
+    mode: lpc::LpcMode,
+    policy: EncodePolicy,
+    per_channel_limit: usize,
+) -> LmlResult<ChannelEncodeOutput> {
+    if policy.max_packet_bytes.is_some() {
+        encode_one_channel_bounded(
+            channel,
+            n_levels,
+            mode,
+            policy.flags.arithmetic,
+            policy.flags.bit_pack,
+            policy.flags.extended_lpc,
+            per_channel_limit,
+        )
+    } else {
+        encode_one_channel(
+            channel,
+            n_levels,
+            mode,
+            policy.flags.arithmetic,
+            policy.flags.bit_pack,
+            policy.flags.extended_lpc,
+        )
+    }
+}
+
+fn effective_execution_profile(profile: ExecutionProfile, _mode: lpc::LpcMode) -> ExecutionProfile {
+    #[cfg(all(feature = "std", feature = "parallel"))]
+    if matches!(
+        _mode,
+        lpc::LpcMode::Anytime {
+            deadline: Some(_),
+            ..
+        }
+    ) {
+        return ExecutionProfile::Serial;
+    }
+    profile
+}
+
 fn encode_channels_core(
     channels: &[&[i64]],
-    n_ch: usize,
-    t: usize,
-    n_levels: u8,
+    shape: EncodeShape,
     noise_bits: u8,
     policy: EncodePolicy,
     mode: lpc::LpcMode,
+    profile: ExecutionProfile,
 ) -> LmlResult<Vec<u8>> {
-    let per_channel_limit = channel_payload_limit(policy.max_packet_bytes, n_ch, t, n_levels)?;
-    let mut per_channel = Vec::with_capacity(n_ch);
-    for &ch in channels.iter() {
-        let encoded = if policy.max_packet_bytes.is_some() {
-            encode_one_channel_bounded(
-                ch,
-                n_levels,
-                mode,
-                policy.flags.0,
-                policy.flags.1,
-                policy.flags.2,
-                per_channel_limit,
-            )?
-        } else {
-            encode_one_channel(
-                ch,
-                n_levels,
-                mode,
-                policy.flags.0,
-                policy.flags.1,
-                policy.flags.2,
-            )?
-        };
-        per_channel.push(encoded);
-    }
+    let per_channel_limit =
+        channel_payload_limit(policy.max_packet_bytes, shape.n_ch, shape.t, shape.n_levels)?;
+    let profile = effective_execution_profile(profile, mode);
+    let per_channel = match profile {
+        ExecutionProfile::Serial => channels
+            .iter()
+            .map(|&channel| {
+                encode_channel_with_policy(channel, shape.n_levels, mode, policy, per_channel_limit)
+            })
+            .collect::<LmlResult<Vec<_>>>()?,
+        #[cfg(feature = "parallel")]
+        ExecutionProfile::Rayon => crate::parallel::encode_channels(
+            channels,
+            shape.n_levels,
+            mode,
+            policy,
+            per_channel_limit,
+        )?,
+    };
     let (lpc_meta, payload, wins) = finalize_channels(&per_channel);
-    let packet = assemble_lml_packet(n_ch, t, n_levels, noise_bits, wins, &lpc_meta, &payload);
+    let packet = assemble_lml_packet(
+        shape.n_ch,
+        shape.t,
+        shape.n_levels,
+        noise_bits,
+        wins,
+        &lpc_meta,
+        &payload,
+    );
     if let Some(limit) = policy.max_packet_bytes {
         if packet.len() > limit {
             return Err(LmlError::InvalidHeader(alloc::format!(
@@ -838,8 +975,7 @@ fn encode_channels_core(
 /// Conservative per-channel entropy budget used before any large payload
 /// allocation. Metadata and packet framing are reserved up front; selected
 /// experimental candidates never exceed their Golomb fallback.
-#[doc(hidden)]
-pub fn channel_payload_limit(
+fn channel_payload_limit(
     max_packet_bytes: Option<usize>,
     n_ch: usize,
     t: usize,
@@ -885,38 +1021,28 @@ pub fn channel_payload_limit(
 /// is a pure encoder-side, wire-compatible, never-worse win. Default OFF ⇒ output byte-identical to
 /// today (byte-equal-backends + goldens unaffected) unless `LAMQUANT_TRY_TRANSFORM_SKIP=1`.
 ///
-/// `#[doc(hidden)] pub` (ADR 0058 carve-full seam): the Desktop parallel tier reads the SAME flag via
-/// this one function so both tiers make the identical keep-best decision — the byte-equal invariant
-/// holds with the flag ON as well as OFF (task #32 discipline: experimental flags stay backend-symmetric).
-#[doc(hidden)]
 #[cfg(feature = "std")]
-pub fn transform_skip_enabled() -> bool {
+fn transform_skip_enabled() -> bool {
     std::env::var("LAMQUANT_TRY_TRANSFORM_SKIP")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
-#[doc(hidden)]
 #[cfg(not(feature = "std"))]
-pub fn transform_skip_enabled() -> bool {
+fn transform_skip_enabled() -> bool {
     false
 }
 
 /// Encode `channels` at `full_levels`, and — when transform-skip is enabled and the transform is
 /// actually in use (`full_levels > 0`) — ALSO at `n_levels = 0`, returning the smaller packet.
-/// Deterministic byte-length keep-best: both tiers (serial MCU + Desktop parallel) that route through
-/// this pick identically, so the byte-equal invariant is preserved. The chosen packet is produced by
-/// the SAME [`encode_channels_core`] firmware uses, so each candidate is itself byte-exact.
-///
-/// MUST MIRROR: `keep_best_levels_parallel` in `lamquant-lml-desktop/src/parallel.rs` implements the
-/// identical keep-best. Any new candidate depth or selection rule added here MUST be added there in
-/// lockstep, or `byte_equal_backends` diverges (serial vs parallel pick differently).
+/// Deterministic byte-length keep-best shared by all execution profiles.
+#[cfg(test)]
 fn encode_maybe_skip(
     channels: &[&[i64]],
     n_ch: usize,
     t: usize,
     full_levels: u8,
     noise_bits: u8,
-    flags: (bool, bool, bool),
+    flags: EncoderFlags,
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
     encode_maybe_skip_explicit(
@@ -934,6 +1060,7 @@ fn encode_maybe_skip(
         },
         transform_skip_enabled(),
         mode,
+        ExecutionProfile::Serial,
     )
 }
 
@@ -944,19 +1071,21 @@ fn encode_maybe_skip_explicit(
     policy: EncodePolicy,
     try_transform_skip: bool,
     mode: lpc::LpcMode,
+    profile: ExecutionProfile,
 ) -> LmlResult<Vec<u8>> {
-    let full = encode_channels_core(
-        channels,
-        shape.n_ch,
-        shape.t,
-        shape.n_levels,
-        noise_bits,
-        policy,
-        mode,
-    )?;
+    let full = encode_channels_core(channels, shape, noise_bits, policy, mode, profile)?;
     if try_transform_skip && shape.n_levels > 0 {
-        let skip =
-            encode_channels_core(channels, shape.n_ch, shape.t, 0, noise_bits, policy, mode)?;
+        let skip = encode_channels_core(
+            channels,
+            EncodeShape {
+                n_levels: 0,
+                ..shape
+            },
+            noise_bits,
+            policy,
+            mode,
+            profile,
+        )?;
         if skip.len() < full.len() {
             return Ok(skip);
         }
@@ -981,16 +1110,35 @@ pub fn compress_with_mode(
     noise_bits: u8,
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
+    compress_with_mode_profile(signal, noise_bits, mode, ExecutionProfile::Serial)
+}
+
+/// Compress through one owner-controlled channel execution preference.
+/// Live `Anytime` deadlines use serial execution even when `Rayon` is requested.
+pub fn compress_with_mode_profile(
+    signal: &[Vec<i64>],
+    noise_bits: u8,
+    mode: lpc::LpcMode,
+    profile: ExecutionProfile,
+) -> LmlResult<Vec<u8>> {
     let prep = prepare_encode(signal, noise_bits)?;
     let views: Vec<&[i64]> = prep.signal.iter().map(|v| v.as_slice()).collect();
-    encode_maybe_skip(
+    encode_maybe_skip_explicit(
         &views,
-        prep.n_ch,
-        prep.t,
-        prep.n_levels,
+        EncodeShape {
+            n_ch: prep.n_ch,
+            t: prep.t,
+            n_levels: prep.n_levels,
+            flags: prep.flags,
+        },
         noise_bits,
-        prep.flags,
+        EncodePolicy {
+            flags: prep.flags,
+            max_packet_bytes: None,
+        },
+        transform_skip_enabled(),
         mode,
+        profile,
     )
 }
 
@@ -1020,6 +1168,17 @@ pub fn compress_with_mode_views(
     noise_bits: u8,
     mode: lpc::LpcMode,
 ) -> LmlResult<Vec<u8>> {
+    compress_with_mode_views_profile(windows, noise_bits, mode, ExecutionProfile::Serial)
+}
+
+/// Zero-copy compress through one owner-controlled channel execution preference.
+/// Live `Anytime` deadlines use serial execution even when `Rayon` is requested.
+pub fn compress_with_mode_views_profile(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: lpc::LpcMode,
+    profile: ExecutionProfile,
+) -> LmlResult<Vec<u8>> {
     let n_ch = windows.len();
     let t = windows.first().map(|w| w.len()).unwrap_or(0);
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
@@ -1033,6 +1192,7 @@ pub fn compress_with_mode_views(
             max_packet_bytes: None,
         },
         transform_skip_enabled(),
+        profile,
     )
 }
 
@@ -1046,20 +1206,39 @@ pub fn compress_with_mode_views_explicit(
     mode: lpc::LpcMode,
     features: EncodeFeatures,
 ) -> LmlResult<Vec<u8>> {
+    compress_with_mode_views_explicit_profile(
+        windows,
+        noise_bits,
+        mode,
+        features,
+        ExecutionProfile::Serial,
+    )
+}
+
+/// Explicit zero-copy compress through one owner-controlled execution preference.
+/// Live `Anytime` deadlines use serial execution even when `Rayon` is requested.
+pub fn compress_with_mode_views_explicit_profile(
+    windows: &[&[i64]],
+    noise_bits: u8,
+    mode: lpc::LpcMode,
+    features: EncodeFeatures,
+    profile: ExecutionProfile,
+) -> LmlResult<Vec<u8>> {
     let n_ch = windows.len();
     let t = windows.first().map(|w| w.len()).unwrap_or(0);
     let shape = validate_and_levels(n_ch, t, noise_bits)?;
-    let (flags, try_transform_skip, max_packet_bytes) = features.resolve()?;
+    let resolved = features.resolve()?;
     compress_validated_views(
         windows,
         noise_bits,
         mode,
         shape,
         EncodePolicy {
-            flags,
-            max_packet_bytes,
+            flags: resolved.flags,
+            max_packet_bytes: resolved.max_packet_bytes,
         },
-        try_transform_skip,
+        resolved.transform_skip,
+        profile,
     )
 }
 
@@ -1070,9 +1249,18 @@ fn compress_validated_views(
     shape: EncodeShape,
     policy: EncodePolicy,
     try_transform_skip: bool,
+    profile: ExecutionProfile,
 ) -> LmlResult<Vec<u8>> {
     if noise_bits == 0 {
-        encode_maybe_skip_explicit(windows, shape, noise_bits, policy, try_transform_skip, mode)
+        encode_maybe_skip_explicit(
+            windows,
+            shape,
+            noise_bits,
+            policy,
+            try_transform_skip,
+            mode,
+            profile,
+        )
     } else {
         let shifted: Vec<Vec<i64>> = windows
             .iter()
@@ -1086,6 +1274,7 @@ fn compress_validated_views(
             policy,
             try_transform_skip,
             mode,
+            profile,
         )
     }
 }
@@ -1104,8 +1293,8 @@ fn compress_validated_views(
 /// Wire: per-window LML1 with `flags = FLAG_BIT_TRACK2_MODE`, `n_levels = 0`.
 /// `lpc_meta = [MODE_BOUNDED_MAE][δ:u64 LE]` then per channel
 /// `[order:u8][coeffs:i32 LE × order]`; `payload` = per-channel
-/// `golomb::encode_dense(indices)`. Decoded by [`decompress`] /
-/// [`decompress_parallel`] (firmware-decodable — integer-only).
+/// `golomb::encode_dense(indices)`. Decoded by [`decompress`] or any selected
+/// host execution profile (firmware-decodable — integer-only).
 pub fn compress_bounded_mae(
     signal: &[Vec<i64>],
     delta: u64,
@@ -1693,13 +1882,9 @@ pub(crate) fn compress_or_panic(signal: &[Vec<i64>], noise_bits: u8) -> Vec<u8> 
 
 /// Pick the lifting-DWT depth for a window of `t` samples.
 ///
-/// Starts at 3 levels (the encoder's nominal choice) and steps down
-/// until each level still has at least 4 samples on its smallest
-/// subband (Burg's `4 * 2^n_levels` rule). Both serial and parallel
-/// encoders MUST agree on this number — otherwise the same input
-/// produces different `n_levels` in the header and the byte-equal
-/// invariant breaks.
-#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
+/// Starts at 3 levels (the encoder's nominal choice) and steps down until each
+/// level still has at least 4 samples on its smallest subband. Packet
+/// orchestration resolves this once before selecting channel execution.
 pub fn compute_n_levels(t: usize) -> u8 {
     let mut n_levels: u8 = 3;
     while (t as u64) < 4 * (1u64 << n_levels) && n_levels > 0 {
@@ -1713,11 +1898,9 @@ pub fn compute_n_levels(t: usize) -> u8 {
 /// parallel variant can dispatch this across rayon workers and still
 /// produce byte-identical output to the serial path.
 ///
-/// The serial `compress_with_mode` calls this in a `for` loop; the
-/// host-only `compress_with_mode_parallel` calls it via
-/// `par_iter().map(...).collect()`, which preserves input order, so
-/// the concatenated bytes match the serial path exactly. The
-/// `tests/byte_equal_backends.rs` gate locks that invariant.
+/// Serial and Rayon adapters both call this function; ordered collection keeps
+/// finalized channel bytes identical. `tests/byte_equal_backends.rs` locks that
+/// invariant.
 /// Per-subband encoding result for the experimental selection
 /// machinery. Holds the always-available Golomb bytes plus the
 /// winning encoder's bytes when a non-Golomb encoder strictly beats
@@ -1735,13 +1918,10 @@ struct SubbandResult {
 /// allocations) so rayon's `collect` on `Vec<ChannelEncodeOutput>`
 /// moves only ~48 bytes of header per channel — matching the pre-B1
 /// throughput on multi-channel desktop-parallel encode.
-// #[doc(hidden)] pub (ADR 0058 carve-full): an opaque per-channel encode result.
-// The Desktop tier names this type (`Vec<ChannelEncodeOutput>`) but never reads
-// its fields — it goes straight back into `finalize_channels`. Fields stay
-// private so the wire-assembly logic remains owned by this crate.
+// Opaque per-channel output shared only by execution profiles in this crate.
+// Fields stay private so wire assembly has one owner.
 #[cfg(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic"))]
-#[doc(hidden)]
-pub struct ChannelEncodeOutput {
+pub(crate) struct ChannelEncodeOutput {
     meta: Vec<u8>,
     subbands: Vec<SubbandResult>,
     n_subbands: usize,
@@ -1749,8 +1929,7 @@ pub struct ChannelEncodeOutput {
 }
 
 #[cfg(not(any(feature = "experimental_bit_pack", feature = "experimental_arithmetic")))]
-#[doc(hidden)]
-pub struct ChannelEncodeOutput {
+pub(crate) struct ChannelEncodeOutput {
     meta: Vec<u8>,
     payload: Vec<u8>,
 }
@@ -1797,8 +1976,7 @@ fn assemble_payload(per_channel: &[ChannelEncodeOutput], use_tagged: bool) -> Ve
     payload
 }
 
-#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
-pub fn encode_one_channel(
+pub(crate) fn encode_one_channel(
     signal_ch: &[i64],
     n_levels: u8,
     mode: lpc::LpcMode,
@@ -1819,8 +1997,7 @@ pub fn encode_one_channel(
 
 /// Bounded variant used by graph runtimes. Refuses an oversized Golomb
 /// fallback before allocating its payload.
-#[doc(hidden)]
-pub fn encode_one_channel_bounded(
+pub(crate) fn encode_one_channel_bounded(
     signal_ch: &[i64],
     n_levels: u8,
     mode: lpc::LpcMode,
@@ -2049,55 +2226,10 @@ fn encode_one_channel_impl(
 /// Returns identical bytes to `compress_with_mode`; the only
 /// difference is wall-clock time on multi-channel inputs (typical
 /// clinical EEG = 8-24 channels = 4-12× speedup on a 16-core host).
-/// Compress a signal into any [`std::io::Write`] sink.
-///
-/// Phase 0.4 wrapper around [`compress_with_mode`]: today this buffers
-/// the full LML1 packet in `Vec<u8>` and `write_all`s it. Phase 0.5
-/// will rewrite `compress_with_mode` itself to stream into the sink so
-/// peak allocation drops to one window. The signature is the future
-/// shape — callers can adopt it now without another rewrite later.
-///
-/// Bible R33 — the `LmlSink` trait's `before_window` hook (in
-/// `crate::io`) is the future attachment point for backpressure once
-/// per-window streaming lands; for now sinks just receive the full
-/// packet.
-///
-/// Returns the number of bytes written.
-#[cfg(feature = "std")]
-pub fn compress_into<W: std::io::Write>(
-    signal: &[Vec<i64>],
-    noise_bits: u8,
-    mode: lpc::LpcMode,
-    sink: &mut W,
-) -> LmlResult<usize> {
-    let bytes = compress_with_mode(signal, noise_bits, mode)?;
-    sink.write_all(&bytes).map_err(LmlError::Io)?;
-    Ok(bytes.len())
-}
-
-/// Decompress an LML1 packet from any [`std::io::Read`] source.
-///
-/// Phase 0.4 wrapper around [`decompress`]: today this `read_to_end`s
-/// the source into `Vec<u8>` and decompresses. Partial-read sources
-/// (one-byte-at-a-time pipes, `ByteAtATime` test adapter) work
-/// correctly because `read_to_end` loops internally. Phase 0.5 will
-/// teach the decoder to consume bytes incrementally so streaming
-/// sources don't need to fit in memory.
-///
-/// Callers who already have `&[u8]` should keep using [`decompress`]
-/// — this wrapper exists for the `LmlSource` / stdin / S3 path.
-#[cfg(feature = "std")]
-pub fn decompress_from<R: std::io::Read>(src: &mut R) -> LmlResult<Vec<Vec<i64>>> {
-    let mut buf = Vec::new();
-    src.read_to_end(&mut buf).map_err(LmlError::Io)?;
-    decompress(&buf)
-}
-
 /// Decompress LML1 packet → [n_ch][T].
 /// Decode plan produced by [`parse_lml_channels`] — either an already-decoded
 /// signal (track-2 path) or per-channel subbands awaiting synth + lifting.
-#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
-pub enum DecodePlan {
+pub(crate) enum DecodePlan {
     /// Track-2 near-lossless / lossy packet: already a full signal.
     Done(Vec<Vec<i64>>),
     /// Standard LML1: per-channel `Vec<(coeffs, residual)>` per subband, plus
@@ -2111,11 +2243,10 @@ pub enum DecodePlan {
 
 /// Parse an LML1 stream up to (but not including) per-channel synthesis: header,
 /// validation, CRC verify, track-2 dispatch, and the sequential per-(channel,
-/// subband) coeff/residual decode. Shared by the serial (MCU) and parallel
-/// (Desktop) decode orchestrators; the only thing they add is HOW the per-channel
+/// subband) coeff/residual decode. Shared by serial and host-parallel decode
+/// profiles; the only thing they add is HOW the per-channel
 /// [`synthesize_channel_signal`] runs (serial vs rayon) + the post-synth shift.
-#[doc(hidden)]
-pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
+pub(crate) fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
     let offset = find_magic_offset(data)?;
     let data = &data[offset..];
 
@@ -2169,8 +2300,7 @@ pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
     // packet with n_levels>=4 would otherwise decode n_levels+1 subbands
     // and fall through the `_` arm to return ONLY the first subband —
     // wrong-length output presented as Ok instead of an error. Reject it.
-    // (The serial `decompress` and parallel `decompress_parallel` paths
-    // share this identical guard.)
+    // Every execution profile shares this identical guard.
     if n_levels > 3 {
         return Err(LmlError::InvalidHeader(format!(
             "n_levels must be 0..=3, got {}",
@@ -2366,6 +2496,11 @@ pub fn parse_lml_channels(data: &[u8]) -> LmlResult<DecodePlan> {
 }
 
 pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
+    decompress_with_profile(data, ExecutionProfile::Serial)
+}
+
+/// Decompress through one owner-controlled channel execution profile.
+pub fn decompress_with_profile(data: &[u8], profile: ExecutionProfile) -> LmlResult<Vec<Vec<i64>>> {
     match parse_lml_channels(data)? {
         DecodePlan::Done(signal) => Ok(signal),
         DecodePlan::Synthesize {
@@ -2373,10 +2508,16 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
             noise_bits,
             channels,
         } => {
-            let mut signal: Vec<Vec<i64>> = channels
-                .into_iter()
-                .map(|subs| synthesize_channel_signal(subs, n_levels))
-                .collect::<LmlResult<Vec<_>>>()?;
+            let mut signal = match profile {
+                ExecutionProfile::Serial => channels
+                    .into_iter()
+                    .map(|subbands| synthesize_channel_signal(subbands, n_levels))
+                    .collect::<LmlResult<Vec<_>>>()?,
+                #[cfg(feature = "parallel")]
+                ExecutionProfile::Rayon => {
+                    crate::parallel::synthesize_channels(channels, n_levels)?
+                }
+            };
             if noise_bits > 0 {
                 for ch in signal.iter_mut() {
                     for v in ch.iter_mut() {
@@ -2397,8 +2538,7 @@ pub fn decompress(data: &[u8]) -> LmlResult<Vec<Vec<i64>>> {
 /// n_levels=0 edge case). Extracted so the parallel decoder can
 /// dispatch this work across rayon workers while the byte-equal
 /// invariant is preserved by construction.
-#[doc(hidden)] // ADR 0058 carve-full: cross-crate seam for the Desktop tier.
-pub fn synthesize_channel_signal(
+pub(crate) fn synthesize_channel_signal(
     per_subband: Vec<(Vec<i32>, Vec<i64>)>,
     n_levels: u8,
 ) -> LmlResult<Vec<i64>> {
@@ -2709,6 +2849,19 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn live_deadline_forces_serial_execution_profile() {
+        let mode = lpc::LpcMode::Anytime {
+            max_order: 16,
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+        };
+        assert_eq!(
+            effective_execution_profile(ExecutionProfile::Rayon, mode),
+            ExecutionProfile::Serial
+        );
+    }
+
     #[test]
     fn roundtrip_21ch() {
         let signal: Vec<Vec<i64>> = (0..21)
@@ -2744,25 +2897,41 @@ mod tests {
             .collect();
         let (n_ch, t) = (signal.len(), signal[0].len());
         let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
-        let flags = (false, false, false);
+        let flags = EncoderFlags::default();
         let policy = EncodePolicy {
             flags,
             max_packet_bytes: None,
         };
-        let skip_pkt =
-            encode_channels_core(&views, n_ch, t, 0, 0, policy, lpc::LpcMode::default()).unwrap();
+        let skip_pkt = encode_channels_core(
+            &views,
+            EncodeShape {
+                n_ch,
+                t,
+                n_levels: 0,
+                flags,
+            },
+            0,
+            policy,
+            lpc::LpcMode::default(),
+            ExecutionProfile::Serial,
+        )
+        .unwrap();
         // Header n_levels field must read 0 (the decoder branches on it), and the packet must decode.
         assert_eq!(decompress(&skip_pkt).unwrap(), signal);
         // Sanity: the full-transform packet also round-trips (the other keep-best candidate).
         let full_levels = compute_n_levels(t);
         let full_pkt = encode_channels_core(
             &views,
-            n_ch,
-            t,
-            full_levels,
+            EncodeShape {
+                n_ch,
+                t,
+                n_levels: full_levels,
+                flags,
+            },
             0,
             policy,
             lpc::LpcMode::default(),
+            ExecutionProfile::Serial,
         )
         .unwrap();
         assert_eq!(decompress(&full_pkt).unwrap(), signal);
@@ -2782,7 +2951,7 @@ mod tests {
             .collect();
         let (n_ch, t) = (signal.len(), signal[0].len());
         let views: Vec<&[i64]> = signal.iter().map(|v| v.as_slice()).collect();
-        let flags = (false, false, false);
+        let flags = EncoderFlags::default();
         let policy = EncodePolicy {
             flags,
             max_packet_bytes: None,
@@ -2790,12 +2959,16 @@ mod tests {
         let full_levels = compute_n_levels(t);
         let baseline = encode_channels_core(
             &views,
-            n_ch,
-            t,
-            full_levels,
+            EncodeShape {
+                n_ch,
+                t,
+                n_levels: full_levels,
+                flags,
+            },
             0,
             policy,
             lpc::LpcMode::default(),
+            ExecutionProfile::Serial,
         )
         .unwrap();
         // With the flag unset in the test environment, encode_maybe_skip == encode_channels_core(full).
@@ -2820,69 +2993,6 @@ mod tests {
         let r = decompress(&compress(&s, 4).unwrap()).unwrap();
         let expected: Vec<i64> = s[0].iter().map(|&v| (v >> 4) << 4).collect();
         assert_eq!(expected, r[0]);
-    }
-
-    #[test]
-    fn compress_into_writes_to_vec_sink() {
-        let signal = vec![vec![1i64, 2, 3, 4, 5]];
-        let direct = compress(&signal, 0).unwrap();
-        let mut sink: Vec<u8> = Vec::new();
-        let written = compress_into(&signal, 0, lpc::LpcMode::default(), &mut sink).unwrap();
-        assert_eq!(written, direct.len(), "byte count must match direct call");
-        assert_eq!(sink, direct, "sink output must be byte-identical");
-    }
-
-    #[test]
-    fn decompress_from_reads_from_cursor() {
-        let signal: Vec<Vec<i64>> = (0..4)
-            .map(|ch| (0..256).map(|i| ((i * (ch + 1)) % 1000) as i64).collect())
-            .collect();
-        let bytes = compress(&signal, 0).unwrap();
-        let mut cursor = std::io::Cursor::new(&bytes);
-        let recovered = decompress_from(&mut cursor).unwrap();
-        assert_eq!(signal, recovered);
-    }
-
-    #[test]
-    fn decompress_from_handles_partial_reads() {
-        // A one-byte-per-read adapter forces caller loops; the generic
-        // decompress_from must still recover the full signal. (Inlined here
-        // when lml moved to -core; the facade's `io::tests::ByteAtATime` is
-        // no longer reachable from this crate.)
-        struct ByteAtATime<'a> {
-            src: &'a [u8],
-        }
-        impl<'a> std::io::Read for ByteAtATime<'a> {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                if self.src.is_empty() || buf.is_empty() {
-                    return Ok(0);
-                }
-                buf[0] = self.src[0];
-                self.src = &self.src[1..];
-                Ok(1)
-            }
-        }
-        let signal = vec![vec![42i64; 128]];
-        let bytes = compress(&signal, 0).unwrap();
-        let mut src = ByteAtATime { src: &bytes };
-        let recovered = decompress_from(&mut src).unwrap();
-        assert_eq!(signal, recovered);
-    }
-
-    #[test]
-    fn compress_into_then_decompress_from_roundtrip() {
-        let signal: Vec<Vec<i64>> = (0..3)
-            .map(|ch| {
-                (0..512)
-                    .map(|i| ((i * 7 + ch * 11) % 5000) as i64)
-                    .collect()
-            })
-            .collect();
-        let mut sink: Vec<u8> = Vec::new();
-        compress_into(&signal, 0, lpc::LpcMode::default(), &mut sink).unwrap();
-        let mut cursor = std::io::Cursor::new(&sink);
-        let recovered = decompress_from(&mut cursor).unwrap();
-        assert_eq!(signal, recovered);
     }
 
     #[test]
@@ -3045,8 +3155,8 @@ mod tests {
             matches!(r, Err(LmlError::InvalidHeader(_))),
             "serial: {r:?}"
         );
-        // (The parallel-decode equivalent of this guard is tested in the Desktop
-        // tier `lamquant-lml-desktop`, which now owns `decompress_parallel`.)
+        // Profile-independent parsing makes this guard apply before either
+        // serial or Rayon channel synthesis.
     }
 }
 
@@ -3068,7 +3178,7 @@ fn roundtrip_small_windows() {
         assert_eq!(
             signal, decompressed,
             "Value mismatch at n={}:\n  input:  {:?}\n  output: {:?}",
-            n, &signal[0], &decompressed[0]
+            n, signal[0], decompressed[0]
         );
     }
 }

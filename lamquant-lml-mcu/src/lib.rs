@@ -13,9 +13,9 @@
 //!
 //! Build modes:
 //!   no features  — `no_std` + `alloc`. Integer codec only. RP2350 firmware.
-//!   "std"        — adds the f64 host-side encode helpers (RD search, Anytime
-//!                  LPC, blockfloat bench, std::io sinks).
-//!   "archive"    — adds the rayon parallel encode/decode (Desktop backend).
+//!   "std"        — adds f64 host-side encode helpers (RD search, Anytime LPC,
+//!                  blockfloat bench).
+//!   "parallel"   — adds Rayon parallel encode/decode (Desktop backend).
 //!
 //! Modules:
 //!   crc32   — CRC-32 ISO 3309 (re-exported from lamquant-common)
@@ -56,3 +56,8 @@ pub mod mcu_packet;
 pub mod quant;
 pub mod rans;
 pub mod zrle;
+
+// Host-only channel execution adapter. Packet orchestration remains in `lml`;
+// firmware builds exclude this module and its Rayon dependency.
+#[cfg(feature = "parallel")]
+mod parallel;

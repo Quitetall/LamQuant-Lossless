@@ -103,10 +103,14 @@ required-features = ["host"]
 default = ["host"]
 
 # ── Level 0: no_std DSP core (firmware / embedded) ──────────────────────────
-# The codec core now lives in `lamquant-lml-mcu`; `std` turns on its
-# host-side encode helpers (f64 RD search, std::io sinks). Firmware depends on
-# `lamquant-lml-mcu` DIRECTLY (not this facade), so this is the host path.
-std = ["lamquant-lml-mcu/std"]
+# The codec core now lives in `lamquant-lml-mcu`; `std` turns on its host-side
+# numeric helpers and the Desktop-owned host Read/Write adapters.
+# Firmware depends on `lamquant-lml-mcu` directly, so it never gains host I/O.
+std = [
+    "lamquant-lml-mcu/std",
+    "dep:lamquant-lml-desktop",
+    "lamquant-lml-desktop/std",
+]
 
 # ── Level 1: archive — file I/O + LMA/EDF/container r/w ────────────────────
 # Enables: lma, container, edf, io, offset_table, range, stream, source,
@@ -114,10 +118,7 @@ std = ["lamquant-lml-mcu/std"]
 # Use this for OS plugins and 3rd-party readers (e.g. lml-os/lmafs).
 archive = [
     "std",
-    # Link the Desktop tier crate + turn on its rayon parallel path (ADR 0058
-    # carve-full: the Desktop tier now OWNS the parallel encode/decode). `fast`
-    # implies `std`.
-    "dep:lamquant-lml-desktop",
+    # Activate the codec owner's Rayon execution profile. `fast` implies `std`.
     "lamquant-lml-desktop/fast",
     # ADR 0139/0143 cutover: host containers are canonical ABIR BCS2 codec
     # bundles. Retired wires are available only through the independent,
@@ -262,9 +263,9 @@ lamquant-lml-optimum = { version = "0.0.1", path = "../lamquant-lml-optimum", de
 lamquant-lml-optimum-v2 = { version = "0.1.0", path = "../lamquant-lml-optimum-v2", optional = true }
 # ADR 0056: the Desktop tier (host fast path). Optional + enabled by `archive`
 # so the no_std facade build stays no_std (desktop is std/rayon). Re-exported as
-# `lamquant_core::desktop`. The facade already reaches the parallel path via
-# `lamquant-lml-mcu/archive`; this links the Desktop tier crate so the umbrella
-# assembles all three tiers (mcu + desktop + optimum).
+# `lamquant_core::desktop`. Desktop's `fast` feature selects the MCU codec's
+# private `parallel` execution adapter; this dependency lets the umbrella
+# assemble all three tiers (MCU + Desktop + Optimum).
 lamquant-lml-desktop = { version = "0.9.3", path = "../lamquant-lml-desktop", default-features = false, optional = true }
 # Used by the facade's container/lma/security/config (SHA-256, base64).
 sha2 = { version = "0.10", default-features = false }

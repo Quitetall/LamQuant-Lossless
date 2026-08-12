@@ -19,8 +19,8 @@ use blut_graph_core::{
 use lamquant_abir_codec::{verify_lml_signal_views_closure, LmlBundleError};
 use lamquant_lml_mcu::golomb;
 use lamquant_lml_mcu::lml::{
-    assemble_lml_packet, channel_payload_limit, compress_with_mode_views_explicit,
-    compute_n_levels, forward_subbands, lpc_max_order, scope_lpc_mode, EncodeFeatures, BIAS_CTX,
+    compress_with_mode_views_explicit, compute_n_levels, forward_subbands, lpc_max_order,
+    scope_lpc_mode, EncodeFeatures, PrecomputedLosslessPacket, BIAS_CTX,
 };
 use lamquant_lml_mcu::lpc;
 use lamquant_lml_mcu::lpc::LpcMode;
@@ -274,7 +274,7 @@ pub(crate) fn execute_entropy<'a>(
     };
     let max_packet_bytes = max_frame_bytes(node, predicted.bounds)?;
     let packet = &predicted.packet;
-    let per_channel_limit = channel_payload_limit(
+    let per_channel_limit = PrecomputedLosslessPacket::payload_limit(
         Some(max_packet_bytes),
         packet.n_ch,
         packet.t,
@@ -330,22 +330,16 @@ pub(crate) fn execute_assemble<'a>(
     };
     let max_packet_bytes = max_frame_bytes(node, entropy.bounds)?;
     let encoded = &entropy.packet;
-    let packet = assemble_lml_packet(
+    let packet = PrecomputedLosslessPacket::new(
         encoded.n_ch,
         encoded.t,
         encoded.n_levels,
-        0,
-        false,
         &encoded.lpc_meta,
         &encoded.payload,
-    );
-    if packet.len() > max_packet_bytes {
-        return Err(kernel_failure(
-            node,
-            "resource-limit",
-            "assembled LML packet exceeds frame bound",
-        ));
-    }
+    )
+    .map_err(|error| lml_failure(node, error))?
+    .encode_bounded(max_packet_bytes)
+    .map_err(|error| lml_failure(node, error))?;
     Ok(vec![LamQuantNodeValue::LmlPackets(LmlPackets {
         packets: vec![packet],
     })])
