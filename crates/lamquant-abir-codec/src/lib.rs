@@ -58,6 +58,9 @@ pub const OPTIMUM_KERNEL_ID: &str = "org.quitetall.lamquant.lml-optimum.lossless
 /// Stable generation-v4 peer kernel identity under the existing lossless profile.
 #[cfg(feature = "optimum-v2")]
 pub const OPTIMUM_V2_KERNEL_ID: &str = lamquant_lml_optimum_v2::PEER_KERNEL_ID;
+/// Stable peer-r2 kernel identity under the existing exact-lossless profile.
+#[cfg(feature = "optimum-v2")]
+pub const OPTIMUM_V2_R2_KERNEL_ID: &str = lamquant_lml_optimum_v2::PEER_R2_KERNEL_ID;
 /// Exact semantic-to-packet closure enforced by this integration crate.
 pub const LML_FIDELITY_CONTRACT: &str =
     "org.quitetall.lamquant.bcs2.lml.exact-signal-block-closure-v1";
@@ -971,6 +974,39 @@ pub fn optimum_v2_implementation_identity() -> CodecImplementation {
     }
 }
 
+/// Linked Optimum-v2 peer-r2 source/build identity.
+#[cfg(feature = "optimum-v2")]
+pub fn optimum_v2_r2_implementation_identity() -> CodecImplementation {
+    CodecImplementation {
+        kernel_id: OPTIMUM_V2_R2_KERNEL_ID.to_string(),
+        ..implementation_identity()
+    }
+}
+
+#[cfg(feature = "optimum-v2")]
+#[derive(Clone, Copy)]
+enum OptimumV2Revision {
+    PeerR1,
+    PeerR2,
+}
+
+#[cfg(feature = "optimum-v2")]
+impl OptimumV2Revision {
+    const fn kernel_id(self) -> &'static str {
+        match self {
+            Self::PeerR1 => OPTIMUM_V2_KERNEL_ID,
+            Self::PeerR2 => OPTIMUM_V2_R2_KERNEL_ID,
+        }
+    }
+
+    const fn packet_grammar(self) -> &'static str {
+        match self {
+            Self::PeerR1 => "OV2P.peer-v4",
+            Self::PeerR2 => "OV2P.peer-r2",
+        }
+    }
+}
+
 /// Seal generation-v4 peer packets after proving exact ABIR signal closure.
 #[cfg(feature = "optimum-v2")]
 pub fn seal_optimum_v2_packets(
@@ -979,15 +1015,49 @@ pub fn seal_optimum_v2_packets(
     producer: CodecImplementation,
     bounds: ResourceBounds,
 ) -> Result<Vec<u8>, LmlBundleError> {
+    seal_optimum_v2_packets_for(
+        dataset,
+        packets,
+        producer,
+        bounds,
+        OptimumV2Revision::PeerR1,
+    )
+}
+
+/// Seal peer-r2 packets under a distinct catalog identity and grammar marker.
+#[cfg(feature = "optimum-v2")]
+pub fn seal_optimum_v2_r2_packets(
+    dataset: &AbirDataset,
+    packets: &[&[u8]],
+    producer: CodecImplementation,
+    bounds: ResourceBounds,
+) -> Result<Vec<u8>, LmlBundleError> {
+    seal_optimum_v2_packets_for(
+        dataset,
+        packets,
+        producer,
+        bounds,
+        OptimumV2Revision::PeerR2,
+    )
+}
+
+#[cfg(feature = "optimum-v2")]
+fn seal_optimum_v2_packets_for(
+    dataset: &AbirDataset,
+    packets: &[&[u8]],
+    producer: CodecImplementation,
+    bounds: ResourceBounds,
+    revision: OptimumV2Revision,
+) -> Result<Vec<u8>, LmlBundleError> {
     use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
 
     if packets.is_empty() {
         return Err(LmlBundleError::PacketCount);
     }
-    if producer.kernel_id != OPTIMUM_V2_KERNEL_ID {
+    if producer.kernel_id != revision.kernel_id() {
         return Err(LmlBundleError::CatalogContract);
     }
-    let (signal, _) = decode_optimum_v2_sequence(dataset, packets)?;
+    let (signal, _) = decode_optimum_v2_sequence(dataset, packets, revision)?;
     verify_signal_closure(dataset, &signal)?;
 
     let semantics = canonical_debug_json(dataset).map_err(|_| LmlBundleError::SemanticEncoding)?;
@@ -999,7 +1069,7 @@ pub fn seal_optimum_v2_packets(
             implementation: producer,
             model_provenance: None,
             packets,
-            parameters: optimum_v2_parameters(),
+            parameters: optimum_v2_parameters_for(revision),
             profile: CodecProfile::LmlLossless,
         },
         bounds,
@@ -1013,6 +1083,24 @@ pub fn open_optimum_v2_bundle(
     bytes: &[u8],
     bounds: ResourceBounds,
 ) -> Result<OpenedOptimumV2Bundle<'_>, LmlBundleError> {
+    open_optimum_v2_bundle_for(bytes, bounds, OptimumV2Revision::PeerR1)
+}
+
+/// Open a peer-r2 bundle and re-prove exact semantic closure.
+#[cfg(feature = "optimum-v2")]
+pub fn open_optimum_v2_r2_bundle(
+    bytes: &[u8],
+    bounds: ResourceBounds,
+) -> Result<OpenedOptimumV2Bundle<'_>, LmlBundleError> {
+    open_optimum_v2_bundle_for(bytes, bounds, OptimumV2Revision::PeerR2)
+}
+
+#[cfg(feature = "optimum-v2")]
+fn open_optimum_v2_bundle_for(
+    bytes: &[u8],
+    bounds: ResourceBounds,
+    revision: OptimumV2Revision,
+) -> Result<OpenedOptimumV2Bundle<'_>, LmlBundleError> {
     use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
 
     let bundle = CodecBundleView::open_with_capabilities(bytes, CAP_LML_OPTIMUM_V1, bounds)
@@ -1023,8 +1111,8 @@ pub fn open_optimum_v2_bundle(
     }
     if catalog.model_provenance().is_some()
         || catalog.fidelity() != &exact_fidelity()
-        || catalog.implementation().kernel_id != OPTIMUM_V2_KERNEL_ID
-        || catalog.parameters() != optimum_v2_parameters()
+        || catalog.implementation().kernel_id != revision.kernel_id()
+        || catalog.parameters() != optimum_v2_parameters_for(revision)
     {
         return Err(LmlBundleError::CatalogContract);
     }
@@ -1052,7 +1140,8 @@ pub fn open_optimum_v2_bundle(
         return Err(LmlBundleError::CatalogContract);
     }
     let packets = bundle.packets().collect::<Vec<_>>();
-    let (signal, packet_sample_counts) = decode_optimum_v2_sequence(bundle.dataset(), &packets)?;
+    let (signal, packet_sample_counts) =
+        decode_optimum_v2_sequence(bundle.dataset(), &packets, revision)?;
     verify_signal_closure(bundle.dataset(), &signal)?;
     Ok(OpenedOptimumV2Bundle {
         bundle,
@@ -1065,6 +1154,7 @@ pub fn open_optimum_v2_bundle(
 fn decode_optimum_v2_sequence(
     dataset: &AbirDataset,
     packets: &[&[u8]],
+    revision: OptimumV2Revision,
 ) -> Result<(Vec<Vec<i64>>, Vec<usize>), LmlBundleError> {
     let descriptors = ordered_descriptors(dataset)?;
     let expected_sample_rate_mhz = optimum_v2_sample_rate_mhz(dataset)?;
@@ -1087,9 +1177,11 @@ fn decode_optimum_v2_sequence(
     let mut context = None;
     let mut packet_sample_counts = Vec::with_capacity(packets.len());
     for packet in packets {
-        let decoded = lamquant_lml_optimum_v2::PeerCodec
-            .decode_window(packet)
-            .map_err(LmlBundleError::OptimumV2)?;
+        let decoded = match revision {
+            OptimumV2Revision::PeerR1 => lamquant_lml_optimum_v2::PeerCodec.decode_window(packet),
+            OptimumV2Revision::PeerR2 => lamquant_lml_optimum_v2::PeerR2Codec.decode_window(packet),
+        }
+        .map_err(LmlBundleError::OptimumV2)?;
         if decoded.samples.len() != descriptors.len() {
             return Err(LmlBundleError::SignalShapeMismatch);
         }
@@ -1226,8 +1318,13 @@ fn canonical_parameters() -> Vec<CodecParameter> {
     ]
 }
 
-#[cfg(feature = "optimum-v2")]
+#[cfg(all(feature = "optimum-v2", test))]
 fn optimum_v2_parameters() -> Vec<CodecParameter> {
+    optimum_v2_parameters_for(OptimumV2Revision::PeerR1)
+}
+
+#[cfg(feature = "optimum-v2")]
+fn optimum_v2_parameters_for(revision: OptimumV2Revision) -> Vec<CodecParameter> {
     vec![
         CodecParameter {
             name: "abir.revision".to_string(),
@@ -1244,7 +1341,7 @@ fn optimum_v2_parameters() -> Vec<CodecParameter> {
         CodecParameter {
             name: "lml.packet_grammar".to_string(),
             value: CodecParameterValue::Text {
-                value: "OV2P.peer-v4".to_string(),
+                value: revision.packet_grammar().to_string(),
             },
         },
         CodecParameter {
@@ -2439,6 +2536,85 @@ mod tests {
         assert!(matches!(
             open_lml_bundle(&bytes, ResourceBounds::default()),
             Err(LmlBundleError::Bundle(_))
+        ));
+    }
+
+    #[cfg(feature = "optimum-v2")]
+    #[test]
+    fn optimum_v2_r2_bundle_has_distinct_identity_and_cross_revision_refusal() {
+        use lamquant_lml_optimum_v2::{PeerCodec, PeerEncodeContext, PeerR2Codec};
+        use semantic_abir_bcs::CAP_LML_OPTIMUM_V1;
+
+        let signal = optimum_v2_fixture_signal();
+        let mapped = fixture_from_signal(&[
+            (ElementType::I16, signal[0].clone()),
+            (ElementType::I24, signal[1].clone()),
+            (ElementType::I32, signal[2].clone()),
+        ]);
+        let packet = PeerR2Codec
+            .encode_window(
+                &signal,
+                PeerEncodeContext {
+                    sample_rate_mhz: 256_000,
+                    bit_depth: 24,
+                },
+            )
+            .expect("encode peer-r2 packet");
+        let bytes = seal_optimum_v2_r2_packets(
+            mapped.dataset(),
+            &[packet.as_slice()],
+            optimum_v2_r2_implementation_identity(),
+            ResourceBounds::default(),
+        )
+        .expect("seal peer-r2 packet");
+        let opened = open_optimum_v2_r2_bundle(&bytes, ResourceBounds::default())
+            .expect("open peer-r2 bundle");
+
+        assert_eq!(opened.signal(), signal);
+        assert_eq!(opened.packet(), packet);
+        assert_eq!(opened.packet_sample_counts(), &[64]);
+        assert_eq!(
+            opened.bundle().catalog().implementation().kernel_id,
+            OPTIMUM_V2_R2_KERNEL_ID
+        );
+        let wire = Bcs2View::parse(&bytes, CAP_LML_OPTIMUM_V1, ResourceBounds::default()).unwrap();
+        assert!(wire
+            .frames()
+            .iter()
+            .any(|frame| frame.required_capabilities() == CAP_LML_OPTIMUM_V1));
+        assert!(matches!(
+            open_optimum_v2_bundle(&bytes, ResourceBounds::default()),
+            Err(LmlBundleError::CatalogContract)
+        ));
+
+        let r1_packet = PeerCodec
+            .encode_window(
+                &signal,
+                PeerEncodeContext {
+                    sample_rate_mhz: 256_000,
+                    bit_depth: 24,
+                },
+            )
+            .expect("encode peer-r1 packet");
+        let r1_bytes = seal_optimum_v2_packets(
+            mapped.dataset(),
+            &[r1_packet.as_slice()],
+            optimum_v2_implementation_identity(),
+            ResourceBounds::default(),
+        )
+        .expect("seal peer-r1 packet");
+        assert!(matches!(
+            open_optimum_v2_r2_bundle(&r1_bytes, ResourceBounds::default()),
+            Err(LmlBundleError::CatalogContract)
+        ));
+        assert!(matches!(
+            seal_optimum_v2_r2_packets(
+                mapped.dataset(),
+                &[packet.as_slice()],
+                optimum_v2_implementation_identity(),
+                ResourceBounds::default(),
+            ),
+            Err(LmlBundleError::CatalogContract)
         ));
     }
 

@@ -97,12 +97,15 @@ use blut_graph_core::{
 };
 use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
 #[cfg(feature = "optimum-v2")]
-use lamquant_abir_codec::{optimum_v2_implementation_identity, seal_optimum_v2_packets};
+use lamquant_abir_codec::{
+    optimum_v2_implementation_identity, optimum_v2_r2_implementation_identity,
+    seal_optimum_v2_packets, seal_optimum_v2_r2_packets,
+};
 use lamquant_lml_mcu::lml::EncodeFeatures;
 use lamquant_lml_mcu::lpc::LpcMode;
 #[cfg(feature = "optimum-v2")]
 use lamquant_lml_optimum_v2::{
-    PeerCodec, PeerEncodeContext, PEER_MAX_PACKET_BYTES, PEER_MAX_PARALLEL_CANDIDATES,
+    PeerCodec, PeerEncodeContext, PeerR2Codec, PEER_MAX_PACKET_BYTES, PEER_MAX_PARALLEL_CANDIDATES,
     PEER_MAX_PEAK_BYTES, PEER_MAX_SCRATCH_BYTES, PEER_MAX_SIGNAL_BYTES, PEER_MAX_VALUES,
 };
 use semantic_abir::AbirDataset;
@@ -115,6 +118,11 @@ pub const CAP_LML_ARITHMETIC_NODE: &str = "bcs2.cap.lml-arithmetic-v1";
 pub const OPTIMUM_V2_PEER_NODE_TYPE: &str = "org.quitetall.lamquant.lml.encode.optimum-v2-peer-r1";
 #[cfg(feature = "optimum-v2")]
 pub const CAP_LML_OPTIMUM_V2_PEER_NODE: &str = "bcs2.cap.lml-optimum-v2-peer-v1";
+#[cfg(feature = "optimum-v2")]
+pub const OPTIMUM_V2_PEER_R2_NODE_TYPE: &str =
+    "org.quitetall.lamquant.lml.encode.optimum-v2-peer-r2";
+#[cfg(feature = "optimum-v2")]
+pub const CAP_LML_OPTIMUM_V2_PEER_R2_NODE: &str = "bcs2.cap.lml-optimum-v2-peer-r2-v1";
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_LML: &str = "bcs.lml.lossless-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.lml.encode";
@@ -144,6 +152,18 @@ const ARITHMETIC_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0202);
 const OPTIMUM_V2_PEER_R1_HOST_KERNEL: KernelId = KernelId(0x4c4d_0401);
 #[cfg(feature = "optimum-v2")]
 const OPTIMUM_V2_PEER_R1_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0403);
+// 0x4c4d_0502 remains reserved for a future measured MCU implementation.
+#[cfg(feature = "optimum-v2")]
+const OPTIMUM_V2_PEER_R2_HOST_KERNEL: KernelId = KernelId(0x4c4d_0501);
+#[cfg(feature = "optimum-v2")]
+const OPTIMUM_V2_PEER_R2_BLUT_KERNEL: KernelId = KernelId(0x4c4d_0503);
+
+#[cfg(feature = "optimum-v2")]
+#[derive(Clone, Copy)]
+enum OptimumV2NodeRevision {
+    PeerR1,
+    PeerR2,
+}
 
 /// Borrowed input shape accepted by LML encoder nodes.
 ///
@@ -315,7 +335,13 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
                 execute_fused_outer(node, type_name, inputs)
             }
             #[cfg(feature = "optimum-v2")]
-            OPTIMUM_V2_PEER_NODE_TYPE => execute_optimum_v2_peer(node, inputs),
+            OPTIMUM_V2_PEER_NODE_TYPE => {
+                execute_optimum_v2_peer(node, inputs, OptimumV2NodeRevision::PeerR1)
+            }
+            #[cfg(feature = "optimum-v2")]
+            OPTIMUM_V2_PEER_R2_NODE_TYPE => {
+                execute_optimum_v2_peer(node, inputs, OptimumV2NodeRevision::PeerR2)
+            }
             _ => Err(lml_reference::kernel_failure(
                 node,
                 "unsupported-node",
@@ -329,6 +355,7 @@ impl<'a> KernelExecutor for LamQuantKernelExecutor<'a> {
 fn execute_optimum_v2_peer<'a>(
     node: &CompiledNode,
     inputs: &[Option<&LamQuantNodeValue<'a>>],
+    revision: OptimumV2NodeRevision,
 ) -> Result<Vec<LamQuantNodeValue<'a>>, ExecutionError> {
     let signal = match inputs {
         [Some(LamQuantNodeValue::LmlSignal(signal))] => signal,
@@ -376,7 +403,11 @@ fn execute_optimum_v2_peer<'a>(
         samples.extend_from_slice(channel);
         owned.push(samples);
     }
-    let packet = PeerCodec.encode_window(&owned, context).map_err(|error| {
+    let packet = match revision {
+        OptimumV2NodeRevision::PeerR1 => PeerCodec.encode_window(&owned, context),
+        OptimumV2NodeRevision::PeerR2 => PeerR2Codec.encode_window(&owned, context),
+    }
+    .map_err(|error| {
         let message = error.to_string();
         lml_reference::kernel_failure(node, "codec-failure", &message)
     })?;
@@ -388,12 +419,20 @@ fn execute_optimum_v2_peer<'a>(
             "Optimum-v2 packet exceeds declared frame budget",
         ));
     }
-    let bytes = seal_optimum_v2_packets(
-        signal.dataset,
-        &[packet.as_slice()],
-        optimum_v2_implementation_identity(),
-        signal.bounds,
-    )
+    let bytes = match revision {
+        OptimumV2NodeRevision::PeerR1 => seal_optimum_v2_packets(
+            signal.dataset,
+            &[packet.as_slice()],
+            optimum_v2_implementation_identity(),
+            signal.bounds,
+        ),
+        OptimumV2NodeRevision::PeerR2 => seal_optimum_v2_r2_packets(
+            signal.dataset,
+            &[packet.as_slice()],
+            optimum_v2_r2_implementation_identity(),
+            signal.bounds,
+        ),
+    }
     .map_err(|error| lml_reference::codec_failure(node, error))?;
     if bytes.len() as u64 > PEER_MAX_BUNDLE_BYTES {
         return Err(lml_reference::kernel_failure(
@@ -532,15 +571,28 @@ pub fn arithmetic_lml_descriptor() -> NodeDescriptor {
 
 #[cfg(feature = "optimum-v2")]
 pub fn optimum_v2_peer_descriptor() -> NodeDescriptor {
+    optimum_v2_peer_descriptor_for(OPTIMUM_V2_PEER_NODE_TYPE, CAP_LML_OPTIMUM_V2_PEER_NODE)
+}
+
+#[cfg(feature = "optimum-v2")]
+pub fn optimum_v2_peer_r2_descriptor() -> NodeDescriptor {
+    optimum_v2_peer_descriptor_for(
+        OPTIMUM_V2_PEER_R2_NODE_TYPE,
+        CAP_LML_OPTIMUM_V2_PEER_R2_NODE,
+    )
+}
+
+#[cfg(feature = "optimum-v2")]
+fn optimum_v2_peer_descriptor_for(type_name: &str, capability: &str) -> NodeDescriptor {
     NodeDescriptor {
-        type_name: OPTIMUM_V2_PEER_NODE_TYPE.into(),
+        type_name: type_name.into(),
         version: 1,
         inputs: vec![optimum_v2_signal_port()],
         outputs: vec![optimum_v2_bundle_port()],
         capabilities: vec![
             Capability(CAP_ABIR.into()),
             Capability(CAP_LML.into()),
-            Capability(CAP_LML_OPTIMUM_V2_PEER_NODE.into()),
+            Capability(capability.into()),
         ],
         targets: vec![Target::Host, Target::BlutDurable],
         resources: ResourceEnvelope::bounded(
@@ -715,6 +767,8 @@ pub fn register_lml_nodes_with_fused_mcu_implementation(
     registry.register_descriptor(arithmetic_lml_descriptor())?;
     #[cfg(feature = "optimum-v2")]
     registry.register_descriptor(optimum_v2_peer_descriptor())?;
+    #[cfg(feature = "optimum-v2")]
+    registry.register_descriptor(optimum_v2_peer_r2_descriptor())?;
 
     for (offset, type_name) in reference_stage_types().iter().enumerate() {
         registry.register_kernel(reference_kernel(
@@ -759,7 +813,24 @@ pub fn register_lml_nodes_with_fused_mcu_implementation(
         (OPTIMUM_V2_PEER_R1_HOST_KERNEL, Target::Host),
         (OPTIMUM_V2_PEER_R1_BLUT_KERNEL, Target::BlutDurable),
     ] {
-        registry.register_kernel(optimum_v2_kernel(id, target))?;
+        registry.register_kernel(optimum_v2_kernel(
+            id,
+            target,
+            OPTIMUM_V2_PEER_NODE_TYPE,
+            "fused:org.quitetall.lamquant.lml.encode.optimum-v2-peer-r1:peer-v4-parallel-v1",
+        ))?;
+    }
+    #[cfg(feature = "optimum-v2")]
+    for (id, target) in [
+        (OPTIMUM_V2_PEER_R2_HOST_KERNEL, Target::Host),
+        (OPTIMUM_V2_PEER_R2_BLUT_KERNEL, Target::BlutDurable),
+    ] {
+        registry.register_kernel(optimum_v2_kernel(
+            id,
+            target,
+            OPTIMUM_V2_PEER_R2_NODE_TYPE,
+            "fused:org.quitetall.lamquant.lml.encode.optimum-v2-peer-r2:peer-r2-parallel-v1",
+        ))?;
     }
     Ok(())
 }
@@ -1030,14 +1101,19 @@ fn lml_kernel(id: KernelId, type_name: &str, target: Target) -> KernelDescriptor
 }
 
 #[cfg(feature = "optimum-v2")]
-fn optimum_v2_kernel(id: KernelId, target: Target) -> KernelDescriptor {
+fn optimum_v2_kernel(
+    id: KernelId,
+    target: Target,
+    type_name: &str,
+    lowering: &str,
+) -> KernelDescriptor {
     KernelDescriptor {
         id,
         implements: vec![NodeTypeRef {
-            type_name: OPTIMUM_V2_PEER_NODE_TYPE.into(),
+            type_name: type_name.into(),
             version: 1,
         }],
-        implementation_id: implementation_id(OPTIMUM_V2_PEER_NODE_TYPE, target),
+        implementation_id: implementation_id(type_name, target),
         conversion: None,
         target,
         input_layouts: vec![Layout::ChannelMajor],
@@ -1048,8 +1124,7 @@ fn optimum_v2_kernel(id: KernelId, target: Target) -> KernelDescriptor {
             PEER_MAX_PARALLEL_CANDIDATES,
         ),
         determinism: Determinism::BitExact,
-        lowering: "fused:org.quitetall.lamquant.lml.encode.optimum-v2-peer-r1:peer-v4-parallel-v1"
-            .into(),
+        lowering: lowering.into(),
     }
 }
 

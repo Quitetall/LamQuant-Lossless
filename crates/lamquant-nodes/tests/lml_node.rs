@@ -22,8 +22,9 @@ use lamquant_nodes::{
 };
 #[cfg(feature = "optimum-v2")]
 use lamquant_nodes::{
-    optimum_v2_node_config, optimum_v2_peer_descriptor, CAP_LML_OPTIMUM_V2_PEER_NODE,
-    OPTIMUM_V2_PEER_NODE_TYPE, PEER_MAX_BUNDLE_BYTES, PEER_NODE_MAX_CHANNELS,
+    optimum_v2_node_config, optimum_v2_peer_descriptor, optimum_v2_peer_r2_descriptor,
+    CAP_LML_OPTIMUM_V2_PEER_NODE, CAP_LML_OPTIMUM_V2_PEER_R2_NODE, OPTIMUM_V2_PEER_NODE_TYPE,
+    OPTIMUM_V2_PEER_R2_NODE_TYPE, PEER_MAX_BUNDLE_BYTES, PEER_NODE_MAX_CHANNELS,
     PEER_NODE_MAX_SAMPLES,
 };
 use semantic_abir::{
@@ -388,6 +389,102 @@ fn optimum_v2_peer_node_matches_direct_codec_and_bcs2_closure() {
     let opened = open_optimum_v2_bundle(&host, bounds).unwrap();
     assert_eq!(opened.packet(), direct_packet);
     assert_eq!(opened.signal(), signal);
+    assert!(Compiler::new(&registry, ExecutionRealm::McuAot)
+        .compile(&graph)
+        .is_err());
+}
+
+#[cfg(feature = "optimum-v2")]
+#[test]
+fn optimum_v2_peer_r2_node_uses_fresh_kernels_and_exact_bcs2_closure() {
+    use lamquant_abir_codec::{
+        open_optimum_v2_bundle, open_optimum_v2_r2_bundle, optimum_v2_r2_implementation_identity,
+        seal_optimum_v2_r2_packets, LmlBundleError,
+    };
+    use lamquant_lml_optimum_v2::{PeerEncodeContext, PeerR2Codec};
+
+    let signal = fixture_signal();
+    let dataset = fixture_dataset(&signal);
+    let views = signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let bounds = ResourceBounds::default();
+    let descriptor = optimum_v2_peer_r2_descriptor();
+    assert_eq!(descriptor.type_name, OPTIMUM_V2_PEER_R2_NODE_TYPE);
+    assert_eq!(descriptor.targets, vec![Target::Host, Target::BlutDurable]);
+    assert!(descriptor
+        .capabilities
+        .contains(&Capability(CAP_LML_OPTIMUM_V2_PEER_R2_NODE.into())));
+
+    let mut registry = KernelRegistry::default();
+    register_lml_nodes(&mut registry).unwrap();
+    let graph = single_lml_graph(
+        OPTIMUM_V2_PEER_R2_NODE_TYPE,
+        descriptor.capabilities,
+        optimum_v2_node_config(256_000, 16).unwrap(),
+    );
+    let direct_packet = PeerR2Codec
+        .encode_window(
+            &signal,
+            PeerEncodeContext {
+                sample_rate_mhz: 256_000,
+                bit_depth: 16,
+            },
+        )
+        .unwrap();
+    let direct_bundle = seal_optimum_v2_r2_packets(
+        &dataset,
+        &[direct_packet.as_slice()],
+        optimum_v2_r2_implementation_identity(),
+        bounds,
+    )
+    .unwrap();
+
+    let execute = |realm| {
+        let plan = Compiler::new(&registry, realm).compile(&graph).unwrap();
+        let selected = plan
+            .as_plan()
+            .nodes
+            .iter()
+            .map(|node| (node.kernel, node.implementation_id))
+            .collect::<Vec<_>>();
+        let mut kernels = lamquant_nodes::LamQuantKernelExecutor::default();
+        let mut sink = NoopTransactionalSink;
+        let mut executor = PlanExecutor::new(&mut kernels, &mut sink);
+        let result = executor
+            .execute(
+                &plan,
+                [0x82; 32],
+                BTreeMap::from([(
+                    PortRef {
+                        node: NodeId(0),
+                        port: "signal".into(),
+                    },
+                    LamQuantNodeValue::LmlSignal(
+                        LmlSignalView::new(&dataset, &views, bounds).unwrap(),
+                    ),
+                )]),
+            )
+            .unwrap();
+        let bytes = match &result.terminal_values.get(&NodeId(0)).unwrap()[0] {
+            LamQuantNodeValue::Bcs2(bytes) => bytes.clone(),
+            other => panic!("unexpected peer-r2 node output: {other:?}"),
+        };
+        (selected, bytes)
+    };
+
+    let (host_kernels, host) = execute(ExecutionRealm::HostStream);
+    let (blut_kernels, blut) = execute(ExecutionRealm::BlutDurable);
+    assert_eq!(host_kernels[0].0, blut_graph_core::KernelId(0x4c4d_0501));
+    assert_eq!(blut_kernels[0].0, blut_graph_core::KernelId(0x4c4d_0503));
+    assert_ne!(host_kernels, blut_kernels);
+    assert_eq!(host, direct_bundle);
+    assert_eq!(blut, host);
+    let opened = open_optimum_v2_r2_bundle(&host, bounds).unwrap();
+    assert_eq!(opened.packet(), direct_packet);
+    assert_eq!(opened.signal(), signal);
+    assert!(matches!(
+        open_optimum_v2_bundle(&host, bounds),
+        Err(LmlBundleError::CatalogContract)
+    ));
     assert!(Compiler::new(&registry, ExecutionRealm::McuAot)
         .compile(&graph)
         .is_err());
