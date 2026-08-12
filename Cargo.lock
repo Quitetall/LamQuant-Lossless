@@ -3754,6 +3754,7 @@ dependencies = [
  "dicom-object",
  "flate2",
  "hdf5-metno",
+ "hdf5-metno-src",
  "lamquant-common",
  "lamquant-lml",
  "serde_json",
