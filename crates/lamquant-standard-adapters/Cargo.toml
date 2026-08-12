@@ -6,7 +6,7 @@ rust-version = "1.81"
 license = "AGPL-3.0-or-later"
 [features]
 default = ["nwb"]
-nwb = ["dep:hdf5-metno", "lamquant-lml/nwb"]
+nwb = ["dep:hdf5-metno", "dep:hdf5-metno-src", "lamquant-lml/nwb"]
 
 [dependencies]
 abir-adapter = { version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4" }
@@ -20,8 +20,10 @@ dicom-object = "0.8"
 # Build the binding's pinned HDF5 source. Rolling distributions now ship HDF5
 # 2.x, which the current binding rejects before even non-NWB adapter tests run.
 # Keeping the native dependency hermetic also makes archive conformance gates
-# independent of host pkg-config state.
+# independent of host pkg-config state. Do not loosen the source pin: 0.10.4
+# bundles HDF5 2.2, which hdf5-metno-sys 0.11.3 cannot parse.
 hdf5-metno = { version = "0.12", optional = true, features = ["static"] }
+hdf5-metno-src = { version = "=0.10.0", optional = true }
 lamquant-lml = { version = "0.9.3", path = "../../lamquant-lossless", default-features = false, features = ["archive", "dicom"] }
 semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4" }
 serde_json = "1"
