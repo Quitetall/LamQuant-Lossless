@@ -5,7 +5,7 @@ version = 3
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=9d877fa11aeacdc95fc12c2428f15df39507bc47#9d877fa11aeacdc95fc12c2428f15df39507bc47"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=9d877fa11aeacdc95fc12c2428f15df39507bc47#9d877fa11aeacdc95fc12c2428f15df39507bc47"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "abir",
  "blake3",
@@ -25,7 +25,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=9d877fa11aeacdc95fc12c2428f15df39507bc47#9d877fa11aeacdc95fc12c2428f15df39507bc47"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "abir",
  "blake3",
@@ -39,7 +39,7 @@ dependencies = [
 [[package]]
 name = "abir-training"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=9d877fa11aeacdc95fc12c2428f15df39507bc47#9d877fa11aeacdc95fc12c2428f15df39507bc47"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "abir",
  "abir-bcs",
@@ -926,7 +926,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=9b75234e443f72cff3af101bf3dfcdc29f4e7c07#9b75234e443f72cff3af101bf3dfcdc29f4e7c07"
+source = "git+https://github.com/Quitetall/blut.git?rev=be640306babf0120475e31db8d802c679375647d#be640306babf0120475e31db8d802c679375647d"
 dependencies = [
  "blake3",
  "postcard",
@@ -3507,7 +3507,7 @@ dependencies = [
 [[package]]
 name = "lamquant-config"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=e028f67ce5511f0c4cd0cd7e65582608309be7fc#e028f67ce5511f0c4cd0cd7e65582608309be7fc"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=aeea8639e2d3546e1de3abff527eeed1fe30e938#aeea8639e2d3546e1de3abff527eeed1fe30e938"
 dependencies = [
  "clap",
  "dirs",
@@ -3519,7 +3519,7 @@ dependencies = [
 [[package]]
 name = "lamquant-history"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=e028f67ce5511f0c4cd0cd7e65582608309be7fc#e028f67ce5511f0c4cd0cd7e65582608309be7fc"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=aeea8639e2d3546e1de3abff527eeed1fe30e938#aeea8639e2d3546e1de3abff527eeed1fe30e938"
 dependencies = [
  "fs2",
  "serde",
@@ -3708,7 +3708,7 @@ dependencies = [
 [[package]]
 name = "lamquant-ops"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=e028f67ce5511f0c4cd0cd7e65582608309be7fc#e028f67ce5511f0c4cd0cd7e65582608309be7fc"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=aeea8639e2d3546e1de3abff527eeed1fe30e938#aeea8639e2d3546e1de3abff527eeed1fe30e938"
 dependencies = [
  "blut-graph-core",
  "lamquant-history",
@@ -3735,7 +3735,7 @@ dependencies = [
 [[package]]
 name = "lamquant-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=e028f67ce5511f0c4cd0cd7e65582608309be7fc#e028f67ce5511f0c4cd0cd7e65582608309be7fc"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=aeea8639e2d3546e1de3abff527eeed1fe30e938#aeea8639e2d3546e1de3abff527eeed1fe30e938"
 dependencies = [
  "blake3",
  "blut-graph-core",
@@ -3767,7 +3767,7 @@ dependencies = [
 [[package]]
 name = "lamquant-tui"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=e028f67ce5511f0c4cd0cd7e65582608309be7fc#e028f67ce5511f0c4cd0cd7e65582608309be7fc"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=aeea8639e2d3546e1de3abff527eeed1fe30e938#aeea8639e2d3546e1de3abff527eeed1fe30e938"
 dependencies = [
  "crossterm 0.28.1",
  "lamquant-config",

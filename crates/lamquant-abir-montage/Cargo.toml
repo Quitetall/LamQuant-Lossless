@@ -15,5 +15,5 @@ default = ["std"]
 std = ["semantic-abir/std"]
 
 [dependencies]
-semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "9d877fa11aeacdc95fc12c2428f15df39507bc47", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "e2115200e0e4f284c38aa2afd4578a204cc8f40d", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false }
