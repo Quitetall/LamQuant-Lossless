@@ -29,7 +29,7 @@ crate-type = ["rlib"]
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
-lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "9aea1bb8043ef2d25e594d7f8fb30a2830c99d14", features = ["test-advanced-process"] }
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "e028f67ce5511f0c4cd0cd7e65582608309be7fc", features = ["test-advanced-process"] }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.
@@ -246,11 +246,11 @@ lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", defau
 # default-features = false so a no_std facade build stays no_std; the facade's
 # own `std`/`archive`/`experimental_*` features turn on the matching core ones.
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
-semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", default-features = false, features = ["std"], optional = true }
-semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", default-features = false, features = ["std"], optional = true }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "9d877fa11aeacdc95fc12c2428f15df39507bc47", default-features = false, features = ["std"], optional = true }
+semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "9d877fa11aeacdc95fc12c2428f15df39507bc47", default-features = false, features = ["std"], optional = true }
 # ADR 0144 training snapshots: the TRAINING_* profiles and their sealed catalog.
 # Only the `archive` tier links it -- firmware never builds training packs.
-semantic-abir-training = { package = "abir-training", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", optional = true }
+semantic-abir-training = { package = "abir-training", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "9d877fa11aeacdc95fc12c2428f15df39507bc47", optional = true }
 lamquant-abir-codec = { version = "0.1.0", path = "../crates/lamquant-abir-codec", default-features = false, features = ["std"], optional = true }
 # ADR 0052 Tier 3 / ADR 0054: the Optimum (LMO) codec. The facade IS the Desktop
 # profile, so it links the LMO DECODER always (no_std-capable, cheap) and turns
@@ -274,12 +274,12 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 # Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
 # Host feature only; firmware never spawns subprocesses. Also used by the
 # binary for JSON event emission during encode (not just TUI).
-lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "9aea1bb8043ef2d25e594d7f8fb30a2830c99d14", optional = true }
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "e028f67ce5511f0c4cd0cd7e65582608309be7fc", optional = true }
 # Shared TUI framework — all panels, Panel trait, AppState, Router, theme,
 # layout, config, etc. Replaces the 37-file local tui/ module.
-lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "9aea1bb8043ef2d25e594d7f8fb30a2830c99d14", optional = true }
+lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "e028f67ce5511f0c4cd0cd7e65582608309be7fc", optional = true }
 # Shared config crate — comment-preserving TOML with section-per-binary model.
-lamquant-config = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "9aea1bb8043ef2d25e594d7f8fb30a2830c99d14", optional = true }
+lamquant-config = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "e028f67ce5511f0c4cd0cd7e65582608309be7fc", optional = true }
 
 # Host-only deps (gated by `host` feature).
 clap = { version = "4", features = ["derive"], optional = true }
