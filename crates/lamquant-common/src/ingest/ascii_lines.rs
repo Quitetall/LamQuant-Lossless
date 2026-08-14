@@ -178,10 +178,7 @@ pub fn detect_ascii_int_lines(data: &[u8]) -> Option<AsciiLinesTemplate> {
         LineEnding::Lf => sniff.iter().rposition(|&b| b == b'\n').map(|p| p + 1),
         LineEnding::CrLf => sniff.windows(2).rposition(|w| w == b"\r\n").map(|p| p + 2),
     };
-    let scan = match scan_end {
-        Some(end) => &sniff[..end],
-        None => return None, // no complete line in sniff window
-    };
+    let scan = &sniff[..scan_end?];
 
     for raw_line in split_lines(scan, line_ending) {
         if raw_line.is_empty() {
@@ -244,11 +241,39 @@ pub fn detect_ascii_int_lines(data: &[u8]) -> Option<AsciiLinesTemplate> {
 
     let trailing_newline = ends_with_line_break(data, line_ending);
 
-    Some(AsciiLinesTemplate {
+    let template = AsciiLinesTemplate {
         line_ending,
         leading_whitespace: leading_ws.unwrap_or(0),
         field_width,
         trailing_newline,
+    };
+    if !is_exactly_renderable(data, &template) {
+        return None;
+    }
+    Some(template)
+}
+
+/// Reject lexical forms not represented by `AsciiLinesTemplate`. Parsing an
+/// integer is insufficient: `+0012`, leading zeros, and blank lines all lose
+/// bytes when rendered from only the numeric sample value.
+fn is_exactly_renderable(data: &[u8], template: &AsciiLinesTemplate) -> bool {
+    let leading = template.leading_whitespace as usize;
+    split_lines(data, template.line_ending).all(|line| {
+        if line.len() < leading || line[..leading].iter().any(|byte| *byte != b' ') {
+            return false;
+        }
+        let token = &line[leading..];
+        let Ok(token) = std::str::from_utf8(token) else {
+            return false;
+        };
+        let Ok(value) = token.parse::<i16>() else {
+            return false;
+        };
+        let canonical = value.to_string();
+        let padding = (template.field_width as usize).saturating_sub(canonical.len());
+        token.len() == padding + canonical.len()
+            && token.as_bytes()[..padding].iter().all(|byte| *byte == b' ')
+            && &token.as_bytes()[padding..] == canonical.as_bytes()
     })
 }
 
@@ -431,6 +456,20 @@ mod tests {
             bytes.extend_from_slice(b"  5\n");
         }
         assert!(detect_ascii_int_lines(&bytes).is_none());
+    }
+
+    #[test]
+    fn detect_rejects_integer_spellings_template_cannot_restore() {
+        for token in ["+0012\n", "0007\n"] {
+            let bytes = token.repeat(80);
+            assert!(detect_ascii_int_lines(bytes.as_bytes()).is_none());
+        }
+    }
+
+    #[test]
+    fn detect_rejects_blank_lines_template_cannot_restore() {
+        let bytes = "12\n\n".repeat(80);
+        assert!(detect_ascii_int_lines(bytes.as_bytes()).is_none());
     }
 
     #[test]

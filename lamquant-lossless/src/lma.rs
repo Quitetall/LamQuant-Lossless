@@ -96,7 +96,7 @@ fn path_is_unsafe(path: &str) -> bool {
         return true;
     }
     // Absolute / root.
-    if path.starts_with('/') || path.starts_with('\\') {
+    if path.starts_with('/') || path.starts_with('\\') || path.contains('\\') {
         return true;
     }
     // UNC: leading "\\".
@@ -117,16 +117,24 @@ fn path_is_unsafe(path: &str) -> bool {
         return true;
     }
     // ADS / device names: check each path segment.
-    for segment in path.split(['/', '\\']) {
+    for segment in path.split('/') {
         if segment.is_empty() {
             continue;
+        }
+        if segment.ends_with('.') || segment.ends_with(' ') {
+            return true;
         }
         // ADS marker `:` inside a segment (Windows Alternate Data Streams).
         if segment.contains(':') {
             return true;
         }
         // Reserved DOS device names — case-insensitive, with or without ext.
-        let stem_upper: String = segment.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let stem_upper: String = segment
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(' ')
+            .to_ascii_uppercase();
         const RESERVED: &[&str] = &[
             "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
             "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
@@ -220,6 +228,17 @@ pub struct ArchiveEntry {
     /// leading whitespace, field width for ASCII int-per-line files).
     /// Missing on regular EDF / BDF / arbitrary-zstd entries.
     pub synthetic_from: Option<SyntheticFromInfo>,
+}
+
+/// Validated absolute extent of one entry's stored frame inside an LMA file.
+///
+/// Consumers may stream exactly this range without materializing either the
+/// archive or the frame. Construction always applies the same overflow and
+/// archive-bound checks as [`LmaArchive::read_stored`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredExtent {
+    pub offset: u64,
+    pub len: u64,
 }
 
 /// Describes how an `ArchiveEntry` was synthesised from a non-EDF
@@ -624,6 +643,12 @@ impl<R: Read + Seek> LmaArchive<R> {
         &self.index.entries
     }
 
+    /// Validated empty-directory paths and second-resolution mtimes recorded by
+    /// the source archive.
+    pub fn directories(&self) -> &[(String, u64)] {
+        &self.index.directories
+    }
+
     fn entry(&self, name: &str) -> Result<ArchiveEntry, Box<dyn std::error::Error + Send + Sync>> {
         self.index
             .entries
@@ -645,6 +670,41 @@ impl<R: Read + Seek> LmaArchive<R> {
         entry: &ArchiveEntry,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         read_stored_payload(&mut self.source, &self.index, entry)
+    }
+
+    /// Return one entry's validated stored-frame extent.
+    pub fn stored_extent(
+        &self,
+        name: &str,
+    ) -> Result<StoredExtent, Box<dyn std::error::Error + Send + Sync>> {
+        let entry = self.entry(name)?;
+        stored_extent(&self.index, &entry)
+    }
+
+    /// Return a validated extent for an entry already borrowed from
+    /// [`Self::entries`], avoiding a second linear name lookup.
+    pub(crate) fn stored_extent_for(
+        &self,
+        entry: &ArchiveEntry,
+    ) -> Result<StoredExtent, Box<dyn std::error::Error + Send + Sync>> {
+        stored_extent(&self.index, entry)
+    }
+
+    /// Read one entry exactly as stored, without decoding or re-encoding it.
+    pub fn read_stored(
+        &mut self,
+        name: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let entry = self.entry(name)?;
+        self.stored_payload(&entry)
+    }
+
+    /// Read an entry already borrowed from [`Self::entries`] exactly as stored.
+    pub(crate) fn read_stored_entry(
+        &mut self,
+        entry: &ArchiveEntry,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        self.stored_payload(entry)
     }
 
     /// Read an entry without reconstructing LML payloads. Store and Zstd return
@@ -757,6 +817,20 @@ impl<R: Read + Seek> LmaArchive<R> {
         Ok((stored_hex, computed_hex, computed.as_slice() == stored))
     }
 
+    /// Verify the archive-wide custody hash before trusting manifest metadata.
+    ///
+    /// Entry hashes alone cannot protect paths, modes, synthetic-source
+    /// descriptors, or other manifest fields. Migration callers must invoke
+    /// this gate before re-signing any recovered content into another wire.
+    pub fn verify_archive_hash(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (stored, computed, matches) = self.archive_hash()?;
+        if matches {
+            Ok(())
+        } else {
+            Err(format!("Archive SHA-256 mismatch — stored {stored}, computed {computed}").into())
+        }
+    }
+
     pub fn verify(
         &mut self,
     ) -> Result<ArchiveVerification, Box<dyn std::error::Error + Send + Sync>> {
@@ -789,6 +863,17 @@ fn read_stored_payload<R: Read + Seek>(
     index: &LmaIndex,
     entry: &ArchiveEntry,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let extent = stored_extent(index, entry)?;
+    source.seek(SeekFrom::Start(extent.offset))?;
+    let mut payload = vec![0u8; bounded_alloc_usize(extent.len, &entry.path)?];
+    source.read_exact(&mut payload)?;
+    Ok(payload)
+}
+
+fn stored_extent(
+    index: &LmaIndex,
+    entry: &ArchiveEntry,
+) -> Result<StoredExtent, Box<dyn std::error::Error + Send + Sync>> {
     let payload_size = index
         .payload_end
         .checked_sub(index.payload_base)
@@ -818,14 +903,14 @@ fn read_stored_payload<R: Read + Seek>(
         )
         .into());
     }
-    let absolute = index
+    let offset = index
         .payload_base
         .checked_add(entry.offset)
         .ok_or_else(|| format!("Entry '{}' absolute offset overflows", entry.path))?;
-    source.seek(SeekFrom::Start(absolute))?;
-    let mut payload = vec![0u8; bounded_alloc_usize(entry.compressed_size, &entry.path)?];
-    source.read_exact(&mut payload)?;
-    Ok(payload)
+    Ok(StoredExtent {
+        offset,
+        len: entry.compressed_size,
+    })
 }
 
 fn decode_archive_entry<R: Read + Seek>(
@@ -1070,19 +1155,7 @@ fn read_lma_index<R: Read + Seek>(
     let entries = parse_manifest_entries(&manifest_json)?;
     // Directory mtimes (used by unpack_archive). Absent in array-shaped
     // (oldest) manifests and in append-built manifests.
-    let directories: Vec<(String, u64)> = manifest_json
-        .get("directories")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|d| {
-                    let path = d.get("path")?.as_str()?.to_string();
-                    let mtime = d.get("mtime")?.as_u64()?;
-                    Some((path, mtime))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let directories = parse_manifest_directories(&manifest_json)?;
 
     // Sanity: payload_base must not exceed payload_end for any
     // well-formed archive (an empty-payload archive has them equal).
@@ -1784,6 +1857,27 @@ fn encode_edf_to_lml(
     Ok(lml_bytes)
 }
 
+/// Encode the exact bytes already read by the archive worker.
+///
+/// `encode_archive_entry` derives hashes from one in-memory snapshot. Encoding
+/// a path a second time would permit a concurrent writer to substitute another
+/// file version between identity calculation and LML construction.
+fn encode_edf_snapshot_to_lml(
+    bytes: &[u8],
+    source_path: &Path,
+    tmp_dir: &Path,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let source_name = source_path
+        .file_name()
+        .ok_or("archive source lacks a file name")?;
+    let snapshot_dir = tempfile::Builder::new()
+        .prefix("lma_edf_snapshot_")
+        .tempdir_in(tmp_dir)?;
+    let snapshot_path = snapshot_dir.path().join(source_name);
+    std::fs::write(&snapshot_path, bytes)?;
+    encode_edf_to_lml(&snapshot_path, Some(tmp_dir))
+}
+
 /// Archive a directory into a single .lma file.
 ///
 /// - EDF/BDF files are encoded to LML
@@ -1806,6 +1900,7 @@ pub(crate) enum EncodedEntry {
         compressed: Vec<u8>,
         method: Method,
         original_size: u64,
+        logical_content_id: semantic_abir::ContentId,
         file_hash: String,
         mtime: Option<u64>,
         mtime_nanos: Option<u32>,
@@ -1839,13 +1934,14 @@ pub(crate) fn encode_archive_entry(
         }
     };
     let original_size = raw.len() as u64;
+    let logical_content_id = semantic_abir_bcs::raw_content_id(&raw);
     let file_hash = sha256_hex(&raw);
     let mut method = choose_method(full_path);
     let mut synthetic_from: Option<SyntheticFromInfo> = None;
 
     // Compression cascade: preferred method → zstd fallback → store raw.
     let compressed: Vec<u8> = match method {
-        Method::Lml => match encode_edf_to_lml(full_path, Some(tmp_dir)) {
+        Method::Lml => match encode_edf_snapshot_to_lml(&raw, full_path, tmp_dir) {
             Ok(lml_bytes) => lml_bytes,
             Err(e) => {
                 let msg = format!("{}", e);
@@ -1925,6 +2021,7 @@ pub(crate) fn encode_archive_entry(
         compressed,
         method,
         original_size,
+        logical_content_id,
         file_hash,
         mtime,
         mtime_nanos,
@@ -2103,6 +2200,7 @@ pub fn pack_archive(
                     compressed,
                     method,
                     original_size,
+                    logical_content_id: _,
                     file_hash,
                     mtime,
                     mtime_nanos,
@@ -3412,10 +3510,7 @@ fn unpack_archive_from(
     progress_fn: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Result<ArchiveSummary, Box<dyn std::error::Error + Send + Sync>> {
     if verify {
-        let (_, _, archive_hash_matches) = archive.archive_hash()?;
-        if !archive_hash_matches {
-            return Err("Archive SHA-256 mismatch — file is corrupted".into());
-        }
+        archive.verify_archive_hash()?;
     }
 
     let archive_bytes = archive.file_size;
@@ -4122,6 +4217,9 @@ fn parse_manifest_entries(
             .and_then(|v| v.as_str())
             .ok_or_else(|| parse_err("path"))?
             .to_string();
+        if path_is_unsafe(&path) {
+            return Err(format!("lma manifest entry [{idx}]: unsafe or non-portable path").into());
+        }
         let original_size = entry
             .get("original_size")
             .and_then(|v| v.as_u64())
@@ -4152,6 +4250,35 @@ fn parse_manifest_entries(
             .get("offset")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| parse_err("offset"))?;
+        let mtime = match entry.get("mtime") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => {
+                let seconds = value.as_u64().ok_or_else(|| parse_err("mtime"))?;
+                i64::try_from(seconds).map_err(|_| parse_err("mtime"))?;
+                Some(seconds)
+            }
+        };
+        let mtime_nanos = match entry.get("mtime_nanos") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => {
+                let nanos = value.as_u64().ok_or_else(|| parse_err("mtime_nanos"))?;
+                let nanos = u32::try_from(nanos).map_err(|_| parse_err("mtime_nanos"))?;
+                if nanos >= 1_000_000_000 {
+                    return Err(parse_err("mtime_nanos"));
+                }
+                Some(nanos)
+            }
+        };
+        if mtime_nanos.is_some() && mtime.is_none() {
+            return Err(parse_err("mtime_nanos without mtime"));
+        }
+        let mode = match entry.get("mode") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => {
+                let raw = value.as_u64().ok_or_else(|| parse_err("mode"))?;
+                Some(u32::try_from(raw).map_err(|_| parse_err("mode"))?)
+            }
+        };
         out.push(ArchiveEntry {
             path,
             original_size,
@@ -4159,29 +4286,13 @@ fn parse_manifest_entries(
             method,
             sha256,
             offset,
-            mtime: entry.get("mtime").and_then(|v| v.as_u64()),
-            // Sub-second mtime — pre-fix archives lack this field.
-            mtime_nanos: entry
-                .get("mtime_nanos")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32),
-            // Missing on Windows-produced or pre-mode archives.
-            // Casting from u64 → u32 is safe; Unix mode bits fit
-            // in 16 bits (we only use the low 9 anyway).
-            // ADR 0022 Group C: use try_from instead of `m as u32`
-            // so a manifest claiming `mode = u64::MAX` doesn't
-            // silently truncate to 0xFFFFFFFF and look like a
-            // legitimate Unix mode. Out-of-range values are
-            // dropped + warned to stderr.
-            mode: entry.get("mode").and_then(|v| v.as_u64()).and_then(|m| {
-                u32::try_from(m).ok().or_else(|| {
-                    eprintln!(
-                        "  WARNING: lma manifest entry mode {} doesn't fit in u32; dropping",
-                        m
-                    );
-                    None
-                })
-            }),
+            mtime,
+            // Sub-second mtime — pre-fix archives lack this field. Present
+            // values must fit the forensic timestamp domain exactly.
+            mtime_nanos,
+            // Missing on Windows-produced or pre-mode archives. Present values
+            // must fit exactly; corrupt metadata never degrades into absence.
+            mode,
             // ADR 0023 Track A — optional nested object.
             // Schema:
             //   "synthetic_from": {
@@ -4223,6 +4334,43 @@ fn parse_manifest_entries(
         });
     }
     Ok(out)
+}
+
+fn parse_manifest_directories(
+    json: &serde_json::Value,
+) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error + Send + Sync>> {
+    let values = match json.get("directories") {
+        None | Some(serde_json::Value::Null) => return Ok(Vec::new()),
+        Some(value) => value
+            .as_array()
+            .ok_or("lma manifest: malformed `directories` field")?,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut directories = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let path = value
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("lma manifest directory [{index}]: malformed `path`"))?;
+        if path_is_unsafe(path) {
+            return Err(
+                format!("lma manifest directory [{index}]: unsafe or non-portable path").into(),
+            );
+        }
+        if !seen.insert(path.to_owned()) {
+            return Err(
+                format!("lma manifest directory [{index}]: duplicate path `{path}`").into(),
+            );
+        }
+        let mtime = value
+            .get("mtime")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("lma manifest directory [{index}]: malformed `mtime`"))?;
+        i64::try_from(mtime)
+            .map_err(|_| format!("lma manifest directory [{index}]: `mtime` exceeds i64"))?;
+        directories.push((path.to_owned(), mtime));
+    }
+    Ok(directories)
 }
 
 #[cfg(test)]
@@ -4271,7 +4419,11 @@ mod tests {
             "CON",                   // DOS device
             "PRN.txt",               // DOS device with extension
             "subdir/COM1",           // DOS device in subdir
+            "subdir/AUX .txt",       // normalized DOS device stem
             "file:stream",           // ADS
+            "trailing.",             // non-portable Windows normalization
+            "trailing ",             // non-portable Windows normalization
+            "directory\\file",       // separator ambiguity across platforms
             "",                      // empty
         ];
         for p in &attacks {
@@ -4694,6 +4846,77 @@ mod tests {
         let parsed = parse_manifest_entries(&v).expect("null should parse as None");
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].synthetic_from.is_none());
+    }
+
+    #[test]
+    fn manifest_rejects_unrepresentable_timestamps() {
+        let base = serde_json::json!({
+            "files": [{
+                "path": "x.txt",
+                "original_size": 1,
+                "compressed_size": 1,
+                "method": "store",
+                "sha256": "e".repeat(64),
+                "offset": 0,
+                "mtime": 1,
+                "mtime_nanos": 1_000_000_000_u64,
+            }]
+        });
+        assert!(parse_manifest_entries(&base).is_err());
+
+        let mut seconds = base;
+        seconds["files"][0]["mtime_nanos"] = serde_json::json!(0);
+        seconds["files"][0]["mtime"] = serde_json::json!(i64::MAX as u64 + 1);
+        assert!(parse_manifest_entries(&seconds).is_err());
+
+        let nanos_without_seconds = serde_json::json!({
+            "files": [{
+                "path": "x.txt",
+                "original_size": 1,
+                "compressed_size": 1,
+                "method": "store",
+                "sha256": "e".repeat(64),
+                "offset": 0,
+                "mtime_nanos": 1,
+            }]
+        });
+        assert!(parse_manifest_entries(&nanos_without_seconds).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_unrepresentable_mode_instead_of_dropping_it() {
+        let invalid = serde_json::json!({
+            "files": [{
+                "path": "x.txt",
+                "original_size": 1,
+                "compressed_size": 1,
+                "method": "store",
+                "sha256": "e".repeat(64),
+                "offset": 0,
+                "mode": u64::from(u32::MAX) + 1,
+            }]
+        });
+        assert!(parse_manifest_entries(&invalid).is_err());
+    }
+
+    #[test]
+    fn manifest_directories_are_strict_unique_and_portable() {
+        let valid = serde_json::json!({
+            "directories": [{"path": "empty/nested", "mtime": 1_700_000_000_u64}]
+        });
+        assert_eq!(
+            parse_manifest_directories(&valid).unwrap(),
+            vec![("empty/nested".to_owned(), 1_700_000_000)]
+        );
+
+        for invalid in [
+            serde_json::json!({"directories": [{"path": "../escape", "mtime": 1}]}),
+            serde_json::json!({"directories": [{"path": "empty", "mtime": 1}, {"path": "empty", "mtime": 1}]}),
+            serde_json::json!({"directories": [{"path": "empty"}]}),
+            serde_json::json!({"directories": {"path": "empty", "mtime": 1}}),
+        ] {
+            assert!(parse_manifest_directories(&invalid).is_err(), "{invalid}");
+        }
     }
 
     /// V4 Pro nit (A-2#1): a non-finite sample_rate must NOT

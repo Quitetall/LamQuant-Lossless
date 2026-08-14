@@ -72,7 +72,20 @@ fn cli_convert_archive_writes_verified_capsule_without_touching_source() {
         "conversion must be non-destructive"
     );
 
+    let verification = Command::new(env!("CARGO_BIN_EXE_lml"))
+        .arg("verify-capsule")
+        .arg(&capsule)
+        .output()
+        .expect("spawn capsule verifier");
+    assert!(
+        verification.status.success(),
+        "capsule verification failed: {}",
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verification.stdout).contains("2 files verified"));
+
     let restored = tmp.path().join("restored");
+    std::fs::create_dir_all(&restored).expect("make empty restore destination");
     lma_forensic::unpack_capsule(&capsule, &restored, false).expect("restore capsule");
     assert_eq!(std::fs::read(restored.join("a.bin")).unwrap(), b"alpha");
     assert_eq!(std::fs::read(restored.join("b.bin")).unwrap(), b"beta");
@@ -139,6 +152,30 @@ fn cli_convert_archive_does_not_publish_output_after_source_corruption() {
 
     assert!(!output.status.success());
     assert!(!capsule.exists(), "failed conversion published output");
+}
+
+#[cfg(feature = "archive")]
+#[test]
+fn cli_convert_archive_refuses_invalid_archive_custody_hash() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let archive = write_archive_fixture(&tmp);
+    let mut bytes = std::fs::read(&archive).expect("read archive fixture");
+    *bytes.last_mut().expect("archive has custody hash") ^= 0x01;
+    let corrupt = tmp.path().join("bad-custody-hash.lma");
+    std::fs::write(&corrupt, bytes).expect("write bad custody hash fixture");
+    let capsule = tmp.path().join("converted.bcs2");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lml"))
+        .arg("convert-archive")
+        .arg(&corrupt)
+        .arg("--output")
+        .arg(&capsule)
+        .output()
+        .expect("spawn archive converter");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Archive SHA-256 mismatch"));
+    assert!(!capsule.exists(), "failed custody gate published output");
 }
 
 #[cfg(feature = "archive")]

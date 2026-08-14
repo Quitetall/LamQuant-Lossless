@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647#7e5700e9ef4e5c7c6a42d829196cd2d0a642f647"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647#7e5700e9ef4e5c7c6a42d829196cd2d0a642f647"
 dependencies = [
  "abir",
  "blake3",
@@ -28,7 +28,7 @@ dependencies = [
 [[package]]
 name = "abir-training"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647#7e5700e9ef4e5c7c6a42d829196cd2d0a642f647"
 dependencies = [
  "abir",
  "abir-bcs",
@@ -1244,6 +1244,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "base64",
+ "blake3",
  "clap",
  "clap_complete",
  "clap_mangen",
@@ -1261,6 +1262,7 @@ dependencies = [
  "lamquant-lml-optimum-v2",
  "lamquant-ops",
  "lamquant-tui",
+ "libc",
  "memmap2",
  "rayon",
  "realfft",

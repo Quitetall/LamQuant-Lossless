@@ -576,13 +576,19 @@ SOURCE FORMATS:
         /// Output BCS2 forensic capsule
         #[arg(short, long)]
         output: PathBuf,
-        /// Zstd compression level for transformed sidecar entries (1-22)
+        /// Deprecated compatibility option (1-22); conversion preserves every
+        /// source archive frame byte-for-byte and does not recompress it
         #[arg(
             long,
             default_value = "9",
             value_parser = clap::value_parser!(i32).range(1..=22)
         )]
         zstd_level: i32,
+    },
+    /// Verify every logical file in a BCS2 forensic capsule without extracting
+    VerifyCapsule {
+        /// Input BCS2 forensic capsule
+        input: PathBuf,
     },
     /// Extract an .lma archive to a directory (byte-exact roundtrip)
     ///
@@ -595,6 +601,9 @@ EXAMPLES:
   # Standard extract into a directory
   lml extract recording.lma -o restored/
 
+  # BCS2 forensic capsule: caller owns a pre-created empty destination
+  mkdir restored && lml extract recording.bcs2 -o restored/
+
   # Skip per-entry SHA-256 check (faster, only for trusted archives)
   lml extract recording.lma -o restored/ --no-verify
 
@@ -603,11 +612,13 @@ NOTES:
     struct intact for EEGLAB sources).
   * Path-traversal protected: rejects `..` / absolute / Windows device
     name entries.
+  * Exact BCS2 capsule restore is Linux-only and requires an existing empty
+    output directory; no child is created before full preflight.
   * mtime + Unix mode preserved on extracted entries.")]
     Extract {
         /// Input .lma file
         input: PathBuf,
-        /// Output directory
+        /// Output directory. BCS2 exact restore requires it to exist and be empty.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Verify SHA-256 of each extracted file against the manifest.
@@ -1560,6 +1571,7 @@ fn op_id_of(cmd: &Commands) -> &'static str {
         Commands::Bench { .. } => "bench",
         Commands::Archive { .. } => "archive",
         Commands::ConvertArchive { .. } => "convert_archive",
+        Commands::VerifyCapsule { .. } => "verify_capsule",
         Commands::Extract { .. } => "extract",
         Commands::ListArchive { .. } => "list_archive",
         Commands::VolumeSplit { .. } => "volume_split",
@@ -1907,6 +1919,7 @@ fn main() {
                 output,
                 zstd_level,
             } => cmd_convert_archive(&input, &output, zstd_level),
+            Commands::VerifyCapsule { input } => cmd_verify_capsule(&input),
             Commands::Extract {
                 input,
                 output,
@@ -7746,10 +7759,10 @@ fn cmd_convert_archive(input: &Path, output: &Path, zstd_level: i32) -> R {
         .into());
     }
     let parent = output.parent().unwrap_or(Path::new("."));
-    let temp = tempfile::Builder::new()
+    let temp_dir = tempfile::Builder::new()
         .prefix(".lml-convert-archive-")
-        .tempfile_in(parent)?
-        .into_temp_path();
+        .tempdir_in(parent)?;
+    let temp = temp_dir.path().join("capsule.bcs2");
 
     let t0 = Instant::now();
     println!("Converting {} → {}", input.display(), output.display());
@@ -7766,7 +7779,8 @@ fn cmd_convert_archive(input: &Path, output: &Path, zstd_level: i32) -> R {
         )
         .into());
     }
-    temp.persist_noclobber(output)
+    tempfile::TempPath::try_from_path(&temp)?
+        .persist_noclobber(output)
         .map_err(|error| error.error)?;
 
     println!("\nDone in {:.1}s", t0.elapsed().as_secs_f64());
@@ -7776,6 +7790,24 @@ fn cmd_convert_archive(input: &Path, output: &Path, zstd_level: i32) -> R {
     );
     println!(
         "  {} → {} ({:.2}x CR)",
+        human_bytes(summary.original_bytes),
+        human_bytes(summary.archive_bytes),
+        summary.cr
+    );
+    Ok(())
+}
+
+fn cmd_verify_capsule(input: &Path) -> R {
+    let t0 = Instant::now();
+    println!("Verifying capsule {}", input.display());
+    let summary = lma_forensic::verify_capsule(input, false)?;
+    println!("\nDone in {:.1}s", t0.elapsed().as_secs_f64());
+    println!(
+        "  {} files verified ({} LML, {} zstd, {} stored)",
+        summary.n_files, summary.counts_lml, summary.counts_zstd, summary.counts_store
+    );
+    println!(
+        "  {} logical bytes / {} capsule bytes ({:.2}x CR)",
         human_bytes(summary.original_bytes),
         human_bytes(summary.archive_bytes),
         summary.cr

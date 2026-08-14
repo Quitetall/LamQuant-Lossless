@@ -123,6 +123,8 @@ pub use lamquant_common::ingest;
 #[cfg(feature = "archive")]
 pub mod io;
 #[cfg(feature = "archive")]
+mod legacy_adapter_process;
+#[cfg(feature = "archive")]
 pub mod lma;
 #[cfg(feature = "archive")]
 pub mod workflows;
