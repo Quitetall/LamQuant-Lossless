@@ -565,6 +565,25 @@ SOURCE FORMATS:
         #[arg(long)]
         capsule: bool,
     },
+    /// Convert an existing LMA1/LMA2 archive into a BCS2 forensic capsule
+    ///
+    /// Conversion is non-destructive: input stays byte-identical. Output is
+    /// published atomically only after every source entry verifies against its
+    /// LMA manifest and the complete capsule validates.
+    ConvertArchive {
+        /// Input LMA1/LMA2 archive
+        input: PathBuf,
+        /// Output BCS2 forensic capsule
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Zstd compression level for transformed sidecar entries (1-22)
+        #[arg(
+            long,
+            default_value = "9",
+            value_parser = clap::value_parser!(i32).range(1..=22)
+        )]
+        zstd_level: i32,
+    },
     /// Extract an .lma archive to a directory (byte-exact roundtrip)
     ///
     /// Recovers every byte of every entry: signal `.lml`, original
@@ -1540,6 +1559,7 @@ fn op_id_of(cmd: &Commands) -> &'static str {
         Commands::Recover { .. } => "recover",
         Commands::Bench { .. } => "bench",
         Commands::Archive { .. } => "archive",
+        Commands::ConvertArchive { .. } => "convert_archive",
         Commands::Extract { .. } => "extract",
         Commands::ListArchive { .. } => "list_archive",
         Commands::VolumeSplit { .. } => "volume_split",
@@ -1882,6 +1902,11 @@ fn main() {
                 zstd_level,
                 capsule,
             } => cmd_archive(&input, output.as_deref(), zstd_level, capsule),
+            Commands::ConvertArchive {
+                input,
+                output,
+                zstd_level,
+            } => cmd_convert_archive(&input, &output, zstd_level),
             Commands::Extract {
                 input,
                 output,
@@ -7706,6 +7731,55 @@ fn cmd_archive(input: &Path, output: Option<&Path>, zstd_level: i32, capsule: bo
             summary.errors.len()
         );
     }
+    Ok(())
+}
+
+fn cmd_convert_archive(input: &Path, output: &Path, zstd_level: i32) -> R {
+    if input == output {
+        return Err("convert-archive output must differ from input".into());
+    }
+    if output.exists() {
+        return Err(format!(
+            "convert-archive refuses to overwrite existing output: {}",
+            output.display()
+        )
+        .into());
+    }
+    let parent = output.parent().unwrap_or(Path::new("."));
+    let temp = tempfile::Builder::new()
+        .prefix(".lml-convert-archive-")
+        .tempfile_in(parent)?
+        .into_temp_path();
+
+    let t0 = Instant::now();
+    println!("Converting {} → {}", input.display(), output.display());
+    let summary = lma_forensic::convert_archive(input, &temp, zstd_level)?;
+    if !summary.errors.is_empty() {
+        return Err(format!(
+            "convert-archive refused partial output: {} source entr{} failed verification",
+            summary.errors.len(),
+            if summary.errors.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        )
+        .into());
+    }
+    temp.persist_noclobber(output)
+        .map_err(|error| error.error)?;
+
+    println!("\nDone in {:.1}s", t0.elapsed().as_secs_f64());
+    println!(
+        "  {} files ({} LML, {} zstd, {} stored)",
+        summary.n_files, summary.counts_lml, summary.counts_zstd, summary.counts_store
+    );
+    println!(
+        "  {} → {} ({:.2}x CR)",
+        human_bytes(summary.original_bytes),
+        human_bytes(summary.archive_bytes),
+        summary.cr
+    );
     Ok(())
 }
 

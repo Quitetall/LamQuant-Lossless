@@ -1,7 +1,7 @@
 #[cfg(feature = "archive")]
 use lamquant_core::workflows::{VerificationOutcome, VerificationTarget};
 #[cfg(feature = "archive")]
-use lamquant_core::{lma, workflows};
+use lamquant_core::{lma, lma_forensic, workflows};
 #[cfg(feature = "archive")]
 use std::process::Command;
 #[cfg(feature = "archive")]
@@ -42,6 +42,103 @@ fn write_corrupted_archive(path: &std::path::Path) -> std::path::PathBuf {
     let out = path.with_file_name("corrupt.lma");
     std::fs::write(&out, &bytes).expect("write corrupted archive fixture");
     out
+}
+
+#[cfg(feature = "archive")]
+#[test]
+fn cli_convert_archive_writes_verified_capsule_without_touching_source() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let archive = write_archive_fixture(&tmp);
+    let source_before = std::fs::read(&archive).expect("read source archive");
+    let capsule = tmp.path().join("converted.bcs2");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lml"))
+        .arg("convert-archive")
+        .arg(&archive)
+        .arg("--output")
+        .arg(&capsule)
+        .output()
+        .expect("spawn archive converter");
+
+    assert!(
+        output.status.success(),
+        "converter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(lma_forensic::is_capsule(&capsule));
+    assert_eq!(
+        std::fs::read(&archive).expect("reread source archive"),
+        source_before,
+        "conversion must be non-destructive"
+    );
+
+    let restored = tmp.path().join("restored");
+    lma_forensic::unpack_capsule(&capsule, &restored, false).expect("restore capsule");
+    assert_eq!(std::fs::read(restored.join("a.bin")).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(restored.join("b.bin")).unwrap(), b"beta");
+}
+
+#[cfg(feature = "archive")]
+#[test]
+fn cli_convert_archive_rejects_out_of_contract_zstd_level() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let archive = write_archive_fixture(&tmp);
+    let capsule = tmp.path().join("converted.bcs2");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lml"))
+        .arg("convert-archive")
+        .arg(&archive)
+        .arg("--output")
+        .arg(&capsule)
+        .arg("--zstd-level")
+        .arg("0")
+        .output()
+        .expect("spawn archive converter");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value '0'"));
+    assert!(!capsule.exists());
+}
+
+#[cfg(feature = "archive")]
+#[test]
+fn cli_convert_archive_refuses_source_as_output() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let archive = write_archive_fixture(&tmp);
+    let source_before = std::fs::read(&archive).expect("read source archive");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lml"))
+        .arg("convert-archive")
+        .arg(&archive)
+        .arg("--output")
+        .arg(&archive)
+        .output()
+        .expect("spawn archive converter");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("convert-archive output must differ from input"));
+    assert_eq!(std::fs::read(&archive).unwrap(), source_before);
+}
+
+#[cfg(feature = "archive")]
+#[test]
+fn cli_convert_archive_does_not_publish_output_after_source_corruption() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let archive = write_archive_fixture(&tmp);
+    let corrupt = write_corrupted_archive(&archive);
+    let capsule = tmp.path().join("converted.bcs2");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lml"))
+        .arg("convert-archive")
+        .arg(&corrupt)
+        .arg("--output")
+        .arg(&capsule)
+        .output()
+        .expect("spawn archive converter");
+
+    assert!(!output.status.success());
+    assert!(!capsule.exists(), "failed conversion published output");
 }
 
 #[cfg(feature = "archive")]
