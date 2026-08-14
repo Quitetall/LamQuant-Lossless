@@ -3507,6 +3507,7 @@ dependencies = [
 [[package]]
 name = "lamquant-config"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=73d0a005a322ec8521b730946bcd7d007558d260#73d0a005a322ec8521b730946bcd7d007558d260"
 dependencies = [
  "clap",
  "dirs",
@@ -3518,6 +3519,7 @@ dependencies = [
 [[package]]
 name = "lamquant-history"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=73d0a005a322ec8521b730946bcd7d007558d260#73d0a005a322ec8521b730946bcd7d007558d260"
 dependencies = [
  "fs2",
  "serde",
@@ -3706,6 +3708,7 @@ dependencies = [
 [[package]]
 name = "lamquant-ops"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=73d0a005a322ec8521b730946bcd7d007558d260#73d0a005a322ec8521b730946bcd7d007558d260"
 dependencies = [
  "blut-graph-core",
  "lamquant-history",
@@ -3732,6 +3735,7 @@ dependencies = [
 [[package]]
 name = "lamquant-runtime"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=73d0a005a322ec8521b730946bcd7d007558d260#73d0a005a322ec8521b730946bcd7d007558d260"
 dependencies = [
  "blake3",
  "blut-graph-core",
@@ -3763,6 +3767,7 @@ dependencies = [
 [[package]]
 name = "lamquant-tui"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=73d0a005a322ec8521b730946bcd7d007558d260#73d0a005a322ec8521b730946bcd7d007558d260"
 dependencies = [
  "crossterm 0.28.1",
  "lamquant-config",
