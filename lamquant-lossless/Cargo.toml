@@ -29,7 +29,7 @@ crate-type = ["rlib"]
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
-lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "7aa9217c7f60079c5b5633be0ef8b99bf21ec904", features = ["test-advanced-process"] }
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "66c7aa8170e387490071befb5d01d1a530033d36", features = ["test-advanced-process"] }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.
@@ -277,12 +277,12 @@ blake3 = { version = "=1.8.2", optional = true }
 # Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
 # Host feature only; firmware never spawns subprocesses. Also used by the
 # binary for JSON event emission during encode (not just TUI).
-lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "7aa9217c7f60079c5b5633be0ef8b99bf21ec904", optional = true }
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "66c7aa8170e387490071befb5d01d1a530033d36", optional = true }
 # Shared TUI framework — all panels, Panel trait, AppState, Router, theme,
 # layout, config, etc. Replaces the 37-file local tui/ module.
-lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "7aa9217c7f60079c5b5633be0ef8b99bf21ec904", optional = true }
+lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "66c7aa8170e387490071befb5d01d1a530033d36", optional = true }
 # Shared config crate — comment-preserving TOML with section-per-binary model.
-lamquant-config = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "7aa9217c7f60079c5b5633be0ef8b99bf21ec904", optional = true }
+lamquant-config = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "66c7aa8170e387490071befb5d01d1a530033d36", optional = true }
 
 # Host-only deps (gated by `host` feature).
 clap = { version = "4", features = ["derive"], optional = true }
