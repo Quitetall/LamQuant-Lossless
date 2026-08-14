@@ -2215,15 +2215,170 @@ fn now_utc() -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yr, mon, d, h, m, s)
 }
 
+const BATCH_MANIFEST_IDENTITY_SCHEMA: &str =
+    "org.quitetall.lamquant.lml-batch-manifest-identity-projection-v1";
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct FileResult {
     source: String,
     output: String,
     raw_bytes: usize,
     compressed_bytes: usize,
     cr: f64,
-    sha256: String,
+    #[serde(default, alias = "sha256", skip_serializing_if = "Option::is_none")]
+    decoded_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    n_channels: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    n_samples: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sample_rate_f32_bits: Option<String>,
     verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct ManifestAbirIdentity {
+    schema: String,
+    domain: String,
+    content_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct BatchManifest {
+    version: String,
+    encoder: String,
+    created: String,
+    n_files: usize,
+    n_failed: usize,
+    n_skipped: usize,
+    total_raw_bytes: usize,
+    total_compressed_bytes: usize,
+    overall_cr: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    abir_identity: Option<ManifestAbirIdentity>,
+    files: Vec<FileResult>,
+}
+
+fn validate_batch_manifest_envelope(manifest: &BatchManifest) -> Result<(), String> {
+    match manifest.version.as_str() {
+        "1.0" => {}
+        "2.0" if manifest.abir_identity.is_none() => {
+            return Err("batch manifest v2.0 requires abir_identity".into());
+        }
+        "2.0" => {}
+        version => return Err(format!("unsupported batch manifest version: {version}")),
+    }
+    // Pre-create failures and worker panics increment aggregate counters before
+    // a FileResult can exist. Aggregates may therefore exceed recorded rows,
+    // but must never under-report them.
+    if manifest.n_files < manifest.files.len() {
+        return Err(format!(
+            "batch manifest n_files={} is smaller than {} file entries",
+            manifest.n_files,
+            manifest.files.len()
+        ));
+    }
+    let observed_failed = manifest
+        .files
+        .iter()
+        .filter(|file| file.error.is_some())
+        .count();
+    if manifest.n_failed < observed_failed {
+        return Err(format!(
+            "batch manifest n_failed={} is smaller than {} failed entries",
+            manifest.n_failed, observed_failed
+        ));
+    }
+    Ok(())
+}
+
+fn decoded_signal_identities(signal: &[Vec<i64>]) -> (String, String) {
+    let mut sha256 = Sha256::new();
+    let mut content = semantic_abir::PayloadContentHasher::new(semantic_abir::ElementType::I64);
+    for channel in signal {
+        for &sample in channel {
+            let bytes = sample.to_le_bytes();
+            sha256.update(bytes);
+            content.update(&bytes);
+        }
+    }
+    (
+        format!("{:x}", sha256.finalize()),
+        content.finalize().to_string(),
+    )
+}
+
+fn batch_manifest_content_id(files: &[FileResult]) -> Result<String, String> {
+    use semantic_abir_training::{TrainingSemanticDescriptor, TrainingSemanticRole};
+    use std::collections::BTreeSet;
+
+    let mut members = Vec::new();
+    let mut source_keys = BTreeSet::new();
+    for file in files.iter().filter(|file| file.error.is_none()) {
+        let source_key = file.source.replace('\\', "/");
+        if source_key.is_empty() {
+            return Err("manifest identity requires a non-empty source key".into());
+        }
+        if !source_keys.insert(source_key.clone()) {
+            return Err(format!("duplicate manifest source key: {source_key}"));
+        }
+        let content_id = file
+            .content_id
+            .as_deref()
+            .ok_or_else(|| format!("manifest identity missing content_id for {source_key}"))?;
+        let n_channels = file
+            .n_channels
+            .ok_or_else(|| format!("manifest identity missing n_channels for {source_key}"))?;
+        let n_samples = file
+            .n_samples
+            .ok_or_else(|| format!("manifest identity missing n_samples for {source_key}"))?;
+        let sample_rate_f32_bits = file.sample_rate_f32_bits.as_deref().ok_or_else(|| {
+            format!("manifest identity missing sample_rate_f32_bits for {source_key}")
+        })?;
+        let rate_bits = u32::from_str_radix(sample_rate_f32_bits, 16)
+            .map_err(|_| format!("invalid sample_rate_f32_bits for {source_key}"))?;
+        let rate = f32::from_bits(rate_bits);
+        if !rate.is_finite() || rate <= 0.0 {
+            return Err(format!("invalid sample rate for {source_key}"));
+        }
+        members.push(serde_json::json!({
+            "source_key": source_key,
+            "payload": {
+                "content_id": content_id,
+                "element": "i64",
+                "byte_order": "little",
+                "layout": "dense-channel-major",
+                "shape": [n_channels, n_samples],
+            },
+            "sample_rate": {"f32_bits": format!("{rate_bits:08x}")},
+        }));
+    }
+    members.sort_by(|left, right| {
+        left["source_key"]
+            .as_str()
+            .cmp(&right["source_key"].as_str())
+    });
+
+    let role = TrainingSemanticRole::Cohort;
+    let descriptor = TrainingSemanticDescriptor::new(
+        role,
+        serde_json::json!({
+            "schema": role.domain(),
+            "definition": {
+                "schema": BATCH_MANIFEST_IDENTITY_SCHEMA,
+                "members": members,
+            },
+        }),
+    )
+    .map_err(|error| format!("invalid ABIR batch manifest descriptor: {error}"))?;
+    descriptor
+        .content_id()
+        .map(|content_id| content_id.to_string())
+        .map_err(|error| format!("ABIR batch manifest identity failed: {error}"))
 }
 
 /// Telemetry returned by encode_one. Sourced from ContainerStats plus the
@@ -2235,8 +2390,10 @@ struct EncodeMetrics {
     compressed_size: usize,
     cr: f64,
     sha256: String,
+    content_id: String,
     verified: bool,
     samples: u64,
+    samples_per_channel: u64,
     duration_s: f64,
     n_channels: u32,
     sample_rate: f32,
@@ -2278,13 +2435,7 @@ fn encode_one_brainvision(
 
     // SHA-256 of the i64 LE sample matrix — same convention as EDF
     // encode for cross-format checksum compatibility.
-    let mut hasher = Sha256::new();
-    for ch in uniform_signal.signal() {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    let (sha256_hex, content_id) = decoded_signal_identities(uniform_signal.signal());
 
     // v1.1: source `.vhdr` + `.vmrk` are now preserved as separate
     // LMA entries (in default mode) or sibling files (in --no-bundle
@@ -2477,8 +2628,10 @@ fn encode_one_brainvision(
         compressed_size: compressed_size as usize,
         cr,
         sha256: sha256_hex,
+        content_id,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
+        samples_per_channel: n_samples as u64,
         duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
@@ -2511,13 +2664,7 @@ fn encode_one_raw(
     let sample_rate = uniform_signal.sample_rate();
 
     // SHA-256 of the i64 LE sample matrix.
-    let mut hasher = Sha256::new();
-    for ch in uniform_signal.signal() {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    let (sha256_hex, content_id) = decoded_signal_identities(uniform_signal.signal());
 
     // v1.1: sidecar JSON now preserved as a real sibling file on
     // disk (named via `raw_sidecar_filename` blob in v1.0); no need
@@ -2693,8 +2840,10 @@ fn encode_one_raw(
         compressed_size: compressed_size as usize,
         cr,
         sha256: sha256_hex,
+        content_id,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
+        samples_per_channel: n_samples as u64,
         duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
@@ -2726,13 +2875,7 @@ fn encode_one_cnt(
         .unwrap_or(0);
     let sample_rate = uniform_signal.sample_rate();
 
-    let mut hasher = Sha256::new();
-    for ch in uniform_signal.signal() {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    let (sha256_hex, content_id) = decoded_signal_identities(uniform_signal.signal());
 
     // v1.1: source `.cnt` is now preserved as a separate LMA entry
     // (default mode) or sibling file (--no-bundle), not as a b64-zstd
@@ -2866,8 +3009,10 @@ fn encode_one_cnt(
         compressed_size: compressed_size as usize,
         cr,
         sha256: sha256_hex,
+        content_id,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
+        samples_per_channel: n_samples as u64,
         duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
@@ -2900,13 +3045,7 @@ fn encode_one_dicom(
         .unwrap_or(0);
     let sample_rate = uniform_signal.sample_rate();
 
-    let mut hasher = Sha256::new();
-    for ch in uniform_signal.signal() {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    let (sha256_hex, content_id) = decoded_signal_identities(uniform_signal.signal());
 
     // v1.1: source `.dcm` is now preserved as a separate LMA entry
     // (default mode) or sibling file (--no-bundle), not as a b64-zstd
@@ -3039,8 +3178,10 @@ fn encode_one_dicom(
         compressed_size: compressed_size as usize,
         cr,
         sha256: sha256_hex,
+        content_id,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
+        samples_per_channel: n_samples as u64,
         duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
@@ -3077,13 +3218,7 @@ fn encode_one_eeglab(
         .unwrap_or(0);
     let sample_rate = uniform_signal.sample_rate();
 
-    let mut hasher = Sha256::new();
-    for ch in uniform_signal.signal() {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    let (sha256_hex, content_id) = decoded_signal_identities(uniform_signal.signal());
 
     let mut ch_json = String::from("[");
     for (i, name) in uniform_signal.channels().iter().enumerate() {
@@ -3237,8 +3372,10 @@ fn encode_one_eeglab(
         compressed_size: compressed_size as usize,
         cr,
         sha256: sha256_hex,
+        content_id,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
+        samples_per_channel: n_samples as u64,
         duration_s: uniform_signal.duration_s(),
         n_channels,
         sample_rate: sample_rate as f32,
@@ -3330,13 +3467,7 @@ fn encode_one_inner(
     let mut edf_data = edf::read_edf(edf_path)?;
 
     // SHA-256 of original signal bytes (channel-major, i64 LE — matches Python)
-    let mut hasher = Sha256::new();
-    for ch in &edf_data.signal {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    let (sha256_hex, content_id) = decoded_signal_identities(&edf_data.signal);
 
     // Build rich metadata with full EDF header preservation
     use base64::Engine;
@@ -3598,8 +3729,10 @@ fn encode_one_inner(
         compressed_size: stats.compressed_size,
         cr: stats.cr,
         sha256: sha256_hex,
+        content_id,
         verified,
         samples: (stats.n_channels as u64).saturating_mul(stats.total_samples as u64),
+        samples_per_channel: stats.total_samples as u64,
         duration_s: stats.duration_s,
         n_channels: stats.n_channels as u32,
         sample_rate: if stats.duration_s.is_finite() {
@@ -3733,13 +3866,7 @@ fn encode_one_descriptor(
     let n_samples = uniform_signal.signal().first().map(Vec::len).unwrap_or(0);
     let sample_rate = uniform_signal.sample_rate();
 
-    let mut hasher = Sha256::new();
-    for ch in uniform_signal.signal() {
-        for &sample in ch {
-            hasher.update(sample.to_le_bytes());
-        }
-    }
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    let (sha256_hex, content_id) = decoded_signal_identities(uniform_signal.signal());
 
     let expected_signal = verify.then(|| uniform_signal.signal().to_vec());
     let duration_s = uniform_signal.duration_s();
@@ -3797,8 +3924,10 @@ fn encode_one_descriptor(
         compressed_size: compressed_size as usize,
         cr,
         sha256: sha256_hex,
+        content_id,
         verified: verify,
         samples: (n_channels as u64).saturating_mul(n_samples as u64),
+        samples_per_channel: n_samples as u64,
         duration_s,
         n_channels,
         sample_rate: sample_rate as f32,
@@ -4447,7 +4576,11 @@ fn cmd_encode(
                             raw_bytes: m.raw_size,
                             compressed_bytes: m.compressed_size,
                             cr: m.cr,
-                            sha256: m.sha256,
+                            decoded_sha256: Some(m.sha256),
+                            content_id: Some(m.content_id),
+                            n_channels: Some(m.n_channels),
+                            n_samples: Some(m.samples_per_channel),
+                            sample_rate_f32_bits: Some(format!("{:08x}", m.sample_rate.to_bits())),
                             verified: m.verified,
                             error: None,
                         });
@@ -4526,7 +4659,11 @@ fn cmd_encode(
                             raw_bytes: 0,
                             compressed_bytes: 0,
                             cr: 0.0,
-                            sha256: String::new(),
+                            decoded_sha256: None,
+                            content_id: None,
+                            n_channels: None,
+                            n_samples: None,
+                            sample_rate_f32_bits: None,
                             verified: false,
                             error: Some(err_msg),
                         });
@@ -4622,73 +4759,51 @@ fn cmd_encode(
     }
 
     {
-        let res = results.lock().unwrap();
-        let total_raw: usize = res.iter().map(|r| r.raw_bytes).sum();
-        let total_comp: usize = res.iter().map(|r| r.compressed_bytes).sum();
+        let mut files = results.lock().unwrap().clone();
+        files.sort_by_key(|file| file.source.replace('\\', "/"));
+        let total_raw: usize = files.iter().map(|r| r.raw_bytes).sum();
+        let total_comp: usize = files.iter().map(|r| r.compressed_bytes).sum();
         let overall_cr = if total_comp > 0 {
             total_raw as f64 / total_comp as f64
         } else {
             0.0
         };
-
-        let mut files_json = String::from("[");
-        for (i, r) in res.iter().enumerate() {
-            if i > 0 {
-                files_json.push(',');
-            }
-            if let Some(ref err) = r.error {
-                let escaped = err.replace('\\', "\\\\").replace('"', "\\\"");
-                files_json.push_str(&format!(
-                    concat!(
-                        "{{\"source\":\"{}\",\"output\":\"{}\",",
-                        "\"raw_bytes\":{},\"compressed_bytes\":{},\"cr\":{:.4},",
-                        "\"sha256\":\"{}\",\"verified\":{},\"error\":\"{}\"}}"
-                    ),
-                    r.source,
-                    r.output,
-                    r.raw_bytes,
-                    r.compressed_bytes,
-                    r.cr,
-                    r.sha256,
-                    r.verified,
-                    escaped
-                ));
-            } else {
-                files_json.push_str(&format!(
-                    concat!(
-                        "{{\"source\":\"{}\",\"output\":\"{}\",",
-                        "\"raw_bytes\":{},\"compressed_bytes\":{},\"cr\":{:.4},",
-                        "\"sha256\":\"{}\",\"verified\":{}}}"
-                    ),
-                    r.source, r.output, r.raw_bytes, r.compressed_bytes, r.cr, r.sha256, r.verified
-                ));
-            }
-        }
-        files_json.push(']');
-
-        let manifest = format!(
-            concat!(
-                "{{\"version\":\"1.0\",\"encoder\":\"lml 0.2.0 (Rust)\",",
-                "\"created\":\"{}\",",
-                "\"n_files\":{},\"n_failed\":{},\"n_skipped\":{},",
-                "\"total_raw_bytes\":{},\"total_compressed_bytes\":{},",
-                "\"overall_cr\":{:.4},",
-                "\"files\":{}}}"
-            ),
-            now_utc(),
-            total - s,
-            f,
-            s,
-            total_raw,
-            total_comp,
+        // ADR 0169 evidence is fail-closed: encoded payloads remain valid, but
+        // command must not report success without its required identity record.
+        let content_id = batch_manifest_content_id(&files).map_err(|error| {
+            format!("encoding succeeded but ABIR batch manifest identity failed: {error}")
+        })?;
+        let manifest = BatchManifest {
+            version: "2.0".into(),
+            encoder: format!("lml {} (Rust)", env!("CARGO_PKG_VERSION")),
+            created: now_utc(),
+            n_files: total - s,
+            n_failed: f,
+            n_skipped: s,
+            total_raw_bytes: total_raw,
+            total_compressed_bytes: total_comp,
             overall_cr,
-            files_json
-        );
+            abir_identity: Some(ManifestAbirIdentity {
+                schema: BATCH_MANIFEST_IDENTITY_SCHEMA.into(),
+                domain: semantic_abir_training::TrainingSemanticRole::Cohort
+                    .domain()
+                    .into(),
+                content_id,
+            }),
+            files,
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
 
         let manifest_path = output_dir.join("manifest.lml.json");
-        if let Err(e) = std::fs::write(&manifest_path, manifest.as_bytes()) {
-            eprintln!("Warning: failed to write manifest: {}", e);
-        }
+        std::fs::write(&manifest_path, manifest_bytes).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "encoding succeeded but required manifest {} could not be written: {error}",
+                    manifest_path.display()
+                ),
+            )
+        })?;
     }
 
     // Feature 4: Final state file
@@ -6370,58 +6485,52 @@ fn cmd_roundtrip(
 
 // ── Feature 2: verify-manifest ──
 
+fn read_manifest_lml_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let is_lma = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lma"));
+    if !is_lma {
+        return std::fs::read(path).map_err(|error| error.to_string());
+    }
+
+    let entries = lma::list_archive(path).map_err(|error| error.to_string())?;
+    let mut lml_entries = entries.iter().filter(|entry| {
+        Path::new(&entry.path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lml"))
+    });
+    let entry = lml_entries
+        .next()
+        .ok_or_else(|| format!("{} contains no LML entry", path.display()))?;
+    if lml_entries.next().is_some() {
+        return Err(format!(
+            "{} contains multiple LML entries; per-recording manifest output must be unambiguous",
+            path.display()
+        ));
+    }
+    lma::read_entry(path, &entry.path).map_err(|error| error.to_string())
+}
+
 fn cmd_verify_manifest(manifest_path: &Path) -> R {
     let data = std::fs::read_to_string(manifest_path)?;
     let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
-
-    // Minimal JSON parsing — find "files" array entries
-    // Each entry has: "output", "compressed_bytes", "sha256"
-    let files_start = data
-        .find("\"files\":[")
-        .ok_or("manifest missing \"files\" array")?;
-    let files_str = &data[files_start + 8..];
-
-    // Split on "},{" to get individual file entries
-    let mut entries: Vec<&str> = Vec::new();
-    let inner_start = files_str.find('[').unwrap_or(0) + 1;
-    let inner_end = files_str.rfind(']').unwrap_or(files_str.len());
-    let inner = &files_str[inner_start..inner_end];
-    if !inner.trim().is_empty() {
-        // Split carefully on "},{" — rejoin with "},{" to re-parse
-        let mut depth = 0i32;
-        let mut start = 0;
-        let bytes = inner.as_bytes();
-        for i in 0..bytes.len() {
-            match bytes[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        entries.push(&inner[start..=i]);
-                        // Skip comma
-                        if i + 1 < bytes.len() && bytes[i + 1] == b',' {
-                            start = i + 2;
-                        } else {
-                            start = i + 1;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let total = entries.len();
+    let manifest: BatchManifest = serde_json::from_str(&data)?;
+    validate_batch_manifest_envelope(&manifest)?;
+    let total = manifest
+        .files
+        .iter()
+        .filter(|entry| entry.error.is_none())
+        .count();
     let mut passed = 0usize;
     let mut failed_count = 0usize;
     let mut missing = 0usize;
 
-    for entry in &entries {
-        let out_path = extract_json_str(entry, "output").unwrap_or_default();
-        let expected_size = extract_json_num(entry, "compressed_bytes").unwrap_or(0);
-        let expected_sha = extract_json_str(entry, "sha256").unwrap_or_default();
+    for entry in manifest.files.iter().filter(|entry| entry.error.is_none()) {
+        let out_path = &entry.output;
 
-        let full_path = manifest_dir.join(&out_path);
+        let full_path = manifest_dir.join(out_path);
 
         if !full_path.exists() {
             println!("  MISSING {}", out_path);
@@ -6429,48 +6538,114 @@ fn cmd_verify_manifest(manifest_path: &Path) -> R {
             continue;
         }
 
-        // Check file size
-        let actual_size = std::fs::metadata(&full_path)?.len() as usize;
-        if expected_size > 0 && actual_size != expected_size {
+        let lml_bytes = match read_manifest_lml_bytes(&full_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                println!("  READ FAIL {}: {}", out_path, error);
+                failed_count += 1;
+                continue;
+            }
+        };
+        if entry.compressed_bytes > 0 && lml_bytes.len() != entry.compressed_bytes {
             println!(
                 "  SIZE MISMATCH {}: expected {} got {}",
-                out_path, expected_size, actual_size
+                out_path,
+                entry.compressed_bytes,
+                lml_bytes.len()
             );
             failed_count += 1;
             continue;
         }
 
-        // Decode and compute SHA-256 of signal
-        if !expected_sha.is_empty() {
-            match decode_lml_file(&full_path) {
-                Ok((signal, _)) => {
-                    let mut hasher = Sha256::new();
-                    for ch in &signal {
-                        for &sample in ch {
-                            hasher.update(sample.to_le_bytes());
-                        }
-                    }
-                    let actual_sha = format!("{:x}", hasher.finalize());
-                    if actual_sha != expected_sha {
-                        println!(
-                            "  SHA256 MISMATCH {}: expected {}.. got {}...",
-                            out_path,
-                            &expected_sha[..16.min(expected_sha.len())],
-                            &actual_sha[..16.min(actual_sha.len())]
-                        );
-                        failed_count += 1;
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    println!("  DECODE FAIL {}: {}", out_path, e);
-                    failed_count += 1;
-                    continue;
-                }
+        let header = match container::parse_header(&lml_bytes) {
+            Ok(header) => header,
+            Err(error) => {
+                println!("  HEADER FAIL {}: {}", out_path, error);
+                failed_count += 1;
+                continue;
             }
+        };
+        let signal = match container::read_bytes(&lml_bytes) {
+            Ok((signal, _)) => signal,
+            Err(error) => {
+                println!("  DECODE FAIL {}: {}", out_path, error);
+                failed_count += 1;
+                continue;
+            }
+        };
+        let (actual_sha, actual_content_id) = decoded_signal_identities(&signal);
+        if entry
+            .decoded_sha256
+            .as_deref()
+            .is_some_and(|expected| !expected.is_empty() && expected != actual_sha)
+        {
+            let expected = entry.decoded_sha256.as_deref().unwrap_or_default();
+            println!(
+                "  SHA256 MISMATCH {}: expected {}.. got {}...",
+                out_path,
+                &expected[..16.min(expected.len())],
+                &actual_sha[..16.min(actual_sha.len())]
+            );
+            failed_count += 1;
+            continue;
+        }
+        if entry
+            .content_id
+            .as_deref()
+            .is_some_and(|expected| expected != actual_content_id)
+        {
+            println!("  CONTENT ID MISMATCH {}", out_path);
+            failed_count += 1;
+            continue;
+        }
+        if entry
+            .n_channels
+            .is_some_and(|expected| usize::try_from(expected).ok() != Some(header.n_channels))
+            || entry.n_samples.is_some_and(|expected| {
+                usize::try_from(expected).ok() != Some(header.total_samples)
+            })
+        {
+            println!("  SHAPE MISMATCH {}", out_path);
+            failed_count += 1;
+            continue;
+        }
+        if entry
+            .sample_rate_f32_bits
+            .as_deref()
+            .is_some_and(|expected| {
+                format!("{:08x}", (header.sample_rate_hz as f32).to_bits()) != expected
+            })
+        {
+            println!("  SAMPLE RATE MISMATCH {}", out_path);
+            failed_count += 1;
+            continue;
         }
 
         passed += 1;
+    }
+
+    if failed_count == 0 && missing == 0 {
+        if let Some(identity) = &manifest.abir_identity {
+            let expected_domain = semantic_abir_training::TrainingSemanticRole::Cohort.domain();
+            if identity.schema != BATCH_MANIFEST_IDENTITY_SCHEMA
+                || identity.domain != expected_domain
+            {
+                println!("  MANIFEST IDENTITY SCHEMA MISMATCH");
+                failed_count += 1;
+            } else {
+                match batch_manifest_content_id(&manifest.files) {
+                    Ok(actual) if actual == identity.content_id => {}
+                    Ok(_) => {
+                        println!("  MANIFEST CONTENT ID MISMATCH");
+                        failed_count += 1;
+                    }
+                    Err(error) => {
+                        println!("  MANIFEST IDENTITY INVALID: {}", error);
+                        failed_count += 1;
+                    }
+                }
+            }
+        }
     }
 
     println!(
@@ -6483,21 +6658,13 @@ fn cmd_verify_manifest(manifest_path: &Path) -> R {
     Ok(())
 }
 
-/// Extract a JSON string value by key (simple, no nested objects).
-fn extract_json_str(json: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{}\":\"", key);
-    let start = json.find(&needle)? + needle.len();
-    let end = json[start..].find('"')? + start;
-    Some(json[start..end].to_string())
-}
-
-/// Extract a JSON number value by key.
+/// Extract a non-negative integer JSON value by key from legacy metadata.
 fn extract_json_num(json: &str, key: &str) -> Option<usize> {
     let needle = format!("\"{}\":", key);
     let start = json.find(&needle)? + needle.len();
     let rest = json[start..].trim_start();
     let end = rest
-        .find(|c: char| !c.is_ascii_digit())
+        .find(|character: char| !character.is_ascii_digit())
         .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
@@ -10251,6 +10418,114 @@ fn cmd_notify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn semantic_file(source: &str, output: &str, signal: &[Vec<i64>]) -> FileResult {
+        let (decoded_sha256, content_id) = decoded_signal_identities(signal);
+        FileResult {
+            source: source.to_string(),
+            output: output.to_string(),
+            raw_bytes: signal.iter().map(|channel| channel.len() * 8).sum(),
+            compressed_bytes: 7,
+            cr: 2.0,
+            decoded_sha256: Some(decoded_sha256),
+            content_id: Some(content_id),
+            n_channels: Some(signal.len() as u32),
+            n_samples: signal.first().map(|channel| channel.len() as u64),
+            sample_rate_f32_bits: Some(format!("{:08x}", 256.0_f32.to_bits())),
+            verified: true,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn batch_manifest_identity_is_order_and_output_location_invariant() {
+        let first = semantic_file("nested/a.edf", "first/a.lml", &[vec![1, 2, 3]]);
+        let second = semantic_file("b.edf", "first/b.lml", &[vec![4, 5]]);
+        let expected = batch_manifest_content_id(&[first.clone(), second.clone()]).unwrap();
+
+        let mut moved_first = first;
+        moved_first.output = "/another/root/a.lml".to_string();
+        let mut moved_second = second;
+        moved_second.output = "/another/root/b.lml".to_string();
+        let observed = batch_manifest_content_id(&[moved_second, moved_first]).unwrap();
+
+        assert_eq!(expected, observed);
+    }
+
+    #[test]
+    fn batch_manifest_identity_binds_decoded_shape() {
+        let signal = vec![vec![1, 2, 3, 4]];
+        let one_channel = semantic_file("a.edf", "a.lml", &signal);
+        let mut two_channels = one_channel.clone();
+        two_channels.n_channels = Some(2);
+        two_channels.n_samples = Some(2);
+
+        assert_ne!(
+            batch_manifest_content_id(&[one_channel]).unwrap(),
+            batch_manifest_content_id(&[two_channels]).unwrap()
+        );
+    }
+
+    #[test]
+    fn file_result_accepts_legacy_sha256_field() {
+        let file: FileResult = serde_json::from_str(
+            r#"{
+                "source":"a.edf","output":"a.lml","raw_bytes":8,
+                "compressed_bytes":7,"cr":1.0,"sha256":"legacy",
+                "verified":true,"error":null
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(file.decoded_sha256.as_deref(), Some("legacy"));
+        assert!(file.content_id.is_none());
+    }
+
+    #[test]
+    fn batch_manifest_identity_rejects_duplicate_source_keys() {
+        let first = semantic_file("nested/a.edf", "a.lml", &[vec![1]]);
+        let second = semantic_file("nested\\a.edf", "b.lml", &[vec![2]]);
+
+        assert!(batch_manifest_content_id(&[first, second])
+            .unwrap_err()
+            .contains("duplicate manifest source key"));
+    }
+
+    #[test]
+    fn decoded_signal_content_id_uses_native_abir_payload_domain() {
+        let signal = vec![vec![1_i64, -2_i64]];
+        let (_, observed) = decoded_signal_identities(&signal);
+        let mut logical_bytes = Vec::new();
+        for sample in &signal[0] {
+            logical_bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        let expected =
+            semantic_abir::payload_content_id(semantic_abir::ElementType::I64, &logical_bytes);
+
+        assert_eq!(observed, expected.to_string());
+    }
+
+    #[test]
+    fn batch_manifest_v2_requires_abir_identity() {
+        let manifest = BatchManifest {
+            version: "2.0".into(),
+            encoder: "test".into(),
+            created: "1970-01-01T00:00:00Z".into(),
+            n_files: 0,
+            n_failed: 0,
+            n_skipped: 0,
+            total_raw_bytes: 0,
+            total_compressed_bytes: 0,
+            overall_cr: 0.0,
+            abir_identity: None,
+            files: Vec::new(),
+        };
+
+        assert_eq!(
+            validate_batch_manifest_envelope(&manifest).unwrap_err(),
+            "batch manifest v2.0 requires abir_identity"
+        );
+    }
 
     #[test]
     fn default_lossless_mode_is_mcu_when_flag_missing() {
