@@ -93,6 +93,43 @@ fn cli_convert_archive_writes_verified_capsule_without_touching_source() {
 
 #[cfg(feature = "archive")]
 #[test]
+fn cli_long_listing_exposes_capsule_root_and_entry_content_ids() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let archive = write_archive_fixture(&tmp);
+    let capsule = tmp.path().join("converted.bcs2");
+    lma_forensic::convert_archive(&archive, &capsule, 3).expect("convert archive");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lml"))
+        .arg("ls")
+        .arg(&capsule)
+        .arg("--long")
+        .output()
+        .expect("spawn capsule listing");
+
+    assert!(
+        output.status.success(),
+        "capsule listing failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("listing utf8");
+    let mut lines = stdout.lines();
+    let banner = lines.next().expect("schema banner");
+    assert!(banner.starts_with("#lml-ls schema=2 root_content_id="));
+    assert!(banner.contains(&format!(
+        " identity_domain={}",
+        lma_forensic::FORENSIC_CAPSULE_CONTENT_DOMAIN
+    )));
+    let rows: Vec<&str> = lines.collect();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[3].len(), 64);
+    }
+}
+
+#[cfg(feature = "archive")]
+#[test]
 fn cli_convert_archive_rejects_out_of_contract_zstd_level() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let archive = write_archive_fixture(&tmp);

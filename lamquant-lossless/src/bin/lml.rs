@@ -8083,6 +8083,9 @@ fn cmd_list_archive(input: &Path) -> R {
 /// inside the archive without unpacking. Pairs with `lml cat` for
 /// single-entry extraction.
 fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
+    if lma_forensic::is_capsule(input) {
+        return cmd_ls_capsule(input, tree, long);
+    }
     let entries = lma::list_archive(input)?;
 
     if long {
@@ -8148,6 +8151,102 @@ fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
 
     render_archive_tree(input, &entries);
     Ok(())
+}
+
+fn cmd_ls_capsule(input: &Path, tree: bool, long: bool) -> R {
+    let inspection = lma_forensic::inspect_capsule(input)?;
+    if long {
+        println!(
+            "#lml-ls schema=2 root_content_id={} identity_domain={}",
+            inspection.root_content_id, inspection.content_domain
+        );
+        for entry in &inspection.entries {
+            if entry
+                .path
+                .bytes()
+                .any(|byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0))
+            {
+                return Err(format!(
+                    "entry path {:?} contains a control byte and cannot enter lml-ls schema=2",
+                    entry.path
+                )
+                .into());
+            }
+            let content_id = entry.content_id.ok_or_else(|| {
+                format!(
+                    "capsule entry {:?} has no logical ABIR ContentId",
+                    entry.path
+                )
+            })?;
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                entry.original_size,
+                entry.stored_size,
+                capsule_method_name(entry.method),
+                content_id,
+                entry.path
+            );
+        }
+        return Ok(());
+    }
+
+    if !tree {
+        for entry in &inspection.entries {
+            println!("{}", entry.path);
+        }
+        return Ok(());
+    }
+
+    let total_original: u64 = inspection
+        .entries
+        .iter()
+        .map(|entry| entry.original_size)
+        .sum();
+    let total_stored: u64 = inspection
+        .entries
+        .iter()
+        .map(|entry| entry.stored_size)
+        .sum();
+    println!(
+        "{} ({}, {} entries, ABIR {})",
+        input.display(),
+        human_bytes(total_stored),
+        inspection.entries.len(),
+        inspection.root_content_id
+    );
+    for (index, entry) in inspection.entries.iter().enumerate() {
+        let connector = if index + 1 == inspection.entries.len() {
+            "└── "
+        } else {
+            "├── "
+        };
+        println!(
+            "{}{:<48}  {:>10}  {:<6}  content:{}",
+            connector,
+            entry.path,
+            human_bytes(entry.original_size),
+            capsule_method_name(entry.method),
+            entry
+                .content_id
+                .map(|content_id| content_id.to_string())
+                .unwrap_or_else(|| "missing".into())
+        );
+    }
+    println!(
+        "{} logical / {} stored",
+        human_bytes(total_original),
+        human_bytes(total_stored)
+    );
+    Ok(())
+}
+
+fn capsule_method_name(method: lma::Method) -> &'static str {
+    match method {
+        lma::Method::Lml => "lml",
+        lma::Method::Zstd => "zstd",
+        lma::Method::Store => "store",
+        _ => "unknown",
+    }
 }
 
 /// Render archive entries already produced by the archive facade. `info` and

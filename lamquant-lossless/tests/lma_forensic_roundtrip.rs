@@ -337,7 +337,13 @@ fn listing_reports_the_same_files_and_sizes_the_archive_holds() {
     let capsule = work.path().join("archive.bcs2");
     capsule_of(source.path(), &capsule);
 
-    let listed = lma_forensic::list_capsule(&capsule).expect("list");
+    let inspection = lma_forensic::inspect_capsule(&capsule).expect("inspect");
+    assert_eq!(inspection.root_content_id.to_string().len(), 64);
+    assert_eq!(
+        inspection.content_domain,
+        lma_forensic::FORENSIC_CAPSULE_CONTENT_DOMAIN
+    );
+    let listed = inspection.entries;
     assert_eq!(listed.len(), expected.len());
     for entry in &listed {
         let original = expected

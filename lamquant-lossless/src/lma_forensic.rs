@@ -74,6 +74,9 @@ use std::path::Path;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// Semantic domain used by BCS2 forensic-tree root ContentIds.
+pub const FORENSIC_CAPSULE_CONTENT_DOMAIN: &str = "org.quitetall.abir.bcs2.forensic-tree-v1";
+
 /// Capabilities a fully equipped LamQuant reader offers.
 pub const READER_CAPABILITIES: u64 = CAP_ZSTD
     | CAP_LML_LOSSLESS_V1
@@ -526,6 +529,13 @@ pub struct CapsuleEntry {
     pub mode: Option<u32>,
 }
 
+/// Bounded capsule catalog plus its native ABIR root identity.
+pub struct CapsuleInspection {
+    pub root_content_id: semantic_abir::ContentId,
+    pub content_domain: &'static str,
+    pub entries: Vec<CapsuleEntry>,
+}
+
 fn synthetic_of(
     entry: &semantic_abir_bcs::ForensicEntryMetadata,
 ) -> Result<Option<SyntheticFromInfo>, Error> {
@@ -557,12 +567,13 @@ fn synthetic_of(
     }))
 }
 
-/// List a capsule's regular-file entries.
-pub fn list_capsule(path: &Path) -> Result<Vec<CapsuleEntry>, Error> {
+/// Inspect a capsule without reading its stored payload frames.
+pub fn inspect_capsule(path: &Path) -> Result<CapsuleInspection, Error> {
     let mut file = File::open(path)?;
     let bounds = reader_bounds();
     let index = ForensicFileIndex::open(&mut file, READER_CAPABILITIES, bounds)
         .map_err(|e| format!("lma capsule: parse failed: {e:?}"))?;
+    let root_content_id = index.root_content_id();
     let mut out = Vec::new();
     for entry in index.entries() {
         if entry.file_type != ForensicFileType::Regular {
@@ -592,7 +603,16 @@ pub fn list_capsule(path: &Path) -> Result<Vec<CapsuleEntry>, Error> {
             mode: Some(entry.mode),
         });
     }
-    Ok(out)
+    Ok(CapsuleInspection {
+        root_content_id,
+        content_domain: FORENSIC_CAPSULE_CONTENT_DOMAIN,
+        entries: out,
+    })
+}
+
+/// List a capsule's regular-file entries.
+pub fn list_capsule(path: &Path) -> Result<Vec<CapsuleEntry>, Error> {
+    Ok(inspect_capsule(path)?.entries)
 }
 
 /// Recover one entry's original bytes from its stored frame.
