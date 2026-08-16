@@ -4,7 +4,7 @@
 //! decomposition as an executable contract: a hand-composed reference built ONLY
 //! from the public stage primitives
 //!   `lifting::{forward,forward_3level}` → `lpc::analyze_with_mode` →
-//!   `golomb::encode_dense` → `assemble_lml_packet`
+//!   `golomb::encode_dense` → `PrecomputedLosslessPacket`
 //! must be **byte-identical** to the fused kernel `compress_with_mode_views`, and
 //! the fused bytes must decode-reconstruct the input.
 //!
@@ -12,7 +12,7 @@
 //! decode⁻¹`) at the smallest granularity, and it is **zero production change**:
 //! the reference lives entirely here and reproduces the kernel's own split
 //! (`encode_one_channel` lml.rs:1501, `forward_subbands` lml.rs:917,
-//! `finalize_channels` lml.rs:576, `assemble_lml_packet` lml.rs:605). If a future
+//! owner-controlled staged packet seam. If a future
 //! extraction drifts, this fails FIRST — before the wire goldens do.
 //!
 //! Default-feature build only (no `experimental_*`): the flat-Golomb payload is
@@ -22,8 +22,8 @@
 use lamquant_core::golomb;
 use lamquant_core::lifting;
 use lamquant_core::lml::{
-    assemble_lml_packet, compress_with_mode_views, compute_n_levels, decompress, lpc_max_order,
-    scope_lpc_mode, BIAS_CTX,
+    compress_with_mode_views, compute_n_levels, decompress, lpc_max_order, scope_lpc_mode,
+    PrecomputedLosslessPacket, BIAS_CTX,
 };
 use lamquant_core::lpc::{self, LpcMode};
 
@@ -71,8 +71,7 @@ fn ref_channel(sig: &[i64], n_levels: u8, mode: LpcMode) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The full reference packet = `map(ref_channel) >> finalize (concat all metas,
-/// then all payloads) >> assemble_lml_packet`. Mirrors `encode_channels_core`
-/// (lml.rs:739-755) + `finalize_channels` (lml.rs:576, default branch: wins=false).
+/// then all payloads) >> owner-controlled staged packet encoding.
 fn ref_packet(signal: &[Vec<i64>], mode: LpcMode) -> Vec<u8> {
     assert!(
         !signal.is_empty(),
@@ -88,9 +87,9 @@ fn ref_packet(signal: &[Vec<i64>], mode: LpcMode) -> Vec<u8> {
         lpc_meta.extend_from_slice(&m);
         payload.extend_from_slice(&p);
     }
-    assemble_lml_packet(
-        n_ch, t, n_levels, /* noise_bits = */ 0, /* wins = */ false, &lpc_meta, &payload,
-    )
+    PrecomputedLosslessPacket::new(n_ch, t, n_levels, &lpc_meta, &payload)
+        .expect("valid staged packet")
+        .encode()
 }
 
 /// Deterministic multi-channel signal (smooth ramp + bounded wobble so lifting,

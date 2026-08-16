@@ -5,7 +5,7 @@ version = 3
 [[package]]
 name = "abir"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=37cd630497751462030cdc2068548243cf69ffa4#37cd630497751462030cdc2068548243cf69ffa4"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "blake3",
  "serde_json",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=37cd630497751462030cdc2068548243cf69ffa4#37cd630497751462030cdc2068548243cf69ffa4"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "abir",
  "blake3",
@@ -25,7 +25,7 @@ dependencies = [
 [[package]]
 name = "abir-bcs"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=37cd630497751462030cdc2068548243cf69ffa4#37cd630497751462030cdc2068548243cf69ffa4"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "abir",
  "blake3",
@@ -39,7 +39,7 @@ dependencies = [
 [[package]]
 name = "abir-training"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=37cd630497751462030cdc2068548243cf69ffa4#37cd630497751462030cdc2068548243cf69ffa4"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
 dependencies = [
  "abir",
  "abir-bcs",
@@ -894,9 +894,9 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.5.5"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8ee0c1824c4dea5b5f81736aff91bae041d2c07ee1192bec91054e10e3e601e"
+checksum = "3888aaa89e4b2a40fca9848e400f6a658a5a3978de7be858e209cafa8be9a4a0"
 dependencies = [
  "arrayref",
  "arrayvec",
@@ -926,7 +926,7 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=c514d63638ae95779b77c7c59e395bd45b06b633#c514d63638ae95779b77c7c59e395bd45b06b633"
+source = "git+https://github.com/Quitetall/blut.git?rev=0d633c4b7cf5f5ecb45e410a2576d8dc7f8aa33e#0d633c4b7cf5f5ecb45e410a2576d8dc7f8aa33e"
 dependencies = [
  "blake3",
  "postcard",
@@ -2748,6 +2748,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "home"
+version = "0.5.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "http"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3508,9 +3517,11 @@ dependencies = [
 [[package]]
 name = "lamquant-config"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
 dependencies = [
  "clap",
  "dirs",
+ "serde",
  "toml_edit 0.22.27",
  "tracing",
 ]
@@ -3518,6 +3529,7 @@ dependencies = [
 [[package]]
 name = "lamquant-history"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
 dependencies = [
  "fs2",
  "serde",
@@ -3598,7 +3610,6 @@ name = "lamquant-lml-desktop"
 version = "0.9.3"
 dependencies = [
  "lamquant-lml-mcu",
- "rayon",
  "sha2 0.10.9",
 ]
 
@@ -3622,6 +3633,7 @@ dependencies = [
  "libm",
  "probability",
  "proptest",
+ "rayon",
  "sha2 0.10.9",
 ]
 
@@ -3706,6 +3718,7 @@ dependencies = [
 [[package]]
 name = "lamquant-ops"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
 dependencies = [
  "blut-graph-core",
  "lamquant-history",
@@ -3732,6 +3745,7 @@ dependencies = [
 [[package]]
 name = "lamquant-runtime"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
 dependencies = [
  "blake3",
  "blut-graph-core",
@@ -3764,6 +3778,7 @@ dependencies = [
 [[package]]
 name = "lamquant-tui"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
 dependencies = [
  "crossterm 0.28.1",
  "lamquant-config",
@@ -3777,7 +3792,9 @@ dependencies = [
  "tui-piechart",
  "tui-scrollview",
  "tui-tree-widget",
+ "tui-widget-list",
  "walkdir",
+ "which",
 ]
 
 [[package]]
@@ -3946,9 +3963,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.18.0"
+version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a860605968fce16869fd239cf4237a82f3ac470723415db603b0e8b6c8d4fb9"
+checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -5225,7 +5242,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.14.0",
  "kasuari",
- "lru 0.18.0",
+ "lru 0.18.2",
  "palette",
  "serde",
  "strum 0.28.0",
@@ -6754,6 +6771,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tui-widget-list"
+version = "0.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39fc4e2d4f0673ad55213e1db3203b2f5962d8e99acbc54faa59318c435b010a"
+dependencies = [
+ "ratatui-core",
+ "ratatui-widgets",
+]
+
+[[package]]
 name = "twox-hash"
 version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7104,6 +7131,18 @@ dependencies = [
  "lazy_static",
  "serde",
  "wezterm-dynamic",
+]
+
+[[package]]
+name = "which"
+version = "6.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
+dependencies = [
+ "either",
+ "home",
+ "rustix 0.38.44",
+ "winsafe",
 ]
 
 [[package]]
@@ -7512,6 +7551,12 @@ dependencies = [
  "serde",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wit-bindgen"

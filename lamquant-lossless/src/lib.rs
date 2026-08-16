@@ -8,7 +8,7 @@
 //!
 //! Build modes:
 //!   default ("host")  — full library: codec + container + EDF + LMA + CLI/TUI deps
-//!   "std"             — codec only, host platform (file I/O, std types)
+//!   "std"             — codec + host Read/Write adapters; no archive/container
 //!   no features       — `no_std` + `alloc`. Codec only. For RP2350 firmware.
 //!   "python"          — PyO3 bindings (implies "host")
 //!   "ffi"             — C FFI bindings (implies "host")
@@ -38,9 +38,17 @@ extern crate alloc;
 // paths stay byte-for-byte stable for firmware, lamquant-lsl, the Python
 // extension, and every test — none of those call sites change.
 pub use lamquant_lml_mcu::{
-    bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting, lml, lmqc, lpc,
-    quant, rans, zrle,
+    bit_pack, codec, codec_errors, crc32, deployment, error, golomb, lifting, lmqc, lpc, quant,
+    rans, zrle,
 };
+
+/// Stable LML codec facade: buffer-oriented codec from the MCU floor plus host
+/// `Read`/`Write` adapters when the Desktop assembly is enabled.
+pub mod lml {
+    #[cfg(feature = "std")]
+    pub use lamquant_lml_desktop::io::{compress_into, decompress_from};
+    pub use lamquant_lml_mcu::lml::*;
+}
 // ADR 0023 Track B5+ / ADR 0051 P3.5: arithmetic + empirical-categorical range
 // coders are opt-in via `experimental_arithmetic` (re-exported from core).
 #[cfg(feature = "experimental_arithmetic")]
@@ -55,17 +63,11 @@ pub use lamquant_lml_mcu::{arith_cat, arithmetic};
 #[cfg(feature = "archive")]
 pub use lamquant_lml_desktop as desktop;
 
-// ADR 0058 carve-full: the `ComputeBackend` selector + the rayon parallel
-// encode/decode now live in the Desktop tier. Re-exported at the stable
-// `lamquant_core::backend` path (used by `container`, the `lml` CLI's
-// `--backend` flag, …) and the parallel entry points the container hot path
-// calls. Firmware (no `archive`) never selects a backend — it runs scalar.
+// Desktop owns backend selection; the MCU codec owns packet orchestration and
+// keeps serial/Rayon channel execution behind its typed profile seam. Firmware
+// never links the selector or Rayon dependency.
 #[cfg(feature = "archive")]
 pub use lamquant_lml_desktop::backend;
-#[cfg(feature = "archive")]
-pub use lamquant_lml_desktop::{
-    compress_with_mode_parallel, compress_with_mode_parallel_views, decompress_parallel,
-};
 
 // The Optimum (LMO) tier. Re-exported as `lamquant_core::optimum`; it ships the
 // LMO decoder always and the encoder under `archive` (which needs the MCU tier's
@@ -122,6 +124,8 @@ pub use lamquant_common::ingest;
 pub mod io;
 #[cfg(feature = "archive")]
 pub mod lma;
+#[cfg(feature = "archive")]
+pub mod workflows;
 // LMA directory archives expressed as BCS2 forensic capsules (ADR 0139
 // contract 5). Additive: `lma` keeps reading and writing LMA1/LMA2.
 #[cfg(feature = "archive")]

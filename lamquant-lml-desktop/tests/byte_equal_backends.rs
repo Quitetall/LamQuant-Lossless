@@ -34,15 +34,13 @@
 //! `specs/conformance/byte_equal_v1.json` at that time.
 
 use lamquant_lml_desktop::backend::{
-    compress_with_backend, decompress_with_backend, ComputeBackend,
+    compress_views_explicit_with_backend, compress_views_with_backend, compress_with_backend,
+    decompress_with_backend, ComputeBackend,
 };
-use lamquant_lml_desktop::lml::{
+use lamquant_lml_mcu::lml::{
     compress_with_mode, compress_with_mode_views, compress_with_mode_views_explicit, EncodeFeatures,
 };
-use lamquant_lml_desktop::lpc::LpcMode;
-use lamquant_lml_desktop::{
-    compress_with_mode_parallel_views, compress_with_mode_parallel_views_explicit,
-};
+use lamquant_lml_mcu::lpc::LpcMode;
 use sha2::{Digest, Sha256};
 
 /// xorshift64 — deterministic across machines + architectures.
@@ -267,7 +265,7 @@ fn desktop_backend_decode_matches_firmware() {
 }
 
 /// ADR 0069 L6.3 — the zero-copy view kernel gate: `compress_with_mode_views`
-/// (serial, `lamquant-lml-mcu`) and `compress_with_mode_parallel_views`
+/// (serial profile) and Desktop-selected Rayon profile
 /// (rayon, `lamquant-lml-desktop`) MUST produce byte-identical output to the
 /// reference `compress_with_mode(&vecs, ...)` for the same logical input —
 /// same `GOLDEN_VECTORS` shapes as the backend-drift gate above, but this
@@ -278,7 +276,7 @@ fn desktop_backend_decode_matches_firmware() {
 /// vs an explicit `v >> noise_bits` shift in the views entry points) — the
 /// header's `noise_bits` field must still land as the true value (3), not 0,
 /// in both view variants, or this test fails on the very first byte
-/// (`assemble_lml_packet`'s `flags` byte encodes it).
+/// (packet flags encode it).
 #[test]
 #[cfg(feature = "fast")]
 fn views_match_vecs_serial_and_parallel() {
@@ -307,10 +305,15 @@ fn views_match_vecs_serial_and_parallel() {
                 ));
             }
 
-            let parallel_views = compress_with_mode_parallel_views(&views, noise_bits, v.lpc_mode)
-                .unwrap_or_else(|e| {
-                    panic!("vector `{}` parallel-views compress failed: {e:?}", v.name)
-                });
+            let parallel_views = compress_views_with_backend(
+                &views,
+                noise_bits,
+                v.lpc_mode,
+                ComputeBackend::Desktop,
+            )
+            .unwrap_or_else(|e| {
+                panic!("vector `{}` parallel-views compress failed: {e:?}", v.name)
+            });
             if parallel_views != vecs_ref {
                 failures.push(format!(
                     "vector `{}` noise_bits={} PARALLEL views diverged from vecs ({} vs {} bytes; sha {} vs {})",
@@ -341,11 +344,12 @@ fn explicit_baseline_is_golden_and_parallel_byte_equal() {
         let serial =
             compress_with_mode_views_explicit(&views, vector.noise_bits, vector.lpc_mode, features)
                 .expect("explicit serial");
-        let parallel = compress_with_mode_parallel_views_explicit(
+        let parallel = compress_views_explicit_with_backend(
             &views,
             vector.noise_bits,
             vector.lpc_mode,
             features,
+            ComputeBackend::Desktop,
         )
         .expect("explicit parallel");
 
@@ -373,22 +377,23 @@ fn explicit_arithmetic_candidate_is_parallel_byte_equal() {
         let serial =
             compress_with_mode_views_explicit(&views, vector.noise_bits, vector.lpc_mode, features)
                 .expect("explicit serial");
-        let parallel = compress_with_mode_parallel_views_explicit(
+        let parallel = compress_views_explicit_with_backend(
             &views,
             vector.noise_bits,
             vector.lpc_mode,
             features,
+            ComputeBackend::Desktop,
         )
         .expect("explicit parallel");
 
         assert_eq!(serial, parallel, "vector `{}` diverged", vector.name);
-        selected_arithmetic |= lamquant_lml_desktop::lml::requires_arithmetic_coders(&serial);
+        selected_arithmetic |= lamquant_lml_mcu::lml::requires_arithmetic_coders(&serial);
     }
     let zero_signal = [vec![0_i64; 4096]];
     let zero_views = zero_signal.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let zero_packet = compress_with_mode_views_explicit(&zero_views, 0, LpcMode::Fixed, features)
         .expect("explicit zero-signal arithmetic candidate");
-    selected_arithmetic |= lamquant_lml_desktop::lml::requires_arithmetic_coders(&zero_packet);
+    selected_arithmetic |= lamquant_lml_mcu::lml::requires_arithmetic_coders(&zero_packet);
     assert!(
         selected_arithmetic,
         "fixture set never selected an arithmetic coder"

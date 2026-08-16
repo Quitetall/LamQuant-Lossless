@@ -9,7 +9,7 @@
 
 use clap::{Parser, Subcommand};
 use lamquant_core::deployment::LosslessMode;
-use lamquant_core::{container, edf, lma, lma_forensic, lml, tui};
+use lamquant_core::{container, edf, lma, lma_forensic, lml, tui, workflows};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::io::{BufWriter, Write};
@@ -564,6 +564,25 @@ SOURCE FORMATS:
         /// `extract` accepts either form without a flag.
         #[arg(long)]
         capsule: bool,
+    },
+    /// Convert an existing LMA1/LMA2 archive into a BCS2 forensic capsule
+    ///
+    /// Conversion is non-destructive: input stays byte-identical. Output is
+    /// published atomically only after every source entry verifies against its
+    /// LMA manifest and the complete capsule validates.
+    ConvertArchive {
+        /// Input LMA1/LMA2 archive
+        input: PathBuf,
+        /// Output BCS2 forensic capsule
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Zstd compression level for transformed sidecar entries (1-22)
+        #[arg(
+            long,
+            default_value = "9",
+            value_parser = clap::value_parser!(i32).range(1..=22)
+        )]
+        zstd_level: i32,
     },
     /// Extract an .lma archive to a directory (byte-exact roundtrip)
     ///
@@ -1540,6 +1559,7 @@ fn op_id_of(cmd: &Commands) -> &'static str {
         Commands::Recover { .. } => "recover",
         Commands::Bench { .. } => "bench",
         Commands::Archive { .. } => "archive",
+        Commands::ConvertArchive { .. } => "convert_archive",
         Commands::Extract { .. } => "extract",
         Commands::ListArchive { .. } => "list_archive",
         Commands::VolumeSplit { .. } => "volume_split",
@@ -1882,6 +1902,11 @@ fn main() {
                 zstd_level,
                 capsule,
             } => cmd_archive(&input, output.as_deref(), zstd_level, capsule),
+            Commands::ConvertArchive {
+                input,
+                output,
+                zstd_level,
+            } => cmd_convert_archive(&input, &output, zstd_level),
             Commands::Extract {
                 input,
                 output,
@@ -5671,38 +5696,39 @@ fn summarise_json(v: &serde_json::Value) -> String {
 }
 
 fn cmd_info(input: &Path) -> R {
-    let data = std::fs::read(input)?;
-    if data.starts_with(b"LMA1") {
-        eprintln!(
-            "note: {} is an LMA archive, dispatching to archive inspector (`lml ls --tree`).",
-            input.display(),
-        );
-        return cmd_ls(input, /*tree=*/ true, /*long=*/ false);
+    match workflows::inspect_path(input)? {
+        workflows::InspectionReport::Archive { entries } => {
+            eprintln!(
+                "note: {} is an LMA archive, dispatching to archive inspector (`lml ls --tree`).",
+                input.display(),
+            );
+            render_archive_tree(input, &entries);
+        }
+        workflows::InspectionReport::Container { header, file_size } => {
+            let raw = header.n_channels as f64 * header.total_samples as f64 * 8.0;
+            let duration_s = header.total_samples as f64 / header.sample_rate_hz;
+            println!("File:       {}", input.display());
+            println!("Format:     BCS2 / bcs.lml.lossless.v1");
+            println!("Channels:   {}", header.n_channels);
+            println!("Windows:    {}", header.n_windows);
+            println!(
+                "Samples:    {} ({:.1}s @ {:.0} Hz)",
+                header.total_samples, duration_s, header.sample_rate_hz
+            );
+            println!("Duration:   {}", human_duration(duration_s));
+            println!("Window:     {} samples", header.window_size);
+            println!("Size:       {}", human_bytes(file_size));
+            if raw > 0.0 {
+                println!(
+                    "CR:         {:.2}:1  ({} raw → {})",
+                    raw / file_size as f64,
+                    human_bytes(raw as u64),
+                    human_bytes(file_size)
+                );
+            }
+            print_metadata_summary(&header.metadata);
+        }
     }
-    let header = container::parse_header(&data)?;
-    let file_size = data.len() as u64;
-    let raw = header.n_channels as f64 * header.total_samples as f64 * 8.0;
-    let duration_s = header.total_samples as f64 / header.sample_rate_hz;
-    println!("File:       {}", input.display());
-    println!("Format:     BCS2 / bcs.lml.lossless.v1");
-    println!("Channels:   {}", header.n_channels);
-    println!("Windows:    {}", header.n_windows);
-    println!(
-        "Samples:    {} ({:.1}s @ {:.0} Hz)",
-        header.total_samples, duration_s, header.sample_rate_hz
-    );
-    println!("Duration:   {}", human_duration(duration_s));
-    println!("Window:     {} samples", header.window_size);
-    println!("Size:       {}", human_bytes(file_size));
-    if raw > 0.0 {
-        println!(
-            "CR:         {:.2}:1  ({} raw → {})",
-            raw / file_size as f64,
-            human_bytes(raw as u64),
-            human_bytes(file_size)
-        );
-    }
-    print_metadata_summary(&header.metadata);
     Ok(())
 }
 
@@ -5751,162 +5777,112 @@ fn print_metadata_summary(meta: &str) {
 }
 
 fn cmd_verify(input: &Path, recursive: bool, explain: bool) -> R {
-    // Hard-fail on a missing input — clinical-grade contract: silent
-    // "0/0 verified" on a typo'd path is unacceptable.
-    if !input.exists() {
-        return Err(format!("input path does not exist: {}", input.display()).into());
+    let report = workflows::verify_path(input, recursive)?;
+    let single_archive = report.uses_legacy_single_archive_rendering();
+
+    if single_archive {
+        eprintln!(
+            "note: {} is an LMA archive, dispatching to archive verifier (`lml verify-archive`).",
+            input.display(),
+        );
     }
 
-    // Tier 3 audit (O14 follow-up): if user passed `--explain` but
-    // the dispatch never reaches the archive verifier (i.e. input
-    // is a pure-LML file or LML directory), emit a stderr WARNING
-    // so the operator knows the flag is being ignored. The
-    // per-window CRC report for LML files is a follow-up feature;
-    // until then, the visible diagnostic prevents silent
-    // confusion.
-    let warn_explain_unused = |scope: &str| {
-        if explain {
-            eprintln!(
-                "  WARNING: --explain currently only applies to LMA archive verification, \
-                 not LML files ({}); ignoring for this run.",
-                scope
-            );
-        }
-    };
+    emit_verification_projections(&report);
+    if !EMIT_PROJECTIONS.load(Ordering::Relaxed) {
+        render_verification_report(&report, explain, !single_archive);
+    }
+    verification_status(&report)
+}
 
-    // v1.1 magic-byte auto-dispatch: if the user passed a single
-    // `.lma` archive (or any single file whose leading bytes are
-    // `LMA1`), route to the archive verifier instead of trying to
-    // walk it as an LML directory. v1.2 X adds `--explain`
-    // forwarding so `lml verify foo.lma --explain` renders the
-    // auditable per-step readout.
-    //
-    // Tier 3 audit (O14): surface File::open errors instead of
-    // silently falling through to the LML walker. Pre-fix the
-    // `.is_ok()` short-circuit meant a permission-denied on an
-    // LMA produced a confusing "not LML" error downstream.
-    if input.is_file() {
-        use std::io::Read as _;
-        match std::fs::File::open(input) {
-            Ok(mut f) => {
-                let mut magic = [0u8; 4];
-                if f.read_exact(&mut magic).is_ok() && &magic == b"LMA1" {
-                    eprintln!(
-                        "note: {} is an LMA archive, dispatching to archive verifier (`lml verify-archive`).",
-                        input.display(),
-                    );
-                    return cmd_verify_archive_explain(input, explain);
-                }
-            }
-            Err(e) => {
-                return Err(format!(
-                    "cmd_verify: cannot open {} for magic-byte check: {}",
-                    input.display(),
-                    e
-                )
-                .into());
-            }
+fn emit_verification_projections(report: &workflows::VerificationReport) {
+    if !EMIT_PROJECTIONS.load(Ordering::Relaxed) {
+        return;
+    }
+    for item in &report.items {
+        for update in item.to_plan_updates() {
+            emit_projection(update);
         }
     }
+}
 
-    let files = if input.is_file() {
-        vec![input.to_path_buf()]
-    } else {
-        let mut f = Vec::new();
-        let walker = if recursive {
-            walkdir::WalkDir::new(input)
-        } else {
-            walkdir::WalkDir::new(input).max_depth(1)
-        };
-        for entry in walker.into_iter().filter_map(|e| e.ok()) {
-            // v1.1: include `.lma` in directory walks so `lml verify
-            // recursive_dir/` picks up archives alongside `.lml` files.
-            //
-            // Tier 3 audit (O14): compare against OsStr instead of
-            // str so paths with non-UTF-8 components aren't silently
-            // dropped from the verify set (pre-fix `.and_then(|e|
-            // e.to_str())` returned None and the entry was skipped
-            // with no warning; total count under-reported).
-            let ext = entry.path().extension();
-            let is_lml = ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lml")));
-            let is_lma = ext.is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lma")));
-            if is_lml || is_lma {
-                f.push(entry.path().to_path_buf());
-            }
-        }
-        f.sort();
-        f
-    };
-
-    let total = files.len();
-    if total == 0 {
-        return Err(format!(
-            "no .lml files found at {} — verify would silently report \
-             0/0 success otherwise",
-            input.display()
-        )
-        .into());
+fn render_verification_report(
+    report: &workflows::VerificationReport,
+    explain: bool,
+    render_batch_summary: bool,
+) {
+    if explain && !report.has_archives() {
+        eprintln!(
+            "  WARNING: --explain currently only applies to LMA archive verification, \
+             not LML files (verify batch); ignoring for this run."
+        );
     }
-    let mut passed = 0;
-    let mut failed = 0;
 
-    // Tier 3 audit (O14): if explain was requested but every file
-    // in the batch is LML (not LMA), surface the warning once
-    // instead of per-file. Mixed batches don't trigger this; the
-    // per-LML-entry path silently skips explain.
-    let any_lma = files.iter().any(|f| {
-        f.extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(std::ffi::OsStr::new("lma")))
-    });
-    if !any_lma {
-        warn_explain_unused("verify batch");
-    }
-    for f in &files {
-        let t0 = Instant::now();
-        // v1.1: per-file magic-byte dispatch so a mixed `.lml` +
-        // `.lma` corpus walks transparently.
-        let is_lma = f
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e == "lma");
-        if is_lma {
-            match cmd_verify_archive_explain(f, explain) {
-                Ok(()) => {
-                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                    if total <= 10 {
-                        println!("  OK  lma ({:.1}ms) {}", ms, f.display());
-                    }
-                    passed += 1;
-                }
-                Err(e) => {
-                    println!("  FAIL {} — {}", f.display(), e);
-                    failed += 1;
-                }
-            }
-            continue;
-        }
-        match decode_lml_file(f) {
-            Ok((sig, _)) => {
-                let n_ch = sig.len();
-                let t = if n_ch > 0 { sig[0].len() } else { 0 };
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let total = report.items.len();
+    for item in &report.items {
+        let elapsed = std::time::Duration::from_secs_f64(item.elapsed_ms / 1000.0);
+        match &item.outcome {
+            workflows::VerificationOutcome::Container { header, .. } => {
                 if total <= 10 {
-                    println!("  OK  {}ch × {} ({:.1}ms) {}", n_ch, t, ms, f.display());
+                    println!(
+                        "  OK  {}ch × {} ({:.1}ms) {}",
+                        header.n_channels,
+                        header.total_samples,
+                        item.elapsed_ms,
+                        item.path.display()
+                    );
                 }
-                passed += 1;
             }
-            Err(e) => {
-                println!("  FAIL {} — {}", f.display(), e);
-                failed += 1;
+            workflows::VerificationOutcome::Archive(result) => {
+                if explain {
+                    render_archive_verification_explained(result, elapsed);
+                } else {
+                    render_archive_verification_compact(result, elapsed);
+                }
+                if render_batch_summary && item.passed() && total <= 10 {
+                    println!(
+                        "  OK  lma ({:.1}ms) {}",
+                        item.elapsed_ms,
+                        item.path.display()
+                    );
+                }
+            }
+            workflows::VerificationOutcome::Failed { error, .. } => {
+                println!("  FAIL {} — {}", item.path.display(), error);
             }
         }
     }
 
-    println!("{}/{} verified, {} failed", passed, total, failed);
-    if failed > 0 {
-        std::process::exit(1);
+    if render_batch_summary {
+        println!(
+            "{}/{} verified, {} failed",
+            report.passed(),
+            total,
+            report.failed()
+        );
     }
-    Ok(())
+}
+
+fn verification_status(report: &workflows::VerificationReport) -> R {
+    if report.is_success() {
+        return Ok(());
+    }
+    if report.items.len() == 1 {
+        match &report.items[0].outcome {
+            workflows::VerificationOutcome::Archive(result) if !result.archive_hash_matches => {
+                return Err("Archive SHA-256 mismatch — file is corrupted".into());
+            }
+            workflows::VerificationOutcome::Archive(result) => {
+                return Err(
+                    format!("{} files failed verification", result.failed_entries()).into(),
+                );
+            }
+            workflows::VerificationOutcome::Failed { error, .. } => {
+                return Err(error.clone().into());
+            }
+            workflows::VerificationOutcome::Container { .. } => {}
+        }
+    }
+    Err(format!("{} files failed verification", report.failed()).into())
 }
 
 // ── Paranoid roundtrip verification — clinical-grade bit-exact check ──
@@ -7758,6 +7734,55 @@ fn cmd_archive(input: &Path, output: Option<&Path>, zstd_level: i32, capsule: bo
     Ok(())
 }
 
+fn cmd_convert_archive(input: &Path, output: &Path, zstd_level: i32) -> R {
+    if input == output {
+        return Err("convert-archive output must differ from input".into());
+    }
+    if output.exists() {
+        return Err(format!(
+            "convert-archive refuses to overwrite existing output: {}",
+            output.display()
+        )
+        .into());
+    }
+    let parent = output.parent().unwrap_or(Path::new("."));
+    let temp = tempfile::Builder::new()
+        .prefix(".lml-convert-archive-")
+        .tempfile_in(parent)?
+        .into_temp_path();
+
+    let t0 = Instant::now();
+    println!("Converting {} → {}", input.display(), output.display());
+    let summary = lma_forensic::convert_archive(input, &temp, zstd_level)?;
+    if !summary.errors.is_empty() {
+        return Err(format!(
+            "convert-archive refused partial output: {} source entr{} failed verification",
+            summary.errors.len(),
+            if summary.errors.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        )
+        .into());
+    }
+    temp.persist_noclobber(output)
+        .map_err(|error| error.error)?;
+
+    println!("\nDone in {:.1}s", t0.elapsed().as_secs_f64());
+    println!(
+        "  {} files ({} LML, {} zstd, {} stored)",
+        summary.n_files, summary.counts_lml, summary.counts_zstd, summary.counts_store
+    );
+    println!(
+        "  {} → {} ({:.2}x CR)",
+        human_bytes(summary.original_bytes),
+        human_bytes(summary.archive_bytes),
+        summary.cr
+    );
+    Ok(())
+}
+
 fn cmd_extract(input: &Path, output: Option<&Path>, verify: bool) -> R {
     let _span = tracing::info_span!(
         "extract",
@@ -7922,9 +7947,13 @@ fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
         return Ok(());
     }
 
-    // Tree-style with totals header + per-entry size / method /
-    // sha256 prefix. Format chosen to match `tree -L 1` semantics:
-    // every entry is a sibling under the root; the manifest is flat.
+    render_archive_tree(input, &entries);
+    Ok(())
+}
+
+/// Render archive entries already produced by the archive facade. `info` and
+/// `ls --tree` share this adapter without reopening or reparsing the archive.
+fn render_archive_tree(input: &Path, entries: &[lma::ArchiveEntry]) {
     let total_orig: u64 = entries.iter().map(|e| e.original_size).sum();
     let total_comp: u64 = entries.iter().map(|e| e.compressed_size).sum();
     let cr = if total_comp > 0 {
@@ -7968,7 +7997,6 @@ fn cmd_ls(input: &Path, tree: bool, long: bool) -> R {
             sha_prefix,
         );
     }
-    Ok(())
 }
 
 /// Phase-Lossless — `lml cat foo.lma <entry-path>`. Extract a single
@@ -8209,387 +8237,156 @@ fn cmd_volume_assemble(input: &Path, output: Option<&Path>, force: bool) -> R {
 /// v1.2 X — dispatches to the explainer when `--explain` is set;
 /// otherwise calls the compact existing verifier.
 fn cmd_verify_archive_explain(input: &Path, explain: bool) -> R {
-    if explain {
-        cmd_verify_archive_explainer(input)
-    } else {
-        cmd_verify_archive(input)
+    let report = workflows::verify_archive(input)?;
+    emit_verification_projections(&report);
+    if !EMIT_PROJECTIONS.load(Ordering::Relaxed) {
+        render_verification_report(&report, explain, false);
+    }
+    verification_status(&report)
+}
+
+fn archive_method_name(method: lma::Method) -> &'static str {
+    match method {
+        lma::Method::Lml => "lml",
+        lma::Method::Zstd => "zstd",
+        lma::Method::Store => "store",
+        _ => "unknown",
     }
 }
 
-/// v1.2 X — auditable per-step readout. Prints the literal chain
-/// of checks the verifier performs:
-///   1. Archive size + structural minimum
-///   2. Archive-wide SHA-256 over content+footer
-///   3. Manifest section (zstd decompress + parse)
-///   4. Per-entry payload read + method-specific verify + SHA match
-///   5. Decompression byte counts + per-entry CR
-///   6. Cumulative elapsed time + OK/FAIL summary
-///
-/// No black box. Operator sees exactly what was checked.
-fn cmd_verify_archive_explainer(input: &Path) -> R {
-    use sha2::Digest;
-
-    let file_size = std::fs::metadata(input)?.len();
-    if file_size < 48 {
-        return Err(format!("Archive too small ({} bytes)", file_size).into());
-    }
-
-    let t0 = Instant::now();
-    println!("Verifying {} (auditable readout)", input.display());
-    println!("─────────────────────────────────────────────────────────");
+fn render_archive_verification_compact(
+    result: &lma::ArchiveVerification,
+    elapsed: std::time::Duration,
+) {
     println!(
-        "[1/5] Archive size:        {} ({:.2} KB)",
-        file_size,
-        file_size as f64 / 1024.0
+        "Verifying {}",
+        result
+            .archive_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<memory>".into())
     );
-
-    // 2. Archive-wide SHA-256 (content + everything before the 32-byte footer)
-    print!("[2/5] Archive SHA-256:     ");
-    {
-        use std::io::Read;
-        let mut f = std::io::BufReader::new(std::fs::File::open(input)?);
-        let mut hasher = Sha256::new();
-        let content_size = file_size - 32;
-        let mut remaining = content_size;
-        let mut buf = vec![0u8; 8 * 1024 * 1024];
-        while remaining > 0 {
-            let to_read = (remaining as usize).min(buf.len());
-            let n = f.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            remaining -= n as u64;
-        }
-        let computed = hasher.finalize();
-        let mut stored = [0u8; 32];
-        f.read_exact(&mut stored)?;
-        let computed_bytes = computed.as_slice();
-        if computed_bytes != stored {
-            println!("FAILED");
-            print!("       stored:    ");
-            for b in &stored {
-                print!("{:02x}", b);
-            }
-            println!();
-            print!("       computed:  ");
-            for b in computed_bytes {
-                print!("{:02x}", b);
-            }
-            println!();
-            return Err("Archive SHA-256 mismatch — file is corrupted".into());
-        }
-        print!("OK  sha256:");
-        for b in &stored[..8] {
-            print!("{:02x}", b);
-        }
-        println!();
-    }
-
-    // 3. Manifest decompress + parse
-    let entries = lma::list_archive(input)?;
-    println!(
-        "[3/5] Manifest:            OK ({} entries enumerated)",
-        entries.len()
-    );
-
-    // 4. Per-entry payload read + verify
-    println!("[4/5] Per-entry verify:");
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::io::BufReader::new(std::fs::File::open(input)?);
-    let mut header = [0u8; 16];
-    f.read_exact(&mut header)?;
-    let manifest_len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as u64;
-    let payload_start = 16 + manifest_len;
-
-    let mut verified = 0usize;
-    let mut failed = 0usize;
-    let mut total_compressed: u64 = 0;
-    let mut total_decompressed: u64 = 0;
-
-    for (i, entry) in entries.iter().enumerate() {
-        f.seek(SeekFrom::Start(payload_start + entry.offset))?;
-        let mut payload = vec![0u8; entry.compressed_size as usize];
-        f.read_exact(&mut payload)?;
-
-        let method_str = match entry.method {
-            lma::Method::Lml => "lml",
-            lma::Method::Zstd => "zstd",
-            lma::Method::Store => "store",
-            _ => "unknown",
-        };
-        let sha_prefix = &entry.sha256[..entry.sha256.len().min(12)];
-
-        let (ok, decompressed_size, detail) = match entry.method {
-            lma::Method::Lml => {
-                let tmp = tempfile::NamedTempFile::new()?;
-                std::fs::write(tmp.path(), &payload)?;
-                match decode_lml_file(tmp.path()) {
-                    Ok((signal, _)) => {
-                        let bytes = signal.iter().map(|ch| ch.len() * 8).sum::<usize>() as u64;
-                        (true, bytes, "LML decode OK".to_string())
-                    }
-                    Err(e) => (false, 0, format!("LML decode error: {}", e)),
-                }
-            }
-            lma::Method::Zstd => match zstd::decode_all(payload.as_slice()) {
-                Ok(decompressed) => {
-                    let hash = format!("{:x}", Sha256::digest(&decompressed));
-                    if hash == entry.sha256 {
-                        (true, decompressed.len() as u64, "zstd OK".to_string())
-                    } else {
-                        (
-                            false,
-                            decompressed.len() as u64,
-                            format!(
-                                "SHA-256 mismatch (got {}, expected {})",
-                                &hash[..12],
-                                sha_prefix
-                            ),
-                        )
-                    }
-                }
-                Err(e) => (false, 0, format!("zstd error: {}", e)),
-            },
-            lma::Method::Store => {
-                let hash = format!("{:x}", Sha256::digest(&payload));
-                if hash == entry.sha256 {
-                    (true, payload.len() as u64, "store OK".to_string())
-                } else {
-                    (
-                        false,
-                        payload.len() as u64,
-                        format!(
-                            "SHA-256 mismatch (got {}, expected {})",
-                            &hash[..12],
-                            sha_prefix
-                        ),
-                    )
-                }
-            }
-            _ => (
-                false,
-                0,
-                "unknown compression method (writer newer than reader)".to_string(),
-            ),
-        };
-
-        let cr = if entry.compressed_size > 0 {
-            decompressed_size as f64 / entry.compressed_size as f64
-        } else {
-            0.0
-        };
-        let marker = if ok { "✓" } else { "✗" };
-        println!(
-            "       [{}/{}] {} {:<32}  {:>10}  {:<6}  sha256:{}  CR {:.2}x  ({})",
-            i + 1,
-            entries.len(),
-            marker,
-            entry.path,
-            human_bytes(entry.compressed_size),
-            method_str,
-            sha_prefix,
-            cr,
-            detail,
-        );
-        if ok {
-            verified += 1;
-        } else {
-            failed += 1;
-        }
-        total_compressed += entry.compressed_size;
-        total_decompressed += decompressed_size;
-    }
-
-    let elapsed = t0.elapsed();
-    let cr = if total_compressed > 0 {
-        total_decompressed as f64 / total_compressed as f64
+    if result.archive_hash_matches {
+        println!("  Archive SHA-256... OK");
     } else {
-        0.0
-    };
-    println!("[5/5] Summary:");
-    println!(
-        "       Compressed total:   {} ({} bytes)",
-        human_bytes(total_compressed),
-        total_compressed
-    );
-    println!(
-        "       Decompressed total: {} ({} bytes)",
-        human_bytes(total_decompressed),
-        total_decompressed
-    );
-    println!("       Archive CR:         {:.2}x", cr);
-    println!("       Verified:           {}/{}", verified, entries.len());
-    println!("       Failed:             {}/{}", failed, entries.len());
-    println!("       Elapsed:            {:.3}s", elapsed.as_secs_f64());
-    println!("─────────────────────────────────────────────────────────");
-    if failed > 0 {
-        println!("Result: FAIL ({} failed entries)", failed);
-        Err(format!("{} files failed verification", failed).into())
-    } else {
-        println!("Result: PASS (archive-wide hash OK + all entries verified)");
-        Ok(())
+        println!("  Archive SHA-256... FAILED");
+        return;
     }
-}
-
-fn cmd_verify_archive(input: &Path) -> R {
-    let file_size = std::fs::metadata(input)?.len();
-    if file_size < 48 {
-        return Err(format!("Archive too small ({} bytes)", file_size).into());
-    }
-
-    let t0 = Instant::now();
-    println!("Verifying {}", input.display());
-
-    // 1. Archive-level SHA-256
-    print!("  Archive SHA-256... ");
-    {
-        use std::io::Read;
-        let mut f = std::io::BufReader::new(std::fs::File::open(input)?);
-        let mut hasher = Sha256::new();
-        let content_size = file_size - 32;
-        let mut remaining = content_size;
-        let mut buf = vec![0u8; 8 * 1024 * 1024];
-        while remaining > 0 {
-            let to_read = (remaining as usize).min(buf.len());
-            let n = f.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            remaining -= n as u64;
+    println!("  Manifest: {} files", result.entries.len());
+    for (index, entry) in result.entries.iter().enumerate() {
+        if !entry.passed {
+            println!("  FAIL: {} — {}", entry.path, entry.detail);
         }
-        let computed = hasher.finalize();
-        let mut stored = [0u8; 32];
-        f.read_exact(&mut stored)?;
-        if computed.as_slice() != stored {
-            println!("FAILED");
-            return Err("Archive SHA-256 mismatch — file is corrupted".into());
-        }
-        println!("OK");
-    }
-
-    // 2. Read manifest
-    let entries = lma::list_archive(input)?;
-    println!("  Manifest: {} files", entries.len());
-
-    // 3. Verify each entry's payload is readable and consistent.
-    use rayon::prelude::*;
-    use std::io::{Read, Seek, SeekFrom};
-
-    // Parse the 16-byte header once to locate the payload region.
-    let payload_start = {
-        let mut header = [0u8; 16];
-        std::io::BufReader::new(std::fs::File::open(input)?).read_exact(&mut header)?;
-        let manifest_len =
-            u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as u64;
-        16 + manifest_len
-    };
-
-    // Verify entries IN PARALLEL: each rayon worker opens its OWN file handle and
-    // decode-checks its payload independently (verify is read-only — no ordering
-    // constraint). The per-file LML verify uses a uniquely-named tempfile, so
-    // concurrent verifies never collide. `None` = pass; `Some(msg)` = fail.
-    // Messages are printed IN MANIFEST ORDER below, so output stays deterministic.
-    let verdicts: Vec<Option<String>> = entries
-        .par_iter()
-        .map(|entry| -> Option<String> {
-            let mut f = match std::fs::File::open(input) {
-                Ok(f) => f,
-                Err(e) => return Some(format!("  FAIL: {} — open error: {}", entry.path, e)),
-            };
-            if let Err(e) = f.seek(SeekFrom::Start(payload_start + entry.offset)) {
-                return Some(format!("  FAIL: {} — seek error: {}", entry.path, e));
-            }
-            let mut payload = vec![0u8; entry.compressed_size as usize];
-            if let Err(e) = f.read_exact(&mut payload) {
-                return Some(format!("  FAIL: {} — read error: {}", entry.path, e));
-            }
-
-            match entry.method {
-                lma::Method::Lml => {
-                    // Decodable LML payload (CRC checked inside decode_lml_file).
-                    let tmp = match tempfile::NamedTempFile::new() {
-                        Ok(t) => t,
-                        Err(e) => return Some(format!("  FAIL: {} — tempfile: {}", entry.path, e)),
-                    };
-                    if let Err(e) = std::fs::write(tmp.path(), &payload) {
-                        return Some(format!("  FAIL: {} — tempfile write: {}", entry.path, e));
-                    }
-                    match decode_lml_file(tmp.path()) {
-                        Ok(_) => None,
-                        Err(e) => Some(format!("  FAIL: {} — LML decode error: {}", entry.path, e)),
-                    }
-                }
-                lma::Method::Zstd => match zstd::decode_all(payload.as_slice()) {
-                    Ok(decompressed) => {
-                        let hash = format!("{:x}", Sha256::digest(&decompressed));
-                        if hash == entry.sha256 {
-                            None
-                        } else {
-                            Some(format!("  FAIL: {} — SHA-256 mismatch", entry.path))
-                        }
-                    }
-                    Err(e) => Some(format!(
-                        "  FAIL: {} — zstd decompress error: {}",
-                        entry.path, e
-                    )),
-                },
-                lma::Method::Store => {
-                    let hash = format!("{:x}", Sha256::digest(&payload));
-                    if hash == entry.sha256 {
-                        None
-                    } else {
-                        Some(format!("  FAIL: {} — SHA-256 mismatch", entry.path))
-                    }
-                }
-                // Unknown method (future Method variant). Fail-closed — clinical
-                // contract: never treat unknown as Store.
-                _ => Some(format!(
-                    "  FAIL: {} — unknown compression method (writer is newer than this reader)",
-                    entry.path
-                )),
-            }
-        })
-        .collect();
-
-    // Aggregate + report in deterministic (manifest) order.
-    let mut verified = 0usize;
-    let mut failed = 0usize;
-    for (i, verdict) in verdicts.iter().enumerate() {
-        match verdict {
-            None => verified += 1,
-            Some(msg) => {
-                failed += 1;
-                println!("{}", msg);
-            }
-        }
-        if (i + 1) % 500 == 0 {
-            println!("    {}/{} verified...", i + 1, entries.len());
+        if (index + 1) % 500 == 0 {
+            println!("    {}/{} verified...", index + 1, result.entries.len());
         }
     }
-
-    let elapsed = t0.elapsed();
+    let failed = result.failed_entries();
+    let verified = result.entries.len() - failed;
     println!(
         "\n  {} files verified, {} failed, {:.1}s",
         verified,
         failed,
         elapsed.as_secs_f64()
     );
-
-    if failed > 0 {
-        Err(format!("{} files failed verification", failed).into())
-    } else {
+    if failed == 0 {
         println!("  INTEGRITY OK — archive is valid.");
-        Ok(())
     }
 }
 
-/// ADR 0051 track 2: encode a single EDF/BDF to a bare bounded-MAE `.lml`
-/// (closed-loop DPCM, guarantees max|orig-recon| <= delta). Self-contained —
-/// bypasses the batch/bundle path; the lossy stream has no per-recording
-/// `.lma` sibling-envelope semantics. For the H.BWC working-point bench +
-/// clinical near-lossless. Prints BPS (and, with --verify, the measured MAE).
+fn render_archive_verification_explained(
+    result: &lma::ArchiveVerification,
+    elapsed: std::time::Duration,
+) {
+    println!(
+        "Verifying {} (auditable readout)",
+        result
+            .archive_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<memory>".into())
+    );
+    println!("─────────────────────────────────────────────────────────");
+    println!(
+        "[1/5] Archive size:        {} ({:.2} KB)",
+        result.archive_size,
+        result.archive_size as f64 / 1024.0
+    );
+    if result.archive_hash_matches {
+        println!(
+            "[2/5] Archive SHA-256:     OK  sha256:{}",
+            &result.archive_sha256[..result.archive_sha256.len().min(16)]
+        );
+    } else {
+        println!("[2/5] Archive SHA-256:     FAILED");
+        println!("       stored:    {}", result.archive_sha256);
+        println!("       computed:  {}", result.computed_archive_sha256);
+        return;
+    }
+    println!(
+        "[3/5] Manifest:            OK ({} entries enumerated)",
+        result.entries.len()
+    );
+    println!("[4/5] Per-entry verify:");
+    for (index, entry) in result.entries.iter().enumerate() {
+        let ratio = if entry.compressed_size > 0 {
+            entry.reconstructed_size as f64 / entry.compressed_size as f64
+        } else {
+            0.0
+        };
+        println!(
+            "       [{}/{}] {} {:<32}  {:>10}  {:<6}  sha256:{}  CR {:.2}x  ({})",
+            index + 1,
+            result.entries.len(),
+            if entry.passed { "✓" } else { "✗" },
+            entry.path,
+            human_bytes(entry.compressed_size),
+            archive_method_name(entry.method),
+            &entry.sha256[..entry.sha256.len().min(12)],
+            ratio,
+            entry.detail
+        );
+    }
+    let failed = result.failed_entries();
+    let verified = result.entries.len() - failed;
+    let compressed = result.compressed_bytes();
+    let reconstructed = result.reconstructed_bytes();
+    let ratio = if compressed > 0 {
+        reconstructed as f64 / compressed as f64
+    } else {
+        0.0
+    };
+    println!("[5/5] Summary:");
+    println!(
+        "       Compressed total:   {} ({} bytes)",
+        human_bytes(compressed),
+        compressed
+    );
+    println!(
+        "       Decompressed total: {} ({} bytes)",
+        human_bytes(reconstructed),
+        reconstructed
+    );
+    println!("       Archive CR:         {:.2}x", ratio);
+    println!(
+        "       Verified:           {}/{}",
+        verified,
+        result.entries.len()
+    );
+    println!(
+        "       Failed:             {}/{}",
+        failed,
+        result.entries.len()
+    );
+    println!("       Elapsed:            {:.3}s", elapsed.as_secs_f64());
+    println!("─────────────────────────────────────────────────────────");
+    if failed == 0 {
+        println!("Result: PASS (archive-wide hash OK + all entries verified)");
+    } else {
+        println!("Result: FAIL ({} failed entries)", failed);
+    }
+}
+
 fn cmd_encode_bounded_mae(
     _input: &Path,
     _output: Option<&Path>,

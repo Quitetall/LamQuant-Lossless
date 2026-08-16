@@ -56,9 +56,9 @@ standard-nwb = [
 ]
 
 [dependencies]
-abir-adapter = { version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", optional = true }
-blake3 = { version = "=1.5.5", default-features = false }
-blut-graph-core = { version = "=0.1.0-alpha.1", git = "https://github.com/Quitetall/blut.git", rev = "c514d63638ae95779b77c7c59e395bd45b06b633", default-features = false }
+abir-adapter = { version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "e2115200e0e4f284c38aa2afd4578a204cc8f40d", optional = true }
+blake3 = { version = "=1.8.2", default-features = false }
+blut-graph-core = { version = "=0.1.0-alpha.1", git = "https://github.com/Quitetall/blut.git", rev = "0d633c4b7cf5f5ecb45e410a2576d8dc7f8aa33e", default-features = false }
 ed25519-dalek = { version = "2.1", optional = true }
 fs2 = { version = "0.4.3", optional = true }
 lamquant-abir-codec = { version = "0.1.0", path = "../lamquant-abir-codec", default-features = false }
@@ -66,8 +66,8 @@ lamquant-lmq = { version = "0.0.2", path = "../../lamquant-lmq", default-feature
 lamquant-lml-mcu = { version = "0.9.3", path = "../../lamquant-lml-mcu", default-features = false }
 lamquant-lml-optimum-v2 = { version = "0.1.0", path = "../../lamquant-lml-optimum-v2", features = ["parallel"], optional = true }
 lamquant-standard-adapters = { version = "0.1.0", path = "../lamquant-standard-adapters", default-features = false, optional = true }
-semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", default-features = false, features = ["alloc"] }
-semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", default-features = false, features = ["alloc"] }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "e2115200e0e4f284c38aa2afd4578a204cc8f40d", default-features = false, features = ["alloc"] }
+semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "e2115200e0e4f284c38aa2afd4578a204cc8f40d", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["alloc"], optional = true }
 serde_json = { version = "1", features = ["arbitrary_precision"], optional = true }
 
@@ -76,7 +76,7 @@ libc = { version = "0.2", optional = true }
 rustix = { version = "1", features = ["process"], optional = true }
 
 [build-dependencies]
-blake3 = { version = "=1.5.5" }
+blake3 = { version = "=1.8.2" }
 
 [dev-dependencies]
 # criterion + the [[bench]] below arrived on published main with the P8.3

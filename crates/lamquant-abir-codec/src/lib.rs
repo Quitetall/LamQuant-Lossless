@@ -469,49 +469,16 @@ fn compress_views(
     mode: lamquant_lml_mcu::lpc::LpcMode,
     selection: EncoderSelection,
 ) -> Result<Vec<u8>, LmlBundleError> {
-    use lamquant_lml_desktop::backend::{global_backend, ComputeBackend};
+    use lamquant_lml_desktop::backend::{
+        compress_views_explicit_with_backend, compress_views_with_backend, global_backend,
+    };
 
-    // Rayon workers observe a live deadline at different instants, which can
-    // select different predictor schedules. Keep live-deadline encoding on the
-    // serial reference path; Fixed, Adaptive, and deadline-free Anytime remain
-    // byte-equal on either backend.
-    if matches!(
-        mode,
-        lamquant_lml_mcu::lpc::LpcMode::Anytime {
-            deadline: Some(_),
-            ..
+    let backend = global_backend();
+    let result = match selection {
+        EncoderSelection::Ambient => compress_views_with_backend(signal, 0, mode, backend),
+        EncoderSelection::Explicit(features) => {
+            compress_views_explicit_with_backend(signal, 0, mode, features, backend)
         }
-    ) {
-        let result = match selection {
-            EncoderSelection::Ambient => {
-                lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode)
-            }
-            EncoderSelection::Explicit(features) => {
-                lamquant_lml_mcu::lml::compress_with_mode_views_explicit(signal, 0, mode, features)
-            }
-        };
-        return result.map_err(LmlBundleError::Lml);
-    }
-
-    let result = match global_backend() {
-        ComputeBackend::Firmware => match selection {
-            EncoderSelection::Ambient => {
-                lamquant_lml_mcu::lml::compress_with_mode_views(signal, 0, mode)
-            }
-            EncoderSelection::Explicit(features) => {
-                lamquant_lml_mcu::lml::compress_with_mode_views_explicit(signal, 0, mode, features)
-            }
-        },
-        ComputeBackend::Desktop => match selection {
-            EncoderSelection::Ambient => {
-                lamquant_lml_desktop::compress_with_mode_parallel_views(signal, 0, mode)
-            }
-            EncoderSelection::Explicit(features) => {
-                lamquant_lml_desktop::compress_with_mode_parallel_views_explicit(
-                    signal, 0, mode, features,
-                )
-            }
-        },
     };
     result.map_err(LmlBundleError::Lml)
 }

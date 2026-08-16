@@ -330,7 +330,7 @@ fn lma_mmap_read_phys_selected<'py>(
     channel_mask: Vec<u16>,
 ) -> PyResult<(Bound<'py, PyArray2<f32>>, String, usize)> {
     let archive =
-        lml::lma::MmapArchive::open(std::path::Path::new(lma_path)).map_err(lma_err_to_py)?;
+        lml::lma::LmaArchive::open_mmap(std::path::Path::new(lma_path)).map_err(lma_err_to_py)?;
     let data = archive.entry_bytes(entry_name).map_err(lma_err_to_py)?;
     let dims = lml::container::parse_header(data)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -378,7 +378,7 @@ fn lma_mmap_entry_metadata(
     entry_name: &str,
 ) -> PyResult<(String, usize, usize, usize, usize)> {
     let archive =
-        lml::lma::MmapArchive::open(std::path::Path::new(lma_path)).map_err(lma_err_to_py)?;
+        lml::lma::LmaArchive::open_mmap(std::path::Path::new(lma_path)).map_err(lma_err_to_py)?;
     let data = archive.entry_bytes(entry_name).map_err(lma_err_to_py)?;
     let header = lml::container::parse_header(data)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;

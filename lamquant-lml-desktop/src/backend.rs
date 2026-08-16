@@ -11,13 +11,14 @@
 //!   * `Firmware` — the reference scalar path (`lamquant_lml_mcu::lml::
 //!     compress_with_mode` / `decompress`). The MCU build uses it directly
 //!     (without this selector); here it is the byte-equality baseline.
-//!   * `Desktop` — rayon per-channel parallelism (+ future SIMD), byte-identical
-//!     to `Firmware` by construction (see [`crate::parallel`]).
+//!   * `Desktop` — requests Rayon per-channel execution (+ future SIMD) through
+//!     the codec owner's single orchestration interface. Live `Anytime`
+//!     deadlines fall back to serial execution for firmware byte equality.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use lamquant_lml_mcu::error::LmlResult;
-use lamquant_lml_mcu::lml;
+use lamquant_lml_mcu::lml::{self, EncodeFeatures, ExecutionProfile};
 use lamquant_lml_mcu::lpc::LpcMode;
 
 use alloc::vec::Vec;
@@ -29,8 +30,9 @@ use alloc::vec::Vec;
 pub enum ComputeBackend {
     /// Reference scalar Rust path (the MCU tier's codec). Byte-equality baseline.
     Firmware,
-    /// Rayon per-channel parallelism (+ future SIMD). Same wire-format output as
-    /// `Firmware` by contract. The default on this host fast tier.
+    /// Requests Rayon per-channel parallelism (+ future SIMD). Live `Anytime`
+    /// deadlines fall back to serial execution. Same wire-format output as
+    /// `Firmware` by contract. Default on this host fast tier.
     #[default]
     Desktop,
 }
@@ -92,20 +94,42 @@ pub fn compress_with_backend(
     mode: LpcMode,
     backend: ComputeBackend,
 ) -> LmlResult<Vec<u8>> {
-    match backend {
-        ComputeBackend::Firmware => lml::compress_with_mode(signal, noise_bits, mode),
-        ComputeBackend::Desktop => {
-            crate::parallel::compress_with_mode_parallel(signal, noise_bits, mode)
-        }
-    }
+    lml::compress_with_mode_profile(signal, noise_bits, mode, execution_profile(backend))
+}
+
+/// Compress borrowed channel views through selected backend.
+pub fn compress_views_with_backend(
+    signal: &[&[i64]],
+    noise_bits: u8,
+    mode: LpcMode,
+    backend: ComputeBackend,
+) -> LmlResult<Vec<u8>> {
+    let profile = execution_profile(backend);
+    lml::compress_with_mode_views_profile(signal, noise_bits, mode, profile)
+}
+
+/// Compress borrowed channel views with explicit deterministic choices.
+pub fn compress_views_explicit_with_backend(
+    signal: &[&[i64]],
+    noise_bits: u8,
+    mode: LpcMode,
+    features: EncodeFeatures,
+    backend: ComputeBackend,
+) -> LmlResult<Vec<u8>> {
+    let profile = execution_profile(backend);
+    lml::compress_with_mode_views_explicit_profile(signal, noise_bits, mode, features, profile)
 }
 
 /// Decompress through the selected backend. Byte-identical signal output across
 /// variants.
 pub fn decompress_with_backend(data: &[u8], backend: ComputeBackend) -> LmlResult<Vec<Vec<i64>>> {
+    lml::decompress_with_profile(data, execution_profile(backend))
+}
+
+fn execution_profile(backend: ComputeBackend) -> ExecutionProfile {
     match backend {
-        ComputeBackend::Firmware => lml::decompress(data),
-        ComputeBackend::Desktop => crate::parallel::decompress_parallel(data),
+        ComputeBackend::Firmware => ExecutionProfile::Serial,
+        ComputeBackend::Desktop => ExecutionProfile::Rayon,
     }
 }
 
@@ -135,5 +159,17 @@ mod tests {
         }
         assert!(ComputeBackend::parse("avx2").is_err());
         assert!(ComputeBackend::parse("").is_err());
+    }
+
+    #[test]
+    fn live_deadline_desktop_routes_through_byte_equal_serial_execution() {
+        let signal = vec![vec![7_i64; 256], vec![-11_i64; 256]];
+        let mode = LpcMode::Anytime {
+            max_order: 16,
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+        };
+        let firmware = compress_with_backend(&signal, 0, mode, ComputeBackend::Firmware).unwrap();
+        let desktop = compress_with_backend(&signal, 0, mode, ComputeBackend::Desktop).unwrap();
+        assert_eq!(desktop, firmware);
     }
 }

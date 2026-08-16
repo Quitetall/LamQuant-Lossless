@@ -1,0 +1,240 @@
+use lamquant_core::lma::{self, LmaArchive, Method};
+use sha2::{Digest, Sha256};
+use std::io::Cursor;
+
+fn sha256(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
+
+fn legacy_v1_store(path: &str, payload: &[u8]) -> Vec<u8> {
+    let manifest = serde_json::json!({
+        "compressor": "zstd",
+        "files": [{
+            "path": path,
+            "original_size": payload.len(),
+            "compressed_size": payload.len(),
+            "method": "store",
+            "sha256": sha256(payload),
+            "offset": 0,
+        }]
+    });
+    let manifest = zstd::encode_all(serde_json::to_vec(&manifest).unwrap().as_slice(), 3).unwrap();
+    let mut archive = Vec::new();
+    archive.extend_from_slice(b"LMA1");
+    archive.extend_from_slice(&1u32.to_le_bytes());
+    archive.extend_from_slice(&1u32.to_le_bytes());
+    archive.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
+    archive.extend_from_slice(&manifest);
+    archive.extend_from_slice(payload);
+    let digest = Sha256::digest(&archive);
+    archive.extend_from_slice(&digest);
+    archive
+}
+
+fn v2_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("input");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::write(input.join("image.png"), b"stored-payload").unwrap();
+    std::fs::write(
+        input.join("notes.txt"),
+        b"zstd payload with repeated repeated text",
+    )
+    .unwrap();
+    let archive = root.path().join("fixture.lma");
+    lma::pack_archive(&input, &archive, 3, false, None).unwrap();
+    (root, archive)
+}
+
+#[test]
+fn v1_borrowed_bytes_adapter_lists_reads_and_verifies() {
+    let bytes = legacy_v1_store("legacy.bin", b"legacy-v1-payload");
+    let mut archive =
+        LmaArchive::from_source(Cursor::new(bytes.as_slice()), bytes.len() as u64).unwrap();
+
+    assert_eq!(archive.entries().len(), 1);
+    assert_eq!(archive.entries()[0].method, Method::Store);
+    assert_eq!(
+        archive.read_raw("legacy.bin").unwrap(),
+        b"legacy-v1-payload"
+    );
+    assert_eq!(
+        archive.read_decoded("legacy.bin").unwrap(),
+        b"legacy-v1-payload"
+    );
+    let verification = archive.verify().unwrap();
+    assert!(verification.passed());
+    assert!(verification.archive_path.is_none());
+}
+
+#[test]
+fn v1_file_and_mmap_facade_cover_read_extract_unpack_append_and_verify() {
+    let root = tempfile::tempdir().unwrap();
+    let archive_path = root.path().join("legacy.lma");
+    std::fs::write(
+        &archive_path,
+        legacy_v1_store("legacy.bin", b"legacy-v1-payload"),
+    )
+    .unwrap();
+
+    let mut buffered = LmaArchive::open(&archive_path).unwrap();
+    assert_eq!(buffered.entries().len(), 1);
+    assert_eq!(
+        buffered.read_raw("legacy.bin").unwrap(),
+        b"legacy-v1-payload"
+    );
+    assert!(buffered.verify().unwrap().passed());
+
+    let extracted = root.path().join("legacy-extracted.bin");
+    buffered.extract_to("legacy.bin", &extracted).unwrap();
+    assert_eq!(std::fs::read(&extracted).unwrap(), b"legacy-v1-payload");
+
+    let unpacked = root.path().join("legacy-unpacked");
+    buffered.unpack_to(&unpacked, true, false, None).unwrap();
+    assert_eq!(
+        std::fs::read(unpacked.join("legacy.bin")).unwrap(),
+        b"legacy-v1-payload"
+    );
+    drop(buffered);
+
+    let mut mapped = LmaArchive::open_mmap(&archive_path).unwrap();
+    assert_eq!(mapped.entries().len(), 1);
+    assert_eq!(
+        mapped.entry_bytes("legacy.bin").unwrap(),
+        b"legacy-v1-payload"
+    );
+    assert_eq!(mapped.read_raw("legacy.bin").unwrap(), b"legacy-v1-payload");
+    assert!(mapped.verify().unwrap().passed());
+    drop(mapped);
+
+    let extra = root.path().join("extra.png");
+    std::fs::write(&extra, b"v1-appended").unwrap();
+    LmaArchive::append_file(&archive_path, &extra, Some("extra.png"), 3, false, false).unwrap();
+    let mut upgraded = LmaArchive::open(&archive_path).unwrap();
+    assert_eq!(upgraded.entries().len(), 2);
+    assert_eq!(upgraded.read_raw("extra.png").unwrap(), b"v1-appended");
+    assert!(upgraded.verify().unwrap().passed());
+}
+
+#[test]
+fn v2_file_facade_covers_list_read_extract_unpack_append_and_verify() {
+    let (root, archive_path) = v2_fixture();
+    let mut archive = LmaArchive::open(&archive_path).unwrap();
+    assert_eq!(archive.entries().len(), 2);
+    assert_eq!(
+        archive.read_decoded("image.png").unwrap(),
+        b"stored-payload"
+    );
+    assert_eq!(
+        archive.read_decoded("notes.txt").unwrap(),
+        b"zstd payload with repeated repeated text"
+    );
+    assert_eq!(
+        archive.read_raw("notes.txt").unwrap(),
+        b"zstd payload with repeated repeated text"
+    );
+    assert!(archive.verify().unwrap().passed());
+
+    let extracted = root.path().join("single.png");
+    archive.extract_to("image.png", &extracted).unwrap();
+    assert_eq!(std::fs::read(extracted).unwrap(), b"stored-payload");
+
+    let unpacked = root.path().join("unpacked");
+    let summary = archive.unpack_to(&unpacked, true, false, None).unwrap();
+    assert_eq!(summary.n_files, 2);
+    assert_eq!(
+        std::fs::read(unpacked.join("image.png")).unwrap(),
+        b"stored-payload"
+    );
+
+    let extra = root.path().join("extra.png");
+    std::fs::write(&extra, b"appended").unwrap();
+    drop(archive);
+    LmaArchive::append_file(&archive_path, &extra, Some("extra.png"), 3, false, false).unwrap();
+    let verification = lma::verify_archive(&archive_path).unwrap();
+    assert!(verification.passed());
+    assert_eq!(verification.entries.len(), 3);
+
+    // Compatibility adapters remain behavior-preserving while callers migrate.
+    assert_eq!(lma::list_archive(&archive_path).unwrap().len(), 3);
+    assert_eq!(
+        lma::read_entry(&archive_path, "image.png").unwrap(),
+        b"stored-payload"
+    );
+}
+
+#[test]
+fn v2_mmap_facade_matches_buffered_file_result() {
+    let (_root, archive_path) = v2_fixture();
+    let mut mapped = LmaArchive::open_mmap(&archive_path).unwrap();
+    let mut buffered = LmaArchive::open(&archive_path).unwrap();
+
+    assert_eq!(
+        mapped
+            .entries()
+            .iter()
+            .map(|entry| &entry.path)
+            .collect::<Vec<_>>(),
+        buffered
+            .entries()
+            .iter()
+            .map(|entry| &entry.path)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(mapped.entry_bytes("image.png").unwrap(), b"stored-payload");
+    assert_eq!(
+        mapped.read_decoded("notes.txt").unwrap(),
+        buffered.read_decoded("notes.txt").unwrap()
+    );
+    assert_eq!(
+        mapped.verify().unwrap().passed(),
+        buffered.verify().unwrap().passed()
+    );
+}
+
+#[test]
+fn v1_and_v2_corruption_return_structured_verification_results() {
+    let (_root, archive_path) = v2_fixture();
+    let mut v2 = std::fs::read(&archive_path).unwrap();
+    v2[16] ^= 0x40;
+
+    let mut v1 = legacy_v1_store("legacy.bin", b"legacy-v1-payload");
+    let manifest_len = u32::from_le_bytes(v1[12..16].try_into().unwrap()) as usize;
+    v1[16 + manifest_len] ^= 0x40;
+
+    for bytes in [&v1, &v2] {
+        let mut archive =
+            LmaArchive::from_source(Cursor::new(bytes.as_slice()), bytes.len() as u64).unwrap();
+        let verification = archive.verify().unwrap();
+        assert!(!verification.archive_hash_matches);
+        assert!(!verification.passed());
+        assert!(verification.failed_entries() >= 1);
+    }
+}
+
+#[test]
+fn cli_verifier_contains_no_archive_layout_parser() {
+    let cli = include_str!("../src/bin/lml.rs");
+    let start = cli.find("fn cmd_verify_archive_explain").unwrap();
+    let end = cli[start..].find("fn cmd_encode_bounded_mae").unwrap() + start;
+    let verifier = &cli[start..end];
+    assert!(verifier.contains("workflows::verify_archive(input)"));
+    assert!(!verifier.contains("manifest_len"));
+    assert!(!verifier.contains("payload_start"));
+    assert!(!verifier.contains("SeekFrom"));
+    assert!(!verifier.contains("Sha256"));
+}
+
+#[test]
+fn archive_layout_parser_is_private_to_facade_construction() {
+    let archive = include_str!("../src/lma.rs");
+    assert_eq!(
+        archive.matches("read_lma_index(").count(),
+        1, // LmaArchive::from_source is the only parser call site
+        "only LmaArchive construction may call the parser"
+    );
+    assert!(archive.contains("fn read_lma_index<R: Read + Seek>("));
+    assert!(!archive.contains("pub fn read_lma_index"));
+    assert!(archive.contains("impl LmaArchive<MmapSource>"));
+    assert!(!archive.contains("pub struct MmapArchive"));
+}
