@@ -3517,7 +3517,7 @@ dependencies = [
 [[package]]
 name = "lamquant-config"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=a339ef768865d4b70c94f129d9d58171be4d5410#a339ef768865d4b70c94f129d9d58171be4d5410"
 dependencies = [
  "clap",
  "dirs",
@@ -3529,7 +3529,7 @@ dependencies = [
 [[package]]
 name = "lamquant-history"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=a339ef768865d4b70c94f129d9d58171be4d5410#a339ef768865d4b70c94f129d9d58171be4d5410"
 dependencies = [
  "fs2",
  "serde",
@@ -3718,7 +3718,7 @@ dependencies = [
 [[package]]
 name = "lamquant-ops"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=a339ef768865d4b70c94f129d9d58171be4d5410#a339ef768865d4b70c94f129d9d58171be4d5410"
 dependencies = [
  "blut-graph-core",
  "lamquant-history",
@@ -3745,7 +3745,7 @@ dependencies = [
 [[package]]
 name = "lamquant-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=a339ef768865d4b70c94f129d9d58171be4d5410#a339ef768865d4b70c94f129d9d58171be4d5410"
 dependencies = [
  "blake3",
  "blut-graph-core",
@@ -3778,7 +3778,7 @@ dependencies = [
 [[package]]
 name = "lamquant-tui"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=7aa9217c7f60079c5b5633be0ef8b99bf21ec904#7aa9217c7f60079c5b5633be0ef8b99bf21ec904"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=a339ef768865d4b70c94f129d9d58171be4d5410#a339ef768865d4b70c94f129d9d58171be4d5410"
 dependencies = [
  "crossterm 0.28.1",
  "lamquant-config",
