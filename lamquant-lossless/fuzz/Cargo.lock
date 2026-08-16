@@ -1254,7 +1254,6 @@ dependencies = [
  "indicatif",
  "lamquant-abir-codec",
  "lamquant-common",
- "lamquant-config",
  "lamquant-lml-desktop",
  "lamquant-lml-mcu",
  "lamquant-lml-optimum",
