@@ -168,7 +168,6 @@ cli = [
 tui = [
     "cli",
     "dep:lamquant-tui",
-    "dep:lamquant-config",
     "dep:serde_yaml",
     "dep:lamquant-ops",
 ]
@@ -279,7 +278,6 @@ lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant
 # layout, config, etc. Replaces the 37-file local tui/ module.
 lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "3db7b30eb553e4cc7a0284231bfffc4c47ae1147", optional = true }
 # Shared config crate — comment-preserving TOML with section-per-binary model.
-lamquant-config = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "3db7b30eb553e4cc7a0284231bfffc4c47ae1147", optional = true }
 
 # Host-only deps (gated by `host` feature).
 clap = { version = "4", features = ["derive"], optional = true }
