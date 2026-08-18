@@ -58,7 +58,7 @@ standard-nwb = [
 [dependencies]
 abir-adapter = { version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "83fb2a82f5cbcfefc8328d7842b50e16174ff37a", optional = true }
 blake3 = { version = "=1.8.2", default-features = false }
-blut-graph-core = { version = "=0.1.0-alpha.1", git = "https://github.com/Quitetall/blut.git", rev = "96be14ead9dd36b213a4543a5b8535d5a328c45b", default-features = false }
+blut-graph-core = { version = "=0.1.0-alpha.1", git = "https://github.com/Quitetall/blut.git", rev = "f5403b9d45585544f6d2f5d1a34e048915b2545d", default-features = false }
 ed25519-dalek = { version = "2.1", optional = true }
 fs2 = { version = "0.4.3", optional = true }
 lamquant-abir-codec = { version = "0.1.0", path = "../lamquant-abir-codec", default-features = false }
