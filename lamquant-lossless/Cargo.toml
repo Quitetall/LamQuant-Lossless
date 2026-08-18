@@ -29,7 +29,7 @@ crate-type = ["rlib"]
 [dev-dependencies]
 # Used by integration tests that need scratch dirs / spawn the lml binary.
 tempfile = "3"
-lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "80a974e9bb65a9d505efc0dd029fb568f43e6150", features = ["test-advanced-process"] }
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "db845d4be64258093e499996642b8928eccbf25f", features = ["test-advanced-process"] }
 # tests/cr_regression.rs parses tests/cr_baselines.json. Listed here
 # unconditionally so it's available regardless of which features the
 # host build enables.
@@ -273,10 +273,10 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 # Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
 # Host feature only; firmware never spawns subprocesses. Also used by the
 # binary for JSON event emission during encode (not just TUI).
-lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "80a974e9bb65a9d505efc0dd029fb568f43e6150", optional = true }
+lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "db845d4be64258093e499996642b8928eccbf25f", optional = true }
 # Shared TUI framework — all panels, Panel trait, AppState, Router, theme,
 # layout, config, etc. Replaces the 37-file local tui/ module.
-lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "80a974e9bb65a9d505efc0dd029fb568f43e6150", optional = true }
+lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "db845d4be64258093e499996642b8928eccbf25f", optional = true }
 # Shared config crate — comment-preserving TOML with section-per-binary model.
 
 # Host-only deps (gated by `host` feature).
