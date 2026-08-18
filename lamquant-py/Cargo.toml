@@ -20,7 +20,7 @@ crate-type = ["cdylib"]
 [dependencies]
 lamquant-abir-codec = { version = "0.1.0", path = "../crates/lamquant-abir-codec" }
 lml = { package = "lamquant-lml", version = "0.9.3", path = "../lamquant-lossless", features = ["archive"] }
-semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "974af90df978b5330c304eec79a2b368d83d7e85" }
+semantic-abir = { package = "abir", git = "https://github.com/Quitetall/ABIR.git", rev = "83fb2a82f5cbcfefc8328d7842b50e16174ff37a" }
 # ADR 0114 N2: the Neural Evidence Graph, exposed to Python as `PyNeg`. The
 # crate is pyo3-free (rlib); the typed Python boundary lives in this handle.
 lamquant-neg = { version = "0.1.0", path = "../crates/lamquant-neg" }
