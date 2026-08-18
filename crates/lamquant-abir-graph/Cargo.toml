@@ -23,8 +23,8 @@ std = ["semantic-abir/std", "blut-graph-core/std", "lamquant-abir-montage/std"]
 # ADR 0139 contract 4: blut-graph-core models ABIR by string convention and takes
 # NO ABIR dependency. That independence is correct and this crate preserves it --
 # the projection lives HERE, on the LamQuant side, depending on both.
-semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "6eee09ef630f11dc2aa02974fb0240adc421212a", default-features = false, features = ["alloc"] }
-blut-graph-core = { version = "=0.1.0-alpha.1", git = "https://github.com/Quitetall/blut.git", rev = "2163f746b803e2f36cc8fe68bd809ebe0a67f3a3", default-features = false }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "974af90df978b5330c304eec79a2b368d83d7e85", default-features = false, features = ["alloc"] }
+blut-graph-core = { version = "=0.1.0-alpha.1", git = "https://github.com/Quitetall/blut.git", rev = "5392bb9f8c51234afdb68cb4d349f5d9b26dc353", default-features = false }
 lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", default-features = false }
 
 [dev-dependencies]
