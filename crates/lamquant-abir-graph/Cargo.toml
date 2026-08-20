@@ -24,7 +24,14 @@ std = ["semantic-abir/std", "blut-graph-core/std", "lamquant-abir-montage/std"]
 # NO ABIR dependency. That independence is correct and this crate preserves it --
 # the projection lives HERE, on the LamQuant side, depending on both.
 semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "83fb2a82f5cbcfefc8328d7842b50e16174ff37a", default-features = false, features = ["alloc"] }
-blut-graph-core = { version = "=0.1.0-alpha.1", git = "https://github.com/Quitetall/blut.git", rev = "33b3e047fd8eae50c4f706e7e3c7f4a3648a5778", default-features = false }
+# From crates.io, NOT a git pin on a private repository. This repository is
+# PUBLIC, and a `git = .../blut.git` dependency made it unbuildable by anyone
+# without access to that private repo -- verified, `cargo build` exits 101 even
+# when the dependency is optional and unused. Published 2026-08-20 as
+# blut-graph-core 0.1.0-alpha.1, whose source tree hashes 627dd0ce, byte
+# identical to the revision this line used to pin, so the swap changes nothing
+# that is built. The meta patches this back to its worktree path.
+blut-graph-core = { version = "=0.1.0-alpha.1", default-features = false }
 lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", default-features = false }
 
 [dev-dependencies]
