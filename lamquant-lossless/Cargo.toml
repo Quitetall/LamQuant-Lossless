@@ -91,7 +91,9 @@ required-features = ["host"]
 [[bin]]
 name = "lml"
 path = "src/bin/lml.rs"
-required-features = ["host"]
+# NOT ["host"] -- host pulls the interactive shell, and with it a private
+# dependency. The binary needs `lml-bin`; the shell is additive.
+required-features = ["lml-bin"]
 
 # `lamquant` umbrella binary moved to meta-repo /lamquant/ crate per
 # ADR 0026 (W2 phase A.6). LamQuant-Lossless now ships ONLY the lml
@@ -155,6 +157,9 @@ oracle = ["archive"]
 cli = [
     "archive",
     "dep:clap",
+    # PCCP YAML registry parsing, used by `lml` subcommands. Previously reached
+    # only through `tui`, which is why a CLI-only build could not compile it.
+    "dep:serde_yaml",
     "dep:clap_complete",
     "dep:clap_mangen",
     "dep:indicatif",
@@ -162,14 +167,21 @@ cli = [
     "dep:tracing-subscriber",
 ]
 
+# ── plan — emit plan projections as JSON, no terminal UI ─────────────────────
+# Split out of `tui` (ADR 0185 phase 2). Emitting a machine-readable event
+# stream never needed a terminal, and folding the two together meant
+# `--emit-plan-projections` could not be had without pulling in the whole
+# interactive shell. They are now independent, so a consumer that only wants
+# the JSON contract takes `cli,plan` and links no UI at all.
+plan = ["dep:lamquant-plan"]
+
 # ── Level 3: tui — cli + interactive TUI panels ──────────────────────────────
-# Enables: shared TUI framework (lamquant-tui), IPC event bus (lamquant-ops),
-#          PCCP YAML registry parsing.
+# Enables: shared TUI framework (lamquant-tui), plan projections, PCCP YAML
+# registry parsing.
 tui = [
     "cli",
+    "plan",
     "dep:lamquant-tui",
-    "dep:serde_yaml",
-    "dep:lamquant-ops",
 ]
 
 # ── security — archive + encryption / signing primitives ────────────────────
@@ -185,10 +197,18 @@ security = [
     "dep:getrandom",
 ]
 
+# ── lml-bin: everything the `lml` BINARY itself needs ───────────────────────
+# The interactive shell is deliberately NOT in here. It was one call site in
+# src/bin/lml.rs, and requiring it made the flagship binary of a PUBLIC
+# repository unbuildable without access to a private one (#120, ADR 0185).
+# Every dependency reachable from here is crates.io or in-repo, so
+# `--no-default-features --features lml-bin` builds `lml` from a bare clone.
+lml-bin = ["cli", "plan", "security"]
+
 # ── host: full lml CLI + TUI + security (backward-compat alias) ─────────────
 # Enables everything. cargo install lamquant-lml gives you lml with all
 # subcommands including encrypt/sign and the interactive TUI.
-host = ["tui", "security"]
+host = ["lml-bin", "tui", "security"]
 
 # ── Optional heavy extensions ────────────────────────────────────────────────
 # Phase 6 — async + network. tokio + reqwest + notify filesystem watcher.
@@ -270,10 +290,15 @@ lamquant-lml-desktop = { version = "0.9.3", path = "../lamquant-lml-desktop", de
 sha2 = { version = "0.10", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
-# Shared op-runner contract — see specs/ui-parity.md and crates/lamquant-ops.
-# Host feature only; firmware never spawns subprocesses. Also used by the
-# binary for JSON event emission during encode (not just TUI).
-lamquant-ops = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "ac642d73605aca140a9882256c90819157068cc8", optional = true }
+# The plan-projection wire vocabulary. IN-REPO, not the meta's `lamquant-ops`
+# it used to come from: this is a PUBLIC repository, and a production
+# dependency on a private one made it unbuildable for everyone outside the
+# owning account (ADR 0185, issue #120). `lamquant-ops` still re-exports these
+# same types from here, so every meta-side call site is unaffected and the two
+# spellings remain ONE type -- no duplicate-link E0308 at the seam.
+#
+# Host feature only; firmware never emits projections.
+lamquant-plan = { version = "0.1.0", path = "../crates/lamquant-plan", optional = true }
 # Shared TUI framework — all panels, Panel trait, AppState, Router, theme,
 # layout, config, etc. Replaces the 37-file local tui/ module.
 lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "ac642d73605aca140a9882256c90819157068cc8", optional = true }

@@ -191,7 +191,7 @@ fn mixed_bcs2_and_lma2_result_without_process_capture() {
     assert!(saw_lma2, "batch missed LMA archive path");
 }
 
-#[cfg(feature = "archive")]
+#[cfg(all(feature = "archive", feature = "plan"))]
 #[test]
 fn corruption_is_explicit_in_workflow_report() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -209,8 +209,8 @@ fn corruption_is_explicit_in_workflow_report() {
     let updates = failed.to_plan_updates();
     assert!(updates.iter().any(|update| matches!(
         update,
-        lamquant_ops::PlanUpdate::Diagnostic {
-            level: lamquant_ops::DiagnosticLevel::Error,
+        lamquant_plan::PlanUpdate::Diagnostic {
+            level: lamquant_plan::DiagnosticLevel::Error,
             message,
             ..
         } if message.contains("verification failed")
@@ -220,7 +220,7 @@ fn corruption_is_explicit_in_workflow_report() {
 #[cfg(all(feature = "archive", feature = "tui"))]
 #[test]
 fn tui_plan_projection_from_workflows_can_update_appstate() {
-    use lamquant_ops::PlanIdentity;
+    use lamquant_plan::PlanIdentity;
     use lamquant_tui::state::AppState;
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -244,13 +244,51 @@ fn tui_plan_projection_from_workflows_can_update_appstate() {
     let mut state = AppState::new();
     for projection in projections {
         match projection.update {
-            lamquant_ops::PlanUpdate::Artifact { .. } => {}
+            lamquant_plan::PlanUpdate::Artifact { .. } => {}
             _ => panic!("expected workflow to emit artifact updates"),
         }
         projection.validate().expect("valid projection");
-        state.apply_plan_projection(&projection);
+        state.apply_plan_projection(&to_shell_projection(&projection));
     }
-    assert_eq!(state.op_last_artifact.as_ref(), Some(&expected_last));
+    assert_artifact_matches(&state, &expected_last);
+}
+
+/// Carry a codec projection across the codec/shell boundary the way it is
+/// actually carried in production: as a JSON wire line.
+///
+/// The codec emits `lamquant_plan::PlanProjection`; the shell consumes
+/// `lamquant_tui::operations::PlanProjection`. Those were the SAME Rust type
+/// only because the shell happened to be resolved from a revision that still
+/// defined it, and asserting through that coincidence tested the linker rather
+/// than the contract. The contract is the line on stdout -- so serialise, parse,
+/// and let a wire-format break fail here instead of in the field.
+#[cfg(all(feature = "archive", feature = "tui"))]
+fn to_shell_projection(
+    projection: &lamquant_plan::PlanProjection,
+) -> lamquant_tui::operations::PlanProjection {
+    let line = projection
+        .to_json_line()
+        .expect("codec projection serialises to a wire line");
+    lamquant_tui::operations::PlanProjection::from_json_line(&line)
+        .expect("shell parses the codec's wire line")
+}
+
+/// Compare the shell's recorded artifact against the codec's expectation by
+/// VALUE, for the same reason: the two `ArtifactProjection` types are distinct
+/// to rustc but identical on the wire, and the wire is what ships.
+#[cfg(all(feature = "archive", feature = "tui"))]
+fn assert_artifact_matches(
+    state: &lamquant_tui::state::AppState,
+    expected: &lamquant_plan::ArtifactProjection,
+) {
+    let observed = state
+        .op_last_artifact
+        .as_ref()
+        .expect("shell recorded an artifact");
+    assert_eq!(
+        serde_json::to_value(observed).expect("shell artifact serialises"),
+        serde_json::to_value(expected).expect("codec artifact serialises"),
+    );
 }
 
 #[cfg(feature = "archive")]
@@ -277,7 +315,7 @@ fn architecture_assert_cli_should_dispatch_to_workflows() {
 #[cfg(all(feature = "archive", feature = "tui"))]
 #[test]
 fn compact_explain_json_and_tui_share_verification_semantics() {
-    use lamquant_ops::{PlanIdentity, PlanProjection, PlanUpdate};
+    use lamquant_plan::{PlanIdentity, PlanProjection, PlanUpdate};
     use lamquant_tui::state::AppState;
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -371,8 +409,8 @@ fn compact_explain_json_and_tui_share_verification_semantics() {
         invocation_id: "33".repeat(32),
     };
     let mut state = AppState::new();
-    state.apply_plan_projection(&item.to_plan_projection(&identity));
-    assert_eq!(state.op_last_artifact.as_ref(), Some(&expected));
+    state.apply_plan_projection(&to_shell_projection(&item.to_plan_projection(&identity)));
+    assert_artifact_matches(&state, &expected);
 }
 
 #[cfg(feature = "archive")]

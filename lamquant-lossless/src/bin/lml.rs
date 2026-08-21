@@ -9,7 +9,12 @@
 
 use clap::{Parser, Subcommand};
 use lamquant_core::deployment::LosslessMode;
-use lamquant_core::{container, edf, lma, lma_forensic, lml, tui, workflows};
+use lamquant_core::{container, edf, lma, lma_forensic, lml, workflows};
+// The interactive shell is additive: a build without it still ships every
+// subcommand. Importing it unconditionally is what made `lml` unbuildable
+// without the private shell crate (#120).
+#[cfg(feature = "tui")]
+use lamquant_core::tui;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::io::{BufWriter, Write};
@@ -1214,7 +1219,7 @@ enum PccpAction {
 /// arg; queried by emit_* helpers so call sites in encode loops can call
 /// them unconditionally and incur zero cost when emission is off.
 static EMIT_PROJECTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static PROJECTION_IDENTITY: std::sync::OnceLock<lamquant_ops::PlanIdentity> =
+static PROJECTION_IDENTITY: std::sync::OnceLock<lamquant_plan::PlanIdentity> =
     std::sync::OnceLock::new();
 
 /// Phase 1.7 — process-global `--fail-fast` flag. Default false
@@ -1414,7 +1419,7 @@ fn init_projection_identity() -> Result<(), String> {
         std::env::var(name)
             .map_err(|_| format!("--emit-plan-projections requires environment variable {name}"))
     };
-    let identity = lamquant_ops::PlanIdentity {
+    let identity = lamquant_plan::PlanIdentity {
         graph_id: required("LAMQUANT_GRAPH_ID")?,
         plan_id: required("LAMQUANT_PLAN_ID")?,
         invocation_id: required("LAMQUANT_INVOCATION_ID")?,
@@ -1427,12 +1432,12 @@ fn init_projection_identity() -> Result<(), String> {
         .map_err(|_| "plan projection identity initialized twice".into())
 }
 
-fn emit_projection(update: lamquant_ops::PlanUpdate) {
+fn emit_projection(update: lamquant_plan::PlanUpdate) {
     let Some(identity) = PROJECTION_IDENTITY.get() else {
         eprintln!("Error: plan projection identity is unavailable");
         return;
     };
-    let projection = lamquant_ops::PlanProjection::new(identity.clone(), update);
+    let projection = lamquant_plan::PlanProjection::new(identity.clone(), update);
     if let Err(error) = projection.validate() {
         eprintln!("Error: invalid plan projection: {error}");
         return;
@@ -1459,9 +1464,9 @@ fn emit_file_done(
     sha256: Option<String>,
     n_windows: Option<u32>,
 ) {
-    emit_projection(lamquant_ops::PlanUpdate::Artifact {
+    emit_projection(lamquant_plan::PlanUpdate::Artifact {
         node_id: 0,
-        artifact: lamquant_ops::ArtifactProjection {
+        artifact: lamquant_plan::ArtifactProjection {
             path: path.into(),
             success,
             elapsed_ms: ms,
@@ -1480,7 +1485,7 @@ fn emit_file_done(
 
 /// Declare the codec operation inside its supervising one-node plan.
 fn emit_started(op_id: &str, total: Option<u64>) {
-    emit_projection(lamquant_ops::PlanUpdate::Planned {
+    emit_projection(lamquant_plan::PlanUpdate::Planned {
         operation: op_id.into(),
         total_nodes: 1,
         total_work: total,
@@ -1490,9 +1495,9 @@ fn emit_started(op_id: &str, total: Option<u64>) {
 /// Emit a human-readable diagnostic observation.
 #[allow(dead_code)]
 pub(crate) fn emit_log(message: impl Into<String>) {
-    emit_projection(lamquant_ops::PlanUpdate::Diagnostic {
+    emit_projection(lamquant_plan::PlanUpdate::Diagnostic {
         node_id: Some(0),
-        level: lamquant_ops::DiagnosticLevel::Info,
+        level: lamquant_plan::DiagnosticLevel::Info,
         message: message.into(),
     });
 }
@@ -1500,7 +1505,7 @@ pub(crate) fn emit_log(message: impl Into<String>) {
 /// Emit a bounded work-progress observation.
 #[allow(dead_code)]
 pub(crate) fn emit_progress(current: u64, total: u64, message: impl Into<String>) {
-    emit_projection(lamquant_ops::PlanUpdate::Progress {
+    emit_projection(lamquant_plan::PlanUpdate::Progress {
         node_id: 0,
         current,
         total,
@@ -1512,11 +1517,11 @@ pub(crate) fn emit_progress(current: u64, total: u64, message: impl Into<String>
 /// receipt or failure after process exit.
 fn emit_terminal(code: i32, summary: &str) {
     let level = if code == 0 {
-        lamquant_ops::DiagnosticLevel::Info
+        lamquant_plan::DiagnosticLevel::Info
     } else {
-        lamquant_ops::DiagnosticLevel::Error
+        lamquant_plan::DiagnosticLevel::Error
     };
-    emit_projection(lamquant_ops::PlanUpdate::Diagnostic {
+    emit_projection(lamquant_plan::PlanUpdate::Diagnostic {
         node_id: Some(0),
         level,
         message: summary.into(),
@@ -1653,7 +1658,7 @@ fn main() {
         }
         if let Some(cmd) = cli.command.as_ref() {
             let operation = op_id_of(cmd);
-            if !lamquant_ops::is_canonical_operation_id(operation) {
+            if !lamquant_plan::is_canonical_operation_id(operation) {
                 eprintln!(
                     "Error: --emit-plan-projections is unavailable for non-registry operation '{operation}'"
                 );
@@ -1665,8 +1670,22 @@ fn main() {
     let op_id_for_terminal = cli.command.as_ref().map(op_id_of).unwrap_or("interactive");
     let result = match cli.command {
         None => {
-            // No subcommand → interactive TUI
-            std::process::exit(tui::run_interactive());
+            // No subcommand → interactive TUI, when this build has one.
+            #[cfg(feature = "tui")]
+            {
+                std::process::exit(tui::run_interactive());
+            }
+            // This single call was the ONLY thing tying the `lml` binary to the
+            // interactive shell, and through it to a private repository -- which
+            // is why a public codec could not be built by anyone outside the
+            // owning account (#120). Say plainly that the shell is absent rather
+            // than exiting 0 as though the user had asked for nothing.
+            #[cfg(not(feature = "tui"))]
+            {
+                eprintln!("Error: this build has no interactive shell.");
+                eprintln!("Run `lml --help` for the commands, or rebuild with `--features tui`.");
+                std::process::exit(2);
+            }
         }
         Some(cmd) => match cmd {
             Commands::Encode {
@@ -10260,7 +10279,7 @@ mod tests {
             encode_operation_id(true, false),
             encode_operation_id(false, true),
         ] {
-            assert!(lamquant_ops::is_canonical_operation_id(operation));
+            assert!(lamquant_plan::is_canonical_operation_id(operation));
         }
         assert_eq!(encode_operation_id(false, false), "encode_lma");
         assert_eq!(encode_operation_id(true, false), "encode_lml_siblings");

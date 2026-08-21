@@ -62,8 +62,8 @@ impl VerificationItem {
         }
     }
 
-    #[cfg(feature = "tui")]
-    pub fn to_artifact_projection(&self) -> lamquant_ops::ArtifactProjection {
+    #[cfg(feature = "plan")]
+    pub fn to_artifact_projection(&self) -> lamquant_plan::ArtifactProjection {
         match &self.outcome {
             VerificationOutcome::Container { header, file_size } => {
                 let raw_bytes = header
@@ -75,7 +75,7 @@ impl VerificationItem {
                 } else {
                     0.0
                 };
-                lamquant_ops::ArtifactProjection {
+                lamquant_plan::ArtifactProjection {
                     path: self.path.display().to_string(),
                     success: true,
                     elapsed_ms: self.elapsed_ms as u64,
@@ -94,7 +94,7 @@ impl VerificationItem {
             }
             VerificationOutcome::Archive(verification) => {
                 let reconstructed = verification.reconstructed_bytes();
-                lamquant_ops::ArtifactProjection {
+                lamquant_plan::ArtifactProjection {
                     path: self.path.display().to_string(),
                     success: verification.passed(),
                     elapsed_ms: self.elapsed_ms as u64,
@@ -113,7 +113,7 @@ impl VerificationItem {
                     window_count: None,
                 }
             }
-            VerificationOutcome::Failed { .. } => lamquant_ops::ArtifactProjection {
+            VerificationOutcome::Failed { .. } => lamquant_plan::ArtifactProjection {
                 path: self.path.display().to_string(),
                 success: false,
                 elapsed_ms: self.elapsed_ms as u64,
@@ -130,33 +130,33 @@ impl VerificationItem {
         }
     }
 
-    #[cfg(feature = "tui")]
-    pub fn to_plan_update(&self) -> lamquant_ops::PlanUpdate {
-        lamquant_ops::PlanUpdate::Artifact {
+    #[cfg(feature = "plan")]
+    pub fn to_plan_update(&self) -> lamquant_plan::PlanUpdate {
+        lamquant_plan::PlanUpdate::Artifact {
             node_id: 0,
             artifact: self.to_artifact_projection(),
         }
     }
 
-    #[cfg(feature = "tui")]
-    pub fn to_plan_updates(&self) -> Vec<lamquant_ops::PlanUpdate> {
+    #[cfg(feature = "plan")]
+    pub fn to_plan_updates(&self) -> Vec<lamquant_plan::PlanUpdate> {
         let mut updates = vec![self.to_plan_update()];
         if let Some(message) = self.failure_diagnostic() {
-            updates.push(lamquant_ops::PlanUpdate::Diagnostic {
+            updates.push(lamquant_plan::PlanUpdate::Diagnostic {
                 node_id: Some(0),
-                level: lamquant_ops::DiagnosticLevel::Error,
+                level: lamquant_plan::DiagnosticLevel::Error,
                 message,
             });
         }
         updates
     }
 
-    #[cfg(feature = "tui")]
+    #[cfg(feature = "plan")]
     pub fn to_plan_projection(
         &self,
-        identity: &lamquant_ops::PlanIdentity,
-    ) -> lamquant_ops::PlanProjection {
-        lamquant_ops::PlanProjection::new(identity.clone(), self.to_plan_update())
+        identity: &lamquant_plan::PlanIdentity,
+    ) -> lamquant_plan::PlanProjection {
+        lamquant_plan::PlanProjection::new(identity.clone(), self.to_plan_update())
     }
 
     fn failure_diagnostic(&self) -> Option<String> {
@@ -230,17 +230,17 @@ impl VerificationReport {
         self.legacy_single_archive_rendering
     }
 
-    #[cfg(feature = "tui")]
+    #[cfg(feature = "plan")]
     pub fn to_plan_projections(
         &self,
-        identity: &lamquant_ops::PlanIdentity,
-    ) -> Vec<lamquant_ops::PlanProjection> {
+        identity: &lamquant_plan::PlanIdentity,
+    ) -> Vec<lamquant_plan::PlanProjection> {
         self.items
             .iter()
             .flat_map(|item| {
                 item.to_plan_updates()
                     .into_iter()
-                    .map(|update| lamquant_ops::PlanProjection::new(identity.clone(), update))
+                    .map(|update| lamquant_plan::PlanProjection::new(identity.clone(), update))
             })
             .collect()
     }
