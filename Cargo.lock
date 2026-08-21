@@ -926,7 +926,8 @@ dependencies = [
 [[package]]
 name = "blut-graph-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=33b3e047fd8eae50c4f706e7e3c7f4a3648a5778#33b3e047fd8eae50c4f706e7e3c7f4a3648a5778"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6c2ae5cf3a5c472aa179d078b8858f0ea888063981d4740f89cf7057d57badb"
 dependencies = [
  "blake3",
  "postcard",
@@ -3503,7 +3504,7 @@ name = "lamquant-abir-graph"
 version = "0.1.0"
 dependencies = [
  "abir",
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=33b3e047fd8eae50c4f706e7e3c7f4a3648a5778)",
+ "blut-graph-core 0.1.0-alpha.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "lamquant-abir-montage",
  "serde_json",
 ]
@@ -3708,7 +3709,7 @@ dependencies = [
  "abir-adapter",
  "abir-bcs",
  "blake3",
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=33b3e047fd8eae50c4f706e7e3c7f4a3648a5778)",
+ "blut-graph-core 0.1.0-alpha.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "criterion",
  "ed25519-dalek",
  "flate2",
@@ -3736,6 +3737,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "lamquant-plan"
+version = "0.1.0"
+dependencies = [
+ "blut-graph-core 0.1.0-alpha.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

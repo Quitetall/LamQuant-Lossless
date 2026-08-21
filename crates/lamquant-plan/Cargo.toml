@@ -1,0 +1,39 @@
+# The plan-projection wire vocabulary, moved here from the PRIVATE meta-repo's
+# `lamquant-ops` crate. ADR 0185 phase 2.
+#
+# codec-lossless is public and declared production dependencies on
+# github.com/Quitetall/LamQuant, so nobody outside the owning account could
+# build it. This crate is the half of `lamquant-ops` a public consumer actually
+# needs -- pure data, no process spawning, no sockets.
+#
+# IT LIVES HERE AND NOT IN ABIR, which was the first choice. ABIR pins
+# rust-toolchain 1.81 to carry the riscv32imac target for ADR 0140's MCU gate,
+# and blut-graph-core is edition 2024 / MSRV 1.88 -- hosting it there would have
+# forced a toolchain bump straight through that gate. ABIR was chosen to avoid a
+# mutual pin between the meta and this repository; removing lamquant-ops and
+# lamquant-tui from here deletes the lossless -> meta edge entirely, so the
+# mutual pin cannot form and the constraint no longer applies. The remaining
+# edge, meta -> lossless, is layer 3 -> 1 (downward) and private -> public.
+
+[package]
+name = "lamquant-plan"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+description = "Stable JSON projection of compiled plan observations and terminal receipts, plus the canonical operation-id registry."
+
+[dependencies]
+# From crates.io, published 2026-08-20. NOT a git pin: a public crate that
+# git-depends on a private repository is unbuildable for everyone else, which
+# is the defect this whole move exists to remove.
+blut-graph-core = { version = "=0.1.0-alpha.1" }
+# std, matching the lamquant-ops crate this came from: `projection.rs` uses
+# serde_json in NON-test code (validate_top_level_keys), so serde_json is a
+# regular dependency here rather than a dev one.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "lamquant_plan"
+path = "src/lib.rs"
