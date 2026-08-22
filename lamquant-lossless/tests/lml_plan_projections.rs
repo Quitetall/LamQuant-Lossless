@@ -1,46 +1,30 @@
 //! Codec CLI plan-projection contract.
+//!
+//! These assert what the `lml` BINARY emits: that `--emit-plan-projections`
+//! writes nothing but conforming JSON to stdout, that every line shares one
+//! plan identity, and that the canonical operation ids agree across the Rust
+//! registry, the JSON Schema and the UI parity spec.
+//!
+//! The vocabulary comes from `lamquant-plan`, which is in THIS repository.
+//! It used to come from `lamquant_ops`, in the private meta-repository, which
+//! made a public crate unbuildable for anyone outside the owning account
+//! (ADR 0185, issue #120). `lamquant_ops` only ever re-exported these types
+//! from `lamquant_plan` -- `crates/lamquant-ops/src/lib.rs:33` is a
+//! `pub use lamquant_plan::{...}` -- so this is the same type, reached
+//! directly instead of through a private hop.
+//!
+//! A fourth test lived here and has MOVED rather than been dropped:
+//! `supervising_plan_owns_terminal_failure_receipt` exercised
+//! `spawn_advanced_command` + `bounded_channel`, which are the launcher's
+//! process runner and channel sink. Those deliberately stayed in
+//! `lamquant-ops` when the vocabulary moved out, because they spawn processes
+//! and open sockets. A test of the launcher supervising a plan is not a test
+//! of this codec, and it now lives beside the code it exercises at
+//! `crates/lamquant-ops/tests/supervising_plan_receipt.rs`.
 
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
-use lamquant_ops::{
-    bounded_channel, spawn_advanced_command, DiagnosticLevel, PlanProjection, PlanUpdate,
-};
-
-fn with_current_history<T>(run: impl FnOnce() -> T) -> T {
-    static HISTORY_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = HISTORY_ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let directory = tempfile::tempdir().expect("temporary history directory");
-    let path = directory.path().join("history.json");
-    std::fs::write(
-        &path,
-        r#"{
-  "schema_version": "2.0",
-  "parity_version": 2,
-  "recent_operations": [],
-  "recent_paths": {"inputs": [], "outputs": []},
-  "interrupted": false,
-  "last_op": null,
-  "last_input": null,
-  "last_output": null
-}"#,
-    )
-    .expect("write current history");
-    let previous = std::env::var_os("LAMQUANT_HISTORY");
-    unsafe {
-        std::env::set_var("LAMQUANT_HISTORY", &path);
-    }
-    let result = run();
-    match previous {
-        Some(value) => unsafe { std::env::set_var("LAMQUANT_HISTORY", value) },
-        None => unsafe { std::env::remove_var("LAMQUANT_HISTORY") },
-    }
-    result
-}
+use lamquant_plan::{DiagnosticLevel, PlanProjection, PlanUpdate};
 
 fn lml_path() -> std::path::PathBuf {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -99,7 +83,7 @@ fn canonical_operation_ids_match_rust_schema_and_ui_spec() {
         .filter_map(|line| line.trim().strip_prefix("- `")?.strip_suffix('`'))
         .collect();
 
-    assert_eq!(lamquant_ops::canonical_operation_ids(), schema_ids);
+    assert_eq!(lamquant_plan::canonical_operation_ids(), schema_ids);
     assert_eq!(schema_ids, ui_ids);
 }
 
@@ -129,32 +113,6 @@ fn direct_codec_stream_is_identity_bound_observations() {
             ..
         }
     ));
-}
-
-#[test]
-fn supervising_plan_owns_terminal_failure_receipt() {
-    let (sink, receiver) = bounded_channel();
-    let _handle = with_current_history(|| {
-        spawn_advanced_command("info".into(), "false".into(), vec![], sink)
-            .expect("compile supervising plan")
-    });
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if let Ok(projection) = receiver.recv_timeout(Duration::from_millis(100)) {
-            if let PlanUpdate::Failure {
-                receipt, cancelled, ..
-            } = &projection.update
-            {
-                assert!(!cancelled);
-                assert_eq!(receipt.graph_id, projection.plan.graph_id);
-                assert_eq!(receipt.plan_id, projection.plan.plan_id);
-                assert_eq!(receipt.invocation_id, projection.plan.invocation_id);
-                projection.validate().expect("valid terminal receipt");
-                return;
-            }
-        }
-    }
-    panic!("expected supervising terminal failure receipt");
 }
 
 #[test]
