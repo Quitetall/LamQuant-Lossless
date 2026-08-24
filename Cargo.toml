@@ -50,3 +50,17 @@ exclude = [
 
 # Firmware-specific profiles (firmware, firmware-dev) moved to the
 # LamQuant-Firmware submodule workspace (ADR 0026 phase B.1, 2026-05-30).
+
+# `lamquant-plan` LIVES HERE, but the meta's crates reach it by a path that
+# points back into this submodule (`../../codec-lossless/crates/lamquant-plan`).
+# When cargo fetches `lamquant-tui`/`lamquant-ops` from the LamQuant git remote
+# it clones that repo WITH submodules, so the path resolves inside the meta's
+# own checkout and this workspace ends up linking two `lamquant-plan 0.1.0` --
+# the local crate and the one under the meta. Two copies of one version are two
+# unrelated types to rustc, which is the E0308-at-the-seam failure the
+# `lamquant-plan` dependency block above exists to prevent.
+#
+# Patching it back to the local path is the same move the meta makes for its own
+# crates, and for the same reason (ADR 0178).
+[patch."https://github.com/Quitetall/LamQuant.git"]
+lamquant-plan = { path = "crates/lamquant-plan" }

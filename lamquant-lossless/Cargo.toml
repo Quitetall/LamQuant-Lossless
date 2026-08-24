@@ -321,7 +321,7 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 lamquant-plan = { version = "0.1.0", path = "../crates/lamquant-plan", optional = true }
 # Shared TUI framework — all panels, Panel trait, AppState, Router, theme,
 # layout, config, etc. Replaces the 37-file local tui/ module.
-lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "ac642d73605aca140a9882256c90819157068cc8", optional = true }
+lamquant-tui = { version = "0.1.0", git = "https://github.com/Quitetall/LamQuant.git", rev = "8b471943", optional = true }
 # Shared config crate — comment-preserving TOML with section-per-binary model.
 
 # Host-only deps (gated by `host` feature).

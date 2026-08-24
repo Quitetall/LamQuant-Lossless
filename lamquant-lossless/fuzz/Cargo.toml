@@ -39,3 +39,12 @@ doc = false
 name = "lma_manifest"
 path = "fuzz_targets/lma_manifest.rs"
 doc = false
+
+# Same reason as the parent workspace's patch: `lamquant-plan` lives in this
+# repository, but the meta's crates reach it by a path back into this submodule,
+# and cargo clones the meta WITH submodules. Without this, the fuzz workspace
+# links two `lamquant-plan 0.1.0`. A fuzz target that builds against a different
+# copy of the projection types than the crate under test is testing the wrong
+# thing. `[patch]` does not inherit across workspace roots, so it is restated.
+[patch."https://github.com/Quitetall/LamQuant.git"]
+lamquant-plan = { path = "../../crates/lamquant-plan" }

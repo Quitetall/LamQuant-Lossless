@@ -935,16 +935,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blut-graph-core"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/Quitetall/blut.git?rev=f5403b9d45585544f6d2f5d1a34e048915b2545d#f5403b9d45585544f6d2f5d1a34e048915b2545d"
-dependencies = [
- "blake3",
- "postcard",
- "serde",
-]
-
-[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3504,7 +3494,7 @@ name = "lamquant-abir-graph"
 version = "0.1.0"
 dependencies = [
  "abir",
- "blut-graph-core 0.1.0-alpha.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "blut-graph-core",
  "lamquant-abir-montage",
  "serde_json",
 ]
@@ -3528,7 +3518,7 @@ dependencies = [
 [[package]]
 name = "lamquant-config"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=ac642d73605aca140a9882256c90819157068cc8#ac642d73605aca140a9882256c90819157068cc8"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=8b471943#8b471943cecaeb9a0c95e81033ab3ecd0c9bcee5"
 dependencies = [
  "clap",
  "dirs",
@@ -3538,9 +3528,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lamquant-config-schema"
+version = "0.1.0"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=8b471943#8b471943cecaeb9a0c95e81033ab3ecd0c9bcee5"
+dependencies = [
+ "lamquant-config",
+ "serde",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "lamquant-history"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=ac642d73605aca140a9882256c90819157068cc8#ac642d73605aca140a9882256c90819157068cc8"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=8b471943#8b471943cecaeb9a0c95e81033ab3ecd0c9bcee5"
 dependencies = [
  "fs2",
  "serde",
@@ -3709,7 +3709,7 @@ dependencies = [
  "abir-adapter",
  "abir-bcs",
  "blake3",
- "blut-graph-core 0.1.0-alpha.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "blut-graph-core",
  "criterion",
  "ed25519-dalek",
  "flate2",
@@ -3728,10 +3728,11 @@ dependencies = [
 [[package]]
 name = "lamquant-ops"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=ac642d73605aca140a9882256c90819157068cc8#ac642d73605aca140a9882256c90819157068cc8"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=8b471943#8b471943cecaeb9a0c95e81033ab3ecd0c9bcee5"
 dependencies = [
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=f5403b9d45585544f6d2f5d1a34e048915b2545d)",
+ "blut-graph-core",
  "lamquant-history",
+ "lamquant-plan",
  "lamquant-runtime",
  "libc",
  "serde",
@@ -3743,7 +3744,7 @@ dependencies = [
 name = "lamquant-plan"
 version = "0.1.0"
 dependencies = [
- "blut-graph-core 0.1.0-alpha.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "blut-graph-core",
  "serde",
  "serde_json",
 ]
@@ -3764,10 +3765,10 @@ dependencies = [
 [[package]]
 name = "lamquant-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=ac642d73605aca140a9882256c90819157068cc8#ac642d73605aca140a9882256c90819157068cc8"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=8b471943#8b471943cecaeb9a0c95e81033ab3ecd0c9bcee5"
 dependencies = [
  "blake3",
- "blut-graph-core 0.1.0-alpha.1 (git+https://github.com/Quitetall/blut.git?rev=f5403b9d45585544f6d2f5d1a34e048915b2545d)",
+ "blut-graph-core",
  "command-group",
  "ed25519-dalek",
  "libc",
@@ -3797,12 +3798,13 @@ dependencies = [
 [[package]]
 name = "lamquant-tui"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant.git?rev=ac642d73605aca140a9882256c90819157068cc8#ac642d73605aca140a9882256c90819157068cc8"
+source = "git+https://github.com/Quitetall/LamQuant.git?rev=8b471943#8b471943cecaeb9a0c95e81033ab3ecd0c9bcee5"
 dependencies = [
  "crossterm 0.28.1",
- "lamquant-config",
+ "lamquant-config-schema",
  "lamquant-history",
  "lamquant-ops",
+ "lamquant-plan",
  "ratatui",
  "ratatui-textarea",
  "serde",
