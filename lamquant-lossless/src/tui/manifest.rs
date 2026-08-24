@@ -71,15 +71,17 @@ const PANELS: &[PanelRegistration] = &[];
 pub const fn lml() -> ShellManifest {
     ShellManifest {
         build_label: "lml",
-        // NOT `SCREEN_CODEC_HUB`, yet. ADR 0053's Context section names this as
-        // the noncompliance: "Running `lml` with no args boots into a mini-hub
-        // ... instead of going directly to lossless codec operations." It is
-        // carried over unchanged so that THIS commit is provably inert -- the
-        // move of ownership and the change of behaviour are separate acts, and
-        // conflating them would make it impossible to show the move changed
-        // nothing. Correcting it is now a one-line edit in this file, which is
-        // the whole point of the field living here.
-        home_screen: lamquant_tui::router::SCREEN_MAIN,
+        // ADR 0053's Context section: "Running `lml` with no args boots into a
+        // mini-hub ... instead of going directly to lossless codec operations."
+        // This is that fix, and it is one line precisely because the field now
+        // lives with the product rather than in the shared framework -- the
+        // whole argument for the move.
+        //
+        // Safe to boot here: `SCREEN_CODEC_HUB` is not a bare route, it is
+        // backed by `CodecHubPanel`, which the framework registers itself in
+        // `App::register_panels`. Booting a screen with no panel would render
+        // an empty shell, so this was checked before changing it.
+        home_screen: lamquant_tui::router::SCREEN_CODEC_HUB,
         workflow_tiles: WORKFLOWS,
         utility_tiles: UTILITIES,
         hub_settings: false,
@@ -99,7 +101,7 @@ mod tests {
         let m = lml();
         assert_eq!(m.build_label, "lml");
         assert!(!m.hub_settings);
-        assert_eq!(m.home_screen, lamquant_tui::router::SCREEN_MAIN);
+        assert_eq!(m.home_screen, lamquant_tui::router::SCREEN_CODEC_HUB);
 
         let keys: Vec<&str> = m.workflow_tiles.iter().map(|t| t.key).collect();
         assert_eq!(keys, ["1"]);
@@ -110,17 +112,31 @@ mod tests {
         assert_eq!(util, ["N", "s", "i", "t"]);
     }
 
-    /// Byte-for-byte against the framework's copy, field by field. When the
-    /// framework finally drops `ShellManifest::spoke()` this test goes with it,
-    /// and until then it is the only thing that would catch the two drifting
-    /// apart -- which is the failure that would make the eventual deletion
+    /// Against the framework's copy, field by field, with EXACTLY ONE
+    /// difference allowed: `home_screen`. Everything else must still match, so
+    /// unintended drift is caught while the intended correction is recorded as
+    /// intended rather than tolerated by loosening the whole comparison.
+    ///
+    /// When the framework finally drops `ShellManifest::spoke()` this test goes
+    /// with it. Until then it is the only thing that would catch the two
+    /// copies diverging -- the failure that would make the eventual deletion
     /// silently change what `lml` renders.
     #[test]
-    fn it_matches_the_framework_copy_it_replaces() {
+    fn it_matches_the_framework_copy_apart_from_the_boot_screen() {
         let mine = lml();
         let theirs = ShellManifest::spoke();
+
+        // The one deliberate divergence: ADR 0053 wants `lml` to boot into the
+        // codec hub, not the mini-hub the framework's copy still names.
+        assert_eq!(mine.home_screen, lamquant_tui::router::SCREEN_CODEC_HUB);
+        assert_eq!(theirs.home_screen, lamquant_tui::router::SCREEN_MAIN);
+        assert_ne!(
+            mine.home_screen, theirs.home_screen,
+            "if these ever agree, either the fix was reverted or the framework \
+             copy moved -- both need a decision, not a silently passing test"
+        );
+
         assert_eq!(mine.build_label, theirs.build_label);
-        assert_eq!(mine.home_screen, theirs.home_screen);
         assert_eq!(mine.hub_settings, theirs.hub_settings);
         assert_eq!(mine.panels.len(), theirs.panels.len());
 
