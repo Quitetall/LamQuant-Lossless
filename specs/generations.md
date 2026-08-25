@@ -905,7 +905,15 @@ Output: pico_sota.pth
 **Location:** `legacy.7z` -> `LamQuant-Old.7z` / `LamQuant-main.zip`
 **Date:** ~March-April 2026
 **Language:** Python/PyTorch (training), C (firmware)
-**Target:** RP2350 Hazard3 (64KB SRAM, < 4ms latency)
+**Target:** RP2350 Hazard3 (< 4ms latency)
+
+> **Corrected 2026-08-25.** This line previously read "RP2350 Hazard3 (64KB
+> SRAM, < 4ms latency)". The RP2350 has **520 KB** of on-chip SRAM in ten
+> independent banks, plus a separate 16 KB XIP cache — see the [RP2350
+> datasheet](https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf).
+> Whether 64 KB was this generation's self-imposed working budget or simply a
+> mistake is not recorded anywhere, so the figure is removed rather than
+> reattributed to something this document cannot support.
 **Repo:** `github.com/Quitetall/lamquant_gen6`
 **License:** Firmware GPLv3, Transport AGPLv3, Weights RAIL-M
 
