@@ -46,10 +46,6 @@ pub use op_spec::{op_spec, OpSpec, CODEC_OPERATION_IDS};
 // Same names, same order as `lamquant-ops` exported them before the move, so a
 // consumer that switches `lamquant_ops::` to `lamquant_plan::` needs no other
 // edit and gets the identical type.
-pub use sink::{
-    bounded_channel, CapturedDiagnostic, MpscProjectionSink, PlanProjectionSink, PlanRunSnapshot,
-    PlanRunState, ProjectionReceiver,
-};
 pub use operation_id::{
     canonical_operation_ids, install_operation_id, is_canonical_operation_id, BLUT_OPERATION_IDS,
     EXTERNAL_OPERATION_IDS, INSTALL_OPERATION_IDS,
@@ -58,4 +54,8 @@ pub use projection::{
     terminal_authority, ArtifactProjection, DiagnosticLevel, ExecutionAttemptProjection,
     ExecutionReceiptProjection, FailureProjection, GapProjection, PlanIdentity, PlanProjection,
     PlanUpdate, TerminalProjectionAuthority, MAX_SAFE_JSON_INTEGER, PROJECTION_SCHEMA,
+};
+pub use sink::{
+    bounded_channel, CapturedDiagnostic, MpscProjectionSink, PlanProjectionSink, PlanRunSnapshot,
+    PlanRunState, ProjectionReceiver,
 };
