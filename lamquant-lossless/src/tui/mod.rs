@@ -7,16 +7,34 @@
 //! that wanted different ones without editing the framework.
 //!
 //! The framework still supplies the shell — event loop, router, layout,
-//! widgets, terminal lifecycle, panic recovery — and that is what the glob
-//! re-export below is for. What moved is the product: see `manifest.rs`.
+//! widgets, terminal lifecycle, panic recovery. What moved is the product: see
+//! `manifest.rs`.
+//!
+//! THE GLOB RE-EXPORT IS GONE, and what it was actually holding up is worth
+//! recording. `pub use lamquant_tui::*;` published the framework's entire
+//! surface — `app`, `panel`, `router`, `config`, everything — through the
+//! codec, and the only consumers of that breadth were two of the codec's own
+//! test files: `reducer_unit.rs` (10 tests over the App reducer and router) and
+//! `config_save.rs` (3 over config persistence). Neither contained a single
+//! codec reference. They tested the FRAMEWORK, and sat here purely because the
+//! glob made the framework reachable from this crate.
+//!
+//! They now live in `crates/lamquant-tui/tests/`, beside the code they
+//! constrain — the same relocation ADR 0185's ceiling note records for the four
+//! files moved on 2026-08-22, and for the same reason: a test that asserts
+//! nothing about the codec should not be a codec test.
+//!
+//! What remains is one function. `bin/lml.rs` calls `tui::run_interactive()`;
+//! that is the entire surface this module needs from the framework now.
+//!
+//! This does NOT by itself close the lossless(L1) -> meta(L3) layer inversion,
+//! and claiming otherwise would be the easy misreading: `lamquant-tui` still
+//! lives in the private meta, so the [dependencies] edge survives. What it does
+//! is shrink that edge from "the whole framework, transitively" to a single
+//! entry point, which is what makes the real fix — publishing the framework, or
+//! moving it to a public module — a mechanical change rather than an audit.
 
 pub mod manifest;
-
-// Re-export the framework's shell types. `run_interactive` arrives through this
-// glob too, but the explicit definition below shadows it — an inherent item
-// always wins over a glob import, which is what lets this module keep the
-// entry-point name `bin/lml.rs` already calls while changing what it does.
-pub use lamquant_tui::*;
 
 /// Run the codec's TUI.
 ///
