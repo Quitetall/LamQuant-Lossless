@@ -8,11 +8,11 @@ use alloc::string::ToString;
 use alloc::vec;
 
 use blut_graph_core::{
-    AbirRootType, AbirSemanticType, AbirViewType, Capability, CompileError, ConfigSchema,
-    Determinism, Effect, ExtentContract, FailureContract, FidelityContract, ImplementationId,
-    KernelDescriptor, KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract, LeaseLifetime,
-    NodeDescriptor, NodeTypeRef, Partiality, PolicyContract, PortDescriptor, ProofContract,
-    ResourceEnvelope, StateContract, Target,
+    Capability, CompileError, ConfigSchema, Determinism, DomainToken, DomainType, Effect,
+    ExtentContract, FailureContract, FidelityContract, ImplementationId, KernelDescriptor,
+    KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor,
+    NodeTypeRef, Partiality, PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope,
+    StateContract, Target,
 };
 
 pub const BLE_TRANSMIT_NODE_TYPE: &str = "org.quitetall.lamquant.transport.ble.transmit";
@@ -28,7 +28,8 @@ pub const CAP_BLE_TRANSPORT: &str = "org.quitetall.lamquant.transport.ble-v1";
 pub const CAP_USB_TRANSPORT: &str = "org.quitetall.lamquant.transport.usb-v1";
 pub const POLICY_NETWORK_EXPORT: &str = "abir.policy.network-export-authorized";
 pub const POLICY_DEVICE_EXPORT: &str = "abir.policy.device-export-authorized";
-pub const TRANSPORT_PAYLOAD_PROOF: &str = "org.quitetall.abir.proof.bcs2-stream-bounded-closure-v1";
+pub const TRANSPORT_PAYLOAD_PROOF: &str =
+    "org.quitetall.domain.proof.bcs2-stream-bounded-closure-v1";
 pub const TRANSPORT_ATTEMPT_RECEIPT_PROOF: &str =
     "org.quitetall.lamquant.proof.transport-attempt-receipt-v1";
 pub const TRANSPORT_PAYLOAD_SEMANTIC_TYPE: &str = "bcs2.stream-bounded-v1";
@@ -175,9 +176,9 @@ fn payload_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Packed],
         max_bytes: TRANSPORT_MAX_PAYLOAD_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::EncodedBlock,
-            view: AbirViewType::Atom,
+        domain: DomainType {
+            root: DomainToken::new("encoded-block"),
+            view: DomainToken::new("atom"),
         },
         proof: ProofContract {
             requires: vec![TRANSPORT_PAYLOAD_PROOF.to_string()],
@@ -212,9 +213,9 @@ fn receipt_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes: TRANSPORT_ATTEMPT_RECEIPT_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Unknown("transport-attempt-receipt".to_string()),
-            view: AbirViewType::Unknown("transport-attempt-receipt".to_string()),
+        domain: DomainType {
+            root: DomainToken::new("transport-attempt-receipt".to_string()),
+            view: DomainToken::new("transport-attempt-receipt".to_string()),
         },
         proof: ProofContract {
             requires: vec![],

@@ -7,12 +7,12 @@ use std::collections::BTreeMap;
 
 use abir_adapter::{Adapter, AdapterError, ExportPlan, FidelityReceipt, PayloadResolver};
 use blut_graph_core::{
-    AbirRootType, AbirSemanticType, AbirViewType, Capability, CompileError, CompiledNode,
-    ConfigField, ConfigSchema, ConfigType, ConfigValue, Determinism, Effect, ExecutionError,
-    ExtentContract, FailureContract, FidelityContract, ImplementationId, KernelDescriptor,
-    KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor,
-    NodeTypeRef, Partiality, PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope,
-    StateContract, StateScope, StructuredFailure, Target,
+    Capability, CompileError, CompiledNode, ConfigField, ConfigSchema, ConfigType, ConfigValue,
+    Determinism, DomainToken, DomainType, Effect, ExecutionError, ExtentContract, FailureContract,
+    FidelityContract, ImplementationId, KernelDescriptor, KernelId, KernelRegistry, Layout,
+    LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor, NodeTypeRef, Partiality,
+    PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope, StateContract, StateScope,
+    StructuredFailure, Target,
 };
 #[cfg(feature = "standard-nwb")]
 use lamquant_standard_adapters::NwbAdapter;
@@ -72,13 +72,13 @@ const XDF_SINK_KERNEL: KernelId = KernelId(0x5354_0503);
 
 const CAP_ABIR: &str = "abir.semantic-v1";
 const CAP_SOURCE_CAPSULE: &str = "abir.source-capsule.identity-bound-v1";
-const SOURCE_CAPSULE_PROOF: &str = "org.quitetall.abir.proof.identity-bound-source-capsule-v1";
+const SOURCE_CAPSULE_PROOF: &str = "org.quitetall.domain.proof.identity-bound-source-capsule-v1";
 pub const EXACT_SOURCE_RESTORATION_PROOF: &str =
-    "org.quitetall.abir.proof.exact-source-restoration-v1";
+    "org.quitetall.domain.proof.exact-source-restoration-v1";
 pub const SEMANTIC_STANDARD_EXPORT_PROOF: &str =
-    "org.quitetall.abir.proof.semantic-standard-export-v1";
+    "org.quitetall.domain.proof.semantic-standard-export-v1";
 pub const ACCEPTED_STANDARD_EXPORT_PROOF: &str =
-    "org.quitetall.abir.proof.accepted-standard-export-v1";
+    "org.quitetall.domain.proof.accepted-standard-export-v1";
 const CAP_DURABLE_FILE_SINK: &str = "org.quitetall.lamquant.sink.durable-file-v1";
 const FAILURE_DOMAIN: &str = "org.quitetall.lamquant.standard";
 // Current adapters materialize decoded host values before ABIR payloads.
@@ -1065,9 +1065,9 @@ fn foreign_port(name: &str, profile: &str) -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Packed],
         max_bytes: STANDARD_MAX_FOREIGN_TREE_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Unknown(semantic_type.clone()),
-            view: AbirViewType::Unknown(semantic_type),
+        domain: DomainType {
+            root: DomainToken::new(semantic_type.clone()),
+            view: DomainToken::new(semantic_type),
         },
         proof: empty_proof(),
         policy: empty_policy(),
@@ -1092,9 +1092,9 @@ fn dataset_port(
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes: MAX_DATASET_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: if provides_source_capsule {
             ProofContract {
@@ -1129,9 +1129,9 @@ fn report_port(name: &str) -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes: MAX_REPORT_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Unknown(name.into()),
-            view: AbirViewType::Unknown(name.into()),
+        domain: DomainType {
+            root: DomainToken::new(name),
+            view: DomainToken::new(name),
         },
         proof: empty_proof(),
         policy: empty_policy(),
@@ -1159,9 +1159,9 @@ fn export_plan_port(name: &str, profile: &str) -> PortDescriptor {
     let mut port = report_port(name);
     let semantic_type = format!("abir.export-plan.{profile}");
     port.semantic_type = semantic_type.clone();
-    port.abir = AbirSemanticType {
-        root: AbirRootType::Unknown(semantic_type.clone()),
-        view: AbirViewType::Unknown(semantic_type),
+    port.domain = DomainType {
+        root: DomainToken::new(semantic_type.clone()),
+        view: DomainToken::new(semantic_type),
     };
     port
 }

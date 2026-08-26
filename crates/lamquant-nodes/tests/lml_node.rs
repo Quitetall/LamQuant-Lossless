@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use blut_graph_core::{
-    AbirRootType, AbirViewType, Capability, Compiler, ExecutionRealm, Graph, ImplementationId,
-    KernelRegistry, NodeId, NodeInstance, PlanExecutor, PortRef, Target,
+    Capability, Compiler, DomainToken, ExecutionRealm, Graph, ImplementationId, KernelRegistry,
+    NodeId, NodeInstance, PlanExecutor, PortRef, Target,
 };
 use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
 use lamquant_lml_mcu::mcu_packet::UNIFORM_I64_INVOCATION_HEADER_BYTES;
@@ -79,7 +79,7 @@ fn fixture_dataset(signal: &[Vec<i64>]) -> AbirDataset {
     draft.add_stream(Stream::new(
         stream_id,
         recording_id,
-        ConceptId::new("abir:modality/eeg").unwrap(),
+        ConceptId::new("domain:modality/eeg").unwrap(),
         atom_ids,
         None,
         None,
@@ -180,15 +180,18 @@ fn descriptor_identity_is_feature_specific() {
         .capabilities
         .contains(&Capability(CAP_LML_ARITHMETIC_NODE.into())));
     assert_eq!(baseline.resources.threads, 1024);
-    assert_eq!(baseline.inputs[0].abir.root, AbirRootType::Dataset);
-    assert_eq!(baseline.inputs[0].abir.view, AbirViewType::Root);
-    assert_eq!(baseline.outputs[0].abir.root, AbirRootType::Dataset);
-    assert_eq!(baseline.outputs[0].abir.view, AbirViewType::Root);
+    assert_eq!(baseline.inputs[0].domain.root, DomainToken::new("dataset"));
+    assert_eq!(baseline.inputs[0].domain.view, DomainToken::new("root"));
+    assert_eq!(baseline.outputs[0].domain.root, DomainToken::new("dataset"));
+    assert_eq!(baseline.outputs[0].domain.view, DomainToken::new("root"));
     assert_eq!(baseline.targets, vec![Target::Host, Target::BlutDurable]);
     assert_eq!(packet.type_name, LML_PACKET_BASELINE_NODE_TYPE);
     assert_eq!(packet.targets, vec![Target::McuAot, Target::Host]);
     assert!(packet.subgraph.is_some());
-    assert_eq!(packet.outputs[0].abir.root, AbirRootType::EncodedBlock);
+    assert_eq!(
+        packet.outputs[0].domain.root,
+        DomainToken::new("encoded-block")
+    );
     assert_eq!(
         REFERENCE_MAX_SIGNAL_BYTES,
         REFERENCE_MAX_SIGNAL_PAYLOAD_BYTES + UNIFORM_I64_INVOCATION_HEADER_BYTES as u64

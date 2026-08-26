@@ -17,13 +17,12 @@ use std::sync::{RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use blut_graph_core::{
-    AbirRootType, AbirSemanticType, AbirViewType, Capability, CheckpointMode, CompileError,
-    CompiledNode, ConfigField, ConfigSchema, ConfigType, ConfigValue, Determinism, Effect,
-    ExecutionError, ExtentContract, FailureContract, FailureEvidence, FidelityContract,
-    ImplementationId, KernelDescriptor, KernelId, KernelRegistry, Layout, LeaseAccess,
-    LeaseContract, LeaseLifetime, NodeDescriptor, NodeTypeRef, Partiality, PolicyContract,
-    PortDescriptor, ProofContract, ResourceEnvelope, StateContract, StateScope, StructuredFailure,
-    Target,
+    Capability, CheckpointMode, CompileError, CompiledNode, ConfigField, ConfigSchema, ConfigType,
+    ConfigValue, Determinism, DomainToken, DomainType, Effect, ExecutionError, ExtentContract,
+    FailureContract, FailureEvidence, FidelityContract, ImplementationId, KernelDescriptor,
+    KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor,
+    NodeTypeRef, Partiality, PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope,
+    StateContract, StateScope, StructuredFailure, Target,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use fs2::FileExt;
@@ -1753,9 +1752,9 @@ fn dataset_port(profile: &LmqNodeProfile) -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes: profile.input_max_bytes,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: ProofContract {
             requires: vec![LMQ_MODEL_INPUT_PROOF.into()],
@@ -1779,9 +1778,9 @@ fn bundle_port(profile: &LmqNodeProfile) -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Packed],
         max_bytes: profile.output_max_bytes,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: ProofContract {
             requires: vec![],

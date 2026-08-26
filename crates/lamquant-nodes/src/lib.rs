@@ -88,12 +88,12 @@ use core::fmt;
 use core::marker::PhantomData;
 
 use blut_graph_core::{
-    AbirRootType, AbirSemanticType, AbirViewType, Capability, CheckpointMode, CompileError,
-    CompiledNode, ConfigField, ConfigSchema, ConfigType, ConfigValue, Determinism, Effect,
-    ExecutionError, ExtentContract, FailureContract, FidelityContract, ImplementationId,
-    KernelDescriptor, KernelExecutor, KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract,
-    LeaseLifetime, NodeDescriptor, NodeTypeRef, Partiality, PolicyContract, PortDescriptor,
-    ProofContract, ResourceEnvelope, StateContract, StateScope, Target, TransactionalSink,
+    Capability, CheckpointMode, CompileError, CompiledNode, ConfigField, ConfigSchema, ConfigType,
+    ConfigValue, Determinism, DomainToken, DomainType, Effect, ExecutionError, ExtentContract,
+    FailureContract, FidelityContract, ImplementationId, KernelDescriptor, KernelExecutor,
+    KernelId, KernelRegistry, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor,
+    NodeTypeRef, Partiality, PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope,
+    StateContract, StateScope, Target, TransactionalSink,
 };
 use lamquant_abir_codec::encode_lml_bundle_from_views_explicit;
 #[cfg(feature = "optimum-v2")]
@@ -905,9 +905,9 @@ fn signal_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::ChannelMajor],
         max_bytes: MAX_SIGNAL_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: ProofContract {
             requires: vec![],
@@ -946,9 +946,9 @@ fn optimum_v2_signal_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::ChannelMajor],
         max_bytes: PEER_MAX_SIGNAL_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: ProofContract {
             requires: vec![],
@@ -995,9 +995,9 @@ fn bundle_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Packed],
         max_bytes: MAX_PACKET_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: ProofContract {
             requires: vec![],

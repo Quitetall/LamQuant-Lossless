@@ -7,14 +7,13 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use blut_graph_core::{
-    subgraph_identity, AbirRootType, AbirSemanticType, AbirViewType, Capability, CheckpointMode,
-    CompiledNode, ConfigField, ConfigSchema, ConfigType, ConfigValue, Determinism, Edge, Effect,
-    ExecutionError, ExtentContract, FailureContract, FidelityContract, ImplementationId,
-    KernelDescriptor, KernelId, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor,
-    NodeId, NodeTypeRef, Partiality, PolicyContract, PortDescriptor, PortMap, PortRef,
-    ProofContract, ResourceEnvelope, StateContract, StateScope, StructuredFailure,
-    SubgraphConfigMap, SubgraphInterfacePort, SubgraphLowering, SubgraphNode, SubgraphSchema,
-    Target,
+    subgraph_identity, Capability, CheckpointMode, CompiledNode, ConfigField, ConfigSchema,
+    ConfigType, ConfigValue, Determinism, DomainToken, DomainType, Edge, Effect, ExecutionError,
+    ExtentContract, FailureContract, FidelityContract, ImplementationId, KernelDescriptor,
+    KernelId, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor, NodeId,
+    NodeTypeRef, Partiality, PolicyContract, PortDescriptor, PortMap, PortRef, ProofContract,
+    ResourceEnvelope, StateContract, StateScope, StructuredFailure, SubgraphConfigMap,
+    SubgraphInterfacePort, SubgraphLowering, SubgraphNode, SubgraphSchema, Target,
 };
 use lamquant_abir_codec::{verify_lml_signal_views_closure, LmlBundleError};
 use lamquant_lml_mcu::golomb;
@@ -614,9 +613,9 @@ fn intermediate_port(name: &str, semantic_type: &str) -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes: REFERENCE_MAX_PACKET_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Unknown("native-lml-reference-v1".into()),
-            view: AbirViewType::Unknown("native".into()),
+        domain: DomainType {
+            root: DomainToken::new("native-lml-reference-v1"),
+            view: DomainToken::new("native"),
         },
         proof: ProofContract {
             requires: vec![],
@@ -654,9 +653,9 @@ fn signal_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::ChannelMajor],
         max_bytes: REFERENCE_MAX_SIGNAL_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: ProofContract {
             requires: vec![],
@@ -694,9 +693,9 @@ fn packet_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Packed],
         max_bytes: REFERENCE_MAX_PACKET_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::EncodedBlock,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("encoded-block"),
+            view: DomainToken::new("root"),
         },
         proof: ProofContract {
             requires: vec![],

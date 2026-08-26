@@ -27,7 +27,7 @@ description = "Stable JSON projection of compiled plan observations and terminal
 # From crates.io, published 2026-08-20. NOT a git pin: a public crate that
 # git-depends on a private repository is unbuildable for everyone else, which
 # is the defect this whole move exists to remove.
-blut-graph-core = { version = "=0.1.0-alpha.1" }
+blut-graph-core = { version = "=0.2.0-alpha.1" }
 # std, matching the lamquant-ops crate this came from: `projection.rs` uses
 # serde_json in NON-test code (validate_top_level_keys), so serde_json is a
 # regular dependency here rather than a dev one.

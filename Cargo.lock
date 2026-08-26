@@ -935,6 +935,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blut-graph-core"
+version = "0.2.0-alpha.1"
+dependencies = [
+ "blake3",
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3494,7 +3503,7 @@ name = "lamquant-abir-graph"
 version = "0.1.0"
 dependencies = [
  "abir",
- "blut-graph-core",
+ "blut-graph-core 0.2.0-alpha.1",
  "lamquant-abir-montage",
  "serde_json",
 ]
@@ -3709,7 +3718,7 @@ dependencies = [
  "abir-adapter",
  "abir-bcs",
  "blake3",
- "blut-graph-core",
+ "blut-graph-core 0.2.0-alpha.1",
  "criterion",
  "ed25519-dalek",
  "flate2",
@@ -3730,7 +3739,7 @@ name = "lamquant-ops"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/LamQuant.git?rev=a6d656f764145544c308219afc8ee20961ef6598#a6d656f764145544c308219afc8ee20961ef6598"
 dependencies = [
- "blut-graph-core",
+ "blut-graph-core 0.1.0-alpha.1",
  "lamquant-history",
  "lamquant-plan",
  "lamquant-runtime",
@@ -3744,7 +3753,7 @@ dependencies = [
 name = "lamquant-plan"
 version = "0.1.0"
 dependencies = [
- "blut-graph-core",
+ "blut-graph-core 0.2.0-alpha.1",
  "serde",
  "serde_json",
 ]
@@ -3768,7 +3777,7 @@ version = "0.1.0"
 source = "git+https://github.com/Quitetall/LamQuant.git?rev=a6d656f764145544c308219afc8ee20961ef6598#a6d656f764145544c308219afc8ee20961ef6598"
 dependencies = [
  "blake3",
- "blut-graph-core",
+ "blut-graph-core 0.1.0-alpha.1",
  "command-group",
  "ed25519-dalek",
  "libc",

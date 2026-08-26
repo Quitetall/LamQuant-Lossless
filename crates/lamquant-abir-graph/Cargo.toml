@@ -31,7 +31,7 @@ semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com
 # blut-graph-core 0.1.0-alpha.1, whose source tree hashes 627dd0ce, byte
 # identical to the revision this line used to pin, so the swap changes nothing
 # that is built. The meta patches this back to its worktree path.
-blut-graph-core = { version = "=0.1.0-alpha.1", default-features = false }
+blut-graph-core = { version = "=0.2.0-alpha.1", default-features = false }
 lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", default-features = false }
 
 [dev-dependencies]

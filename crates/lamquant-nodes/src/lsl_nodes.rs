@@ -9,12 +9,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use blut_graph_core::{
-    AbirRootType, AbirSemanticType, AbirViewType, Capability, CheckpointContract, CheckpointMode,
-    CompileError, ConfigField, ConfigSchema, ConfigType, Determinism, Effect, ExtentContract,
-    FailureContract, FidelityContract, ImplementationId, KernelDescriptor, KernelId,
-    KernelRegistry, Layout, LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor, NodeTypeRef,
-    Partiality, PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope, StateContract,
-    StateScope, Target,
+    Capability, CheckpointContract, CheckpointMode, CompileError, ConfigField, ConfigSchema,
+    ConfigType, Determinism, DomainToken, DomainType, Effect, ExtentContract, FailureContract,
+    FidelityContract, ImplementationId, KernelDescriptor, KernelId, KernelRegistry, Layout,
+    LeaseAccess, LeaseContract, LeaseLifetime, NodeDescriptor, NodeTypeRef, Partiality,
+    PolicyContract, PortDescriptor, ProofContract, ResourceEnvelope, StateContract, StateScope,
+    Target,
 };
 
 pub const LSL_INLET_NODE_TYPE: &str = "org.quitetall.lamquant.lsl.inlet";
@@ -394,9 +394,9 @@ fn dataset_port(name: &str) -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes: MAX_DATASET_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Dataset,
-            view: AbirViewType::Root,
+        domain: DomainType {
+            root: DomainToken::new("dataset"),
+            view: DomainToken::new("root"),
         },
         proof: empty_proof(),
         policy: empty_policy(),
@@ -437,9 +437,9 @@ fn mapping_report_port() -> PortDescriptor {
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes: MAX_REPORT_BYTES,
-        abir: AbirSemanticType {
-            root: AbirRootType::Unknown("mapping_report".into()),
-            view: AbirViewType::Unknown("mapping_report".into()),
+        domain: DomainType {
+            root: DomainToken::new("mapping_report"),
+            view: DomainToken::new("mapping_report"),
         },
         proof: empty_proof(),
         policy: empty_policy(),
@@ -460,9 +460,9 @@ fn opaque_port(name: &str, semantic_type: &str, max_bytes: u64) -> PortDescripto
         optional: false,
         layouts: vec![Layout::Opaque],
         max_bytes,
-        abir: AbirSemanticType {
-            root: AbirRootType::Unknown(semantic_type.into()),
-            view: AbirViewType::Unknown(semantic_type.into()),
+        domain: DomainType {
+            root: DomainToken::new(semantic_type),
+            view: DomainToken::new(semantic_type),
         },
         proof: empty_proof(),
         policy: empty_policy(),
