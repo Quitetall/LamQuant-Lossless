@@ -188,6 +188,33 @@ jobs:
       - name: Run canonical binding tests
         run: python -m pytest -q lamquant-py/tests
 
+  secret-scan:
+    name: secret scan (gitleaks, full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # This repository is PUBLIC and had no secret scanning at all. A leak here
+    # is published the moment it is pushed, so the gate belongs on every commit
+    # rather than only at release.
+    #
+    # `fetch-depth: 0` is load-bearing: gitleaks scans history, and a shallow
+    # clone silently narrows that to the tip. A credential is typically
+    # committed once and removed in the next commit — precisely what a depth-1
+    # scan cannot see.
+    #
+    # No .gitleaks.toml here on purpose. The default ruleset returns zero
+    # findings across all 935 commits (verified 2026-08-26), so there is
+    # nothing to allowlist, and an empty config file would only invite someone
+    # to start adding exemptions to it.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   format-check:
     name: cargo fmt + clippy
     runs-on: ubuntu-latest
