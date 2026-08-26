@@ -285,11 +285,11 @@ lamquant-common = { version = "0.1.3", path = "../crates/lamquant-common", defau
 # default-features = false so a no_std facade build stays no_std; the facade's
 # own `std`/`archive`/`experimental_*` features turn on the matching core ones.
 lamquant-lml-mcu = { version = "0.9.3", path = "../lamquant-lml-mcu", default-features = false }
-semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "83fb2a82f5cbcfefc8328d7842b50e16174ff37a", default-features = false, features = ["std"], optional = true }
-semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "83fb2a82f5cbcfefc8328d7842b50e16174ff37a", default-features = false, features = ["std"], optional = true }
+semantic-abir = { package = "abir", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "67470c770a1e74d7a6f2a1f6cda96f292f52798e", default-features = false, features = ["std"], optional = true }
+semantic-abir-bcs = { package = "abir-bcs", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "67470c770a1e74d7a6f2a1f6cda96f292f52798e", default-features = false, features = ["std"], optional = true }
 # ADR 0144 training snapshots: the TRAINING_* profiles and their sealed catalog.
 # Only the `archive` tier links it -- firmware never builds training packs.
-semantic-abir-training = { package = "abir-training", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "83fb2a82f5cbcfefc8328d7842b50e16174ff37a", optional = true }
+semantic-abir-training = { package = "abir-training", version = "0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "67470c770a1e74d7a6f2a1f6cda96f292f52798e", optional = true }
 lamquant-abir-codec = { version = "0.1.0", path = "../crates/lamquant-abir-codec", default-features = false, features = ["std"], optional = true }
 # ADR 0052 Tier 3 / ADR 0054: the Optimum (LMO) codec. The facade IS the Desktop
 # profile, so it links the LMO DECODER always (no_std-capable, cheap) and turns
