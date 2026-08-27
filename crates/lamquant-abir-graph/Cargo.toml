@@ -27,10 +27,20 @@ semantic-abir = { path = "../../../abir/crates/abir", package = "abir", version 
 # From crates.io, NOT a git pin on a private repository. This repository is
 # PUBLIC, and a `git = .../blut.git` dependency made it unbuildable by anyone
 # without access to that private repo -- verified, `cargo build` exits 101 even
-# when the dependency is optional and unused. Published 2026-08-20 as
-# blut-graph-core 0.1.0-alpha.1, whose source tree hashes 627dd0ce, byte
-# identical to the revision this line used to pin, so the swap changes nothing
-# that is built. The meta patches this back to its worktree path.
+# when the dependency is optional and unused.
+#
+# The version moved 0.1.0-alpha.1 -> 0.2.0-alpha.1 with the breaking
+# domain-token refactor (blut 2cd47e3b: the compiler holds a domain token, not
+# ABIR's taxonomy), so the older "byte identical to the revision this line used
+# to pin" justification no longer describes what is pinned here and has been
+# retired. 0.2.0-alpha.1 was published 2026-08-27; until then this requirement
+# named a version that did not exist on the registry, and THAT -- not the git
+# pin -- was what still made a `--locked` build of this repository impossible
+# from outside the account.
+#
+# Measured after the publish: `codec-lossless/Cargo.lock` contains ZERO
+# `git+https` sources, and `cargo metadata --locked --offline` exits 0 from
+# `codec-lossless/`. The meta patches this back to its worktree path.
 blut-graph-core = { version = "=0.2.0-alpha.1", default-features = false }
 lamquant-abir-montage = { version = "0.1.0", path = "../lamquant-abir-montage", default-features = false }
 
